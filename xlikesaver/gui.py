@@ -15,8 +15,9 @@ from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
 from . import __version__
-from .core import JobOptions, _normal_account
+from .core import QUICK_STOP_AFTER, JobOptions, _normal_account
 from .login import clear_session, has_session, save_auth_token
+from .settings import load_settings, settings_path
 from .storage import resolve_storage
 
 
@@ -25,22 +26,11 @@ AUTH_MODES = {
     "cookies.txt 파일 · 호환 방식": "file",
 }
 FOLDER_MODES = {"작성자별 폴더": "author", "저장일별 폴더": "date", "구분 없이 저장": "flat"}
+SCAN_MODES = {"새 Like만 빠르게 확인 (권장)": "quick", "전체 목록 다시 확인": "full"}
 BG = "#f5f7fa"
 INK = "#162337"
 MUTED = "#596a80"
 BLUE = "#1768ce"
-
-
-def settings_path() -> Path:
-    return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "XlikeSaver" / "settings.json"
-
-
-def load_settings() -> dict:
-    try:
-        value = json.loads(settings_path().read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
 
 
 def worker_command(request: Path, events: Path, stop: Path) -> list[str]:
@@ -115,6 +105,8 @@ class App:
         # Normal saving covers all available Likes. A short test is opt-in for
         # each session, including after loading settings from older versions.
         self.limited = tk.BooleanVar(value=False)
+        scan = settings.get("scan_mode", "quick")
+        self.scan_mode = tk.StringVar(value=next((k for k, v in SCAN_MODES.items() if v == scan), next(iter(SCAN_MODES))))
         self.status = tk.StringVar(value="시작할 준비가 되었습니다")
         self.counts = tk.StringVar(value="이번 저장 0개    ·    이미 저장됨 0개    ·    용량 초과 0개")
         self._style()
@@ -225,12 +217,15 @@ class App:
         size_entry = ttk.Entry(size, textvariable=self.max_video_mb, width=8)
         size_entry.pack(side="left")
         self.inputs.append(size_entry)
-        ttk.Label(size, text="MiB / 파일 · 0 = 제한 없음", style="Hint.TLabel").pack(side="left", padx=8)
-        ttk.Label(rules, text="동영상·GIF에 적용하며, 큰 파일은 건너뜁니다.", style="Hint.TLabel").grid(row=6, column=1, sticky="w", padx=16, pady=(2, 9))
+        ttk.Label(size, text="MiB / 파일 · 0 = 제한 없음 · 동영상·GIF의 큰 파일은 건너뜀", style="Hint.TLabel").pack(side="left", padx=8)
+        ttk.Label(rules, text="확인 범위", style="Card.TLabel", font=("맑은 고딕", 10, "bold")).grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self.scan_combo = ttk.Combobox(rules, textvariable=self.scan_mode, values=list(SCAN_MODES), state="readonly")
+        self.scan_combo.grid(row=6, column=1, sticky="ew", padx=(16, 0), pady=(4, 0))
+        self.inputs.append(self.scan_combo)
+        ttk.Label(rules, text=f"저장된 파일이 {QUICK_STOP_AFTER}개 연속이면 멈춤 · 필요하면 자동으로 전체 확인", style="Hint.TLabel", wraplength=500).grid(row=7, column=1, sticky="w", padx=16, pady=(1, 2))
         limit = ttk.Checkbutton(rules, text="시험 저장: 새 파일 20개에서 중단", variable=self.limited)
-        limit.grid(row=7, column=1, sticky="w", padx=12)
+        limit.grid(row=8, column=1, sticky="w", padx=12)
         self.inputs.append(limit)
-        ttk.Label(rules, text="기본은 조회 가능한 목록 전체입니다. 완료 파일은 기억합니다.", style="Hint.TLabel", wraplength=500).grid(row=8, column=1, sticky="w", padx=16, pady=(0, 3))
 
         actions = ttk.Frame(shell)
         actions.pack(fill="x", pady=8)
@@ -424,7 +419,7 @@ class App:
             size = 200
         data = {"account": account, "output_dir": directory,
                 "auth_mode": AUTH_MODES[self.auth.get()],
-                "folder_mode": FOLDER_MODES[self.folder_mode.get()], "sync_mode": "all",
+                "folder_mode": FOLDER_MODES[self.folder_mode.get()], "scan_mode": SCAN_MODES[self.scan_mode.get()],
                 "include_videos": self.include_videos.get(), "include_gifs": self.include_gifs.get(),
                 "max_video_mb": size, "separate_accounts": self.separate_accounts.get(),
                 "detailed_progress": self.detailed_progress.get(),
@@ -573,6 +568,9 @@ class App:
                 "로그인된 x.com 쿠키를 Netscape 형식 cookies.txt로 내보내세요. 앱에서 ‘cookies.txt 파일 · 호환 방식’을 선택하고 파일을 고르면 됩니다. JSON은 지원하지 않습니다. 아래 ‘쿠키 파일 안내’를 참고하세요.\n\n"
                 "저장하기\n"
                 "내 X 아이디와 저장 폴더를 입력하고 ‘저장 시작’을 누르세요. 최근 좋아요부터 확인하고, 완료한 파일은 다음에 건너뜁니다. 기본은 선택한 폴더에 바로 저장합니다. ‘저장 옵션’에서 계정별·작성자별·저장일별 정리를 선택할 수 있습니다. ‘파일 위치’에 최종 경로를 보여줍니다.\n\n"
+                f"‘새 Like만 빠르게 확인’은 이미 저장한 파일이 {QUICK_STOP_AFTER}개 연속으로 나오면 멈춰 목록 요청을 크게 줄입니다. 첫 실행, 이전 실행이 중단·오류·시험 저장으로 끝난 경우, 동영상·GIF·용량 제한을 바꾼 경우에는 자동으로 전체 목록을 확인합니다. 옛 Like를 다시 훑고 싶으면 ‘전체 목록 다시 확인’을 고르세요.\n\n"
+                "정기적으로 자동 저장하기\n"
+                "인증 토큰 연결로 한 번 저장을 마친 뒤 ‘예약 명령 복사’를 누르고, 명령 프롬프트(cmd)에 붙여 넣어 실행하면 매일 오전 9시에 새 Like만 저장합니다. 예약 실행은 마지막으로 저장을 시작할 때의 설정을 사용하며 창 없이 실행되고, 결과는 ‘예약 실행 기록’에 남습니다. 시각을 바꾸려면 명령의 09:00을 고치세요. 해제: schtasks /Delete /TN \"XlikeSaver 자동 저장\" /F. 실행 파일을 옮기거나 새 버전으로 바꾸면 다시 등록하세요. 너무 자주 예약하지 마세요.\n\n"
                 "동영상은 최고 제공 MP4 화질로, 움직이는 GIF도 MP4로 저장합니다. 용량 한도는 파일당 200MiB이며 0은 무제한입니다. 큰 파일은 건너뛰고, 한도를 올리면 다음에 다시 확인합니다.\n\n"
                 "출처와 기록 확인하기\n"
                 "파일 내부에 트윗 URL을 기록합니다. 재인코딩하지 않고 기존 설명을 보존합니다. ‘기록 · 통계’에서 파일과 트윗을 열고 CSV로 내보낼 수 있습니다. ‘기존 파일에 출처 기록’은 PC에서만 처리합니다. 출처 기록이 실패해도 미디어는 보존합니다.\n\n"
@@ -594,6 +592,23 @@ class App:
         ttk.Button(links, text="Chrome 쿠키 찾기", command=lambda: webbrowser.open("https://developer.chrome.com/docs/devtools/application/cookies/")).pack(side="left", padx=(0, 8))
         ttk.Button(links, text="쿠키 파일 안내", command=lambda: webbrowser.open("https://github.com/mikf/gallery-dl#cookies")).pack(side="left")
         ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).pack(side="left", padx=8)
+        ttk.Button(links, text="예약 명령 복사", command=self.copy_schedule_command).pack(side="left")
+        ttk.Button(links, text="예약 실행 기록", command=self.open_schedule_logs).pack(side="left", padx=8)
+
+    def copy_schedule_command(self):
+        from .scheduled import schtasks_command
+        self.root.clipboard_clear()
+        self.root.clipboard_append(schtasks_command())
+        self.status.set("예약 등록 명령을 복사했습니다. 명령 프롬프트(cmd)에 붙여 넣어 실행하세요.")
+
+    def open_schedule_logs(self):
+        from .scheduled import log_directory
+        try:
+            directory = log_directory()
+            directory.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(directory))
+        except OSError:
+            messagebox.showerror("폴더 열기 실패", "예약 실행 기록 폴더를 열지 못했습니다.", parent=self.root)
 
     def start(self):
         if self.relocating:
@@ -615,7 +630,7 @@ class App:
                 size_limit = int(self.max_video_mb.get().strip())
             except ValueError:
                 raise ValueError("영상 용량 제한은 0 이상의 정수 MiB로 입력해 주세요. 0은 제한 없음입니다.") from None
-            options = JobOptions(account=self.account.get(), output_dir=self.folder.get(), auth_mode=AUTH_MODES[self.auth.get()], cookies_file=self.cookies.get(), photo_limit=20 if self.limited.get() else 0, folder_mode=FOLDER_MODES[self.folder_mode.get()], sync_mode="all", include_videos=self.include_videos.get(), include_gifs=self.include_gifs.get(), max_video_mb=size_limit, separate_accounts=self.separate_accounts.get()).validate()
+            options = JobOptions(account=self.account.get(), output_dir=self.folder.get(), auth_mode=AUTH_MODES[self.auth.get()], cookies_file=self.cookies.get(), photo_limit=20 if self.limited.get() else 0, folder_mode=FOLDER_MODES[self.folder_mode.get()], scan_mode=SCAN_MODES[self.scan_mode.get()], include_videos=self.include_videos.get(), include_gifs=self.include_gifs.get(), max_video_mb=size_limit, separate_accounts=self.separate_accounts.get()).validate()
         except (ValueError, OSError) as exc:
             messagebox.showerror("입력 확인", str(exc), parent=self.root)
             return
@@ -636,9 +651,9 @@ class App:
         self.progress.configure(mode="indeterminate", value=0)
         self.progress.start(12)
         self._set_running(True)
-        self._log("새 작업 시작 · " + ("새 파일 20개 확인" if options.photo_limit else "조회 가능한 목록 전체"))
+        self._log("새 작업 시작 · " + ("새 파일 20개 확인" if options.photo_limit else self.scan_mode.get()))
         self._log(f"저장 방식 · {self.folder_mode.get()} · 최근 Like부터 확인, 저장 완료 파일은 건너뛰기")
-        self._log("저장 기록이 있어도 목록 조회는 필요합니다. 요청 제한·계정 경고가 나타나면 반복 실행하지 마세요.")
+        self._log("요청 제한·계정 경고가 나타나면 반복 실행하지 마세요.")
         try:
             self._save_settings(options)
         except OSError:
@@ -653,6 +668,7 @@ class App:
         if not value:
             self.auth_combo.configure(state="readonly")
             self.layout_combo.configure(state="readonly")
+            self.scan_combo.configure(state="readonly")
             self._auth_changed()
 
     def _run_process(self, options):
@@ -759,8 +775,6 @@ class App:
                 self._log(self.status.get())
                 if event.get("metadata_failed"):
                     self._log(f"파일 내부 출처 기록 실패 {int(event['metadata_failed']):,}개 · 미디어는 보존했습니다. ‘기록 · 통계’에서 ‘기존 파일에 출처 기록’으로 다시 시도할 수 있습니다.")
-                if event.get("last_sync_at"):
-                    self._log("최근 전체 동기화 기준 · " + str(event["last_sync_at"]))
                 if event.get("retry_at"):
                     self._log("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))
             elif kind == "process_exit":

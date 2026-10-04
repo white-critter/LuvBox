@@ -249,6 +249,48 @@ class ActualExifToolTests(unittest.TestCase):
         self.assertEqual(metadata.embed_source(path, "100")["status"], "embedded")
         self.assertEqual(metadata._read_tags(path, time.monotonic() + 20)["ItemList:Comment"], tags["ItemList:Comment"])
 
+    def test_resident_exiftool_matches_one_shot_results_with_a_single_process(self):
+        files = []
+        for index, (suffix, payload) in enumerate(((".jpg", JPEG), (".png", PNG), (".webp", WEBP))):
+            path = self.root / f"{200 + index}_1{suffix}"
+            path.write_bytes(payload)
+            files.append((path, payload, suffix))
+        real_popen = subprocess.Popen
+        with patch.object(metadata.subprocess, "Popen", side_effect=real_popen) as popen, \
+                patch.object(metadata.subprocess, "run", side_effect=AssertionError("one-shot process used")):
+            with metadata.persistent():
+                for index, (path, payload, suffix) in enumerate(files):
+                    self.assertEqual(metadata.embed_source(path, str(200 + index))["status"], "embedded")
+                    self.assertEqual(metadata.read_source(path), f"https://x.com/i/web/status/{200 + index}")
+                    self.assertEqual(image_payload(path.read_bytes(), suffix), image_payload(payload, suffix))
+        self.assertEqual(popen.call_count, 1)
+        self.assertIsNone(metadata._session)
+        self.assertFalse(list(self.root.glob(".xlikesaver-source-*")))
+
+    def test_resident_exiftool_reports_failures_and_falls_back_when_its_process_dies(self):
+        path = self.root / "300_1.png"
+        path.write_bytes(PNG)
+        with metadata.persistent():
+            missing = metadata._run(["-j", str(self.root / "없는 파일.png")], time.monotonic() + 20)
+            self.assertNotEqual(missing.returncode, 0)
+            session = metadata._session
+            session._process.kill()
+            session._process.wait()
+            self.assertEqual(metadata.embed_source(path, "300")["status"], "embedded")
+        self.assertEqual(metadata.read_source(path), "https://x.com/i/web/status/300")
+
+    def test_resident_exiftool_timeout_stops_the_process(self):
+        path = self.root / "301_1.png"
+        path.write_bytes(PNG)
+        with metadata.persistent():
+            session = metadata._session
+            with self.assertRaises(TimeoutError):
+                session.execute(["-j", str(path)], time.monotonic())
+            self.assertIsNotNone(session._process.poll())
+            # Later calls still work through one-shot processes.
+            self.assertEqual(metadata.embed_source(path, "301")["status"], "embedded")
+        self.assertEqual(path.read_bytes()[:8], PNG[:8])
+
 
 class BundleExtractionTests(unittest.TestCase):
     def setUp(self):

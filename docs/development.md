@@ -8,18 +8,22 @@ VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니
 
 | 파일 | 역할 |
 | --- | --- |
-| `entry.py` | GUI·worker·자체 점검 실행 |
+| `entry.py` | GUI·worker·예약 실행(`--run-saved`)·자체 점검 실행 |
 | `xlikesaver/gui.py` | 메인 화면·설정·작업 진행 |
 | `xlikesaver/history_gui.py` | 기록·통계·출처 기록 화면 |
-| `xlikesaver/core.py` | 수집·다운로드·완료 기록 |
+| `xlikesaver/core.py` | 수집·다운로드·완료 기록·빠른 확인·gallery-dl 호환성 검사 |
 | `xlikesaver/storage.py` | 미디어·기록 경로·이전 DB 복사·저장 경로 잠금 |
 | `xlikesaver/history.py` | SQLite 상세 기록·통계·CSV |
-| `xlikesaver/metadata.py` | ExifTool 출처 기록·확인·원본 보존 |
+| `xlikesaver/metadata.py` | ExifTool 출처 기록·확인·원본 보존·상주 실행 |
 | `xlikesaver/protection.py` | 요청 간격·계정 잠금·제한 대기 기록 |
 | `xlikesaver/login.py` | 입력 토큰 검증·Windows DPAPI 암호화 보관 |
-| `build.ps1`, `tools/package_release.py` | 단일 exe·소스 포함 ZIP 제작 |
+| `xlikesaver/settings.py` | 화면·예약 실행이 함께 쓰는 사용자 설정 |
+| `xlikesaver/scheduled.py` | 작업 스케줄러용 무인 실행·실행 기록 |
+| `build.ps1`, `tools/package_release.py` | 버전이 붙은 단일 exe·소스 포함 ZIP 제작 |
 
 `build.ps1`은 `--onefile --windowed`로 빌드합니다. Python/Tk와 전체 ExifTool 런타임을 포함하며 실행 시 임시 폴더에 풉니다. worker는 부모 앱이 살아 있는 동안 같은 임시 도구를 사용합니다. 사용자 사진과 기록, 설정, 인증정보는 실행 파일 밖에 남습니다. [PyInstaller 배포 방식](https://pyinstaller.org/en/stable/operating-mode.html)
+
+worker는 gallery-dl의 비공개 함수 몇 개(`TwitterExtractor._extract_media`, `DownloadJob.handle_url`, `HttpDownloader.receive` 등)를 감싸서 동작합니다. `core.check_gallery_hooks()`가 요청을 보내기 전에 이 함수들의 이름과 매개변수를 확인하고, 다르면 바로 중단합니다. 자체 점검(`--self-test`)도 같은 검사를 합니다. X 변경 때문에 gallery-dl을 올릴 때는 이 검사와 `tests/test_media.py`의 실제 추출 함수 테스트가 통과하는지 먼저 확인하세요.
 
 ## 로그인
 
@@ -39,15 +43,15 @@ cookies.txt는 Netscape 형식으로 X 사이트의 쿠키만 내보내 지정�
 
 기존 미디어를 이동하지 않습니다. 이전에 선택한 루트와 정확히 기록된 파일 경로만 파일 열기·출처 기록에 허용하고, 신규 다운로드는 현재 저장 루트 안에서만 진행합니다. 여러 번 경로를 바꾸거나 이전 위치로 돌아와도 알려진 파일·실행 기록이 중복되지 않게 합칩니다. 이전 드라이브를 잃었거나 연결할 수 없으면 연결부터 확인하세요. OS 잠금은 이 앱의 작업끼리 보호하며, 다른 도구가 DB를 수정하는 동안의 임의 변경까지 제어하지는 않습니다.
 
-SQLite WAL과 `synchronous=FULL`을 사용합니다. 비정상 종료 기록은 다음 worker가 계정 잠금을 확보한 뒤 중단됨으로 정리합니다. 모르는 종료 시각을 만들어 넣지 않습니다. 하드웨어 고장·정전의 완전 복구, 손상 DB 자동 복구, 완료 파일 전체 해시·디코더 검증은 제공하지 않습니다. 옮기거나 지운 완료 파일도 중복 방지 기록에 남아 있으면 자동으로 다시 받지 않습니다.
+SQLite WAL과 `synchronous=FULL`을 사용합니다. 기록 창의 폴더 재확인은 파일을 트랜잭션 밖에서 읽고 200건씩 짧게 커밋하므로, 같은 기록 DB를 쓰는 다운로드 worker가 잠금 대기로 실패하지 않습니다. 다운로드 중에는 기록 창이 폴더 재확인 자체를 건너뜁니다. 비정상 종료 기록은 다음 worker가 계정 잠금을 확보한 뒤 중단됨으로 정리합니다. 모르는 종료 시각을 만들어 넣지 않습니다. 하드웨어 고장·정전의 완전 복구, 손상 DB 자동 복구, 완료 파일 전체 해시·디코더 검증은 제공하지 않습니다. 옮기거나 지운 완료 파일도 중복 방지 기록에 남아 있으면 자동으로 다시 받지 않습니다.
 
 과거 archive에서 정보가 부족하면 경로나 저장 시각을 임의로 만들지 않습니다. 파일 크기는 확인 가능한 것만 합산합니다. 게시물 ID에서 계산한 게시일은 추정으로 표시합니다. Like 시각과 실제 저장 시각은 별개입니다. [Like 시각 기능 검토](like-time-options.md)
 
-출처 메타데이터는 JPEG·PNG·WebP·MP4의 XMP Source/Description 및 MP4 ItemList Comment에 기록합니다. 기존 설명과 다른 언어 값은 유지합니다. 같은 폴더의 임시 복사본을 수정하고 URL을 다시 읽어 확인한 뒤 원본을 원자적으로 교체합니다. 실패 시 원본과 완료 기록을 보존합니다. 수정 시각은 유지하며 이미지·음성·영상 스트림을 재인코딩하지 않습니다. 탐색기에서 모든 형식의 출처를 클릭할 수 있다는 보장은 없으므로 앱의 트윗 열기를 사용할 수 있습니다.
+출처 메타데이터는 JPEG·PNG·WebP·MP4의 XMP Source/Description 및 MP4 ItemList Comment에 기록합니다. 기존 설명과 다른 언어 값은 유지합니다. 같은 폴더의 임시 복사본을 수정하고 URL을 다시 읽어 확인한 뒤 원본을 원자적으로 교체합니다. 실패 시 원본과 완료 기록을 보존합니다. 수정 시각은 유지하며 이미지·음성·영상 스트림을 재인코딩하지 않습니다. 다운로드와 기존 파일 출처 기록 동안에는 ExifTool을 `-stay_open`으로 하나만 띄워 재사용합니다(호출당 약 0.2초 → 0.01초). 상주 프로세스가 멈추거나 시간을 넘기면 종료하고 호출마다 새 프로세스를 쓰는 방식으로 돌아갑니다. 탐색기에서 모든 형식의 출처를 클릭할 수 있다는 보장은 없으므로 앱의 트윗 열기를 사용할 수 있습니다.
 
 ## 제한·예외 처리
 
-- 사용자 중단·창 닫기: 통신이나 메타데이터 처리가 끝나기를 기다리고 worker를 정리합니다. 완료한 파일은 유지합니다. `.part`는 다음 실행에서 서버 지원 시 이어받습니다.
+- 사용자 중단·창 닫기: 통신이나 메타데이터 처리가 끝나기를 기다리고 worker를 정리합니다. 완료한 파일은 유지합니다. 받던 사진의 다른 크기를 요청하지 않으며, `.part`는 다음 실행에서 서버 지원 시 이어받습니다.
 - 네트워크·타임아웃·서버 오류: 자동 재시도 없이 멈춥니다. 회복 후 수동으로 시작합니다.
 - HTTP 416: 완료 처리하지 않고 부분 파일을 보존합니다. 반복되면 안내된 `.part`만 삭제하고 다시 시작합니다.
 - 디스크 부족·쓰기 권한·파일 잠금·DB 오류: 다음 파일이나 대체 요청을 진행하지 않고 중단합니다. DB를 자동 초기화하지 않습니다.
@@ -62,12 +66,14 @@ SQLite WAL과 `synchronous=FULL`을 사용합니다. 비정상 종료 기록은 
 - 서버 reset/Retry-After 중 늦은 시각에 5초를 더해 대기. 안내가 없으면 15분 대기.
 - 남은 API 요청이 5회 이하이면 다음 요청 전에 멈춤.
 - Windows 사용자 폴더에 입력 계정별 대기 기록·실행 잠금 보관. 저장 폴더 변경·앱 재시작으로 지워지지 않음.
+- 빠른 확인은 이미 저장한 파일이 100개 연속이면 목록 조회를 멈춤. 직전 실행이 정상 종료되지 않았거나 미디어 설정이 바뀌면 자동으로 전체 확인.
 - 정상 작업을 반복해도 목록 조회 요청은 누적됨. 다른 PC·프로그램·브라우저 요청은 제어하지 못함.
+- 국가 제한·연령 제한·볼 수 없는 미디어·작성자 정보 없음 같은 게시물별 경고는 안내로만 표시하며, 실행 실패 이유나 로그인 문제로 보고하지 않음.
 
 HTTP 429와 계정 정지는 별개입니다. 잠금·보안 확인이 뜨면 X에서 직접 확인합니다. 공식 API 요청 한도를 내부 API에 그대로 적용하거나 특정 간격이 안전하다고 단정하지 않습니다. [공식 X API 요청 제한](https://docs.x.com/x-api/fundamentals/rate-limits)
 
 ## 배포
 
-실행에는 `release/XlikeSaver.exe` 하나면 됩니다. 재배포에는 `XlikeSaver-1.0.1.zip`의 소스·라이선스도 함께 제공합니다. 사용자 세션이나 cookies.txt를 배포하지 마세요. ExifTool/Perl 전체 도구와 의존성 라이선스를 포함합니다. [의존성 안내](../THIRD_PARTY_NOTICES.md)
+실행에는 `release/XlikeSaver-<버전>.exe` 하나면 됩니다. 이름에 버전이 붙어 있어 이전 exe를 실행 중이어도 새로 빌드할 수 있습니다. 재배포에는 `XlikeSaver-<버전>.zip`의 소스·라이선스도 함께 제공합니다. 사용자 세션이나 cookies.txt를 배포하지 마세요. ExifTool/Perl 전체 도구와 의존성 라이선스를 포함합니다. [의존성 안내](../THIRD_PARTY_NOTICES.md)
 
-구형 `dist/XlikeSaver/` 빌드는 이 버전이 아닙니다. `build/`는 중간 파일입니다. Python DLL 오류가 나던 중간 exe 대신 새 `release/XlikeSaver.exe`를 사용하세요.
+`build/`는 PyInstaller 중간 파일이며 지워도 됩니다. 예약 실행은 등록한 exe 경로를 그대로 실행하므로, 새 버전으로 바꾸면 **예약 명령 복사**로 다시 등록하세요.

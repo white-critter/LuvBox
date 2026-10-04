@@ -22,9 +22,13 @@ from pathlib import Path
 
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
              *(f"lpt{i}" for i in range(1, 10))}
+# The sync ledger belonged to the removed "new likes only" snapshot mode. It is
+# still recognized and carried along unchanged so no user file is discarded,
+# but it is never created, copied from legacy folders, or merged any more.
+_LEGACY_SYNC = ".xlikesaver-sync.sqlite3"
 _DATABASES = (".xlikesaver-history.sqlite3", ".xlikesaver-archive.sqlite3",
               ".xlikesaver-archive.date.sqlite3", ".xlikesaver-archive.flat.sqlite3",
-              ".xlikesaver-sync.sqlite3")
+              _LEGACY_SYNC)
 
 
 @dataclass(frozen=True)
@@ -82,8 +86,7 @@ def resolve_storage(output_dir: str | Path, account: str, separate_accounts: boo
                         account, separate_accounts)
 
 
-def prepare_storage(paths: StoragePaths, *, include_sync: bool = False,
-                    protected: bool = False) -> None:
+def prepare_storage(paths: StoragePaths, *, protected: bool = False) -> None:
     """Create storage and copy old account records once, preserving originals."""
     # Resolve again immediately before filesystem writes to reject junctions
     # introduced after a settings preview was rendered.
@@ -98,7 +101,7 @@ def prepare_storage(paths: StoragePaths, *, include_sync: bool = False,
     if _linked(checked.legacy_dir) or not checked.legacy_dir.resolve().is_relative_to(checked.output_dir):
         return
     for name in _DATABASES:
-        if name == ".xlikesaver-sync.sqlite3" and not include_sync:
+        if name == _LEGACY_SYNC:
             continue
         destination = checked.record_dir / name
         if destination.exists():
@@ -406,20 +409,7 @@ def _merge_database(name: str, target_path: Path, source_path: Path) -> None:
                 elif name == _HISTORY_DB:
                     _merge_history(target, source)
                 else:
-                    # A sync baseline describes the last completed scan, not a
-                    # union of all likes ever observed. Keep each mode's newest.
-                    if not {"likes", "sync_state"}.issubset(_tables(source)):
-                        raise MigrationError(_MIGRATION_HELP)
-                    for table in ("likes", "sync_state"):
-                        _prepare_table(target, source, table)
-                    for mode, stamp in source.execute("SELECT folder_mode,last_sync_at FROM sync_state"):
-                        old = target.execute("SELECT last_sync_at FROM sync_state WHERE folder_mode=?", (mode,)).fetchone()
-                        if old is not None and old[0] >= stamp:
-                            continue
-                        target.execute("DELETE FROM likes WHERE folder_mode=?", (mode,))
-                        target.executemany("INSERT INTO likes(folder_mode,tweet_id) VALUES (?,?)",
-                                           source.execute("SELECT folder_mode,tweet_id FROM likes WHERE folder_mode=?", (mode,)))
-                        target.execute("INSERT OR REPLACE INTO sync_state(folder_mode,last_sync_at) VALUES (?,?)", (mode, stamp))
+                    raise MigrationError(_MIGRATION_HELP)
             _integrity(target)
 
 
@@ -501,7 +491,7 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
                 _backup_database(target, stage / name)
             elif old is not None:
                 _backup_database(old, stage / name)
-            if old is not None and target is not None:
+            if old is not None and target is not None and name != _LEGACY_SYNC:
                 incoming = stage / (name + ".incoming")
                 try:
                     _backup_database(old, incoming)

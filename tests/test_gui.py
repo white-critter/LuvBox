@@ -175,10 +175,11 @@ class GuiTests(unittest.TestCase):
         with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
         options = thread.call_args.kwargs["args"][0]
-        self.assertEqual((options.folder_mode, options.sync_mode, options.photo_limit), ("date", "all", 0))
+        self.assertEqual((options.folder_mode, options.scan_mode, options.photo_limit), ("date", "quick", 0))
         persisted = json.loads((Path(self.temp.name) / "settings.json").read_text(encoding="utf-8"))
         self.assertEqual(persisted["folder_mode"], "date")
-        self.assertEqual(persisted["sync_mode"], "all")
+        self.assertEqual(persisted["scan_mode"], "quick")
+        self.assertNotIn("sync_mode", persisted)
         self.assertNotIn("date_from", persisted)
         self.assertNotIn("cookies_file", persisted)
         self.assertNotIn("photo_limit", persisted)
@@ -193,7 +194,31 @@ class GuiTests(unittest.TestCase):
         with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
         options = thread.call_args.kwargs["args"][0]
-        self.assertEqual((options.sync_mode, options.photo_limit), ("all", 20))
+        self.assertEqual((options.scan_mode, options.photo_limit), ("quick", 20))
+
+    def test_full_scan_choice_reaches_worker_and_is_remembered(self):
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        self.session_mock.return_value = True
+        self.app.scan_mode.set("전체 목록 다시 확인")
+        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+            self.app.start()
+        self.assertEqual(thread.call_args.kwargs["args"][0].scan_mode, "full")
+        persisted = json.loads((Path(self.temp.name) / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["scan_mode"], "full")
+        other_root = tk.Tk()
+        other_root.withdraw()
+        self.addCleanup(destroy_tk, other_root)
+        with patch("xlikesaver.gui.load_settings", return_value=persisted):
+            app = App(other_root)
+        self.assertEqual(app.scan_mode.get(), "전체 목록 다시 확인")
+
+    def test_schedule_command_is_copied_for_the_running_application(self):
+        self.app.copy_schedule_command()
+        command = self.root.clipboard_get()
+        self.assertIn('schtasks /Create /TN "XlikeSaver 자동 저장" /SC DAILY', command)
+        self.assertIn("--run-saved", command)
+        self.assertIn("명령 프롬프트", self.app.status.get())
 
     def test_default_flat_media_options_and_user_video_cap_reach_worker(self):
         self.assertEqual(self.app.folder_mode.get(), "구분 없이 저장")
@@ -307,7 +332,7 @@ class GuiTests(unittest.TestCase):
         other_root = tk.Tk()
         other_root.withdraw()
         self.addCleanup(destroy_tk, other_root)
-        with patch("xlikesaver.gui.load_settings", return_value={"sync_mode": "new", "photo_limit": 20, "date_from": "2026-10-02"}):
+        with patch("xlikesaver.gui.load_settings", return_value={"sync_mode": "new", "scan_mode": "bogus", "photo_limit": 20, "date_from": "2026-10-02"}):
             app = App(other_root)
         self.assertFalse(app.limited.get())
         self.assertFalse(hasattr(app, "incremental"))
@@ -317,7 +342,8 @@ class GuiTests(unittest.TestCase):
         with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             app.start()
         options = thread.call_args.kwargs["args"][0]
-        self.assertEqual((options.sync_mode, options.photo_limit, options.date_from), ("all", 0, ""))
+        self.assertEqual((options.scan_mode, options.photo_limit), ("quick", 0))
+        self.assertFalse(hasattr(options, "sync_mode") or hasattr(options, "date_from"))
 
     def test_invalid_account_stops_before_worker(self):
         self.app.account.set("bad account")

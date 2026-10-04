@@ -354,20 +354,48 @@ class RelocationTests(unittest.TestCase):
             migrate_records(self.a, self.b)
             self.assertEqual(self.archived(self.b), {"twitter100_1", "twitter101_1"})
 
-    def test_sync_snapshots_keep_latest_complete_baseline_per_mode(self):
+    def write_legacy_sync(self, paths, timestamp, ids):
+        with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-sync.sqlite3")) as db:
+            db.execute("CREATE TABLE likes(folder_mode TEXT,tweet_id TEXT,PRIMARY KEY(folder_mode,tweet_id))")
+            db.execute("CREATE TABLE sync_state(folder_mode TEXT PRIMARY KEY,last_sync_at TEXT NOT NULL)")
+            db.executemany("INSERT INTO likes VALUES ('flat',?)", ((str(ident),) for ident in ids))
+            db.execute("INSERT INTO sync_state VALUES ('flat',?)", (timestamp,))
+            db.commit()
+
+    def legacy_sync(self, paths):
+        with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-sync.sqlite3")) as db:
+            return ({row[0] for row in db.execute("SELECT tweet_id FROM likes")},
+                    db.execute("SELECT last_sync_at FROM sync_state").fetchone()[0])
+
+    def test_unused_legacy_sync_ledger_is_carried_unchanged_never_merged(self):
+        # The snapshot mode was removed; its ledger is kept only so no user
+        # file disappears. The destination's own copy wins, otherwise the
+        # source's copy moves along unchanged.
         for paths, timestamp, ids in ((self.a, "2026-10-05T01:00:00+09:00", [100, 101]),
                                       (self.b, "2026-10-04T23:00:00+09:00", [99])):
             self.record(paths, ids[0])
-            with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-sync.sqlite3")) as db:
-                db.execute("CREATE TABLE likes(folder_mode TEXT,tweet_id TEXT,PRIMARY KEY(folder_mode,tweet_id))")
-                db.execute("CREATE TABLE sync_state(folder_mode TEXT PRIMARY KEY,last_sync_at TEXT NOT NULL)")
-                db.executemany("INSERT INTO likes VALUES ('flat',?)", ((str(ident),) for ident in ids))
-                db.execute("INSERT INTO sync_state VALUES ('flat',?)", (timestamp,))
-                db.commit()
+            self.write_legacy_sync(paths, timestamp, ids)
         migrate_records(self.a, self.b)
-        with closing(sqlite3.connect(self.b.record_dir / ".xlikesaver-sync.sqlite3")) as db:
-            self.assertEqual({row[0] for row in db.execute("SELECT tweet_id FROM likes")}, {"100", "101"})
-            self.assertEqual(db.execute("SELECT last_sync_at FROM sync_state").fetchone()[0], "2026-10-05T01:00:00+09:00")
+        self.assertEqual(self.legacy_sync(self.b), ({"99"}, "2026-10-04T23:00:00+09:00"))
+        migrate_records(self.b, self.c)
+        self.assertEqual(self.legacy_sync(self.c), ({"99"}, "2026-10-04T23:00:00+09:00"))
+        self.assertEqual(self.legacy_sync(self.a), ({"100", "101"}, "2026-10-05T01:00:00+09:00"))
+
+    def test_scan_history_moves_with_records_so_quick_scan_stays_available(self):
+        self.record(self.a, 100)
+        store = HistoryStore.for_storage(self.a)
+        try:
+            run = store.start_run("flat", scan_mode="quick", media_signature="v1:test")
+            store.finish_run(run, "finished")
+        finally:
+            store.close()
+        migrate_records(self.a, self.b)
+        store = HistoryStore.for_storage(self.b)
+        try:
+            self.assertEqual(store.quick_scan_readiness("flat", "v1:test"), "ready")
+            self.assertEqual(store.runs(limit=1)[0]["scan_mode"], "quick")
+        finally:
+            store.close()
 
     def test_destination_custom_files_are_preserved_and_not_replaced(self):
         self.record(self.a, 100)

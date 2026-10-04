@@ -111,17 +111,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["type"], "finished")
         return result, events
 
-    def sync_snapshot(self, folder_mode="author", account="myaccount"):
-        path = self.output / ".xlikesaver" / account / ".xlikesaver-sync.sqlite3"
-        if not path.exists():
-            return None
-        with closing(sqlite3.connect(path)) as db:
-            row = db.execute("SELECT last_sync_at FROM sync_state WHERE folder_mode = ?",
-                             (folder_mode,)).fetchone()
-            if row is None:
-                return None
-            return ({record[0] for record in db.execute(
-                "SELECT tweet_id FROM likes WHERE folder_mode = ?", (folder_mode,))}, row[0])
+    def runs(self):
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+            db.row_factory = sqlite3.Row
+            return [dict(row) for row in db.execute("SELECT * FROM runs ORDER BY id")]
 
     def copied_records_for_new_output(self, output):
         """Simulate the verified ledger transfer without copying media."""
@@ -223,22 +216,18 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             JobOptions("me", str(self.cookie_file)).validate()
 
-    def test_validates_layout_and_sync_mode_and_rejects_unsupported_like_time_range(self):
-        for value in ("other", "", None):
+    def test_validates_layout_and_scan_mode(self):
+        for value in ("other", "", None, "new", "all"):
             with self.subTest(folder_mode=value), self.assertRaises(ValueError):
                 replace(self.options, folder_mode=value).validate()
-            with self.subTest(sync_mode=value), self.assertRaises(ValueError):
-                replace(self.options, sync_mode=value).validate()
-        for value in ("2026-10-04", "2026-10-02 22:00", "bad date", None):
-            for field in ("date_from", "date_to"):
-                with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "실제 마음에 들어요"):
-                    replace(self.options, **{field: value}).validate()
-        normalized = replace(self.options, folder_mode=" DATE ", sync_mode=" NEW ",
-                             date_from=" ", date_to="").validate()
-        self.assertEqual(normalized.folder_mode, "date")
-        self.assertEqual(normalized.sync_mode, "new")
-        self.assertEqual(normalized.date_from, "")
-        self.assertEqual(normalized.date_to, "")
+            with self.subTest(scan_mode=value), self.assertRaises(ValueError):
+                replace(self.options, scan_mode=value).validate()
+        normalized = replace(self.options, folder_mode=" DATE ", scan_mode=" QUICK ").validate()
+        self.assertEqual((normalized.folder_mode, normalized.scan_mode), ("date", "quick"))
+        self.assertEqual(JobOptions("me", str(self.output)).scan_mode, "full")
+        for removed in ("sync_mode", "date_from", "date_to"):
+            with self.subTest(removed=removed), self.assertRaises(TypeError):
+                JobOptions("me", str(self.output), **{removed: ""})
 
     def test_downloads_each_photo_and_skips_non_photos(self):
         rows = [("100", 1, "photo", "alice"), ("100", 2, "photo", "alice"),
@@ -286,7 +275,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(call.args[0].utcoffset(None), timedelta(hours=9))
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 3)
-        self.assertEqual(events[-1]["last_sync_at"], "")
+        self.assertEqual(events[-1]["scan_mode"], "full")
         for tweet in ("100", "101", "102"):
             self.assertTrue((self.output / "myaccount" / "2026-10-04" / f"{tweet}_1.jpg").is_file())
         self.assertFalse((self.output / "myaccount" / "alice").exists())
@@ -479,230 +468,92 @@ class CoreTests(unittest.TestCase):
         with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM archive").fetchone()[0], 2)
 
-    def test_new_mode_first_run_saves_baseline_and_later_saves_old_tweets_liked_now(self):
-        options = replace(self.options, sync_mode="new")
-        baseline = [("100", 1, "photo", "alice", datetime(2026, 10, 4)),
-                    ("200", 1, "video", "bob")]
-        code, events = self.worker(baseline, options=options)
+    def test_quick_scan_runs_complete_scan_until_a_run_finishes(self):
+        rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")]
+        quick = replace(self.options, scan_mode="quick")
+        code, events = self.worker(rows, options=quick)
         self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(self.sync_snapshot()[0], {"100"})
-        self.assertTrue(any("첫 실행" in event.get("message", "") for event in events))
-        # Posting IDs/dates are deliberately older than the previous baseline.
-        rows = [("100", 1, "photo", "alice", datetime(2026, 10, 4)),
-                ("50", 1, "photo", "bob", datetime(2019, 1, 1)),
-                ("50", 2, "photo", "bob", datetime(2019, 1, 1))]
-        code, events = self.worker(rows, options=options)
+        self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"]), ("full", 2))
+        self.assertTrue(any("전체 목록을 확인" in event.get("message", "") for event in events if event["type"] == "log"))
+        code, events = self.worker(rows, options=quick)
         self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 2)
-        self.assertEqual(events[-1]["skipped"], 1)
-        self.assertEqual(self.sync_snapshot()[0], {"100", "50"})
-        self.assertTrue((self.output / "myaccount" / "bob" / "50_2.jpg").is_file())
+        self.assertEqual((events[-1]["scan_mode"], events[-1]["status"], events[-1]["skipped"]), ("quick", "finished", 2))
+        self.assertEqual([(run["scan_mode"], run["status"]) for run in self.runs()],
+                         [("full", "finished"), ("quick", "finished")])
 
-    def test_new_mode_zero_new_is_success_and_scans_every_non_monotonic_page(self):
-        options = replace(self.options, sync_mode="new")
-        baseline = [("100", 1, "photo", "alice"), ("200", 1, "photo", "bob")]
-        self.worker(baseline, options=options)
-        visited_pages = []
-
-        def paged_rows():
-            for page, rows in enumerate((baseline[:1], baseline[1:],
-                                        [("50", 1, "photo", "older", datetime(2019, 1, 1))])):
-                visited_pages.append(page)
-                yield from rows
-
-        code, events = self.worker(paged_rows(), options=options)
-        self.assertEqual(code, 0)
-        self.assertEqual(visited_pages, [0, 1, 2])
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(events[-1]["skipped"], 2)
-        self.assertEqual(self.sync_snapshot()[0], {"100", "200", "50"})
-        previous = self.sync_snapshot()[1]
-        full_rows = baseline + [("50", 1, "photo", "older")]
-        with patch("xlikesaver.core.datetime") as clock:
-            clock.now.return_value = datetime(2026, 10, 5, 22, tzinfo=timezone(timedelta(hours=9)))
-            code, events = self.worker(full_rows, options=options)
+    def test_quick_scan_stops_after_streak_of_saved_files_without_listing_the_rest(self):
+        old = [(str(tweet), 1, "photo", "alice") for tweet in range(100, 106)]
+        self.worker(old)
+        listed = []
+        new_rows = [("200", 1, "photo", "bob"), ("201", 1, "photo", "bob")]
+        with patch("xlikesaver.core.QUICK_STOP_AFTER", 3):
+            code, events = self.worker(new_rows + old, options=replace(self.options, scan_mode="quick"),
+                                       before_row=lambda extractor, row: listed.append(row[0]))
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["status"], "finished")
-        self.assertEqual(events[-1]["saved"], 0)
-        self.assertEqual(events[-1]["skipped"], 3)
-        self.assertIn("게시물 0개", events[-1]["message"])
-        self.assertNotEqual(events[-1]["last_sync_at"], previous)
-        self.assertEqual(events[-1]["last_sync_at"], self.sync_snapshot()[1])
+        self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["skipped"]), ("quick", 2, 3))
+        self.assertIn("이전 확인 지점", events[-1]["message"])
+        self.assertEqual(listed, ["200", "201", "100", "101", "102"])
+        self.assertEqual(FakeHttpDownloader.downloaded[-2:], [
+            "https://pbs.twimg.com/media/200_1?format=jpg&name=orig",
+            "https://pbs.twimg.com/media/201_1?format=jpg&name=orig"])
+        self.assertEqual(self.runs()[-1]["status"], "finished")
 
-    def test_new_mode_initial_baseline_reuses_legacy_download_archive(self):
+    def test_saved_file_resets_the_streak_so_interleaved_new_likes_are_kept(self):
+        old = [(str(tweet), 1, "photo", "alice") for tweet in range(100, 104)]
+        self.worker(old)
+        rows = [old[0], old[1], ("200", 1, "photo", "bob"), old[2], old[3], ("201", 1, "photo", "bob")]
+        with patch("xlikesaver.core.QUICK_STOP_AFTER", 3):
+            code, events = self.worker(rows, options=replace(self.options, scan_mode="quick"))
+        self.assertEqual(code, 0)
+        self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (2, 4))
+        self.assertNotIn("이전 확인 지점", events[-1]["message"])
+
+    def test_unfinished_run_makes_the_next_quick_scan_complete(self):
+        old = [(str(tweet), 1, "photo", "alice") for tweet in range(100, 105)]
+        self.worker(old)
+        quick = replace(self.options, scan_mode="quick")
+        rows = [("200", 1, "photo", "bob"), ("201", 1, "photo", "bob"), ("202", 1, "photo", "bob")] + old
+        with patch("xlikesaver.core.QUICK_STOP_AFTER", 2):
+            # A short test run stops after one new file: newer likes below it
+            # would otherwise sit behind the saved streak forever.
+            code, events = self.worker(rows, options=replace(quick, photo_limit=1))
+            self.assertEqual((code, events[-1]["saved"]), (0, 1))
+            self.assertEqual(self.runs()[-1]["status"], "limited")
+            code, events = self.worker(rows, options=quick)
+            self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["skipped"]), ("full", 2, 6))
+            FakeHttpDownloader.failure = True
+            code, events = self.worker([("300", 1, "photo", "bob")] + rows, options=quick)
+            self.assertEqual((events[-1]["scan_mode"], events[-1]["status"]), ("quick", "error"))
+            FakeHttpDownloader.failure = False
+            code, events = self.worker([("300", 1, "photo", "bob")] + rows, options=quick)
+            self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"]), ("full", 1))
+            flag = self.base / "stop.flag"
+            code, events = self.worker(rows, options=quick, stop_file=flag,
+                                       before_row=lambda extractor, row: row[0] == "200" or flag.touch())
+            self.assertEqual((events[-1]["status"], self.runs()[-1]["status"]), ("stopped", "stopped"))
+            flag.unlink()
+            code, events = self.worker(rows, options=quick)
+            self.assertEqual(events[-1]["scan_mode"], "full")
+            code, events = self.worker(rows, options=quick)
+            self.assertEqual(events[-1]["scan_mode"], "quick")
+
+    def test_changed_media_settings_make_one_complete_scan(self):
+        rows = [("100", 1, "photo", "alice"), ("101", 2, "video", "alice")]
+        quick = replace(self.options, scan_mode="quick")
+        self.worker(rows, options=quick)
+        self.assertEqual(self.worker(rows, options=quick)[1][-1]["scan_mode"], "quick")
+        for changed in (replace(quick, include_videos=True), replace(quick, include_videos=True, max_video_mb=500)):
+            code, events = self.worker(rows, options=changed)
+            self.assertEqual(events[-1]["scan_mode"], "full")
+            self.assertTrue(any("설정이 이전 확인 때와 달라" in event.get("message", "") for event in events))
+            self.assertEqual(self.worker(rows, options=changed)[1][-1]["scan_mode"], "quick")
+
+    def test_quick_readiness_is_separate_for_each_folder_layout(self):
         rows = [("100", 1, "photo", "alice")]
         self.worker(rows)
-        self.assertFalse((self.record_dir / ".xlikesaver-sync.sqlite3").exists())
-        code, events = self.worker(rows, options=replace(self.options, sync_mode="new"))
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 0)
-        self.assertEqual(events[-1]["skipped"], 1)
-        self.assertEqual(self.sync_snapshot()[0], {"100"})
-        self.assertEqual(len(FakeHttpDownloader.downloaded), 1)
-
-    def test_new_mode_snapshots_are_separate_by_layout_and_account(self):
-        options = replace(self.options, sync_mode="new")
-        rows = [("100", 1, "photo", "alice")]
-        self.worker(rows, options=options)
-        code, events = self.worker(rows, options=replace(options, folder_mode="flat"))
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        code, events = self.worker(rows, options=replace(options, account="OtherAccount"))
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.worker(rows + [("50", 1, "photo", "bob")], options=options)
-        self.assertEqual(self.sync_snapshot()[0], {"100", "50"})
-        self.assertEqual(self.sync_snapshot("flat")[0], {"100"})
-        self.assertEqual(self.sync_snapshot(account="otheraccount")[0], {"100"})
-
-    def test_legacy_new_snapshot_is_independent_of_archive_based_all_mode(self):
-        rows = [("100", 1, "photo", "alice"), ("200", 1, "photo", "alice")]
-        options = replace(self.options, sync_mode="new")
-        self.worker(rows, options=options)
-        self.worker(rows[1:], options=options)
-        self.assertEqual(self.sync_snapshot()[0], {"200"})
-        (self.output / "myaccount" / "alice" / "200_1.jpg").unlink()
-        (self.record_dir / ".xlikesaver-archive.sqlite3").unlink()
-        code, events = self.worker(rows[1:], options=replace(self.options, sync_mode="new"))
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 0)
-        self.assertEqual(events[-1]["skipped"], 1)
-        self.assertFalse((self.output / "myaccount" / "alice" / "200_1.jpg").exists())
-        code, events = self.worker(rows[1:])
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(self.sync_snapshot()[0], {"200"})
-
-    def test_failed_photo_keeps_snapshot_and_next_run_recovers_unsaved_new_photos(self):
-        options = replace(self.options, sync_mode="new")
-        baseline = [("100", 1, "photo", "alice")]
-        self.worker(baseline, options=options)
-        previous = self.sync_snapshot()
-        rows = baseline + [("101", 1, "photo", "alice"), ("102", 1, "photo", "alice")]
-
-        def fail_last_photo(extractor, row):
-            FakeHttpDownloader.failure = row[0] == "102"
-
-        code, events = self.worker(rows, options=options, before_row=fail_last_photo)
-        self.assertNotEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(self.sync_snapshot(), previous)
-        self.assertEqual(events[-1]["last_sync_at"], previous[1])
-        FakeHttpDownloader.failure = False
-        code, events = self.worker(rows, options=options)
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(events[-1]["skipped"], 2)
-        self.assertEqual(self.sync_snapshot()[0], {"100", "101", "102"})
-
-    def test_cancelled_and_limited_jobs_preserve_successful_snapshot(self):
-        options = replace(self.options, sync_mode="new")
-        baseline = [("100", 1, "photo", "alice")]
-        self.worker(baseline, options=options)
-        previous = self.sync_snapshot()
-        rows = baseline + [("101", 1, "photo", "alice"), ("102", 1, "photo", "alice")]
-        code, events = self.worker(rows, options=replace(options, photo_limit=1))
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertIn("비교 기준은 갱신하지", events[-1]["message"])
-        self.assertEqual(self.sync_snapshot(), previous)
-        flag = self.base / "stop.flag"
-
-        def stop_before_last(extractor, row):
-            if row[0] == "102":
-                flag.touch()
-                extractor.sleep(1, "request")
-
-        code, events = self.worker(rows, options=options, before_row=stop_before_last, stop_file=flag)
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["status"], "stopped")
-        self.assertEqual(self.sync_snapshot(), previous)
-        flag.unlink()
-        code, events = self.worker(rows, options=options)
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(self.sync_snapshot()[0], {"100", "101", "102"})
-
-    def test_limited_first_run_does_not_establish_partial_baseline(self):
-        options = replace(self.options, sync_mode="new")
-        rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")]
-        code, events = self.worker(rows, options=replace(options, photo_limit=1))
-        self.assertEqual(code, 0)
-        self.assertIsNone(self.sync_snapshot())
-        self.assertEqual(events[-1]["last_sync_at"], "")
-        code, events = self.worker(rows, options=options)
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(events[-1]["skipped"], 1)
-        self.assertEqual(self.sync_snapshot()[0], {"100", "101"})
-
-    def test_extraction_error_after_saving_new_photo_does_not_advance_checkpoint(self):
-        options = replace(self.options, sync_mode="new")
-        self.worker([("100", 1, "photo", "alice")], options=options)
-        previous = self.sync_snapshot()
-
-        def interrupted_rows():
-            yield ("101", 1, "photo", "alice")
-            raise exception.AbortExtraction("Rate limit exceeded " + SECRET)
-
-        code, events = self.worker(interrupted_rows(), options=options)
-        self.assertNotEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(self.sync_snapshot(), previous)
-        self.assertEqual(events[-1]["last_sync_at"], previous[1])
-
-    def test_stop_at_last_completed_photo_preserves_archive_and_previous_checkpoint(self):
-        options = replace(self.options, sync_mode="new")
-        self.worker([("100", 1, "photo", "alice")], options=options)
-        previous = self.sync_snapshot()
-        flag = self.base / "stop.flag"
-        original_download = FakeHttpDownloader.download
-
-        def stop_after_download(downloader, url, pathfmt):
-            result = original_download(downloader, url, pathfmt)
-            flag.touch()
-            return result
-
-        rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")]
-        with patch.object(FakeHttpDownloader, "download", new=stop_after_download):
-            code, events = self.worker(rows, options=options, stop_file=flag)
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["status"], "stopped")
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(self.sync_snapshot(), previous)
-        flag.unlink()
-        code, events = self.worker(rows, options=options)
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 0)
-        self.assertEqual(events[-1]["skipped"], 2)
-        self.assertEqual(self.sync_snapshot()[0], {"100", "101"})
-
-    def test_sync_checkpoint_transaction_rolls_back_ids_if_state_update_fails(self):
-        options = replace(self.options, sync_mode="new")
-        baseline = [("100", 1, "photo", "alice")]
-        self.worker(baseline, options=options)
-        previous = self.sync_snapshot()
-        sync_path = self.record_dir / ".xlikesaver-sync.sqlite3"
-        with closing(sqlite3.connect(sync_path)) as db:
-            db.execute("CREATE TRIGGER reject_state BEFORE INSERT ON sync_state "
-                       "BEGIN SELECT RAISE(ABORT, 'state update blocked'); END")
-        code, events = self.worker(baseline + [("101", 1, "photo", "alice")], options=options)
-        self.assertNotEqual(code, 0)
-        self.assertEqual(events[-1]["status"], "error")
-        self.assertIn("동기화 기록", events[-1]["message"])
-        self.assertEqual(self.sync_snapshot(), previous)
-
-    def test_sync_database_error_is_actionable_before_authentication(self):
-        account = self.output / "myaccount"
-        account.mkdir(parents=True)
-        (account / ".xlikesaver-sync.sqlite3").write_bytes(b"invalid sqlite database")
-        with patch("xlikesaver.login.load_session_cookies") as load:
-            code, events = self.worker(options=replace(self.options, auth_mode="managed", sync_mode="new"))
-        load.assert_not_called()
-        self.assertNotEqual(code, 0)
-        self.assertEqual(events[-1]["status"], "error")
-        self.assertIn("동기화 기록", events[-1]["message"])
+        code, events = self.worker(rows, options=replace(self.options, scan_mode="quick", folder_mode="flat"))
+        self.assertEqual(events[-1]["scan_mode"], "full")
 
     def test_all_mode_ignores_legacy_corrupt_sync_database_and_uses_photo_archive(self):
         account = self.output / "myaccount"
@@ -713,7 +564,6 @@ class CoreTests(unittest.TestCase):
         code, events = self.worker(rows)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
-        self.assertNotIn("비교 기준", events[-1]["message"])
         code, events = self.worker(rows)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 0)
@@ -731,6 +581,52 @@ class CoreTests(unittest.TestCase):
         code, events = self.worker(rows)
         self.assertEqual(events[-1]["saved"], 1)
         self.assertEqual(events[-1]["skipped"], 2)
+
+    def test_ordinary_post_warnings_never_claim_an_expired_login(self):
+        def warn(extractor, row):
+            extractor.log.warning("%s: Missing 'author' data", row[0])
+            extractor.log.warning("'%s' (%s)", "Withheld in: KR", row[0])
+            extractor.log.warning("Media unavailable (%s - '%s')", row[0], "Copyright")
+
+        with patch.object(FakeHttpDownloader, "download", lambda self, url, pathfmt: False):
+            code, events = self.worker([("1840412345", 1, "photo", "alice")], before_row=warn)
+        messages = [event["message"] for event in events if event["type"] == "log"]
+        self.assertNotEqual(code, 0)
+        self.assertFalse(any("인증 토큰" in message or "로그인 상태" in message for message in messages), messages)
+        self.assertIn("작성자 정보가 없는 게시물은 건너뛸 수 있습니다.", messages)
+        self.assertIn("국가 제한(withheld) 등으로 볼 수 없는 게시물은 건너뜁니다.", messages)
+        self.assertIn("볼 수 없는 미디어(저작권·지역 제한 등)는 건너뜁니다.", messages)
+        # The failed download stays the run's reason, not a post notice and not
+        # "not found" because the tweet ID happens to contain 404.
+        self.assertIn("일부 파일을 저장하지 못했습니다", events[-1]["message"])
+
+    def test_diagnostics_match_whole_terms(self):
+        from xlikesaver.core import _safe_diagnostic
+
+        for raw in ("AuthRequired: authenticated cookies needed", "AuthorizationError: Account temporarily locked",
+                    "Invalid login credentials", "'401 Unauthorized'", "403 Forbidden", "cookie expired"):
+            with self.subTest(raw=raw):
+                self.assertIn("인증 토큰", _safe_diagnostic(raw, "managed"))
+        for raw in ("1849: Missing 'author' data", "Failed to download 1429_1.jpg",
+                    "Failed to download 1840412345_1.jpg"):
+            with self.subTest(raw=raw):
+                message = _safe_diagnostic(raw, "managed")
+                self.assertNotIn("인증 토큰", message)
+                self.assertNotIn("요청 한도", message)
+                self.assertNotIn("찾지 못했습니다", message)
+        self.assertIn("요청 한도", _safe_diagnostic("HTTP 429 Too Many Requests", "managed"))
+
+    def test_gallery_hook_change_stops_before_any_request(self):
+        from gallery_dl.extractor.twitter import TwitterExtractor
+
+        with patch.object(TwitterExtractor, "_extract_media_source", lambda self, media: None), \
+                patch("gallery_dl.extractor.find") as find:
+            events = []
+            code = run_worker(self.options, events.append)
+        find.assert_not_called()
+        self.assertEqual(code, 1)
+        self.assertIn("gallery-dl 구성", events[-1]["message"])
+        self.assertFalse(self.record_dir.exists())
 
     def test_no_results_is_actionable_error(self):
         code, events = self.worker()
@@ -951,7 +847,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 0)
         self.assertIn("요청 한도", events[-1]["message"])
         self.assertTrue(events[-1]["retry_at"])
-        self.assertIsNone(self.sync_snapshot())
         # Changing the output folder cannot bypass the same-account cooldown.
         with patch("gallery_dl.extractor.find") as find:
             result = run_worker(replace(self.options, output_dir=str(self.base / "other-photos")), events.append)
@@ -959,12 +854,10 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(result, 0)
         self.assertIn("한국 시간", events[-1]["message"])
 
-    def test_api_429_stops_before_library_retry_and_preserves_previous_checkpoint(self):
+    def test_api_429_stops_before_library_retry_and_preserves_previous_downloads(self):
         import requests
 
-        options = replace(self.options, sync_mode="new")
-        self.worker([("100", 1, "photo", "alice")], options=options)
-        previous = self.sync_snapshot()
+        self.worker([("100", 1, "photo", "alice")])
         response = requests.Response()
         response.status_code = 429
         response.reason = "Too Many Requests"
@@ -975,12 +868,12 @@ class CoreTests(unittest.TestCase):
             extractor.request("https://x.com/i/api/graphql/offline/Likes", fatal=None)
 
         with patch("requests.Session.send", return_value=response) as send:
-            result, events = self.worker([("101", 1, "photo", "alice")], options=options, before_row=request_before_row)
+            result, events = self.worker([("101", 1, "photo", "alice")], before_row=request_before_row)
         self.assertEqual(send.call_count, 1)
         self.assertNotEqual(result, 0)
-        self.assertEqual(self.sync_snapshot(), previous)
-        self.assertEqual(events[-1]["last_sync_at"], previous[1])
         self.assertIn("요청 한도", events[-1]["message"])
+        self.assertEqual(self.runs()[-1]["status"], "error")
+        self.assertTrue((self.output / "myaccount" / "alice" / "100_1.jpg").is_file())
 
     def test_media_server_error_stops_before_fallback_and_preserves_saved_photo_history(self):
         import requests

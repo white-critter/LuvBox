@@ -31,7 +31,8 @@ def package() -> None:
     if output.is_symlink() or getattr(output, "is_junction", lambda: False)():
         raise ValueError("Release directory must be inside the project")
     output.mkdir(exist_ok=True)
-    executable = output / "XlikeSaver.exe"
+    # Versioned names: a running older executable never blocks a new build.
+    executable = output / f"XlikeSaver-{__version__}.exe"
     if not executable.is_file():
         raise FileNotFoundError("Build the application first")
     destination = output / f"XlikeSaver-{__version__}.zip"
@@ -40,7 +41,7 @@ def package() -> None:
     staged = Path(filename)
     try:
         with zipfile.ZipFile(staged, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            archive.write(executable, "XlikeSaver.exe")
+            archive.write(executable, executable.name)
             archive.write(ROOT / "docs" / "사용안내.txt", "사용안내.txt")
             archive.write(ROOT / "LICENSE", "LICENSE")
             archive.write(ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")
@@ -84,7 +85,7 @@ def package() -> None:
         with path.open("rb") as file:
             digest = hashlib.file_digest(file, "sha256").hexdigest()
         rows.append(f"{digest}  {path.name}")
-    (output / "SHA256.txt").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    (output / f"SHA256-{__version__}.txt").write_text("\n".join(rows) + "\n", encoding="utf-8")
     print(f"Release {__version__}: {executable.name}, {destination.name}")
 
 

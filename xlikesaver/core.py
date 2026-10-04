@@ -7,13 +7,14 @@ caches, so this module deliberately does not support concurrent in-process jobs.
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 import os
 import re
 import sqlite3
 import tempfile
 import time
-from contextlib import closing
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from datetime import datetime as _Datetime
@@ -23,7 +24,7 @@ from urllib.parse import urlsplit
 
 from .protection import API_INTERVAL, MEDIA_INTERVAL, AccountGuard, ProtectionError
 from .history import HistoryError, HistoryStore
-from .storage import OutputGuard, prepare_storage, resolve_storage
+from .storage import OutputGuard, resolve_storage
 
 
 EventSink = Callable[[dict], None]
@@ -33,12 +34,16 @@ _ROUTES = {"i", "home", "explore", "search", "settings", "notifications",
            "hashtag", "account", "privacy", "tos", "oauth"}
 _AUTH_MODES = {"file", "managed"}
 _FOLDER_MODES = {"author", "date", "flat"}
-_SYNC_MODES = {"all", "new"}
+_SCAN_MODES = {"full", "quick"}
+# A quick scan ends after this many already-saved files in a row. Likes are
+# listed newest-like first, so this is the point where the previous complete
+# run left off. Unsaved files never count toward the streak.
+QUICK_STOP_AFTER = 100
 _KOREA = timezone(timedelta(hours=9))
-_LIKE_TIME_UNAVAILABLE = ("현재 X 좋아요 목록에서는 실제 마음에 들어요를 누른 시각을 제공하지 않아 날짜·시간 범위를 사용할 수 없습니다. "
-                          "범위를 비우고 전체 저장 또는 새로 발견한 마음에 들어요 저장을 사용해 주세요.")
-_SYNC_ERROR = ("동기화 기록을 읽거나 갱신하지 못했습니다. "
-               "저장 폴더의 권한과 다른 실행 중인 프로그램을 확인해 주세요.")
+_RECORD_ERROR = ("저장 기록을 읽거나 갱신하지 못했습니다. "
+                 "저장 폴더의 권한과 다른 실행 중인 프로그램을 확인해 주세요.")
+_COMPATIBILITY_ERROR = ("내장 gallery-dl 구성이 이 버전의 XlikeSaver가 예상한 것과 달라 요청을 보내기 전에 중단했습니다. "
+                        "배포된 실행 파일을 다시 받거나 setup.ps1로 고정된 버전을 설치해 주세요.")
 _HISTORY_ERROR = "저장 이력을 기록하지 못했습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
 _METADATA_ERROR = "원본 트윗 주소를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다."
 _DATE_MOVE_ERROR = "저장 완료일 폴더로 옮기지 못했습니다. 기존 파일 위치와 중복 방지 기록은 보존했습니다."
@@ -90,36 +95,60 @@ def _media_details(metadata: dict) -> dict:
             "metadata_status": metadata.get("_xlikesaver_metadata_status", "pending")}
 
 
-def _read_sync_snapshot(path: Path, folder_mode: str) -> tuple[set[str] | None, str]:
-    """A missing state row means no successful complete baseline yet."""
-    with closing(sqlite3.connect(path, timeout=2)) as db:
-        with db:
-            db.execute("CREATE TABLE IF NOT EXISTS likes ("
-                       "folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, "
-                       "PRIMARY KEY(folder_mode, tweet_id))")
-            db.execute("CREATE TABLE IF NOT EXISTS sync_state ("
-                       "folder_mode TEXT PRIMARY KEY, last_sync_at TEXT NOT NULL)")
-        row = db.execute("SELECT last_sync_at FROM sync_state WHERE folder_mode = ?",
-                         (folder_mode,)).fetchone()
-        if row is None:
-            return None, ""
-        tweets = {row[0] for row in db.execute(
-            "SELECT tweet_id FROM likes WHERE folder_mode = ?", (folder_mode,))}
-        return tweets, row[0]
+class GalleryCompatibilityError(RuntimeError):
+    """The pinned gallery-dl internals this worker replaces have changed."""
 
 
-def _write_sync_snapshot(path: Path, folder_mode: str, tweet_ids: set[str]) -> str:
-    """Replace IDs and successful-sync time in one rollback-safe transaction."""
-    completed_at = datetime.now(_KOREA).isoformat()
-    with closing(sqlite3.connect(path, timeout=2)) as db:
-        with db:
-            db.execute("DELETE FROM likes WHERE folder_mode = ?", (folder_mode,))
-            db.executemany("INSERT INTO likes(folder_mode, tweet_id) VALUES (?, ?)",
-                           ((folder_mode, tweet_id) for tweet_id in tweet_ids))
-            db.execute("INSERT INTO sync_state(folder_mode, last_sync_at) VALUES (?, ?) "
-                       "ON CONFLICT(folder_mode) DO UPDATE SET last_sync_at = excluded.last_sync_at",
-                       (folder_mode, completed_at))
-    return completed_at
+# run_worker replaces these private gallery-dl members. Their names and leading
+# parameters are checked before any request, so a gallery-dl upgrade that
+# renames or reshapes one fails loudly instead of silently skipping a hook.
+_GALLERY_HOOKS = (
+    ("gallery_dl.extractor.twitter", "TwitterExtractor", "_extract_media", ("self", "tweet", "entities", "files")),
+    ("gallery_dl.extractor.twitter", "TwitterExtractor", "_extract_media_source", ("self", "dest", "media")),
+    ("gallery_dl.extractor.common", "Extractor", "_init_session", ("self",)),
+    ("gallery_dl.extractor.common", "Extractor", "_init_cookies", ("self",)),
+    ("gallery_dl.extractor.common", "Extractor", "cookies_check", ("self", "cookies_names")),
+    ("gallery_dl.extractor.common", "Extractor", "sleep", ("self", "seconds", "reason")),
+    ("gallery_dl.extractor.common", "Extractor", "wait", ("self",)),
+    ("gallery_dl.extractor.common", "Extractor", "input", ("self",)),
+    ("gallery_dl.job", "DownloadJob", "handle_url", ("self", "url", "kwdict")),
+    ("gallery_dl.job", "DownloadJob", "handle_directory", ("self", "kwdict")),
+    ("gallery_dl.job", "DownloadJob", "initialize", ("self", "kwdict")),
+    ("gallery_dl.job", "DownloadJob", "download", ("self", "url")),
+    ("gallery_dl.job", "DownloadJob", "get_downloader", ("self", "scheme")),
+    ("gallery_dl.job", "Job", "_init", ("self",)),
+    ("gallery_dl.downloader.http", "HttpDownloader", "download", ("self", "url", "pathfmt")),
+    ("gallery_dl.downloader.http", "HttpDownloader", "receive", ("self", "fp", "content", "bytes_total", "bytes_start")),
+    ("gallery_dl.output", "NullOutput", "success", ("self", "path")),
+    ("gallery_dl.output", "NullOutput", "skip", ("self", "path")),
+    ("gallery_dl.path", "PathFormat", "part_enable", ("self", "part_directory")),
+    ("gallery_dl.path", "PathFormat", "part_size", ("self",)),
+)
+_GALLERY_NAMES = (
+    ("gallery_dl.extractor.common", ("CACHE_COOKIES", "CACHE_MEMORY")),
+    ("gallery_dl.util", ("cookiestxt_load",)),
+    ("gallery_dl.exception", ("ControlException", "StopExtraction", "AbortExtraction", "AuthRequired")),
+)
+
+
+def check_gallery_hooks() -> None:
+    """Verify the private gallery-dl API surface before sending any request."""
+    import importlib
+
+    try:
+        for module_name, class_name, member, parameters in _GALLERY_HOOKS:
+            function = getattr(getattr(importlib.import_module(module_name), class_name), member)
+            names = tuple(inspect.signature(function).parameters)
+            if names[:len(parameters)] != parameters:
+                raise GalleryCompatibilityError(f"{class_name}.{member}")
+        for module_name, names in _GALLERY_NAMES:
+            module = importlib.import_module(module_name)
+            for name in names:
+                getattr(module, name)
+    except GalleryCompatibilityError:
+        raise
+    except (ImportError, AttributeError, TypeError, ValueError):
+        raise GalleryCompatibilityError("missing gallery-dl member") from None
 
 
 def _normal_account(value: str) -> str:
@@ -192,13 +221,16 @@ class JobOptions:
     cookies_file: str = ""
     photo_limit: int = 0
     folder_mode: str = "flat"
-    date_from: str = ""
-    date_to: str = ""
-    sync_mode: str = "all"
+    scan_mode: str = "full"
     include_videos: bool = True
     include_gifs: bool = True
     max_video_mb: int = 200
     separate_accounts: bool = False
+
+    @property
+    def media_signature(self) -> str:
+        """Settings that decide which files a previous scan could have skipped."""
+        return f"v1:videos={int(self.include_videos)}:gifs={int(self.include_gifs)}:max_mb={self.max_video_mb}"
 
     def validate(self) -> "JobOptions":
         account = _normal_account(self.account)
@@ -208,18 +240,15 @@ class JobOptions:
         if not isinstance(self.folder_mode, str) or self.folder_mode.strip().lower() not in _FOLDER_MODES:
             raise ValueError("저장 방식은 작성자별, 날짜별, 구분 없이 중 하나를 선택해 주세요.")
         folder_mode = self.folder_mode.strip().lower()
-        if not isinstance(self.sync_mode, str) or self.sync_mode.strip().lower() not in _SYNC_MODES:
-            raise ValueError("저장 대상은 전체 또는 새로 발견한 마음에 들어요 중 하나를 선택해 주세요.")
-        sync_mode = self.sync_mode.strip().lower()
+        if not isinstance(self.scan_mode, str) or self.scan_mode.strip().lower() not in _SCAN_MODES:
+            raise ValueError("확인 범위는 ‘새 Like만 빠르게’ 또는 ‘전체 목록 다시 확인’ 중 하나를 선택해 주세요.")
+        scan_mode = self.scan_mode.strip().lower()
         if type(self.include_videos) is not bool or type(self.include_gifs) is not bool:
             raise ValueError("동영상과 GIF 저장 여부를 확인해 주세요.")
         if type(self.separate_accounts) is not bool:
             raise ValueError("계정별 폴더 설정을 확인해 주세요.")
         if isinstance(self.max_video_mb, bool) or not isinstance(self.max_video_mb, int) or self.max_video_mb < 0:
             raise ValueError("동영상·GIF 크기 한도는 0 이상의 정수 MB로 입력해 주세요. 0은 제한 없음입니다.")
-        if (not isinstance(self.date_from, str) or not isinstance(self.date_to, str) or
-                self.date_from.strip() or self.date_to.strip()):
-            raise ValueError(_LIKE_TIME_UNAVAILABLE)
         if isinstance(self.photo_limit, bool) or not isinstance(self.photo_limit, int) or self.photo_limit < 0:
             raise ValueError("파일 저장 한도는 0 이상의 정수여야 합니다.")
         if not self.output_dir.strip():
@@ -242,7 +271,7 @@ class JobOptions:
             cookie_path = str(path)
         return replace(self, account=account, output_dir=str(output),
                        auth_mode=auth_mode, cookies_file=cookie_path,
-                       folder_mode=folder_mode, date_from="", date_to="", sync_mode=sync_mode)
+                       folder_mode=folder_mode, scan_mode=scan_mode)
 
 
 def _auth_help(mode: str) -> str:
@@ -251,18 +280,45 @@ def _auth_help(mode: str) -> str:
     return "X에 다시 로그인한 뒤 본인 계정의 새 cookies.txt 파일을 내보내 ‘쿠키 파일’에서 선택해 주세요."
 
 
+# Match whole terms: a plain substring test would read gallery-dl's
+# "Missing 'author' data" as an authentication failure.
+_RATE_TERMS = re.compile(r"rate ?limit|\b429\b")
+_STORAGE_TERMS = re.compile(r"permission|access is denied|read-only|disk full|no space|winerror 5\b")
+_AUTH_TERMS = re.compile(r"\bdecrypt|\bdpapi\b|\bcookies?\b|\bauth(?:enticat\w*|oriz\w*|_token|required)?\b|"
+                         r"\blog ?in\b|\bcredentials?\b|\b40[13]\b")
+# Ordinary per-post conditions in a likes list. They are informational, never
+# the reason a run failed, and never a hint to reconnect the account.
+_SKIPPED_POST_NOTICES = (
+    (re.compile(r"\Amedia unavailable\b"),
+     "볼 수 없는 미디어(저작권·지역 제한 등)는 건너뜁니다."),
+    (re.compile(r"\A'.*' \([0-9]+\)\Z", re.S),
+     "국가 제한(withheld) 등으로 볼 수 없는 게시물은 건너뜁니다."),
+    (re.compile(r"\A\"age-restricted"),
+     "연령 제한 게시물은 X 계정의 민감한 콘텐츠 설정에 따라 보이지 않을 수 있습니다."),
+    (re.compile(r"\A[0-9]+: missing 'author' data\Z"),
+     "작성자 정보가 없는 게시물은 건너뛸 수 있습니다."),
+    (re.compile(r"\A[0-9]+: error while extracting media files"),
+     "일부 게시물의 미디어 정보를 읽지 못해 건너뛰었습니다."),
+)
+
+
+def _skipped_post_notice(message: str) -> str:
+    text = message.strip().lower()
+    return next((notice for pattern, notice in _SKIPPED_POST_NOTICES if pattern.search(text)), "")
+
+
 def _safe_diagnostic(message: str, mode: str) -> str:
     """Map library diagnostics to fixed messages; never forward arbitrary secrets."""
     text = message.lower()
     if "history store unavailable" in text:
         return _HISTORY_ERROR
-    if any(part in text for part in ("rate limit", "ratelimit", "429")):
+    if _RATE_TERMS.search(text):
         return "X 요청 한도에 도달해 중단했습니다. 잠시 후 다시 실행하면 저장한 파일은 건너뜁니다."
-    if any(part in text for part in ("permission", "access is denied", "read-only", "disk full", "no space", "winerror 5")):
+    if _STORAGE_TERMS.search(text):
         return "파일에 접근할 수 없습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
-    if any(part in text for part in ("decrypt", "dpapi", "cookie", "auth", "login", "credential", "401", "403")):
+    if _AUTH_TERMS.search(text):
         return _auth_help(mode)
-    if "not found" in text or "404" in text:
+    if "not found" in text or re.search(r"\b404\b", text):
         return "계정 또는 미디어를 찾지 못했습니다. 본인 X 아이디와 게시물의 공개 상태를 확인해 주세요."
     if any(part in text for part in ("timeout", "connection", "network", "ssl", "certificate")):
         return "X에 연결하지 못했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요."
@@ -282,29 +338,35 @@ class _GalleryLogHandler(logging.Handler):
         self._error_priority = 0
         self._last_message = ""
         self.rate_limited = False
+        # After the user's stop, gallery-dl reports the interrupted request or
+        # download as a failure ("None" text). Those are not real problems.
+        self.stopping = False
 
     def emit(self, record: logging.LogRecord) -> None:
         # INFO can contain URLs, arbitrary server text or other user metadata.
         # Progress is emitted separately, so only mapped diagnostics are useful.
-        if record.levelno < logging.WARNING:
+        if record.levelno < logging.WARNING or self.stopping:
             return
         raw = record.getMessage()
         if raw == "media size exceeded":
             return
-        if any(part in raw.lower() for part in ("rate limit", "ratelimit", "429")):
-            self.rate_limited = True
-        message = _safe_diagnostic(raw, self.mode)
-        priority = (3 if any(part in raw.lower() for part in (
-            "rate limit", "429", "permission", "no space", "read-only",
-            "decrypt", "dpapi", "credential", "auth", "login", "cookie"))
-            else 1 if record.levelno >= logging.ERROR else 0)
+        text = raw.lower()
+        notice = _skipped_post_notice(raw) if record.levelno < logging.ERROR else ""
+        if notice:
+            level, message, priority = "info", notice, 0
+        else:
+            if _RATE_TERMS.search(text):
+                self.rate_limited = True
+            level = "error" if record.levelno >= logging.ERROR else "warning"
+            message = _safe_diagnostic(raw, self.mode)
+            priority = (3 if _RATE_TERMS.search(text) or _STORAGE_TERMS.search(text) or _AUTH_TERMS.search(text)
+                        else 1 if record.levelno >= logging.ERROR else 0)
         if priority and priority >= self._error_priority:
             self.last_error = message
             self._error_priority = priority
         if message != self._last_message:
             self._last_message = message
-            self._emit({"type": "log", "level": "error" if record.levelno >= logging.ERROR else "warning",
-                        "message": message})
+            self._emit({"type": "log", "level": level, "message": message})
 
 
 def _configure_gallery(options: JobOptions, archive_path: Path, account_folder: str) -> None:
@@ -356,7 +418,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     from gallery_dl import config, exception, job, output, util
     from gallery_dl.extractor import common
     from requests.exceptions import RequestException
-    from .metadata import available, embed_source
+    from .metadata import available, embed_source, persistent
 
     saved = skipped = size_skipped = 0
     metadata_failed = 0
@@ -368,11 +430,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     exit_code = 1
     normalized = options
     active_job = None
-    previous_likes = None
-    current_likes = set()
-    new_likes = set()
-    last_sync_at = ""
-    sync_path = None
+    quick_scan = False
+    existing_streak = 0
     guard = None
     output_guard = None
     previous_output_guards = []
@@ -398,6 +457,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         nonlocal stop_reason
         if flag is not None and flag.exists():
             stop_reason = "user"
+            handler.stopping = True
             raise exception.StopExtraction()
 
     def sleep(seconds: float, reason: str = "") -> None:
@@ -567,7 +627,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 raise exception.AbortExtraction("download archive unavailable")
 
         def handle_url(self, url, kwdict):
-            nonlocal stop_reason, saved, skipped, size_skipped
+            nonlocal stop_reason, saved, skipped, size_skipped, existing_streak
             check_stop()
             media_type = kwdict.get("type")
             if media_type not in {"photo", "video", "animated_gif"}:
@@ -600,15 +660,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.progress_bytes = self.progress_total = 0
             self.progress_offset = 0
             self.size_exceeded = False
-            if normalized.sync_mode == "new":
-                current_likes.add(tweet_id)
-                if previous_likes is None or tweet_id not in previous_likes:
-                    new_likes.add(tweet_id)
-                else:
-                    skipped += 1
-                    emit({"type": "skipped", "path": "", **_media_details(kwdict)})
-                    history_update(saved=saved, skipped=skipped, size_skipped=size_skipped)
-                    return
             if normalized.folder_mode == "date":
                 kwdict = dict(kwdict, _xlikesaver_date=_save_day().isoformat())
             self.current_media = kwdict
@@ -687,6 +738,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             if normalized.photo_limit and saved >= normalized.photo_limit:
                 stop_reason = "limit"
                 raise exception.StopExtraction()
+            if quick_scan and self.last_output:
+                # Size-limited and failed files are neither saved nor known,
+                # so they neither extend nor break the already-saved streak.
+                existing_streak = 0 if self.last_output[0] == "saved" else existing_streak + 1
+                if existing_streak >= QUICK_STOP_AFTER:
+                    stop_reason = "caught-up"
+                    raise exception.StopExtraction()
 
         def handle_directory(self, kwdict):
             nonlocal last_tweet_id, last_posted_at
@@ -720,6 +778,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 raise exception.AbortExtraction(guard.failure)
             if self.size_exceeded:
                 raise SizeLimit()
+            if not result:
+                # The downloader turns a stop during streaming or request pacing
+                # into a plain failure. Stop here, before gallery-dl requests a
+                # fallback image size and removes the resumable .part file. A
+                # completed download is left to finalize and be archived.
+                check_stop()
             return result
 
         def get_downloader(self, scheme):
@@ -856,14 +920,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     try:
         normalized = options.validate()
         handler.mode = normalized.auth_mode
+        check_gallery_hooks()
         check_stop()
         guard = AccountGuard(normalized.account, sleep=sleep)
         guard.acquire()
         output_guard = OutputGuard(normalized.output_dir)
         output_guard.acquire()
         storage = resolve_storage(normalized.output_dir, normalized.account, normalized.separate_accounts)
-        if normalized.sync_mode == "new":
-            prepare_storage(storage, include_sync=True, protected=True)
         account_dir = storage.media_dir
         account_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=account_dir):
@@ -877,13 +940,18 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             previous_output_guards.append(previous_guard)
         history.import_legacy()
         history.recover_interrupted_runs()
-        run_id = history.start_run(normalized.folder_mode)
+        scan_note = ""
+        if normalized.scan_mode == "quick":
+            readiness = history.quick_scan_readiness(normalized.folder_mode, normalized.media_signature)
+            quick_scan = readiness == "ready"
+            scan_note = {
+                "ready": f"새 Like만 빠르게 확인합니다. 이미 저장한 파일이 {QUICK_STOP_AFTER}개 연속으로 나오면 이전 확인 지점으로 보고 멈춥니다.",
+                "settings-changed": "동영상·GIF·용량 제한 설정이 이전 확인 때와 달라 이번에는 전체 목록을 확인합니다. 다음 실행부터 다시 빠르게 확인합니다.",
+            }.get(readiness, "이전 실행이 끝까지 확인되지 않았거나(첫 실행·중단·오류·시험 저장) 이번 방식의 기록이 없어 전체 목록을 확인합니다. "
+                             "다음 실행부터 빠르게 확인합니다.")
+        run_id = history.start_run(normalized.folder_mode, scan_mode="quick" if quick_scan else "full",
+                                   media_signature=normalized.media_signature)
         metadata_available = available()
-        if normalized.sync_mode == "new":
-            # Legacy snapshot mode is retained for compatibility. The normal
-            # archive-based mode works independently of this old database.
-            sync_path = storage.record_dir / ".xlikesaver-sync.sqlite3"
-            previous_likes, last_sync_at = _read_sync_snapshot(sync_path, normalized.folder_mode)
         # Preserve the original author archive so existing installations resume.
         # Other layouts need their own record, otherwise switching folders would
         # skip photos saved only in the previous destination.
@@ -895,13 +963,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         common.CACHE_MEMORY.clear()
         emit({"type": "log", "level": "info", "message": "본인 계정의 마음에 들어요 목록에서 사진은 원본 크기를 우선하고, 선택한 동영상·GIF는 가장 높은 비트레이트의 MP4를 찾습니다."})
         emit({"type": "log", "level": "info", "message": f"X 목록 요청은 최소 {API_INTERVAL:g}초, 미디어 요청은 최소 {MEDIA_INTERVAL:g}초 간격으로 보냅니다. 남은 요청 한도가 5회 이하이거나 요청 한도·계정 인증 제한을 만나면 중단합니다."})
-        if normalized.sync_mode == "new":
-            baseline_message = ("이 저장 방식의 첫 실행입니다. 현재 읽을 수 있는 미디어를 저장하고 비교 기준을 만듭니다."
-                                if previous_likes is None else
-                                f"이전 전체 확인 때의 미디어 게시물 {len(previous_likes)}개와 비교해 새로 발견한 항목만 저장합니다.")
-            emit({"type": "log", "level": "info", "message": baseline_message})
+        if scan_note:
+            emit({"type": "log", "level": "info", "message": scan_note})
         active_job = PhotoJob(f"https://x.com/{normalized.account}/likes")
-        exit_code = active_job.run()
+        # One resident ExifTool for the run; the availability check above stays the only one.
+        with persistent() if metadata_available else nullcontext():
+            exit_code = active_job.run()
         if handler.rate_limited and not guard.failure:
             guard.record_limit()
         if guard.failure:
@@ -914,27 +981,19 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             message = guard.failure or handler.last_error or "미디어를 모두 저장하지 못했습니다. 로그인과 저장 폴더를 확인한 뒤 다시 실행해 주세요."
         elif stop_reason == "limit":
             status = "finished"
-            if normalized.sync_mode == "new":
-                message = (f"테스트 파일 {saved}개 저장을 마쳤습니다. "
-                           "전체 목록을 확인하지 않아 비교 기준은 갱신하지 않았습니다. 한도를 해제하고 다시 실행해 주세요.")
-            else:
-                message = (f"테스트 파일 {saved}개 저장을 마쳤습니다. 저장한 파일 기록은 유지됩니다. "
-                           "한도를 해제하고 다시 실행하면 이미 저장한 파일을 건너뛰고 계속 확인합니다.")
+            message = (f"테스트 파일 {saved}개 저장을 마쳤습니다. 저장한 파일 기록은 유지됩니다. "
+                       "한도를 해제하고 다시 실행하면 이미 저장한 파일을 건너뛰고 계속 확인합니다.")
+        elif stop_reason == "caught-up":
+            status = "finished"
+            message = (f"새 Like 확인을 마쳤습니다. 이번에 {saved:,}개를 저장했고, 이미 저장한 파일이 "
+                       f"{QUICK_STOP_AFTER}개 연속으로 나와 이전 확인 지점에서 멈췄습니다.")
         elif not saved and not skipped and not size_skipped:
             exit_code = 1
             message = ("저장할 미디어를 찾지 못했습니다. 본인 계정으로 로그인했는지 확인해 주세요. "
                        "마음에 들어요에 선택한 형식의 미디어가 없거나 X가 목록 접근을 제한했을 수 있습니다.")
         else:
-            if normalized.sync_mode == "new":
-                if previous_likes is not None:
-                    message = (f"새로 발견한 미디어 게시물 {len(new_likes)}개의 확인을 마쳤습니다. "
-                               "X에서 읽을 수 있는 전체 목록으로 비교 기준을 갱신했습니다.")
-                else:
-                    message = "X에서 현재 읽을 수 있는 목록의 저장을 마치고 비교 기준을 갱신했습니다."
-                last_sync_at = _write_sync_snapshot(sync_path, normalized.folder_mode, current_likes)
-            else:
-                message = ("X에서 현재 읽을 수 있는 목록의 확인을 마쳤습니다. 저장한 파일 기록은 유지됩니다. "
-                           "삭제된 게시물이나 X가 제공하지 않은 과거 마음에 들어요는 포함되지 않을 수 있습니다.")
+            message = ("X에서 현재 읽을 수 있는 목록의 확인을 마쳤습니다. 저장한 파일 기록은 유지됩니다. "
+                       "삭제된 게시물이나 X가 제공하지 않은 과거 마음에 들어요는 포함되지 않을 수 있습니다.")
             status = "finished"
     except exception.StopExtraction:
         status, exit_code = "stopped", 0
@@ -951,8 +1010,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     except PermissionError:
         message = "저장 폴더에 쓸 수 없습니다. 문서 또는 사진 폴더 안의 다른 폴더를 선택해 주세요."
         exit_code = 1
+    except GalleryCompatibilityError:
+        status, exit_code, message = "error", 1, _COMPATIBILITY_ERROR
     except sqlite3.Error:
-        status, exit_code, message = "error", 1, _SYNC_ERROR
+        status, exit_code, message = "error", 1, _RECORD_ERROR
     except HistoryError:
         status, exit_code, message = "error", 1, _HISTORY_ERROR
     except OSError as exc:
@@ -1002,5 +1063,5 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
           "size_skipped": size_skipped, "metadata_failed": metadata_failed,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,
           "last_posted_at": last_posted_at,
-          "last_sync_at": last_sync_at, "retry_at": guard.retry_at if guard is not None else "", "message": message})
+          "scan_mode": "quick" if quick_scan else "full", "retry_at": guard.retry_at if guard is not None else "", "message": message})
     return exit_code

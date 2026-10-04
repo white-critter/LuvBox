@@ -29,6 +29,9 @@ _FILENAME = re.compile(r"([0-9]{1,20})_(?:(video|gif|animated_gif)_)?([0-9]{1,5}
 _ARCHIVES = {"author": ".xlikesaver-archive.sqlite3",
              "date": ".xlikesaver-archive.date.sqlite3",
              "flat": ".xlikesaver-archive.flat.sqlite3"}
+# Rows per write transaction while importing; small enough that a concurrent
+# download's single-row write never waits near SQLite's busy timeout.
+_WRITE_BATCH = 200
 _RUN_FIELDS = {"saved", "skipped", "size_skipped", "visited", "last_tweet_id",
                "last_posted_at", "message"}
 _COUNTERS = {"saved", "skipped", "size_skipped", "visited"}
@@ -163,6 +166,14 @@ class HistoryStore:
                 if "metadata_status" not in columns:
                     self._db.execute("ALTER TABLE media ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'pending'")
                 self._db.execute("UPDATE media SET source_url='https://x.com/i/web/status/' || tweet_id WHERE source_url=''")
+            run_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}
+            with self._db:
+                # Runs from earlier versions keep 'full' with no signature, so
+                # the first run after an upgrade is always a complete scan.
+                if "scan_mode" not in run_columns:
+                    self._db.execute("ALTER TABLE runs ADD COLUMN scan_mode TEXT NOT NULL DEFAULT 'full'")
+                if "media_signature" not in run_columns:
+                    self._db.execute("ALTER TABLE runs ADD COLUMN media_signature TEXT NOT NULL DEFAULT ''")
             self._media_roots = self._read_media_roots()
         except Exception:
             self._db.close()
@@ -324,11 +335,31 @@ class HistoryStore:
         return result.rowcount
 
     @_safe
-    def start_run(self, folder_mode: str) -> int:
+    def start_run(self, folder_mode: str, *, scan_mode: str = "full", media_signature: str = "") -> int:
+        if scan_mode not in {"full", "quick"} or not isinstance(media_signature, str):
+            raise HistoryError(_HISTORY_HELP)
         with self._db:
-            row = self._db.execute("INSERT INTO runs(folder_mode,started_at,status) VALUES (?,?,?)",
-                                   (self._mode(folder_mode), _now(), "running"))
+            row = self._db.execute(
+                "INSERT INTO runs(folder_mode,started_at,status,scan_mode,media_signature) VALUES (?,?,?,?,?)",
+                (self._mode(folder_mode), _now(), "running", scan_mode, _clean_text(media_signature, 200)))
         return row.lastrowid
+
+    @_safe
+    def quick_scan_readiness(self, folder_mode: str, media_signature: str) -> str:
+        """Whether a quick scan may stop at the first long run of saved files.
+
+        That is only safe when the latest run of this layout went through to a
+        normal end with the same media settings: everything older than the
+        point where saved files resume was then covered by that run (or, by
+        induction, by the complete runs before it). Returns 'ready',
+        'settings-changed' or 'incomplete'.
+        """
+        row = self._db.execute(
+            "SELECT status,media_signature FROM runs WHERE folder_mode=? AND status!='running' "
+            "ORDER BY started_at DESC,id DESC LIMIT 1", (self._mode(folder_mode),)).fetchone()
+        if row is None or row["status"] != "finished":
+            return "incomplete"
+        return "ready" if row["media_signature"] == media_signature else "settings-changed"
 
     def _run_values(self, fields: dict) -> dict:
         if not set(fields).issubset(_RUN_FIELDS):
@@ -465,79 +496,101 @@ class HistoryStore:
                     elif entry.is_file(follow_symlinks=False) and _FILENAME.fullmatch(entry.name):
                         yield path, root, restricted
 
+    def _write_batches(self, items: list, apply) -> None:
+        """Apply writes in short transactions so a download can record in between."""
+        for start in range(0, len(items), _WRITE_BATCH):
+            with self._db:
+                for item in items[start:start + _WRITE_BATCH]:
+                    apply(item)
+
     @_safe
     def import_legacy(self, *, refresh=False) -> dict:
-        """Import once by default; an explicit refresh checks local files again."""
+        """Import once by default; an explicit refresh checks local files again.
+
+        Files and archives are read outside any write transaction, then merged
+        in short batches. A download worker sharing this catalog must never wait
+        for a whole-library scan (it would exceed SQLite's busy timeout). Every
+        batch is an idempotent merge and the completion marker is written last.
+        """
         imported = self._db.execute("SELECT value FROM catalog_meta WHERE key='legacy_imported'").fetchone()
         if imported is not None and not refresh:
             return {"imported": False, "records": 0, "warnings": []}
         before = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
         warnings = []
-        with self._db:
-            if refresh:
-                for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type,path FROM media WHERE path!=''").fetchall():
-                    try:
-                        actual, size, _ = self._file(row["path"])
-                        actual = self._preserve_missing_location(row["path"], actual)
-                    except HistoryError:
-                        # A copied/moved catalog may contain its old absolute
-                        # paths. Do not inspect those files outside this folder;
-                        # match files at the new location in the scan below.
-                        actual, size = "", None
-                    self._db.execute("UPDATE media SET path=?,filesize=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                                     (actual, size, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
-            for mode, name in _ARCHIVES.items():
-                archive = self.account_dir / name
-                if not archive.is_file() or archive.is_symlink():
-                    continue
+        if refresh:
+            changed = []
+            for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type,path,filesize FROM media WHERE path!=''").fetchall():
                 try:
-                    with closing(sqlite3.connect(archive.as_uri() + "?mode=ro", uri=True, timeout=5)) as legacy:
-                        for (entry,) in legacy.execute("SELECT entry FROM archive"):
-                            match = _ENTRY.fullmatch(entry) if isinstance(entry, str) else None
-                            if not match or not 1 <= int(match[3]) <= 10000:
-                                continue
-                            media_type = "animated_gif" if match[2] in {"gif", "animated_gif"} else match[2] or "photo"
-                            row = self._legacy_row(mode, match[1], int(match[3]), media_type=media_type)
-                            self._upsert(row, replace_path=False)
-                except sqlite3.Error:
-                    warnings = ["일부 기존 다운로드 기록을 읽지 못했습니다. 실제 파일에서 확인한 내역은 표시합니다."]
-            known = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                     for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type FROM media")}
-            known_paths = {row["path"]: dict(row) for row in self._db.execute("SELECT * FROM media WHERE path!=''")}
-            for path, scan_root, restricted in self._files():
-                match = _FILENAME.fullmatch(path.name)
-                number = int(match[3])
-                if not 1 <= number <= 10000:
-                    continue
-                relative = path.relative_to(scan_root)
-                parent = relative.parts[0] if len(relative.parts) > 1 else ""
-                mode = "flat" if not parent else "date" if _date_folder(parent) else "author"
-                actual, size, filename = self._file(path)
-                extension = match[4].lower()
-                tag = (match[2] or "").lower()
-                media_type = "animated_gif" if tag in {"gif", "animated_gif"} else "video" if tag == "video" or extension == "mp4" else "photo"
-                previous = known_paths.get(actual)
-                if previous is not None:
-                    # An author's handle can equal the account-folder name.
-                    # The recorded identity resolves that directory ambiguity.
-                    mode, media_type = previous["folder_mode"], previous["media_type"]
-                    parent = previous["author"] if mode == "author" else parent
-                elif self._isolated_records and scan_root == self.legacy_dir:
-                    alternatives = [key[0] for key in known if key[1:] == (match[1], number, media_type)]
-                    if mode not in alternatives and len(alternatives) == 1:
-                        mode = alternatives[0]
-                if restricted and (mode, match[1], number, media_type) not in known:
-                    # Shared output folders contain no reliable account marker.
-                    # Only this account's archive/catalog identities are valid.
-                    continue
-                row = self._legacy_row(mode, match[1], number, path=actual, filesize=size,
-                                       filename=filename, media_type=media_type,
-                                       author=parent if mode == "author" else "", source="file_scan")
-                previous_identity = self.media_record(mode, {"tweet_id": match[1], "num": number, "type": media_type})
-                old_path = previous_identity.get("path", "") if previous_identity else ""
-                keep_old = (old_path and not self.is_download_path(old_path) and
-                            self.is_media_path(old_path) and Path(old_path).is_file())
-                self._upsert(row, replace_path=not keep_old)
+                    actual, size, _ = self._file(row["path"])
+                    actual = self._preserve_missing_location(row["path"], actual)
+                except HistoryError:
+                    # A copied/moved catalog may contain its old absolute
+                    # paths. Do not inspect those files outside this folder;
+                    # match files at the new location in the scan below.
+                    actual, size = "", None
+                if (actual, size) != (row["path"], row["filesize"]):
+                    changed.append((actual, size, row["folder_mode"], row["tweet_id"], row["num"],
+                                    row["media_type"], row["path"]))
+            # The final path condition leaves rows a download changed meanwhile.
+            self._write_batches(changed, lambda values: self._db.execute(
+                "UPDATE media SET path=?,filesize=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
+                values))
+        archived = []
+        for mode, name in _ARCHIVES.items():
+            archive = self.account_dir / name
+            if not archive.is_file() or archive.is_symlink():
+                continue
+            try:
+                with closing(sqlite3.connect(archive.as_uri() + "?mode=ro", uri=True, timeout=5)) as legacy:
+                    for (entry,) in legacy.execute("SELECT entry FROM archive"):
+                        match = _ENTRY.fullmatch(entry) if isinstance(entry, str) else None
+                        if not match or not 1 <= int(match[3]) <= 10000:
+                            continue
+                        media_type = "animated_gif" if match[2] in {"gif", "animated_gif"} else match[2] or "photo"
+                        archived.append(self._legacy_row(mode, match[1], int(match[3]), media_type=media_type))
+            except sqlite3.Error:
+                warnings = ["일부 기존 다운로드 기록을 읽지 못했습니다. 실제 파일에서 확인한 내역은 표시합니다."]
+        self._write_batches(archived, lambda row: self._upsert(row, replace_path=False))
+        known = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                 for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type FROM media")}
+        known_paths = {row["path"]: dict(row) for row in self._db.execute("SELECT * FROM media WHERE path!=''")}
+        scanned = []
+        for path, scan_root, restricted in self._files():
+            match = _FILENAME.fullmatch(path.name)
+            number = int(match[3])
+            if not 1 <= number <= 10000:
+                continue
+            relative = path.relative_to(scan_root)
+            parent = relative.parts[0] if len(relative.parts) > 1 else ""
+            mode = "flat" if not parent else "date" if _date_folder(parent) else "author"
+            actual, size, filename = self._file(path)
+            extension = match[4].lower()
+            tag = (match[2] or "").lower()
+            media_type = "animated_gif" if tag in {"gif", "animated_gif"} else "video" if tag == "video" or extension == "mp4" else "photo"
+            previous = known_paths.get(actual)
+            if previous is not None:
+                # An author's handle can equal the account-folder name.
+                # The recorded identity resolves that directory ambiguity.
+                mode, media_type = previous["folder_mode"], previous["media_type"]
+                parent = previous["author"] if mode == "author" else parent
+            elif self._isolated_records and scan_root == self.legacy_dir:
+                alternatives = [key[0] for key in known if key[1:] == (match[1], number, media_type)]
+                if mode not in alternatives and len(alternatives) == 1:
+                    mode = alternatives[0]
+            if restricted and (mode, match[1], number, media_type) not in known:
+                # Shared output folders contain no reliable account marker.
+                # Only this account's archive/catalog identities are valid.
+                continue
+            row = self._legacy_row(mode, match[1], number, path=actual, filesize=size,
+                                   filename=filename, media_type=media_type,
+                                   author=parent if mode == "author" else "", source="file_scan")
+            previous_identity = self.media_record(mode, {"tweet_id": match[1], "num": number, "type": media_type})
+            old_path = previous_identity.get("path", "") if previous_identity else ""
+            keep_old = (old_path and not self.is_download_path(old_path) and
+                        self.is_media_path(old_path) and Path(old_path).is_file())
+            scanned.append((row, not keep_old))
+        self._write_batches(scanned, lambda item: self._upsert(item[0], replace_path=item[1]))
+        with self._db:
             self._db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('legacy_imported',?)", (_now(),))
         after = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
         return {"imported": True, "records": after - before, "warnings": warnings}

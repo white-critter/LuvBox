@@ -220,8 +220,11 @@ class HistoryWindow(tk.Toplevel):
         self.generation += 1
         generation = self.generation
         kind = next(k for k, v in MEDIA_LABELS.items() if v == self.media_filter.get())
-        do_import = import_legacy or directory not in self.loaded_locations
-        self.status_text.set("PC의 저장 기록을 읽고 있습니다…")
+        # The running worker records every file it handles, so a whole-library
+        # rescan adds nothing then and only competes with it for the catalog.
+        do_import = (import_legacy or directory not in self.loaded_locations) and not self.is_downloading()
+        self.status_text.set("PC의 저장 기록을 읽고 있습니다…" if do_import or not import_legacy else
+                             "저장 작업 중에는 폴더 전체 재확인을 건너뛰고 현재 기록만 표시합니다…")
         threading.Thread(target=self._load, args=(generation, location, kind, self.query.get(), self.page, do_import), daemon=True).start()
 
     @staticmethod
@@ -343,7 +346,8 @@ class HistoryWindow(tk.Toplevel):
         selection = self.run_tree.selection()
         row = self.run_rows.get(selection[0]) if selection else None
         if row:
-            self.run_text.set(f"{row.get('message') or '실행 중이거나 종료 설명이 없습니다.'}\n마지막 확인 트윗: {row.get('last_tweet_id') or '기록 없음'} · 전체 저장 완료 지점은 아닙니다.")
+            scan = "새 Like만 빠르게 확인" if row.get("scan_mode") == "quick" else "전체 목록 확인"
+            self.run_text.set(f"{row.get('message') or '실행 중이거나 종료 설명이 없습니다.'}\n확인 방식: {scan} · 마지막 확인 트윗: {row.get('last_tweet_id') or '기록 없음'} · 전체 저장 완료 지점은 아닙니다.")
 
     def open_file(self):
         row = self.selected()
@@ -408,7 +412,7 @@ class HistoryWindow(tk.Toplevel):
         threading.Thread(target=self._backfill, args=(self.generation, self.current_storage), daemon=True).start()
 
     def _backfill(self, generation, directory):
-        from .metadata import embed_source
+        from .metadata import embed_source, persistent
         from .protection import AccountGuard, ProtectionError
         store = None
         account_guard = None
@@ -428,30 +432,32 @@ class HistoryWindow(tk.Toplevel):
                     guard = OutputGuard(root)
                     output_guards.append(guard)
                     guard.acquire()
-            offset = 0
-            while True:
-                rows = store.records(limit=1000, offset=offset)
-                if not rows:
-                    break
-                for row in rows:
+            # One resident ExifTool for the whole pass instead of three launches per file.
+            with persistent():
+                offset = 0
+                while True:
+                    rows = store.records(limit=1000, offset=offset)
+                    if not rows:
+                        break
+                    for row in rows:
+                        if self.metadata_stop.is_set():
+                            break
+                        if row.get("metadata_status") == "embedded":
+                            continue
+                        path = Path(row["path"]) if row.get("path") else None
+                        if path is None or not store.is_media_path(path) or not path.is_file():
+                            unavailable += 1
+                            continue
+                        result = embed_source(path, row["tweet_id"])
+                        store.mark_metadata(row, result["status"])
+                        if result["status"] == "embedded":
+                            success += 1
+                        else:
+                            failed += 1
+                        self.results.put((generation, "metadata-progress", f"기존 파일 출처 기록 · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개"))
                     if self.metadata_stop.is_set():
                         break
-                    if row.get("metadata_status") == "embedded":
-                        continue
-                    path = Path(row["path"]) if row.get("path") else None
-                    if path is None or not store.is_media_path(path) or not path.is_file():
-                        unavailable += 1
-                        continue
-                    result = embed_source(path, row["tweet_id"])
-                    store.mark_metadata(row, result["status"])
-                    if result["status"] == "embedded":
-                        success += 1
-                    else:
-                        failed += 1
-                    self.results.put((generation, "metadata-progress", f"기존 파일 출처 기록 · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개"))
-                if self.metadata_stop.is_set():
-                    break
-                offset += len(rows)
+                    offset += len(rows)
             state = "중단" if self.metadata_stop.is_set() else "종료"
             self.results.put((generation, "backfilled", f"출처 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개. X 요청은 보내지 않았습니다."))
         except ProtectionError as exc:

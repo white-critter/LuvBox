@@ -28,11 +28,14 @@ def main() -> int:
             from gallery_dl import extractor, version
             from xlikesaver.gui import App, worker_command
             from xlikesaver import __version__, metadata
+            from xlikesaver.core import check_gallery_hooks
             from xlikesaver.history import HistoryStore
             from xlikesaver.storage import migrate_records, resolve_storage
 
             importlib.import_module("gallery_dl.extractor.utils.twitter_transaction_id")
             importlib.import_module("gallery_dl.downloader.http")
+            # Every private gallery-dl member the worker replaces still exists.
+            check_gallery_hooks()
             match = extractor.find("https://x.com/example/likes")
             assert match and match.subcategory == "likes"
             assert Path(certifi.where()).is_file()
@@ -50,6 +53,13 @@ def main() -> int:
                 result = metadata.embed_source(target, "100")
                 assert result["status"] == "embedded"
                 assert metadata.read_source(target) == "https://x.com/i/web/status/100"
+                resident = Path(folder) / "상주 출처 확인.png"
+                resident.write_bytes(target.read_bytes())
+                with metadata.persistent():
+                    assert metadata._session is not None
+                    assert metadata.embed_source(resident, "101")["status"] == "embedded"
+                    assert metadata.read_source(resident) == "https://x.com/i/web/status/101"
+                assert metadata._session is None
                 paths = resolve_storage(Path(folder), "example")
                 assert paths.media_dir == Path(folder).resolve()
                 store = HistoryStore.for_storage(paths)
@@ -90,7 +100,8 @@ def main() -> int:
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "flat_storage": "direct",
-                      "worker": "stopped-before-authentication", "record_relocation": "preserved-old-file"}
+                      "worker": "stopped-before-authentication", "record_relocation": "preserved-old-file",
+                      "gallery_hooks": "verified", "resident_exiftool": "embedded-and-read-back"}
         except Exception as exc:
             report["error"] = type(exc).__name__
         finally:
@@ -119,6 +130,14 @@ def main() -> int:
                 emit({"type": "finished", "status": "error",
                       "message": f"작업 중 오류가 발생했습니다 ({type(exc).__name__}). 입력과 작업 로그를 확인해 주세요."})
                 return 1
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--run-saved":
+        # Unattended run for Windows Task Scheduler; see xlikesaver/scheduled.py.
+        if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2] != "--full"):
+            return 2
+        from xlikesaver.scheduled import run_saved
+
+        return run_saved(full=len(sys.argv) == 3)
 
     if len(sys.argv) > 1:
         return 2

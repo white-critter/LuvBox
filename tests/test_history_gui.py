@@ -81,6 +81,19 @@ class HistoryGuiTests(unittest.TestCase):
         notice.assert_called_once()
         thread.assert_not_called()
 
+    def test_refresh_skips_whole_folder_rescan_while_downloading(self):
+        # The worker records every file itself; a rescan would only compete
+        # with it for the catalog's write lock.
+        for downloading, expected in ((True, False), (False, True)):
+            with self.subTest(downloading=downloading):
+                self.window.busy = False
+                self.window.is_downloading = lambda: downloading
+                with patch("xlikesaver.history_gui.threading.Thread") as thread:
+                    self.window.refresh(import_legacy=True)
+                self.assertIs(thread.call_args.kwargs["args"][-1], expected)
+                if downloading:
+                    self.assertIn("재확인을 건너뛰고", self.window.status_text.get())
+
     def test_closing_history_cancels_poll_without_closing_main_window(self):
         scheduled = self.window._poll_timer
         self.assertIn(scheduled, self.root.tk.call("after", "info"))

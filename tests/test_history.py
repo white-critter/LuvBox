@@ -420,6 +420,84 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.store.summary()["files"], 1)
         self.assertEqual(archive.read_bytes(), b"bad archive " + SECRET.encode())
 
+    def test_refresh_never_blocks_a_concurrent_download_writer(self):
+        # A download worker shares this catalog with a 5 s busy timeout. The
+        # library scan must not hold the write lock while it inspects files.
+        self.archive([f"twitter{100 + index}_1" for index in range(30)])
+        for index in range(30):
+            self.file(f"alice/{100 + index}_1.jpg")
+        self.store.import_legacy()
+        run = self.store.start_run("author")
+        worker = sqlite3.connect(self.store.path, timeout=0.2)
+        self.addCleanup(worker.close)
+        writes = []
+        original = HistoryStore._file
+
+        def concurrent_write(store, path):
+            with worker:
+                worker.execute("UPDATE runs SET saved=saved+1 WHERE id=?", (run,))
+            writes.append(path)
+            return original(store, path)
+
+        with patch.object(HistoryStore, "_file", concurrent_write):
+            self.store.import_legacy(refresh=True)
+        self.assertGreaterEqual(len(writes), 60)
+        self.assertEqual(self.store.runs(limit=1)[0]["saved"], len(writes))
+
+    def test_import_commits_in_short_batches(self):
+        self.archive([f"twitter{100 + index}_1" for index in range(5)])
+        for index in range(5):
+            self.file(f"alice/{100 + index}_1.jpg")
+        starts = []
+        original = HistoryStore._upsert
+
+        def observe(store, row, **kwargs):
+            starts.append(store._db.in_transaction)
+            return original(store, row, **kwargs)
+
+        with patch("xlikesaver.history._WRITE_BATCH", 1), patch.object(HistoryStore, "_upsert", observe):
+            self.store.import_legacy(refresh=True)
+        self.assertEqual(len(starts), 10)
+        self.assertFalse(any(starts))  # Every row began a new, already-committed transaction.
+        self.assertEqual(self.store.summary()["files"], 5)
+
+    def test_quick_scan_needs_a_finished_latest_run_with_the_same_media_settings(self):
+        self.assertEqual(self.store.quick_scan_readiness("flat", "v1:a"), "incomplete")
+        for status in ("stopped", "error", "limited"):
+            run = self.store.start_run("flat", media_signature="v1:a")
+            self.store.finish_run(run, status)
+            self.assertEqual(self.store.quick_scan_readiness("flat", "v1:a"), "incomplete")
+        run = self.store.start_run("flat", scan_mode="quick", media_signature="v1:a")
+        self.store.finish_run(run, "finished")
+        self.assertEqual(self.store.quick_scan_readiness("flat", "v1:a"), "ready")
+        self.assertEqual(self.store.quick_scan_readiness("flat", "v1:b"), "settings-changed")
+        self.assertEqual(self.store.quick_scan_readiness("author", "v1:a"), "incomplete")
+        self.store.start_run("flat", media_signature="v1:a")
+        self.assertEqual(self.store.recover_interrupted_runs(), 1)
+        self.assertEqual(self.store.quick_scan_readiness("flat", "v1:a"), "incomplete")
+        for bad in ({"scan_mode": "new"}, {"media_signature": None}):
+            with self.subTest(bad=bad), self.assertRaises(HistoryError):
+                self.store.start_run("flat", **bad)
+
+    def test_runs_from_earlier_versions_gain_scan_columns_and_require_a_full_scan(self):
+        legacy = Path(self.temp.name) / "legacy"
+        legacy.mkdir()
+        with closing(sqlite3.connect(legacy / ".xlikesaver-history.sqlite3")) as db:
+            db.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, folder_mode TEXT NOT NULL, "
+                       "started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, saved INTEGER NOT NULL DEFAULT 0, "
+                       "skipped INTEGER NOT NULL DEFAULT 0, size_skipped INTEGER NOT NULL DEFAULT 0, "
+                       "visited INTEGER NOT NULL DEFAULT 0, last_tweet_id TEXT NOT NULL DEFAULT '', "
+                       "last_posted_at TEXT, message TEXT NOT NULL DEFAULT '')")
+            db.execute("INSERT INTO runs(folder_mode,started_at,finished_at,status) VALUES "
+                       "('flat','2026-10-04T20:00:00+09:00','2026-10-04T20:10:00+09:00','finished')")
+            db.commit()
+        store = HistoryStore(legacy)
+        try:
+            self.assertEqual(store.runs()[0]["scan_mode"], "full")
+            self.assertEqual(store.quick_scan_readiness("flat", "v1:videos=1:gifs=1:max_mb=200"), "settings-changed")
+        finally:
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

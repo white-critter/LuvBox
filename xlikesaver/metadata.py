@@ -6,12 +6,15 @@ been read back successfully. No account credentials or network calls are used.
 
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -43,6 +46,130 @@ def available() -> bool:
     return executable.is_file() and (executable.parent / "exiftool_files").is_dir()
 
 
+class _SessionUnavailable(RuntimeError):
+    """The resident ExifTool cannot run a command; use a one-shot process."""
+
+
+class _ExifToolSession:
+    """One resident ExifTool (-stay_open) reading UTF-8 argument lines on stdin.
+
+    Each command ends with -executeN, after which ExifTool prints {readyN} on
+    stdout; -echo4 prints a marker with the command's exit status on stderr
+    once processing is complete. Commands run one at a time. A timeout or any
+    pipe failure kills the process, and later commands fall back to one-shot.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._counter = 0
+        self._process = subprocess.Popen(
+            [str(exiftool_path()), "-config", "", "-stay_open", "True", "-@", "-",
+             "-common_args", "-charset", "filename=UTF8"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self._lines = {"stdout": queue.Queue(), "stderr": queue.Queue()}
+        for name in self._lines:
+            threading.Thread(target=self._pump, args=(getattr(self._process, name), self._lines[name]),
+                             daemon=True).start()
+
+    @staticmethod
+    def _pump(stream, lines):
+        try:
+            for line in iter(stream.readline, b""):
+                lines.put(line.decode("utf-8", errors="replace"))
+        finally:
+            lines.put(None)
+
+    def _collect(self, name: str, done, deadline: float) -> tuple[list[str], str]:
+        collected = []
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("metadata timeout")
+            try:
+                line = self._lines[name].get(timeout=remaining)
+            except queue.Empty:
+                raise TimeoutError("metadata timeout") from None
+            if line is None:
+                raise _SessionUnavailable("exiftool exited")
+            if done(line):
+                return collected, line
+            collected.append(line)
+
+    def execute(self, arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
+        with self._lock:
+            if self._process.poll() is not None:
+                raise _SessionUnavailable("exiftool exited")
+            self._counter += 1
+            number = self._counter
+            ready, finished = f"{{ready{number}}}", f"{{finished{number} "
+            payload = "\n".join([*arguments, "-echo4", finished + "${status}}", f"-execute{number}"]) + "\n"
+            try:
+                self._process.stdin.write(payload.encode("utf-8"))
+                self._process.stdin.flush()
+                stdout, _ = self._collect("stdout", lambda line: line.rstrip("\r\n") == ready, deadline)
+                stderr, marker = self._collect("stderr", lambda line: line.startswith(finished), deadline)
+                status = int(marker[len(finished):].strip().rstrip("}"))
+            except TimeoutError:
+                # Stop a stuck command now; never leave it writing a temporary
+                # copy. (TimeoutError is an OSError, so it is handled first.)
+                self.close(force=True)
+                raise
+            except (OSError, ValueError):
+                self.close(force=True)
+                raise _SessionUnavailable("exiftool pipe failed") from None
+            return subprocess.CompletedProcess(arguments, status, "".join(stdout), "".join(stderr))
+
+    def close(self, *, force: bool = False) -> None:
+        process = self._process
+        if process.poll() is None and not force:
+            try:
+                process.stdin.write(b"-stay_open\nFalse\n")
+                process.stdin.flush()
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if process.poll() is None:
+            process.kill()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+_session: _ExifToolSession | None = None
+
+
+@contextmanager
+def persistent():
+    """Reuse one ExifTool process for every metadata call inside this block.
+
+    Starting the bundled Perl ExifTool costs about 0.2 s per call and a source
+    write takes three calls. Outside this block, or if the resident process
+    fails, each call starts its own process exactly as before.
+    """
+    global _session
+    if _session is not None or not available():
+        yield
+        return
+    try:
+        session = _ExifToolSession()
+    except OSError:
+        yield
+        return
+    _session = session
+    try:
+        yield
+    finally:
+        _session = None
+        session.close()
+
+
 def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
     # A UTF-8 argument file avoids Windows ANSI command-line filename loss.
     # '-' reads that argument file from stdin, so no private sidecar is created.
@@ -51,6 +178,14 @@ def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("metadata timeout")
+    session = _session
+    if session is not None:
+        try:
+            return session.execute(arguments, deadline)
+        except _SessionUnavailable:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("metadata timeout") from None
     return subprocess.run(
         [str(exiftool_path()), "-config", "", "-charset", "filename=UTF8", "-@", "-"],
         input="\n".join(arguments) + "\n", capture_output=True, text=True,

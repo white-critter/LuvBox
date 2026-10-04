@@ -3,6 +3,7 @@
 import errno
 import json
 import sqlite3
+import time
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -334,6 +335,68 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(self.archive_keys(), set())
         self.assertEqual(self.history_rows(), [])
         self.assertEqual(self.history_rows("runs")[-1]["status"], "stopped")
+
+    def photo_with_fallback(self):
+        def items(extractor):
+            metadata = {"tweet_id": "100", "num": 1, "type": "photo", "extension": "jpg",
+                        "author": {"name": "alice"}, "user": {"name": "alice"},
+                        "_fallback": iter(["https://pbs.twimg.com/media/x?name=4096x4096",
+                                           "https://pbs.twimg.com/media/x?name=large"])}
+            yield Message.Directory, "", metadata
+            yield Message.Url, "https://pbs.twimg.com/media/x?name=orig", metadata
+        return items
+
+    def test_cancel_during_photo_stream_requests_no_fallback_size_and_keeps_partial(self):
+        flag = self.base / "stop.flag"
+        first = self.response(content_type="image/jpeg")
+
+        def chunks(*args, **kwargs):
+            yield b"\xff\xd8\xff" + b"a" * 20
+            flag.touch()
+            yield b"a" * 20
+        first.iter_content = chunks
+        fallback = [self.response([b"\xff\xd8\xffxx"], content_type="image/jpeg") for _ in range(2)]
+        code, events, send = self.http_worker([], [first, *fallback], stop_file=flag, items=self.photo_with_fallback())
+        self.assertEqual(code, 0)
+        self.assertEqual(events[-1]["status"], "stopped")
+        self.assertEqual([call.args[0].url for call in send.call_args_list], ["https://pbs.twimg.com/media/x?name=orig"])
+        self.assertTrue(list(self.output.rglob("*.part")))
+        self.assertEqual(self.archive_keys(), set())
+        self.assertFalse(any(event.get("level") == "error" for event in events if event["type"] == "log"))
+
+    def test_cancel_while_pacing_a_photo_request_is_a_clean_stop(self):
+        flag = self.base / "stop.flag"
+        responses = [self.response([b"\xff\xd8\xffxx"], content_type="image/jpeg") for _ in range(3)]
+
+        def items(extractor):
+            for tweet in ("100", "101"):
+                metadata = {"tweet_id": tweet, "num": 1, "type": "photo", "extension": "jpg",
+                            "author": {"name": "alice"}, "user": {"name": "alice"},
+                            "_fallback": iter(["https://pbs.twimg.com/media/fallback?name=large"])}
+                yield Message.Directory, "", metadata
+                yield Message.Url, f"https://pbs.twimg.com/media/{tweet}?name=orig", metadata
+
+        real_sleep = time.sleep
+
+        def press_stop_during_wait(seconds):
+            # The second photo waits for the media interval; stop arrives then.
+            flag.touch()
+            real_sleep(0)
+
+        events = []
+        # http_worker disables the media interval; this test needs a short wait
+        # (30 s or more is treated as a server-imposed cooldown).
+        with patch("gallery_dl.extractor.find", side_effect=lambda url: test_core.FakeLikesExtractor(url, [])), \
+                patch.object(test_core.FakeLikesExtractor, "items", items), \
+                patch("gallery_dl.downloader.find", return_value=HttpDownloader), \
+                patch("requests.Session.send", side_effect=responses) as send, \
+                patch("xlikesaver.protection.MEDIA_INTERVAL", 20), \
+                patch("xlikesaver.core.time.sleep", press_stop_during_wait):
+            code = run_worker(self.all_media(), events.append, flag)
+        self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "stopped", 1))
+        self.assertEqual([call.args[0].url for call in send.call_args_list], ["https://pbs.twimg.com/media/100?name=orig"])
+        # Not reported as a failed download: the user asked to stop.
+        self.assertFalse(any(event.get("level") == "error" for event in events if event["type"] == "log"))
 
     def test_416_never_finalizes_partial_or_requests_fallback_and_preserves_completed_archive(self):
         self.worker([("90", 1, "photo", "alice")])
