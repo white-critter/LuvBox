@@ -37,11 +37,14 @@ class GuiTests(unittest.TestCase):
         self.app = App(self.root)
 
     def test_unconnected_token_mode_requests_connection_before_download(self):
-        with patch("xlikesaver.gui.messagebox.showinfo") as notice, patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("xlikesaver.gui.threading.Thread") as thread:
             self.app.start()
-        self.assertTrue(notice.called)
+        # The login window opens with the reason instead of a separate message box.
+        self.assertTrue(self.app.connect_window.winfo_exists())
+        self.assertIn("로그인", self.app.status.get())
         thread.assert_not_called()
         self.assertFalse(self.app.running)
+        self.assertIn("연결 필요", self.app.login_text.get())
 
     def relocation_source(self):
         from contextlib import closing
@@ -271,7 +274,7 @@ class GuiTests(unittest.TestCase):
         command = self.root.clipboard_get()
         self.assertIn('schtasks /Create /TN "XlikeSaver 자동 저장" /SC DAILY', command)
         self.assertIn("--run-saved", command)
-        self.assertIn("명령 프롬프트", self.app.status.get())
+        self.assertIn("명령 프롬프트", self.app.status_detail.get())
 
     def test_default_flat_media_options_and_user_video_cap_reach_worker(self):
         self.assertEqual(self.app.folder_mode.get(), "구분 없이 저장")
@@ -326,21 +329,45 @@ class GuiTests(unittest.TestCase):
 
     def test_minimum_window_keeps_actions_details_and_log_visible(self):
         self.root.attributes("-alpha", 0)
-        self.root.geometry("740x650")
+        width, height = self.root.minsize()
+        self.root.geometry(f"{width}x{height}")
         self.root.deiconify()
         self.app.progress_details.set("속도 2 MiB/초 · 작성자 @offline_test · 트윗 1000000000000000000\n트윗 게시일 2026-10-04 20:00:00 · 현재 파일의 진행률이며 전체 Like 목록의 완료율은 알 수 없습니다.")
+        self.app.status_detail.set("목록은 10초에 한 번씩 천천히 요청합니다. 전체 Like 수와 완료율은 미리 알 수 없습니다.")
         self.app.detailed_progress.set(True)
         self.app._toggle_progress()
-        for index in (0, 1):
-            self.app.tabs.select(index)
-            self.app._resize_tab()
-            self.root.update()
-            self.assertTrue(self.app.start_button.winfo_ismapped())
-            self.assertGreater(self.app.progress_detail_label.winfo_height(), 25)
-            self.assertGreaterEqual(self.app.log.winfo_height(), 28)
-            for widget in (self.app.start_button, self.app.progress_detail_label, self.app.log):
-                bottom = widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height()
-                self.assertLessEqual(bottom, self.root.winfo_height())
+        self.root.update()
+        self.assertTrue(self.app.start_button.winfo_ismapped())
+        self.assertGreater(self.app.progress_detail_label.winfo_height(), 25)
+        self.assertGreaterEqual(self.app.log.winfo_height(), 28)
+        for widget in (self.app.start_button, self.app.options_button, self.app.progress_detail_label, self.app.log):
+            bottom = widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height()
+            self.assertLessEqual(bottom, self.root.winfo_height())
+
+    def test_main_text_uses_readable_sizes(self):
+        import tkinter.font as tkfont
+        from tkinter import ttk
+        style = ttk.Style(self.root)
+        sizes = {name: tkfont.Font(root=self.root, font=style.lookup(name, "font")).actual("size")
+                 for name in ("TLabel", "Muted.TLabel", "Title.TLabel", "CardBold.TLabel", "TileNumber.TLabel")}
+        self.assertGreaterEqual(sizes["TLabel"], 12)
+        self.assertGreaterEqual(sizes["Muted.TLabel"], 11)
+        self.assertGreater(sizes["Title.TLabel"], sizes["TLabel"])
+        # No option-database font may override ttk label styles.
+        label = ttk.Label(self.root, text="x", style="Title.TLabel")
+        self.assertEqual(str(label.cget("font")), "")
+
+    def test_options_window_edits_the_same_preferences(self):
+        self.app.show_options()
+        self.assertTrue(self.app.options_window.winfo_exists())
+        self.app.folder_mode.set("저장일별 폴더")
+        self.app.include_gifs.set(False)
+        self.app.scan_mode.set("전체 목록 다시 확인")
+        self.assertIn("날짜별 폴더", self.app.option_summary.get())
+        self.assertNotIn("GIF", self.app.option_summary.get())
+        self.assertIn("전체 확인", self.app.option_summary.get())
+        self.app._close_options()
+        self.assertIsNone(self.app.options_window)
 
     def test_invalid_video_limit_stops_before_worker(self):
         self.app.account.set("offline_test")
@@ -409,6 +436,7 @@ class GuiTests(unittest.TestCase):
     def test_token_connection_masks_and_clears_input_without_launching_worker(self):
         self.app.saved, self.app.skipped = 7, 3
         secret = "offline-secret-not-an-account-cookie"
+        self.app.show_connect()
         self.app.token.set(secret)
         self.assertTrue(self.app.token_entry.cget("show"))
         with patch("xlikesaver.gui.save_auth_token") as save, patch("xlikesaver.gui.threading.Thread") as thread:
@@ -417,10 +445,10 @@ class GuiTests(unittest.TestCase):
         thread.assert_not_called()
         self.assertEqual(self.app.token.get(), "")
         self.assertNotIn(secret, self.app.log.get("1.0", "end"))
-        self.assertIn("실제 유효성", self.app.status.get())
+        self.assertIn("실제 유효성", self.app.status_detail.get())
         self.assertEqual((self.app.saved, self.app.skipped), (7, 3))
         self.assertFalse(self.app.running)
-        self.assertEqual(str(self.app.layout_combo.cget("state")), "readonly")
+        self.assertEqual(str(self.app.options_button.cget("state")), "normal")
 
     def test_failed_token_connection_clears_input_and_does_not_start_download(self):
         self.session_mock.return_value = True  # A previous saved connection exists.
@@ -458,11 +486,15 @@ class GuiTests(unittest.TestCase):
             window.destroy()
 
     def test_switch_to_file_hides_and_clears_token_input(self):
+        self.app.show_connect()
         self.app.token.set("offline-test-token")
         self.app.auth.set(next(k for k, v in AUTH_MODES.items() if v == "file"))
         self.assertEqual(self.app.token.get(), "")
         self.assertEqual(self.app.token_controls.winfo_manager(), "")
-        self.assertEqual(self.app.cookie_entry.winfo_manager(), "grid")
+        self.assertEqual(self.app.cookie_controls.winfo_manager(), "pack")
+        self.assertIn("cookies.txt", self.app.login_text.get())
+        self.app._close_connect()
+        self.assertIsNone(self.app.connect_window)
 
     def test_disconnect_clears_pending_input_and_stored_session(self):
         self.app.token.set("offline-test-token")

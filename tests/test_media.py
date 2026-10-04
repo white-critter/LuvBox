@@ -612,7 +612,7 @@ class MediaTests(unittest.TestCase):
             self.assertEqual((events[-1]["saved"], events[-1]["skipped"], events[-1]["author_deferred"]), (0, 1, 1))
             # Only the explicit existing-files action rewrites saved media.
             self.embed_source.assert_not_called()
-            self.assertTrue(any("기존 파일에 출처·작성자 기록" in event.get("message", "")
+            self.assertTrue(any("기록 · 통계 → 출처·작성자 기록" in event.get("message", "")
                                 for event in events if event["type"] == "log"))
             row = self.history_rows()[0]
             self.assertEqual((row["author"], row["author_id"]), ("alice", "123"))

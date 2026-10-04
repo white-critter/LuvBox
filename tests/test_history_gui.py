@@ -238,7 +238,8 @@ class HistoryGuiTests(unittest.TestCase):
         self.root.attributes("-alpha", 0)
         self.root.deiconify()
         self.window.attributes("-alpha", 0)
-        self.window.geometry("780x600")
+        width, height = self.window.minsize()
+        self.window.geometry(f"{width}x{height}")
         self.window.deiconify()
         self.window._display({"files": 384, "posts": 342, "photo": 372, "video": 7,
                               "animated_gif": 5, "bytes": 198700000,
@@ -248,6 +249,12 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.selection_text.set("트윗 100 · 파일에 출처 기록됨\n출처: https://x.com/i/web/status/100\n파일: C:/offline/100_1.jpg")
         self.root.update()
         self.assertGreaterEqual(self.window.tree.winfo_height(), 90)
+        # Each table is laid out inside its own parent. A table once gridded
+        # into a sibling frame created after it was drawn underneath that
+        # frame, so saved files looked like an empty table.
+        for tree in (self.window.tree, self.window.run_tree):
+            self.assertEqual(str(tree.grid_info()["in"]), str(tree.master))
+        self.assertTrue(self.window.tree.winfo_ismapped())
         for variable in (self.window.selection_text, self.window.status_text):
             label = next(widget for widget in self.window.wrapping_labels if str(widget.cget("textvariable")) == str(variable))
             self.assertTrue(label.winfo_ismapped())

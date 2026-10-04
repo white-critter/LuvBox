@@ -12,15 +12,19 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
+from . import theme
 from .history import HistoryStore
 from .storage import OutputGuard, StoragePaths
 
 
 MEDIA_LABELS = {"all": "전체", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF"}
-STATUS_LABELS = {"running": "진행 중", "finished": "종료", "stopped": "사용자 중단", "error": "오류", "interrupted": "중단됨", "limited": "테스트 한도 도달", "partial": "일부만 완료", "cancelled": "취소됨"}
+STATUS_LABELS = {"running": "진행 중", "finished": "완료", "stopped": "직접 중단", "error": "오류", "interrupted": "비정상 종료", "limited": "시험 저장 완료", "partial": "일부만 완료", "cancelled": "취소됨"}
 METADATA_LABELS = {"embedded": "파일에 출처 기록됨", "pending": "출처 기록 전", "failed": "파일 출처 기록 실패", "unsupported": "메타데이터 미지원 형식"}
 AUTHOR_METADATA_LABELS = {"embedded": "작성자 기록됨", "pending": "작성자 기록 전", "error": "작성자 기록 실패", "unknown": "작성자 정보 없음"}
+TILES = {"files": "저장한 파일", "posts": "트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "확인된 용량"}
 PAGE_SIZE = 100
+NO_SELECTION = ("표에서 파일을 고르면 출처와 저장 위치가 여기에 나옵니다. 두 번 누르면 파일이 열립니다.\n"
+                "위 검색칸에서 작성자 아이디, 파일명, 트윗 번호로 찾을 수 있습니다.")
 
 
 def format_bytes(value: int | float | None) -> str:
@@ -43,14 +47,32 @@ def format_date(value: str | None) -> str:
         return "기록 없음"
 
 
+def format_short(value: str | None) -> str:
+    if not value:
+        return "–"
+    try:
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
+    except (ValueError, TypeError):
+        return "–"
+
+
+def format_day(value: str | None) -> str:
+    try:
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d") if value else "–"
+    except (ValueError, TypeError):
+        return "–"
+
+
 class HistoryWindow(tk.Toplevel):
     def __init__(self, parent, get_location, is_downloading=lambda: False):
         super().__init__(parent)
+        theme.apply_style(self)
         self.title("XlikeSaver · 기록과 통계")
-        width = min(1000, max(780, self.winfo_screenwidth() - 100))
-        height = min(720, max(600, self.winfo_screenheight() - 100))
+        width = min(1120, max(860, self.winfo_screenwidth() - 80))
+        height = min(860, max(640, self.winfo_screenheight() - 100))
         self.geometry(f"{width}x{height}")
-        self.minsize(780, 600)
+        self.minsize(min(860, width), min(680, height))
+        self.configure(bg=theme.BG)
         self.transient(parent)
         self.get_location = get_location
         self.is_downloading = is_downloading
@@ -72,16 +94,19 @@ class HistoryWindow(tk.Toplevel):
         self.current_storage = None
         self.current_summary = {}
         self.completion_text = ""
-        self.summary_text = tk.StringVar(value="로컬 저장 기록을 확인합니다…")
+        self.summary_text = tk.StringVar(value="기록을 불러오는 중…")
+        self.tile_values = {key: tk.StringVar(value="–") for key in TILES}
         self.date_text = tk.StringVar()
         self.location_text = tk.StringVar()
         self.status_text = tk.StringVar()
-        self.selection_text = tk.StringVar(value="파일을 선택하면 출처와 저장 위치를 볼 수 있습니다.")
+        self.table_note = tk.StringVar(value="기록을 불러오는 중…")
+        self.selection_text = tk.StringVar(value=NO_SELECTION)
         self.media_filter = tk.StringVar(value="전체")
         self.query = tk.StringVar()
         self.page_text = tk.StringVar()
         self._build()
         self.wrapping_labels = []
+
         def collect_labels(widget):
             for child in widget.winfo_children():
                 if isinstance(child, ttk.Label) and int(child.cget("wraplength") or 0):
@@ -94,101 +119,117 @@ class HistoryWindow(tk.Toplevel):
         self.refresh(import_legacy=True)
 
     def _build(self):
-        body = ttk.Frame(self, padding=12)
+        body = ttk.Frame(self, padding=(22, 16))
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
-        body.rowconfigure(5, weight=1)
+        body.rowconfigure(4, weight=1)
         heading = ttk.Frame(body)
         heading.grid(row=0, column=0, sticky="ew")
-        ttk.Label(heading, text="기록 · 통계", font=("맑은 고딕", 17, "bold")).pack(side="left")
+        ttk.Label(heading, text="기록 · 통계", style="Title.TLabel").pack(side="left")
         ttk.Button(heading, text="새로고침", command=lambda: self.refresh(import_legacy=True)).pack(side="right")
         ttk.Button(heading, text="기록 위치", command=self.show_locations).pack(side="right", padx=8)
-        self.source_stop_button = ttk.Button(heading, text="메타데이터 기록 중단", command=self.stop_metadata, state="disabled")
-        self.source_stop_button.pack(side="right", padx=(0, 8))
-        ttk.Label(body, textvariable=self.location_text, wraplength=930).grid(row=1, column=0, sticky="w", pady=(5, 8))
-        ttk.Label(body, textvariable=self.summary_text, font=("맑은 고딕", 11, "bold"), wraplength=930).grid(row=2, column=0, sticky="w")
-        ttk.Label(body, textvariable=self.date_text, wraplength=930).grid(row=3, column=0, sticky="w", pady=(5, 8))
-        ttk.Label(body, text="게시일 범위는 저장된 트윗 기준입니다. 그 날짜까지 전부 저장했다는 뜻은 아닙니다.", wraplength=930, foreground="#945011").grid(row=4, column=0, sticky="w", pady=(0, 7))
+        self.source_stop_button = ttk.Button(heading, text="출처·작성자 기록 중단", command=self.stop_metadata, state="disabled")
+        ttk.Label(body, textvariable=self.location_text, style="Muted.TLabel", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(2, 10))
+
+        tiles = ttk.Frame(body)
+        tiles.grid(row=2, column=0, sticky="ew")
+        for column, (key, caption) in enumerate(TILES.items()):
+            theme.tile(tiles, self.tile_values[key], caption).grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
+            tiles.columnconfigure(column, weight=1, uniform="tile")
+        ttk.Label(body, textvariable=self.date_text, style="Muted.TLabel", wraplength=1000, justify="left").grid(row=3, column=0, sticky="w", pady=(8, 10))
 
         tabs = ttk.Notebook(body)
-        tabs.grid(row=5, column=0, sticky="nsew")
-        files = ttk.Frame(tabs, padding=8)
-        runs = ttk.Frame(tabs, padding=8)
-        tabs.add(files, text="파일 기록")
+        tabs.grid(row=4, column=0, sticky="nsew")
+        files = ttk.Frame(tabs, padding=(10, 12))
+        runs = ttk.Frame(tabs, padding=(10, 12))
+        tabs.add(files, text="저장한 파일")
         tabs.add(runs, text="실행 기록")
         files.columnconfigure(0, weight=1)
-        files.rowconfigure(2, weight=1)
+        files.rowconfigure(1, weight=1)
         runs.columnconfigure(0, weight=1)
         runs.rowconfigure(0, weight=1)
 
         search = ttk.Frame(files)
         search.grid(row=0, column=0, sticky="ew", pady=(0, 8))
-        combo = ttk.Combobox(search, textvariable=self.media_filter, values=list(MEDIA_LABELS.values()), state="readonly", width=12)
+        combo = ttk.Combobox(search, textvariable=self.media_filter, values=list(MEDIA_LABELS.values()), state="readonly", width=12, font=theme.BODY)
         combo.pack(side="left")
         combo.bind("<<ComboboxSelected>>", lambda _: self.search())
-        entry = ttk.Entry(search, textvariable=self.query)
+        entry = ttk.Entry(search, textvariable=self.query, font=theme.BODY)
         entry.pack(side="left", fill="x", expand=True, padx=8)
         entry.bind("<Return>", lambda _: self.search())
         ttk.Button(search, text="찾기", command=self.search).pack(side="left")
-        ttk.Button(search, text="CSV 저장", command=self.export).pack(side="right", padx=(8, 0))
-        ttk.Label(files, text="작성자·파일명·트윗 ID로 찾을 수 있습니다.", foreground="#596a80", font=("맑은 고딕", 9)).grid(row=1, column=0, sticky="w", pady=(0, 4))
+        ttk.Button(search, text="CSV로 저장", command=self.export).pack(side="right", padx=(8, 0))
+
         columns = ("posted", "kind", "author", "filename", "size", "saved")
-        self.tree = ttk.Treeview(files, columns=columns, show="headings", selectmode="browse", height=10)
-        self._tree_layout(files, self.tree, row=2)
-        for key, title, width in zip(columns,
-                ("트윗 게시일 (한국 시간)", "종류", "작성자", "파일명", "용량", "저장 시각 (한국 시간)"),
-                (165, 95, 110, 230, 95, 165)):
+        table = self._table(files, columns, row=1)
+        self.tree = table
+        for key, title, width in zip(columns, ("트윗 게시일", "종류", "작성자", "파일명", "크기", "저장한 때"),
+                                     (150, 90, 140, 280, 90, 150)):
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=60, stretch=key == "filename")
         self.tree.bind("<<TreeviewSelect>>", self.select_record)
         self.tree.bind("<Double-1>", lambda _: self.open_file())
+        self.table_message = ttk.Label(self.tree.master, textvariable=self.table_note, style="CardMuted.TLabel",
+                                       justify="center", font=theme.BODY)
+
         actions = ttk.Frame(files)
-        actions.grid(row=3, column=0, sticky="ew", pady=8)
+        actions.grid(row=3, column=0, sticky="ew", pady=(8, 6))
         ttk.Button(actions, text="파일 열기", command=self.open_file).pack(side="left")
         ttk.Button(actions, text="트윗 열기", command=self.open_tweet).pack(side="left", padx=8)
-        self.backfill_button = ttk.Button(actions, text="기존 파일에 출처·작성자 기록", command=self.backfill)
-        self.backfill_button.pack(side="left", padx=(0, 8))
-        pages = ttk.Frame(files)
-        pages.grid(row=4, column=0, sticky="ew", pady=(0, 8))
-        self.next_button = ttk.Button(pages, text="다음", command=lambda: self.change_page(1))
+        self.backfill_button = ttk.Button(actions, text="출처·작성자 기록", command=self.backfill)
+        self.backfill_button.pack(side="left")
+        self.next_button = ttk.Button(actions, text="다음 ▶", command=lambda: self.change_page(1))
         self.next_button.pack(side="right")
-        self.previous_button = ttk.Button(pages, text="이전", command=lambda: self.change_page(-1))
+        self.previous_button = ttk.Button(actions, text="◀ 이전", command=lambda: self.change_page(-1))
         self.previous_button.pack(side="right", padx=8)
-        ttk.Label(pages, textvariable=self.page_text).pack(side="right", padx=8)
-        ttk.Label(files, textvariable=self.selection_text, wraplength=890, justify="left").grid(row=5, column=0, sticky="w")
+        ttk.Label(actions, textvariable=self.page_text, style="Muted.TLabel").pack(side="right", padx=8)
+        details = ttk.Frame(files, style="Card.TFrame", padding=(14, 8))
+        details.grid(row=4, column=0, sticky="ew")
+        ttk.Label(details, textvariable=self.selection_text, style="Card.TLabel", wraplength=1000, justify="left").pack(anchor="w")
 
         run_columns = ("started", "ended", "status", "saved", "skipped", "size", "visited", "last")
-        self.run_tree = ttk.Treeview(runs, columns=run_columns, show="headings", selectmode="browse", height=10)
-        self._tree_layout(runs, self.run_tree, row=0)
+        self.run_tree = self._table(runs, run_columns, row=0)
         for key, title, width in zip(run_columns,
-                ("시작 시각", "종료 시각", "상태", "저장", "기존", "용량 초과", "확인 트윗", "마지막 확인 트윗 게시일"),
-                (165, 165, 90, 65, 65, 80, 85, 175)):
+                ("시작", "끝", "결과", "새로 저장", "이미 있음", "용량 초과", "확인한 트윗", "마지막으로 확인한 트윗 게시일"),
+                (160, 160, 110, 90, 90, 90, 100, 220)):
             self.run_tree.heading(key, text=title)
-            self.run_tree.column(key, width=width, minwidth=50, stretch=False)
-        self.run_text = tk.StringVar(value="실행을 선택하면 종료 이유를 볼 수 있습니다. 예전 실행 시각과 좋아요 시각은 알 수 없습니다.")
+            self.run_tree.column(key, width=width, minwidth=60, stretch=key == "last")
+        self.run_text = tk.StringVar(value="실행을 고르면 어떻게 끝났는지 볼 수 있습니다.")
         self.run_tree.bind("<<TreeviewSelect>>", self.select_run)
-        ttk.Label(runs, textvariable=self.run_text, wraplength=890, justify="left").grid(row=1, column=0, sticky="w", pady=8)
-        ttk.Label(body, textvariable=self.status_text, wraplength=930, font=("맑은 고딕", 9)).grid(row=6, column=0, sticky="w", pady=(8, 0))
+        run_details = theme.card(runs)
+        run_details.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        ttk.Label(run_details, textvariable=self.run_text, style="Card.TLabel", wraplength=1000, justify="left").pack(anchor="w")
+        ttk.Label(body, textvariable=self.status_text, style="Muted.TLabel", wraplength=1000, justify="left").grid(row=5, column=0, sticky="w", pady=(10, 0))
 
     def _resize_text(self, event):
         if event.widget is self:
-            width = max(200, self.winfo_width() - 70)
+            width = max(300, self.winfo_width() - 90)
             for label in self.wrapping_labels:
                 if int(label.cget("wraplength")) != width:
                     label.configure(wraplength=width)
 
     @staticmethod
-    def _tree_layout(parent, tree, *, row):
+    def _table(parent, columns, *, row):
+        """A Treeview inside its own frame, so the frame can never cover it."""
         frame = ttk.Frame(parent)
         frame.grid(row=row, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        tree.grid(in_=frame, row=0, column=0, sticky="nsew")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=8)
+        tree.grid(row=0, column=0, sticky="nsew")
         vertical = ttk.Scrollbar(frame, command=tree.yview)
         vertical.grid(row=0, column=1, sticky="ns")
         horizontal = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
         horizontal.grid(row=1, column=0, sticky="ew")
         tree.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        return tree
+
+    def _show_table_note(self, text):
+        if text:
+            self.table_note.set(text)
+            self.table_message.place(relx=0.5, rely=0.5, anchor="center")
+        else:
+            self.table_message.place_forget()
 
     def search(self):
         self.page = 0
@@ -206,7 +247,8 @@ class HistoryWindow(tk.Toplevel):
         try:
             account, directory = self.get_location()
         except (ValueError, OSError):
-            self.status_text.set("먼저 기본 화면에 X 아이디와 저장 폴더를 입력해 주세요.")
+            self.status_text.set("먼저 메인 화면에 X 아이디와 저장 폴더를 입력해 주세요.")
+            self._show_table_note("메인 화면에 X 아이디와 저장 폴더를 입력하면\n그 폴더에 저장한 기록이 여기에 나옵니다.")
             return
         location = directory
         directory = location.record_dir if isinstance(location, StoragePaths) else Path(location)
@@ -216,7 +258,7 @@ class HistoryWindow(tk.Toplevel):
         self.current_account_dir = directory
         self.current_storage = location
         media_dir = location.media_dir if isinstance(location, StoragePaths) else directory
-        self.location_text.set(f"@{account} · 저장 폴더: {media_dir}")
+        self.location_text.set(f"@{account} · 저장 폴더 {media_dir}")
         self.busy = True
         self.generation += 1
         generation = self.generation
@@ -224,8 +266,10 @@ class HistoryWindow(tk.Toplevel):
         # The running worker records every file it handles, so a whole-library
         # rescan adds nothing then and only competes with it for the catalog.
         do_import = (import_legacy or directory not in self.loaded_locations) and not self.is_downloading()
-        self.status_text.set("PC의 저장 기록을 읽고 있습니다…" if do_import or not import_legacy else
-                             "저장 작업 중에는 폴더 전체 재확인을 건너뛰고 현재 기록만 표시합니다…")
+        self.status_text.set("기록을 불러오는 중…" if do_import or not import_legacy else
+                             "저장 작업 중에는 폴더 재확인을 건너뛰고 지금까지의 기록만 보여 줍니다.")
+        if not self.tree.get_children():
+            self._show_table_note("기록을 불러오는 중…")
         threading.Thread(target=self._load, args=(generation, location, kind, self.query.get(), self.page, do_import), daemon=True).start()
 
     @staticmethod
@@ -236,15 +280,22 @@ class HistoryWindow(tk.Toplevel):
         store = None
         try:
             store = self._store(directory)
+
+            def snapshot(warnings):
+                summary = store.summary()
+                summary["warnings"] = warnings
+                rows = store.records(limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, media_type=kind, query=query)
+                return store.account_dir, summary, rows, store.runs(limit=30)
+
             if do_import:
+                # Show what the catalog already holds at once. Re-checking every
+                # file of a large library takes seconds, and the table must not
+                # look empty meanwhile.
+                self.results.put((generation, "preview", snapshot([])))
                 imported = store.import_legacy(refresh=True)
+                self.results.put((generation, "loaded", snapshot(imported.get("warnings", []))))
             else:
-                imported = {"warnings": []}
-            summary = store.summary()
-            summary["warnings"] = imported.get("warnings", [])
-            rows = store.records(limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, media_type=kind, query=query)
-            runs = store.runs(limit=30)
-            self.results.put((generation, "loaded", (store.account_dir, summary, rows, runs)))
+                self.results.put((generation, "loaded", snapshot([])))
         except Exception:
             self.results.put((generation, "error", "기록을 읽지 못했습니다. 저장 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."))
         finally:
@@ -267,10 +318,15 @@ class HistoryWindow(tk.Toplevel):
                 if kind == "metadata-progress":
                     self.status_text.set(result)
                     continue
+                if kind == "preview":
+                    self._display(*result[1:])
+                    self.status_text.set("폴더의 파일을 다시 확인하는 중입니다… 그동안 지금까지의 기록을 먼저 보여 드립니다.")
+                    continue
                 self.busy = False
                 if self.metadata_active:
                     self.metadata_active = False
                     self.source_stop_button.configure(state="disabled")
+                    self.source_stop_button.pack_forget()
                 if self.closing:
                     self.destroy()
                     return
@@ -282,6 +338,8 @@ class HistoryWindow(tk.Toplevel):
                     self.status_text.set(result)
                     if kind == "backfilled":
                         self.completion_text = result
+                    elif kind == "error" and not self.tree.get_children():
+                        self._show_table_note("기록을 읽지 못했습니다.\n아래 안내를 확인해 주세요.")
                 if self.pending:
                     self.pending = False
                     do_import, self.pending_import = self.pending_import, False
@@ -295,39 +353,62 @@ class HistoryWindow(tk.Toplevel):
 
     def _display(self, summary, records, runs):
         self.current_summary = summary
+        files = summary.get("files", 0) or 0
+        values = {"files": files, "posts": summary.get("posts", 0) or 0, "photo": summary.get("photo", 0) or 0,
+                  "video": summary.get("video", 0) or 0, "animated_gif": summary.get("animated_gif", 0) or 0}
+        for key, value in values.items():
+            self.tile_values[key].set(f"{value:,}")
+        self.tile_values["bytes"].set(format_bytes(summary.get("bytes", 0)))
         self.summary_text.set(
-            f"파일 기록 {summary.get('files', 0):,}개 · 트윗 {summary.get('posts', 0):,}개\n"
-            f"사진 {summary.get('photo', 0):,}개 / 동영상 {summary.get('video', 0):,}개 / 움직이는 GIF {summary.get('animated_gif', 0):,}개 · 확인된 용량 {format_bytes(summary.get('bytes', 0))}"
-        )
+            f"파일 기록 {files:,}개 · 트윗 {values['posts']:,}개 · 사진 {values['photo']:,}개 / 동영상 {values['video']:,}개 / "
+            f"움직이는 GIF {values['animated_gif']:,}개 · 확인된 용량 {format_bytes(summary.get('bytes', 0))}")
         oldest, newest = summary.get("oldest_posted_at"), summary.get("newest_posted_at")
-        range_text = f"저장된 트윗 게시일: {format_date(oldest)} ~ {format_date(newest)}" if oldest else "저장된 트윗 게시일: 기록 없음"
-        estimated = summary.get("estimated_dates", 0)
-        extra = f" · ID로 게시일을 추정한 기록 {estimated:,}개" if estimated else ""
-        unknown = summary.get("unknown_bytes", 0)
-        if unknown:
-            extra += f" · 용량 미확인 {unknown:,}개"
-        self.date_text.set(range_text + extra)
+        notes = []
+        if summary.get("estimated_dates", 0):
+            notes.append("* 표시는 트윗 번호로 추정한 날짜")
+        if summary.get("unknown_bytes", 0):
+            notes.append(f"크기를 모르는 파일 {summary['unknown_bytes']:,}개")
+        range_text = (f"저장한 트윗의 게시일: {format_day(oldest)} ~ {format_day(newest)} (이 기간의 Like를 모두 저장했다는 뜻은 아닙니다)"
+                      if oldest else "저장한 트윗의 게시일: 아직 없음")
+        self.date_text.set(range_text + ("  ·  " + " · ".join(notes) if notes else ""))
+        selected = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
         for index, row in enumerate(records[:PAGE_SIZE]):
             key = str(index)
             self.rows[key] = row
-            posted = format_date(row.get("posted_at"))
+            posted = format_short(row.get("posted_at"))
             if row.get("posted_source") == "id_estimate":
                 posted += " *"
-            filename = row.get("filename") or (Path(row["path"]).name if row.get("path") else f"{row['tweet_id']}_{row['num']} (파일 위치 없음)")
-            self.tree.insert("", "end", iid=key, values=(posted, MEDIA_LABELS.get(row.get("media_type"), "알 수 없음"), row.get("author") or "기록 없음", filename, format_bytes(row.get("filesize")), format_date(row.get("saved_at"))))
+            filename = row.get("filename") or (Path(row["path"]).name if row.get("path") else f"{row['tweet_id']}_{row['num']} (위치 없음)")
+            author = "@" + row["author"] if row.get("author") else "–"
+            self.tree.insert("", "end", iid=key, values=(posted, MEDIA_LABELS.get(row.get("media_type"), "알 수 없음"), author, filename,
+                                                         format_bytes(row.get("filesize")), format_short(row.get("saved_at"))))
+        if selected and self.tree.exists(selected[0]):
+            self.tree.selection_set(selected[0])
+        if records:
+            self._show_table_note("")
+        elif files:
+            self._show_table_note("찾는 조건에 맞는 파일이 없습니다.")
+        else:
+            self._show_table_note("아직 저장한 파일이 없습니다.\n메인 화면에서 ‘저장 시작’을 누르면 여기에 쌓입니다.")
         self.previous_button.configure(state="normal" if self.page else "disabled")
         self.next_button.configure(state="normal" if len(records) > PAGE_SIZE else "disabled")
-        self.page_text.set(f"{self.page + 1}페이지 · {len(records[:PAGE_SIZE]):,}개 표시")
+        start = self.page * PAGE_SIZE
+        shown = len(records[:PAGE_SIZE])
+        self.page_text.set(f"{start + 1:,}–{start + shown:,}번째" if shown else "")
         self.run_tree.delete(*self.run_tree.get_children())
         self.run_rows.clear()
         for index, row in enumerate(runs):
             key = str(index)
             self.run_rows[key] = row
-            self.run_tree.insert("", "end", iid=key, values=(format_date(row.get("started_at")), format_date(row.get("finished_at")), STATUS_LABELS.get(row.get("status"), "기록 없음"), row.get("saved", 0), row.get("skipped", 0), row.get("size_skipped", 0), row.get("visited", 0), format_date(row.get("last_posted_at"))))
+            self.run_tree.insert("", "end", iid=key, values=(format_short(row.get("started_at")), format_short(row.get("finished_at")),
+                                                             STATUS_LABELS.get(row.get("status"), "기록 없음"), row.get("saved", 0),
+                                                             row.get("skipped", 0), row.get("size_skipped", 0), row.get("visited", 0),
+                                                             format_short(row.get("last_posted_at"))))
         warning = " ".join(summary.get("warnings", []))
-        self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") + f"파일에 출처 {summary.get('embedded_sources', 0):,}개 · 작성자 {summary.get('embedded_authors', 0):,}개 기록됨 · * 게시일 추정 · 저장 방식별 복사본도 집계합니다.")
+        self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") +
+                             f"파일 안에 출처가 기록된 파일 {summary.get('embedded_sources', 0):,}개 · 작성자까지 기록된 파일 {summary.get('embedded_authors', 0):,}개")
         self.select_record()
 
     def selected(self):
@@ -337,9 +418,9 @@ class HistoryWindow(tk.Toplevel):
     def select_record(self, _=None):
         row = self.selected()
         if row is None:
-            self.selection_text.set("파일을 선택하면 출처와 저장 위치를 볼 수 있습니다.")
+            self.selection_text.set(NO_SELECTION)
             return
-        source = "트윗 ID에서 추정" if row.get("posted_source") == "id_estimate" else "X 목록의 게시일"
+        source = "트윗 번호로 추정" if row.get("posted_source") == "id_estimate" else "X 목록"
         metadata = METADATA_LABELS.get(row.get("metadata_status"), "출처 기록 전")
         author_status = AUTHOR_METADATA_LABELS.get(row.get("author_metadata_status"), "작성자 기록 전")
         if not row.get("author") and not row.get("author_id"):
@@ -347,14 +428,18 @@ class HistoryWindow(tk.Toplevel):
         author = "@" + row["author"] if row.get("author") else "정보 없음"
         if row.get("author_id"):
             author += " (ID " + row["author_id"] + ")"
-        self.selection_text.set(f"트윗 {row['tweet_id']} · 게시일 출처: {source} · {metadata}\n작성자: {author} · {author_status}\n출처: {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n파일: {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}")
+        self.selection_text.set(
+            f"작성자  {author}\n"
+            f"트윗     {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n"
+            f"파일     {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}\n"
+            f"파일 안 기록: {metadata} · {author_status} · 게시일 출처: {source}")
 
     def select_run(self, _=None):
         selection = self.run_tree.selection()
         row = self.run_rows.get(selection[0]) if selection else None
         if row:
             scan = "새 Like만 빠르게 확인" if row.get("scan_mode") == "quick" else "전체 목록 확인"
-            self.run_text.set(f"{row.get('message') or '실행 중이거나 종료 설명이 없습니다.'}\n확인 방식: {scan} · 마지막 확인 트윗: {row.get('last_tweet_id') or '기록 없음'} · 전체 저장 완료 지점은 아닙니다.")
+            self.run_text.set(f"{row.get('message') or '실행 중이거나 종료 설명이 없습니다.'}\n확인 방식: {scan} · 마지막으로 확인한 트윗: {row.get('last_tweet_id') or '기록 없음'}")
 
     def open_file(self):
         row = self.selected()
@@ -403,19 +488,27 @@ class HistoryWindow(tk.Toplevel):
         if self.busy or self.current_account_dir is None:
             return
         if self.is_downloading():
-            messagebox.showinfo("다운로드 진행 중", "현재 저장 작업이 끝난 뒤 기존 파일에 출처를 기록해 주세요. 이 작업은 X에 요청하지 않습니다.", parent=self)
+            messagebox.showinfo("다운로드 진행 중", "저장 작업이 끝난 뒤 출처·작성자를 기록해 주세요. 이 작업은 X에 요청하지 않습니다.", parent=self)
             return
         from .metadata import available
         if not available():
             messagebox.showinfo("출처 기록 도구 없음", "배포 파일을 다시 받아주세요. 개발 중이면 setup.ps1을 실행해 주세요.", parent=self)
+            return
+        if not messagebox.askyesno(
+                "출처·작성자 기록",
+                "예전에 받은 파일 안에 트윗 주소와 작성자를 기록합니다.\n\n"
+                "· 화질은 그대로이며 X에 요청하지 않습니다.\n"
+                "· 파일을 다시 쓰므로 Google Drive·OneDrive 폴더라면 다시 올라갈 수 있습니다.\n"
+                "· 이미 기록된 파일은 건너뜁니다. 중간에 멈춰도 됩니다.\n\n계속할까요?", parent=self):
             return
         self.completion_text = ""
         self.busy = True
         self.metadata_active = True
         self.metadata_stop.clear()
         self.source_stop_button.configure(state="normal")
+        self.source_stop_button.pack(side="right", padx=(0, 8))
         self.generation += 1
-        self.status_text.set("출처와 알려진 작성자를 기록합니다. 화질은 그대로이며 X에 요청하지 않습니다…")
+        self.status_text.set("출처와 작성자를 기록하는 중입니다… 화질은 그대로이며 X에 요청하지 않습니다.")
         threading.Thread(target=self._backfill, args=(self.generation, self.current_storage), daemon=True).start()
 
     def _backfill(self, generation, directory):
