@@ -1,0 +1,606 @@
+"""Local media catalog and run history, independent of download archives.
+
+No cookies, media request URLs, or arbitrary tweet metadata are stored. Old archive rows are
+read-only inputs. Legacy file modification times are never called save times.
+"""
+
+from __future__ import annotations
+
+import csv
+import functools
+import json
+import os
+import re
+import sqlite3
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from .storage import StoragePaths, prepare_storage
+
+
+_KOREA = timezone(timedelta(hours=9))
+_MODES = {"author", "date", "flat"}
+_TYPES = {"photo", "video", "animated_gif"}
+_HISTORY_HELP = "저장 내역을 읽거나 기록하지 못했습니다. 저장 폴더의 권한과 다른 실행 중인 작업을 확인해 주세요."
+_INTERRUPTED_MESSAGE = "이전 작업이 정상 종료되지 않아 중단된 기록으로 정리했습니다. 실제 종료 시각은 알 수 없습니다. 완료한 파일과 마지막으로 기록된 진행 수치는 보존했습니다."
+_ENTRY = re.compile(r"(?:twitter)?([0-9]{1,20})_(?:(video|animated_gif|gif)_)?([0-9]{1,5})\Z")
+_FILENAME = re.compile(r"([0-9]{1,20})_(?:(video|gif|animated_gif)_)?([0-9]{1,5})\.(jpg|jpeg|png|webp|gif|mp4)\Z", re.I)
+_ARCHIVES = {"author": ".xlikesaver-archive.sqlite3",
+             "date": ".xlikesaver-archive.date.sqlite3",
+             "flat": ".xlikesaver-archive.flat.sqlite3"}
+_RUN_FIELDS = {"saved", "skipped", "size_skipped", "visited", "last_tweet_id",
+               "last_posted_at", "message"}
+_COUNTERS = {"saved", "skipped", "size_skipped", "visited"}
+_CSV_FIELDS = ("folder_mode", "tweet_id", "num", "media_type", "author", "filename",
+               "posted_at", "posted_source", "saved_at", "path", "filesize", "status", "record_source",
+               "source_url", "metadata_status")
+
+
+class HistoryError(RuntimeError):
+    """A fixed application error; source exceptions may include user paths."""
+
+
+def _safe(method):
+    @functools.wraps(method)
+    def call(*args, **kwargs):
+        try:
+            return method(*args, **kwargs)
+        except HistoryError:
+            raise
+        except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
+            raise HistoryError(_HISTORY_HELP) from None
+    return call
+
+
+def _now() -> str:
+    return datetime.now(_KOREA).isoformat(timespec="microseconds")
+
+
+def _posted(value) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value)
+    if not isinstance(value, datetime):
+        raise ValueError("invalid date")
+    if value.tzinfo is None:
+        # gallery-dl's legacy tweet dates are naive UTC datetimes.
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(_KOREA).isoformat(timespec="seconds")
+
+
+def _estimated_posted(tweet_id: str) -> str | None:
+    value = int(tweet_id)
+    if not 2**22 <= value <= 2**63 - 1:
+        return None
+    milliseconds = (value >> 22) + 1_288_834_974_657
+    posted = datetime.fromtimestamp(milliseconds / 1000, timezone.utc)
+    if posted > datetime.now(timezone.utc) + timedelta(days=1):
+        return None
+    return _posted(posted)
+
+
+def _clean_text(value, limit=2000) -> str:
+    if not isinstance(value, str):
+        return ""
+    return "".join(char for char in value[:limit] if ord(char) >= 32 and ord(char) != 127)
+
+
+def _date_folder(name: str) -> bool:
+    try:
+        return datetime.strptime(name, "%Y-%m-%d").strftime("%Y-%m-%d") == name
+    except ValueError:
+        return False
+
+
+def _csv_cell(value):
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+class HistoryStore:
+    @_safe
+    def __init__(self, account_dir: Path, *, media_dir: Path | None = None,
+                 output_dir: Path | None = None, legacy_dir: Path | None = None):
+        self.account_dir = Path(account_dir).expanduser().resolve()
+        self.media_dir = Path(media_dir if media_dir is not None else account_dir).expanduser().resolve()
+        self.output_dir = Path(output_dir if output_dir is not None else self.media_dir).expanduser().resolve()
+        self.legacy_dir = Path(legacy_dir).expanduser() if legacy_dir is not None else None
+        self._isolated_records = media_dir is not None
+        self.account_dir.mkdir(parents=True, exist_ok=True)
+        self.path = self.account_dir / ".xlikesaver-history.sqlite3"
+        self._db = sqlite3.connect(self.path, timeout=5)
+        self._db.row_factory = sqlite3.Row
+        try:
+            self._db.execute("PRAGMA busy_timeout=5000")
+            self._db.execute("PRAGMA journal_mode=WAL")
+            # Flush WAL commits so progress is more durable after an OS crash.
+            # Hardware/filesystem failures still cannot be fully guaranteed.
+            self._db.execute("PRAGMA synchronous=FULL")
+            self._db.executescript("""
+                CREATE TABLE IF NOT EXISTS media (
+                    folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                    media_type TEXT NOT NULL, author TEXT NOT NULL DEFAULT '',
+                    filename TEXT NOT NULL DEFAULT '', posted_at TEXT, posted_source TEXT NOT NULL DEFAULT '',
+                    saved_at TEXT, path TEXT NOT NULL DEFAULT '', filesize INTEGER,
+                    status TEXT NOT NULL, record_source TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_mode, tweet_id, num, media_type)
+                );
+                CREATE INDEX IF NOT EXISTS media_posted ON media(posted_at);
+                CREATE INDEX IF NOT EXISTS media_type ON media(media_type);
+                CREATE TABLE IF NOT EXISTS runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, folder_mode TEXT NOT NULL,
+                    started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+                    saved INTEGER NOT NULL DEFAULT 0, skipped INTEGER NOT NULL DEFAULT 0,
+                    size_skipped INTEGER NOT NULL DEFAULT 0, visited INTEGER NOT NULL DEFAULT 0,
+                    last_tweet_id TEXT NOT NULL DEFAULT '', last_posted_at TEXT,
+                    message TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS catalog_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            """)
+            primary = [row["name"] for row in sorted(self._db.execute("PRAGMA table_info(media)").fetchall(),
+                                                     key=lambda row: row["pk"]) if row["pk"]]
+            if primary == ["folder_mode", "tweet_id", "num"]:
+                # Accommodate an early catalog created during development. This
+                # never changes the independent gallery-dl archive databases.
+                with self._db:
+                    self._db.execute("BEGIN IMMEDIATE")
+                    self._db.execute("ALTER TABLE media RENAME TO media_old")
+                    self._db.execute("CREATE TABLE media AS SELECT * FROM media_old WHERE 0")
+                    self._db.execute("CREATE UNIQUE INDEX media_identity ON media(folder_mode,tweet_id,num,media_type)")
+                    self._db.execute("INSERT INTO media SELECT * FROM media_old")
+                    self._db.execute("DROP TABLE media_old")
+                    self._db.execute("CREATE INDEX IF NOT EXISTS media_posted ON media(posted_at)")
+                    self._db.execute("CREATE INDEX IF NOT EXISTS media_type ON media(media_type)")
+            columns = {row["name"] for row in self._db.execute("PRAGMA table_info(media)")}
+            with self._db:
+                if "source_url" not in columns:
+                    self._db.execute("ALTER TABLE media ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
+                if "metadata_status" not in columns:
+                    self._db.execute("ALTER TABLE media ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'pending'")
+                self._db.execute("UPDATE media SET source_url='https://x.com/i/web/status/' || tweet_id WHERE source_url=''")
+            self._media_roots = self._read_media_roots()
+        except Exception:
+            self._db.close()
+            raise
+
+    @classmethod
+    @_safe
+    def for_storage(cls, paths: StoragePaths, *, protected: bool = False) -> "HistoryStore":
+        prepare_storage(paths, protected=protected)
+        return cls(paths.record_dir, media_dir=paths.media_dir, output_dir=paths.output_dir,
+                   legacy_dir=paths.legacy_dir)
+
+    def _read_media_roots(self) -> tuple[Path, ...]:
+        roots = [self.output_dir]
+        row = self._db.execute("SELECT value FROM catalog_meta WHERE key='allowed_media_roots'").fetchone()
+        if row is None:
+            return tuple(roots)
+        try:
+            values = json.loads(row[0])
+        except (ValueError, TypeError):
+            return tuple(roots)
+        if not isinstance(values, list):
+            return tuple(roots)
+        for value in values:
+            if not isinstance(value, str) or not Path(value).is_absolute():
+                continue
+            root = Path(os.path.abspath(value))
+            if root not in roots:
+                roots.append(root)
+        return tuple(roots)
+
+    @property
+    def media_roots(self) -> tuple[Path, ...]:
+        """Selected output roots whose known files may still be opened or tagged."""
+        return self._media_roots
+
+    def _path_in_root(self, path: Path | str, root: Path) -> Path | None:
+        candidate = Path(path)
+        try:
+            supplied = Path(os.path.abspath(candidate))
+            if not supplied.is_relative_to(root):
+                return None
+            current = supplied
+            # Include the root and its ancestors: a formerly ordinary folder
+            # can later be replaced with a junction to another location.
+            while True:
+                if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
+                    return None
+                if current == current.parent:
+                    break
+                current = current.parent
+            candidate = candidate.resolve()
+            record_roots = getattr(self, "_media_roots", (self.output_dir,))
+            if (not candidate.is_relative_to(root) or
+                    (self._isolated_records and any(candidate.is_relative_to(parent / ".xlikesaver")
+                                                   for parent in record_roots))):
+                return None
+            return candidate
+        except (OSError, RuntimeError):
+            return None
+
+    def is_download_path(self, path: Path | str) -> bool:
+        """New downloads may only write within the currently selected output."""
+        return self._path_in_root(path, self.output_dir) is not None
+
+    def is_media_path(self, path: Path | str) -> bool:
+        """Allow former roots only for exact paths already present in this catalog."""
+        if self.is_download_path(path):
+            return True
+        for root in self.media_roots[1:]:
+            candidate = self._path_in_root(path, root)
+            if candidate is not None and self._db.execute(
+                    "SELECT 1 FROM media WHERE path=? LIMIT 1", (str(candidate),)).fetchone():
+                return True
+        return False
+
+    def _preserve_missing_location(self, path: str, actual: str) -> str:
+        # A disconnected drive should remain visible and become usable again
+        # after reconnecting, rather than losing its exact original location.
+        if not actual and path and self.is_media_path(path) and not self.is_download_path(path):
+            return path
+        return actual
+
+    def _mode(self, value: str) -> str:
+        if value not in _MODES:
+            raise HistoryError(_HISTORY_HELP)
+        return value
+
+    def _key(self, metadata: dict) -> tuple[str, int]:
+        tweet_id = str(metadata.get("tweet_id", ""))
+        number = metadata.get("num")
+        if (not re.fullmatch(r"[0-9]{1,20}", tweet_id) or isinstance(number, bool) or
+                not isinstance(number, int) or not 1 <= number <= 10000):
+            raise HistoryError(_HISTORY_HELP)
+        return tweet_id, number
+
+    def _file(self, path: Path | str) -> tuple[str, int | None, str]:
+        candidate = Path(path)
+        # Check both the supplied path and resolved target to avoid importing
+        # symlink/junction targets outside the explicitly selected account.
+        if candidate.is_symlink() or (hasattr(candidate, "is_junction") and candidate.is_junction()):
+            return "", None, candidate.name
+        if not self.is_media_path(candidate):
+            raise HistoryError(_HISTORY_HELP)
+        candidate = candidate.resolve()
+        try:
+            stat = candidate.stat()
+        except FileNotFoundError:
+            return "", None, candidate.name
+        if not candidate.is_file():
+            return "", None, candidate.name
+        return str(candidate), stat.st_size, candidate.name
+
+    def _upsert(self, row: dict, *, replace_path=True) -> None:
+        row["source_url"] = "https://x.com/i/web/status/" + row["tweet_id"]
+        row.setdefault("metadata_status", "pending")
+        previous = self._db.execute("SELECT * FROM media WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                                    (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])).fetchone()
+        if previous is not None:
+            old = dict(previous)
+            if not row["author"] or (row["record_source"] in {"archive", "file_scan"} and old["author"]):
+                row["author"] = old["author"]
+            if (not row["posted_at"] or (row["posted_source"] == "id_estimate" and
+                                         old["posted_source"] == "metadata")):
+                row["posted_at"], row["posted_source"] = old["posted_at"], old["posted_source"]
+            if row["status"] != "saved":
+                row["saved_at"] = old["saved_at"]
+                if old["status"] == "saved":
+                    row["status"] = "saved"
+            if old["record_source"] == "saved" and row["record_source"] != "saved":
+                row["record_source"] = "saved"
+            if not replace_path:
+                row["path"], row["filesize"] = old["path"], old["filesize"]
+                row["filename"] = old["filename"] or row["filename"]
+            if not row["filename"]:
+                row["filename"] = old["filename"]
+            if row["metadata_status"] == "pending":
+                row["metadata_status"] = old["metadata_status"]
+            # An archive-only row describes an old photo, not the exact type of
+            # a file that has since been imported with richer metadata.
+            if row["record_source"] == "archive":
+                row["media_type"] = old["media_type"]
+        row["updated_at"] = _now()
+        columns = tuple(row)
+        self._db.execute("INSERT OR REPLACE INTO media (" + ",".join(columns) + ") VALUES (" +
+                         ",".join("?" for _ in columns) + ")", tuple(row[key] for key in columns))
+
+    @_safe
+    def recover_interrupted_runs(self) -> int:
+        """Recover abandoned runs only after the worker holds AccountGuard.
+
+        Read-only record windows never call this method. No actual end time can
+        be reconstructed after a crash, so keep finished_at unknown.
+        """
+        with self._db:
+            result = self._db.execute(
+                "UPDATE runs SET status='interrupted',message=? WHERE status='running' AND finished_at IS NULL",
+                (_INTERRUPTED_MESSAGE,))
+        return result.rowcount
+
+    @_safe
+    def start_run(self, folder_mode: str) -> int:
+        with self._db:
+            row = self._db.execute("INSERT INTO runs(folder_mode,started_at,status) VALUES (?,?,?)",
+                                   (self._mode(folder_mode), _now(), "running"))
+        return row.lastrowid
+
+    def _run_values(self, fields: dict) -> dict:
+        if not set(fields).issubset(_RUN_FIELDS):
+            raise HistoryError(_HISTORY_HELP)
+        values = {}
+        for key, value in fields.items():
+            if key in _COUNTERS:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise HistoryError(_HISTORY_HELP)
+            elif key == "last_tweet_id":
+                value = str(value or "")
+                if value and not re.fullmatch(r"[0-9]{1,20}", value):
+                    raise HistoryError(_HISTORY_HELP)
+            elif key == "last_posted_at":
+                value = _posted(value)
+            elif key == "message":
+                value = _clean_text(value)
+            values[key] = value
+        return values
+
+    def _update_run(self, run_id: int, values: dict) -> None:
+        if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id < 1:
+            raise HistoryError(_HISTORY_HELP)
+        if not values:
+            return
+        changed = self._db.execute("UPDATE runs SET " + ",".join(key + "=?" for key in values) + " WHERE id=?",
+                                   (*values.values(), run_id))
+        if not changed.rowcount:
+            raise HistoryError(_HISTORY_HELP)
+
+    @_safe
+    def update_run(self, run_id: int, **fields) -> None:
+        with self._db:
+            self._update_run(run_id, self._run_values(fields))
+
+    @_safe
+    def finish_run(self, run_id: int, status: str, **fields) -> None:
+        if status not in {"finished", "stopped", "error", "limited", "partial", "cancelled"}:
+            raise HistoryError(_HISTORY_HELP)
+        values = self._run_values(fields)
+        values.update(status=status, finished_at=_now())
+        with self._db:
+            self._update_run(run_id, values)
+
+    @_safe
+    def record_media(self, folder_mode: str, metadata: dict, path: Path | str, *, status="saved") -> None:
+        if not isinstance(metadata, dict) or status not in {"saved", "existing"}:
+            raise HistoryError(_HISTORY_HELP)
+        mode = self._mode(folder_mode)
+        tweet_id, number = self._key(metadata)
+        media_type = metadata.get("type", "photo")
+        if media_type not in _TYPES:
+            raise HistoryError(_HISTORY_HELP)
+        actual_path, filesize, filename = self._file(path)
+        if status == "saved" and not actual_path:
+            raise HistoryError(_HISTORY_HELP)
+        author = metadata.get("author")
+        author = _clean_text(author.get("name", ""), 100) if isinstance(author, dict) else ""
+        posted = _posted(metadata.get("date"))
+        row = {"folder_mode": mode, "tweet_id": tweet_id, "num": number, "media_type": media_type,
+               "author": author, "filename": filename, "posted_at": posted,
+               "posted_source": "metadata" if posted else "", "saved_at": _now() if status == "saved" else None,
+               "path": actual_path, "filesize": filesize, "status": status, "record_source": status}
+        metadata_status = metadata.get("_xlikesaver_metadata_status", "pending")
+        if metadata_status not in {"embedded", "failed", "unsupported", "pending"}:
+            raise HistoryError(_HISTORY_HELP)
+        row["metadata_status"] = metadata_status
+        with self._db:
+            self._upsert(row)
+
+    @_safe
+    def media_record(self, folder_mode: str, metadata: dict) -> dict | None:
+        """Look up a single layout/media identity without changing its record."""
+        tweet_id, number = self._key(metadata)
+        media_type = metadata.get("type", "photo")
+        if media_type not in _TYPES:
+            raise HistoryError(_HISTORY_HELP)
+        row = self._db.execute("SELECT * FROM media WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                               (self._mode(folder_mode), tweet_id, number, media_type)).fetchone()
+        return dict(row) if row else None
+
+    @_safe
+    def get_metadata_status(self, folder_mode: str, metadata: dict) -> str:
+        row = self.media_record(folder_mode, metadata)
+        return row["metadata_status"] if row else "pending"
+
+    @_safe
+    def mark_metadata(self, row: dict, status: str) -> None:
+        """Update a local tag operation without changing the original save time."""
+        if status not in {"embedded", "failed", "unsupported", "pending"}:
+            raise HistoryError(_HISTORY_HELP)
+        actual, size, _ = self._file(row.get("path") or "")
+        actual = self._preserve_missing_location(row.get("path") or "", actual)
+        with self._db:
+            self._db.execute("UPDATE media SET metadata_status=?,source_url=?,path=?,filesize=?,updated_at=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                             (status, "https://x.com/i/web/status/" + row["tweet_id"], actual, size, _now(), row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
+
+    def _legacy_row(self, mode: str, tweet_id: str, number: int, *, path="", filesize=None,
+                    filename="", media_type="photo", author="", source="archive") -> dict:
+        posted = _estimated_posted(tweet_id)
+        return {"folder_mode": mode, "tweet_id": tweet_id, "num": number, "media_type": media_type,
+                "author": _clean_text(author, 100), "filename": filename or f"{tweet_id}_{number}",
+                "posted_at": posted, "posted_source": "id_estimate" if posted else "",
+                "saved_at": None, "path": path, "filesize": filesize,
+                "status": "existing", "record_source": source}
+
+    def _files(self):
+        roots = [(self.media_dir, self._isolated_records and self.media_dir == self.output_dir)]
+        if self.legacy_dir is not None and self.legacy_dir != self.media_dir:
+            roots.append((self.legacy_dir, False))
+        for root, restricted in roots:
+            if not root.is_dir() or root.is_symlink() or (hasattr(root, "is_junction") and root.is_junction()):
+                continue
+            yield from self._scan_files(root, restricted)
+
+    def _scan_files(self, root, restricted):
+        pending = [root]
+        account_names = set()
+        if restricted and (self.output_dir / ".xlikesaver").is_dir():
+            account_names = {path.name for path in (self.output_dir / ".xlikesaver").iterdir() if path.is_dir()}
+        if self.legacy_dir is not None:
+            account_names.add(self.legacy_dir.name)
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    if entry.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+                        continue
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name == ".xlikesaver" or (restricted and directory == root and entry.name in account_names):
+                            continue
+                        pending.append(path)
+                    elif entry.is_file(follow_symlinks=False) and _FILENAME.fullmatch(entry.name):
+                        yield path, root, restricted
+
+    @_safe
+    def import_legacy(self, *, refresh=False) -> dict:
+        """Import once by default; an explicit refresh checks local files again."""
+        imported = self._db.execute("SELECT value FROM catalog_meta WHERE key='legacy_imported'").fetchone()
+        if imported is not None and not refresh:
+            return {"imported": False, "records": 0, "warnings": []}
+        before = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+        warnings = []
+        with self._db:
+            if refresh:
+                for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type,path FROM media WHERE path!=''").fetchall():
+                    try:
+                        actual, size, _ = self._file(row["path"])
+                        actual = self._preserve_missing_location(row["path"], actual)
+                    except HistoryError:
+                        # A copied/moved catalog may contain its old absolute
+                        # paths. Do not inspect those files outside this folder;
+                        # match files at the new location in the scan below.
+                        actual, size = "", None
+                    self._db.execute("UPDATE media SET path=?,filesize=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                                     (actual, size, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
+            for mode, name in _ARCHIVES.items():
+                archive = self.account_dir / name
+                if not archive.is_file() or archive.is_symlink():
+                    continue
+                try:
+                    with closing(sqlite3.connect(archive.as_uri() + "?mode=ro", uri=True, timeout=5)) as legacy:
+                        for (entry,) in legacy.execute("SELECT entry FROM archive"):
+                            match = _ENTRY.fullmatch(entry) if isinstance(entry, str) else None
+                            if not match or not 1 <= int(match[3]) <= 10000:
+                                continue
+                            media_type = "animated_gif" if match[2] in {"gif", "animated_gif"} else match[2] or "photo"
+                            row = self._legacy_row(mode, match[1], int(match[3]), media_type=media_type)
+                            self._upsert(row, replace_path=False)
+                except sqlite3.Error:
+                    warnings = ["일부 기존 다운로드 기록을 읽지 못했습니다. 실제 파일에서 확인한 내역은 표시합니다."]
+            known = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                     for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type FROM media")}
+            known_paths = {row["path"]: dict(row) for row in self._db.execute("SELECT * FROM media WHERE path!=''")}
+            for path, scan_root, restricted in self._files():
+                match = _FILENAME.fullmatch(path.name)
+                number = int(match[3])
+                if not 1 <= number <= 10000:
+                    continue
+                relative = path.relative_to(scan_root)
+                parent = relative.parts[0] if len(relative.parts) > 1 else ""
+                mode = "flat" if not parent else "date" if _date_folder(parent) else "author"
+                actual, size, filename = self._file(path)
+                extension = match[4].lower()
+                tag = (match[2] or "").lower()
+                media_type = "animated_gif" if tag in {"gif", "animated_gif"} else "video" if tag == "video" or extension == "mp4" else "photo"
+                previous = known_paths.get(actual)
+                if previous is not None:
+                    # An author's handle can equal the account-folder name.
+                    # The recorded identity resolves that directory ambiguity.
+                    mode, media_type = previous["folder_mode"], previous["media_type"]
+                    parent = previous["author"] if mode == "author" else parent
+                elif self._isolated_records and scan_root == self.legacy_dir:
+                    alternatives = [key[0] for key in known if key[1:] == (match[1], number, media_type)]
+                    if mode not in alternatives and len(alternatives) == 1:
+                        mode = alternatives[0]
+                if restricted and (mode, match[1], number, media_type) not in known:
+                    # Shared output folders contain no reliable account marker.
+                    # Only this account's archive/catalog identities are valid.
+                    continue
+                row = self._legacy_row(mode, match[1], number, path=actual, filesize=size,
+                                       filename=filename, media_type=media_type,
+                                       author=parent if mode == "author" else "", source="file_scan")
+                previous_identity = self.media_record(mode, {"tweet_id": match[1], "num": number, "type": media_type})
+                old_path = previous_identity.get("path", "") if previous_identity else ""
+                keep_old = (old_path and not self.is_download_path(old_path) and
+                            self.is_media_path(old_path) and Path(old_path).is_file())
+                self._upsert(row, replace_path=not keep_old)
+            self._db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('legacy_imported',?)", (_now(),))
+        after = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+        return {"imported": True, "records": after - before, "warnings": warnings}
+
+    @_safe
+    def summary(self) -> dict:
+        totals = self._db.execute("""SELECT COUNT(*) AS files,COUNT(DISTINCT tweet_id) AS posts,
+                    COALESCE(SUM(filesize),0) AS bytes,SUM(filesize IS NULL) AS unknown_bytes,
+                    MIN(posted_at) AS oldest_posted_at,MAX(posted_at) AS newest_posted_at,
+                    SUM(posted_source='id_estimate') AS estimated_dates,
+                    SUM(path!='' AND filesize IS NOT NULL) AS known_files,
+                    SUM(path='') AS missing_files FROM media""").fetchone()
+        result = dict(totals)
+        for key in ("unknown_bytes", "estimated_dates", "known_files", "missing_files"):
+            result[key] = result[key] or 0
+        counts = {kind: 0 for kind in _TYPES}
+        for kind, count in self._db.execute("SELECT media_type,COUNT(*) FROM media GROUP BY media_type"):
+            counts[kind] = count
+        result.update(counts)
+        result["counts"] = counts
+        result["embedded_sources"] = self._db.execute("SELECT COUNT(*) FROM media WHERE metadata_status='embedded'").fetchone()[0]
+        result["last_run"] = next(iter(self.runs(limit=1)), None)
+        result["archivepaths"] = [str(self.account_dir / name) for name in _ARCHIVES.values()
+                                  if (self.account_dir / name).is_file() and not (self.account_dir / name).is_symlink()]
+        return result
+
+    @_safe
+    def records(self, limit=100, offset=0, media_type="all", query="") -> list[dict]:
+        if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
+                isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
+                media_type not in _TYPES | {"all"} or not isinstance(query, str)):
+            raise HistoryError(_HISTORY_HELP)
+        clauses, params = [], []
+        if media_type != "all":
+            clauses.append("media_type=?")
+            params.append(media_type)
+        if query:
+            clauses.append("(author LIKE ? ESCAPE '\\' OR tweet_id LIKE ? ESCAPE '\\' OR filename LIKE ? ESCAPE '\\')")
+            query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            params.extend(["%" + query + "%"] * 3)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self._db.execute("SELECT * FROM media" + where +
+                                " ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num LIMIT ? OFFSET ?",
+                                (*params, limit, offset))
+        return [dict(row) for row in rows]
+
+    @_safe
+    def runs(self, limit=20) -> list[dict]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise HistoryError(_HISTORY_HELP)
+        return [dict(row) for row in self._db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,))]
+
+    @_safe
+    def export_records(self, destination: Path | str) -> int:
+        exported = 0
+        with Path(destination).open("w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.writer(file)
+            writer.writerow(_CSV_FIELDS)
+            for row in self._db.execute("SELECT " + ",".join(_CSV_FIELDS) + " FROM media ORDER BY tweet_id,num"):
+                writer.writerow([_csv_cell(value) for value in row])
+                exported += 1
+        return exported
+
+    @_safe
+    def close(self) -> None:
+        self._db.close()
