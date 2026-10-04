@@ -7,6 +7,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -25,6 +26,7 @@ TILES = {"files": "저장한 파일", "posts": "트윗", "photo": "사진", "vid
 PAGE_SIZE = 100
 NO_SELECTION = ("표에서 파일을 고르면 출처와 저장 위치가 여기에 나옵니다. 두 번 누르면 파일이 열립니다.\n"
                 "위 검색칸에서 작성자 아이디, 파일명, 트윗 번호로 찾을 수 있습니다.")
+NO_RUN_SELECTION = "실행을 고르면 어떻게 끝났는지 볼 수 있습니다."
 
 
 def format_bytes(value: int | float | None) -> str:
@@ -77,6 +79,8 @@ class HistoryWindow(tk.Toplevel):
         self.get_location = get_location
         self.is_downloading = is_downloading
         self.page = 0
+        self.displayed_page = 0
+        self.has_next_page = False
         self.busy = False
         self.metadata_active = False
         self.metadata_stop = threading.Event()
@@ -158,7 +162,8 @@ class HistoryWindow(tk.Toplevel):
         entry.pack(side="left", fill="x", expand=True, padx=8)
         entry.bind("<Return>", lambda _: self.search())
         ttk.Button(search, text="찾기", command=self.search).pack(side="left")
-        ttk.Button(search, text="CSV로 저장", command=self.export).pack(side="right", padx=(8, 0))
+        self.export_button = ttk.Button(search, text="CSV로 저장", command=self.export)
+        self.export_button.pack(side="right", padx=(8, 0))
 
         columns = ("posted", "kind", "author", "filename", "size", "saved")
         table = self._table(files, columns, row=1)
@@ -185,7 +190,16 @@ class HistoryWindow(tk.Toplevel):
         ttk.Label(actions, textvariable=self.page_text, style="Muted.TLabel").pack(side="right", padx=8)
         details = ttk.Frame(files, style="Card.TFrame", padding=(14, 8))
         details.grid(row=4, column=0, sticky="ew")
-        ttk.Label(details, textvariable=self.selection_text, style="Card.TLabel", wraplength=1000, justify="left").pack(anchor="w")
+        details.columnconfigure(0, weight=1)
+        self.selection_detail = tk.Text(details, height=4, width=1, wrap="word", font=theme.BODY,
+                                        background=theme.CARD, foreground=theme.INK,
+                                        borderwidth=0, highlightthickness=0, state="disabled")
+        self.selection_detail.grid(row=0, column=0, sticky="ew")
+        detail_scroll = ttk.Scrollbar(details, command=self.selection_detail.yview)
+        detail_scroll.grid(row=0, column=1, sticky="ns")
+        self.selection_detail.configure(yscrollcommand=detail_scroll.set)
+        self._selection_trace = self.selection_text.trace_add("write", self._update_selection_detail)
+        self._update_selection_detail()
 
         run_columns = ("started", "ended", "status", "saved", "skipped", "size", "visited", "last")
         self.run_tree = self._table(runs, run_columns, row=0)
@@ -194,7 +208,7 @@ class HistoryWindow(tk.Toplevel):
                 (160, 160, 110, 90, 90, 90, 100, 220)):
             self.run_tree.heading(key, text=title)
             self.run_tree.column(key, width=width, minwidth=60, stretch=key == "last")
-        self.run_text = tk.StringVar(value="실행을 고르면 어떻게 끝났는지 볼 수 있습니다.")
+        self.run_text = tk.StringVar(value=NO_RUN_SELECTION)
         self.run_tree.bind("<<TreeviewSelect>>", self.select_run)
         run_details = theme.card(runs)
         run_details.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -231,11 +245,31 @@ class HistoryWindow(tk.Toplevel):
         else:
             self.table_message.place_forget()
 
+    def _update_selection_detail(self, *_):
+        text = self.selection_text.get()
+        if self.selection_detail.get("1.0", "end-1c") == text:
+            return
+        self.selection_detail.configure(state="normal")
+        self.selection_detail.delete("1.0", "end")
+        self.selection_detail.insert("1.0", text)
+        self.selection_detail.configure(state="disabled")
+        self.selection_detail.yview_moveto(0)
+
+    def _update_controls(self):
+        ready = not self.busy and self.current_storage is not None
+        page_ready = ready and self.page == self.displayed_page
+        self.previous_button.configure(state="normal" if page_ready and self.page else "disabled")
+        self.next_button.configure(state="normal" if page_ready and self.has_next_page else "disabled")
+        self.export_button.configure(state="normal" if ready else "disabled")
+        self.backfill_button.configure(state="normal" if ready else "disabled")
+
     def search(self):
         self.page = 0
         self.refresh()
 
     def change_page(self, amount):
+        if self.busy or self.page != self.displayed_page:
+            return
         self.page = max(0, self.page + amount)
         self.refresh()
 
@@ -247,6 +281,12 @@ class HistoryWindow(tk.Toplevel):
         try:
             account, directory = self.get_location()
         except (ValueError, OSError):
+            self.current_account_dir = None
+            self.current_storage = None
+            self.completion_text = ""
+            self.page = 0
+            self.location_text.set("")
+            self._display({}, [], [])
             self.status_text.set("먼저 메인 화면에 X 아이디와 저장 폴더를 입력해 주세요.")
             self._show_table_note("메인 화면에 X 아이디와 저장 폴더를 입력하면\n그 폴더에 저장한 기록이 여기에 나옵니다.")
             return
@@ -255,11 +295,15 @@ class HistoryWindow(tk.Toplevel):
         if directory != self.current_account_dir:
             self.page = 0
             self.completion_text = ""
+            # A media identity or run ID is local to its account catalog.
+            # Clear the previous catalog before accepting the new snapshot.
+            self._display({}, [], [])
         self.current_account_dir = directory
         self.current_storage = location
         media_dir = location.media_dir if isinstance(location, StoragePaths) else directory
         self.location_text.set(f"@{account} · 저장 폴더 {media_dir}")
         self.busy = True
+        self._update_controls()
         self.generation += 1
         generation = self.generation
         kind = next(k for k, v in MEDIA_LABELS.items() if v == self.media_filter.get())
@@ -270,7 +314,10 @@ class HistoryWindow(tk.Toplevel):
                              "저장 작업 중에는 폴더 재확인을 건너뛰고 지금까지의 기록만 보여 줍니다.")
         if not self.tree.get_children():
             self._show_table_note("기록을 불러오는 중…")
-        threading.Thread(target=self._load, args=(generation, location, kind, self.query.get(), self.page, do_import), daemon=True).start()
+        query = self.query.get().strip()
+        if re.fullmatch(r"@[A-Za-z0-9_]{1,15}", query):
+            query = query[1:]
+        threading.Thread(target=self._load, args=(generation, location, kind, query, self.page, do_import), daemon=True).start()
 
     @staticmethod
     def _store(location):
@@ -285,7 +332,7 @@ class HistoryWindow(tk.Toplevel):
                 summary = store.summary()
                 summary["warnings"] = warnings
                 rows = store.records(limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, media_type=kind, query=query)
-                return store.account_dir, summary, rows, store.runs(limit=30)
+                return store.account_dir, summary, rows, store.runs(limit=30), page
 
             if do_import:
                 # Show what the catalog already holds at once. Re-checking every
@@ -319,7 +366,7 @@ class HistoryWindow(tk.Toplevel):
                     self.status_text.set(result)
                     continue
                 if kind == "preview":
-                    self._display(*result[1:])
+                    self._display(*result[1:], scanning=True)
                     self.status_text.set("폴더의 파일을 다시 확인하는 중입니다… 그동안 지금까지의 기록을 먼저 보여 드립니다.")
                     continue
                 self.busy = False
@@ -331,15 +378,16 @@ class HistoryWindow(tk.Toplevel):
                     self.destroy()
                     return
                 if kind == "loaded":
-                    directory, summary, rows, runs = result
+                    directory, *snapshot = result
                     self.loaded_locations.add(directory)
-                    self._display(summary, rows, runs)
+                    self._display(*snapshot)
                 else:
                     self.status_text.set(result)
                     if kind == "backfilled":
                         self.completion_text = result
                     elif kind == "error" and not self.tree.get_children():
                         self._show_table_note("기록을 읽지 못했습니다.\n아래 안내를 확인해 주세요.")
+                self._update_controls()
                 if self.pending:
                     self.pending = False
                     do_import, self.pending_import = self.pending_import, False
@@ -351,7 +399,7 @@ class HistoryWindow(tk.Toplevel):
         if self.winfo_exists():
             self._poll_timer = self.after(120, self._poll)
 
-    def _display(self, summary, records, runs):
+    def _display(self, summary, records, runs, page=None, *, scanning=False):
         self.current_summary = summary
         files = summary.get("files", 0) or 0
         values = {"files": files, "posts": summary.get("posts", 0) or 0, "photo": summary.get("photo", 0) or 0,
@@ -371,7 +419,8 @@ class HistoryWindow(tk.Toplevel):
         range_text = (f"저장한 트윗의 게시일: {format_day(oldest)} ~ {format_day(newest)} (이 기간의 Like를 모두 저장했다는 뜻은 아닙니다)"
                       if oldest else "저장한 트윗의 게시일: 아직 없음")
         self.date_text.set(range_text + ("  ·  " + " · ".join(notes) if notes else ""))
-        selected = self.tree.selection()
+        selected = self.selected()
+        selected_identity = self._record_identity(selected) if selected else None
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
         for index, row in enumerate(records[:PAGE_SIZE]):
@@ -384,19 +433,29 @@ class HistoryWindow(tk.Toplevel):
             author = "@" + row["author"] if row.get("author") else "–"
             self.tree.insert("", "end", iid=key, values=(posted, MEDIA_LABELS.get(row.get("media_type"), "알 수 없음"), author, filename,
                                                          format_bytes(row.get("filesize")), format_short(row.get("saved_at"))))
-        if selected and self.tree.exists(selected[0]):
-            self.tree.selection_set(selected[0])
+        for key, row in self.rows.items():
+            if selected_identity is not None and self._record_identity(row) == selected_identity:
+                self.tree.selection_set(key)
+                self.tree.focus(key)
+                self.tree.see(key)
+                break
         if records:
             self._show_table_note("")
+        elif scanning:
+            self._show_table_note("폴더의 파일을 확인하는 중입니다…\n확인이 끝나면 저장한 기록을 보여 드립니다.")
         elif files:
             self._show_table_note("찾는 조건에 맞는 파일이 없습니다.")
         else:
             self._show_table_note("아직 저장한 파일이 없습니다.\n메인 화면에서 ‘저장 시작’을 누르면 여기에 쌓입니다.")
-        self.previous_button.configure(state="normal" if self.page else "disabled")
-        self.next_button.configure(state="normal" if len(records) > PAGE_SIZE else "disabled")
-        start = self.page * PAGE_SIZE
+        self.displayed_page = self.page if page is None else page
+        self.has_next_page = len(records) > PAGE_SIZE
+        self._update_controls()
+        start = self.displayed_page * PAGE_SIZE
         shown = len(records[:PAGE_SIZE])
         self.page_text.set(f"{start + 1:,}–{start + shown:,}번째" if shown else "")
+        run_selection = self.run_tree.selection()
+        selected_run = self.run_rows.get(run_selection[0]) if run_selection else None
+        selected_run_id = selected_run.get("id") if selected_run else None
         self.run_tree.delete(*self.run_tree.get_children())
         self.run_rows.clear()
         for index, row in enumerate(runs):
@@ -406,10 +465,19 @@ class HistoryWindow(tk.Toplevel):
                                                              STATUS_LABELS.get(row.get("status"), "기록 없음"), row.get("saved", 0),
                                                              row.get("skipped", 0), row.get("size_skipped", 0), row.get("visited", 0),
                                                              format_short(row.get("last_posted_at"))))
+            if selected_run_id is not None and row.get("id") == selected_run_id:
+                self.run_tree.selection_set(key)
+                self.run_tree.focus(key)
+                self.run_tree.see(key)
         warning = " ".join(summary.get("warnings", []))
         self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") +
                              f"파일 안에 출처가 기록된 파일 {summary.get('embedded_sources', 0):,}개 · 작성자까지 기록된 파일 {summary.get('embedded_authors', 0):,}개")
         self.select_record()
+        self.select_run()
+
+    @staticmethod
+    def _record_identity(row):
+        return tuple(row.get(key) for key in ("folder_mode", "tweet_id", "num", "media_type"))
 
     def selected(self):
         selection = self.tree.selection()
@@ -440,6 +508,8 @@ class HistoryWindow(tk.Toplevel):
         if row:
             scan = "새 Like만 빠르게 확인" if row.get("scan_mode") == "quick" else "전체 목록 확인"
             self.run_text.set(f"{row.get('message') or '실행 중이거나 종료 설명이 없습니다.'}\n확인 방식: {scan} · 마지막으로 확인한 트윗: {row.get('last_tweet_id') or '기록 없음'}")
+        else:
+            self.run_text.set(NO_RUN_SELECTION)
 
     def open_file(self):
         row = self.selected()
@@ -480,6 +550,7 @@ class HistoryWindow(tk.Toplevel):
         if not destination:
             return
         self.busy = True
+        self._update_controls()
         self.generation += 1
         self.status_text.set("전체 파일 기록을 CSV로 내보내고 있습니다…")
         threading.Thread(target=self._export, args=(self.generation, self.current_storage, destination), daemon=True).start()
@@ -503,6 +574,7 @@ class HistoryWindow(tk.Toplevel):
             return
         self.completion_text = ""
         self.busy = True
+        self._update_controls()
         self.metadata_active = True
         self.metadata_stop.clear()
         self.source_stop_button.configure(state="normal")
@@ -603,6 +675,7 @@ class HistoryWindow(tk.Toplevel):
         if self._destroyed:
             return
         self._destroyed = True
+        self.selection_text.trace_remove("write", self._selection_trace)
         if self._poll_timer is not None:
             self.tk.call("after", "cancel", self._poll_timer)
             self._poll_timer = None

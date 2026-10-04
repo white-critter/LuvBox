@@ -327,7 +327,7 @@ class GuiTests(unittest.TestCase):
         for widget in self.app.inputs:
             self.assertEqual(str(widget.cget("state")), "disabled")
 
-    def test_minimum_window_keeps_actions_details_and_log_visible(self):
+    def test_minimum_window_keeps_actions_details_and_log_reachable(self):
         self.root.attributes("-alpha", 0)
         width, height = self.root.minsize()
         self.root.geometry(f"{width}x{height}")
@@ -340,9 +340,111 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.app.start_button.winfo_ismapped())
         self.assertGreater(self.app.progress_detail_label.winfo_height(), 25)
         self.assertGreaterEqual(self.app.log.winfo_height(), 28)
-        for widget in (self.app.start_button, self.app.options_button, self.app.progress_detail_label, self.app.log):
+        # A short window scrolls rather than clipping controls or shrinking type.
+        for widget in (self.app.start_button, self.app.options_button):
             bottom = widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height()
             self.assertLessEqual(bottom, self.root.winfo_height())
+        self.app.content_view.canvas.yview_moveto(1)
+        self.root.update()
+        for widget in (self.app.progress_detail_label, self.app.log):
+            top = widget.winfo_rooty() - self.root.winfo_rooty()
+            self.assertGreaterEqual(top, 0)
+            self.assertLessEqual(top + widget.winfo_height(), self.root.winfo_height())
+
+    def test_narrow_window_wraps_option_summary_inside_its_column(self):
+        self.root.attributes("-alpha", 0)
+        self.root.geometry("780x880")
+        self.root.deiconify()
+        self.root.update()
+        label = self.app.option_summary_label
+        self.assertLessEqual(label.winfo_reqwidth(), label.winfo_width() + 2)
+        self.assertGreater(label.winfo_height(), 25)
+
+    def test_short_screen_keeps_full_log_reachable_and_wheel_scrolls(self):
+        window = tk.Toplevel(self.root)
+        window.withdraw()
+        window.attributes("-alpha", 0)
+        self.addCleanup(window.destroy)
+        with patch.object(window, "winfo_screenwidth", return_value=1366), \
+                patch.object(window, "winfo_screenheight", return_value=768):
+            app = App(window)
+        window.deiconify()
+        window.update()
+        self.assertLessEqual(window.winfo_height(), 688)
+        self.assertGreaterEqual(app.log.winfo_height(), 60)
+        canvas = app.content_view.canvas
+        self.assertLess(canvas.yview()[1], 1)
+        app.start_button.event_generate("<MouseWheel>", delta=-120)
+        window.update()
+        self.assertGreater(canvas.yview()[0], 0)
+        canvas.yview_moveto(1)
+        window.update()
+        top = app.log.winfo_rooty() - window.winfo_rooty()
+        self.assertGreaterEqual(top, 0)
+        self.assertLessEqual(top + app.log.winfo_height(), window.winfo_height())
+        # The log has its own scroll; its wheel must not move the whole screen.
+        position = canvas.yview()
+        app.log.event_generate("<MouseWheel>", delta=120)
+        window.update()
+        self.assertEqual(canvas.yview(), position)
+        # Keyboard navigation also brings an off-screen field into view.
+        canvas.yview_moveto(0)
+        window.update()
+        app.log.event_generate("<FocusIn>")
+        window.update()
+        self.assertGreater(canvas.yview()[0], 0)
+        self.assertGreaterEqual(app.log.winfo_rooty() - window.winfo_rooty(), 0)
+
+    def test_long_paths_and_live_progress_keep_log_full_height_after_resize(self):
+        self.root.attributes("-alpha", 0)
+        self.root.geometry("960x760")
+        self.root.deiconify()
+        self.root.update()
+        self.app.folder.set("C:/GoogleDrive/" + "very-long-path-name/" * 12)
+        self.app.status_detail.set("전체 Like 목록을 확인하는 중입니다. " * 12)
+        self.app.events.put({"type": "progress", "filename": "1000000000000000000_video_1.mp4",
+                             "tweet_id": "1000000000000000000", "author": "offline_test",
+                             "downloaded": 50, "total": 100, "speed": 25})
+        self.app._poll()
+        self.app.detailed_progress.set(True)
+        self.app._toggle_progress()
+        self.root.update()
+        self.root.geometry("780x760")
+        self.root.update()
+        view = self.app.content_view
+        self.assertGreaterEqual(view.content.winfo_height(), view.content.winfo_reqheight())
+        self.assertGreaterEqual(self.app.log.winfo_height(), 60)
+        view.canvas.yview_moveto(1)
+        self.root.update()
+        bottom = self.app.log.winfo_rooty() - self.root.winfo_rooty() + self.app.log.winfo_height()
+        self.assertLessEqual(bottom, self.root.winfo_height())
+
+    def test_trial_applies_to_one_run_and_validation_does_not_consume_it(self):
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        self.app.limited.set(True)
+        self.session_mock.return_value = True
+        self.app.max_video_mb.set("bad")
+        with patch("xlikesaver.gui.messagebox.showerror"), patch("xlikesaver.gui.threading.Thread") as thread:
+            self.app.start()
+            thread.assert_not_called()
+        self.assertTrue(self.app.limited.get())
+        self.app.max_video_mb.set("200")
+        with patch("xlikesaver.gui.threading.Thread") as thread, \
+                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+            self.app.start()
+            self.assertEqual(thread.call_args.kwargs["args"][0].photo_limit, 20)
+            self.app.events.put({"type": "finished", "status": "finished"})
+            self.app.events.put({"type": "process_exit", "code": 0})
+            self.app._poll()
+            self.assertFalse(self.app.limited.get())
+            self.app.start()
+            self.assertEqual(thread.call_args.kwargs["args"][0].photo_limit, 0)
+
+    def test_stored_login_does_not_claim_server_validation(self):
+        self.session_mock.return_value = True
+        self.app._auth_changed()
+        self.assertIn("연결 정보 저장됨", self.app.login_text.get())
 
     def test_main_text_uses_readable_sizes(self):
         import tkinter.font as tkfont
@@ -368,6 +470,25 @@ class GuiTests(unittest.TestCase):
         self.assertIn("전체 확인", self.app.option_summary.get())
         self.app._close_options()
         self.assertIsNone(self.app.options_window)
+
+    def test_options_fit_short_screen_and_close_stays_reachable(self):
+        self.root.attributes("-alpha", 0)
+        with patch.object(self.root, "winfo_screenheight", return_value=768):
+            self.app.show_options()
+        window = self.app.options_window
+        window.attributes("-alpha", 0)
+        self.root.deiconify()
+        window.update()
+        self.assertLessEqual(window.winfo_height(), 648)
+        view = window.content_view
+        self.assertLess(view.canvas.yview()[1], 1)
+        view.canvas.yview_moveto(1)
+        window.update()
+        close = next(widget for widget in view.content.winfo_children()
+                     if widget.winfo_class() == "TButton" and widget.cget("text") == "닫기")
+        top = close.winfo_rooty() - window.winfo_rooty()
+        self.assertGreaterEqual(top, 0)
+        self.assertLessEqual(top + close.winfo_height(), window.winfo_height())
 
     def test_invalid_video_limit_stops_before_worker(self):
         self.app.account.set("offline_test")

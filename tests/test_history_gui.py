@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from xlikesaver.gui import App
 from xlikesaver.history import HistoryStore
-from xlikesaver.history_gui import HistoryWindow
+from xlikesaver.history_gui import HistoryWindow, NO_SELECTION, NO_RUN_SELECTION
 from xlikesaver.protection import AccountGuard, ProtectionError
 from xlikesaver.storage import OutputGuard, resolve_storage
 from tests.test_gui import destroy_tk
@@ -73,6 +73,174 @@ class HistoryGuiTests(unittest.TestCase):
             self.window.open_tweet()
         browser.assert_called_once_with("https://x.com/i/web/status/100")
 
+    def test_file_selection_follows_media_identity_and_clears_when_absent(self):
+        store = self.records(2)
+        rows = store.records()
+        self.window._display(store.summary(), rows, [])
+        self.window.tree.selection_set("0")
+        self.window.select_record()
+        selected = rows[0]
+        # The same tweet can also exist in a different folder mode. It must
+        # not take over the selection when new records move the rows around.
+        other_mode = dict(selected, folder_mode="author")
+        self.window._display(store.summary(), [other_mode, rows[1], selected], [])
+        self.assertEqual(self.window.tree.selection(), ("2",))
+        self.assertEqual(self.window.selected(), selected)
+        with patch("xlikesaver.history_gui.webbrowser.open") as browser:
+            self.window.open_tweet()
+        browser.assert_called_once_with("https://x.com/i/web/status/" + selected["tweet_id"])
+        self.window._display(store.summary(), [other_mode, rows[1]], [])
+        self.assertIsNone(self.window.selected())
+        self.assertEqual(self.window.selection_text.get(), NO_SELECTION)
+
+    def test_run_selection_follows_run_id_and_clears_old_details(self):
+        first = {"id": 1, "status": "running", "message": "still running"}
+        second = {"id": 2, "status": "finished", "message": "new success"}
+        self.window._display({}, [], [first])
+        self.window.run_tree.selection_set("0")
+        self.window.select_run()
+        finished = dict(first, status="finished", message="selected run finished")
+        self.window._display({}, [], [second, finished])
+        self.assertEqual(self.window.run_tree.selection(), ("1",))
+        self.assertIn("selected run finished", self.window.run_text.get())
+        self.window._display({}, [], [second])
+        self.assertEqual(self.window.run_tree.selection(), ())
+        self.assertEqual(self.window.run_text.get(), NO_RUN_SELECTION)
+
+    def test_location_change_clears_previous_catalog_selection_and_details(self):
+        self.records()
+        self.load()
+        self.window.tree.selection_set("0")
+        self.window.select_record()
+        next_account = Path(self.temporary.name) / "next-account"
+        with closing(HistoryStore(next_account)) as store:
+            path = next_account / "100_1.jpg"
+            path.write_bytes(b"different-image")
+            store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo"}, path)
+        self.window.get_location = lambda: ("next_account", next_account)
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.refresh()
+        self.assertEqual(self.window.tree.get_children(), ())
+        self.assertEqual(self.window.selection_text.get(), NO_SELECTION)
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(len(self.window.rows), 1)
+        self.assertIsNone(self.window.selected())
+
+    def test_invalid_location_clears_catalog_and_disables_previous_folder_actions(self):
+        self.records()
+        self.load()
+        self.window.tree.selection_set("0")
+        self.window.select_record()
+        self.window.get_location = lambda: (_ for _ in ()).throw(ValueError("invalid account"))
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.refresh()
+        thread.assert_not_called()
+        self.assertEqual(self.window.tree.get_children(), ())
+        self.assertEqual(self.window.run_tree.get_children(), ())
+        self.assertEqual(self.window.selection_text.get(), NO_SELECTION)
+        self.assertIsNone(self.window.current_storage)
+        self.assertIsNone(self.window.current_account_dir)
+        self.assertEqual(str(self.window.export_button.cget("state")), "disabled")
+        self.assertEqual(str(self.window.backfill_button.cget("state")), "disabled")
+        with patch("xlikesaver.history_gui.webbrowser.open") as browser:
+            self.window.open_tweet()
+        browser.assert_not_called()
+
+    def test_catalog_preview_remains_openable_while_csv_and_backfill_are_disabled(self):
+        store = self.records()
+        self.load()
+        with patch("xlikesaver.history_gui.threading.Thread"):
+            self.window.refresh(import_legacy=True)
+        self.window.results.put((self.window.generation, "preview",
+                                 (self.account, store.summary(), store.records(), [], 0)))
+        self.window._poll()
+        self.assertTrue(self.window.busy)
+        self.assertEqual(str(self.window.export_button.cget("state")), "disabled")
+        self.assertEqual(str(self.window.backfill_button.cget("state")), "disabled")
+        self.window.tree.selection_set("0")
+        with patch("xlikesaver.history_gui.os.startfile", create=True) as opened:
+            self.window.open_file()
+        opened.assert_called_once_with(store.records()[0]["path"])
+        self.window.results.put((self.window.generation, "loaded",
+                                 (self.account, store.summary(), store.records(), [], 0)))
+        self.window._poll()
+        self.assertEqual(str(self.window.export_button.cget("state")), "normal")
+        self.assertEqual(str(self.window.backfill_button.cget("state")), "normal")
+
+    def test_pagination_ignores_repeated_clicks_until_requested_page_loads(self):
+        self.records(105)
+        self.load()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.change_page(1)
+            arguments = thread.call_args.kwargs["args"]
+            self.window.change_page(1)
+            self.window.change_page(-1)
+        self.assertEqual(thread.call_count, 1)
+        self.assertEqual(self.window.page, 1)
+        self.assertEqual(str(self.window.previous_button.cget("state")), "disabled")
+        self.assertEqual(str(self.window.next_button.cget("state")), "disabled")
+        self.window._load(*arguments)
+        self.window._poll()
+        self.assertEqual(self.window.page_text.get(), "101–105번째")
+        self.assertEqual(str(self.window.previous_button.cget("state")), "normal")
+        self.assertEqual(str(self.window.next_button.cget("state")), "disabled")
+
+    def test_pending_search_does_not_relabel_previous_page_results(self):
+        self.records(105)
+        self.load()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.change_page(1)
+            arguments = thread.call_args.kwargs["args"]
+            self.window.query.set("104")
+            self.window.search()
+            self.window._load(*arguments)
+            self.window._poll()
+            pending_arguments = thread.call_args.kwargs["args"]
+        self.assertEqual(self.window.page_text.get(), "101–105번째")
+        self.assertEqual(self.window.page, 0)
+        self.assertEqual(self.window.displayed_page, 1)
+        self.assertEqual(pending_arguments[4], 0)
+        self.assertEqual(str(self.window.previous_button.cget("state")), "disabled")
+        self.window._load(*pending_arguments)
+        self.window._poll()
+        self.assertEqual(self.window.page_text.get(), "1–1번째")
+        self.assertEqual(len(self.window.rows), 1)
+
+    def test_empty_catalog_preview_stays_loading_until_folder_scan_finishes(self):
+        self.account.mkdir()
+        (self.account / "100_1.jpg").write_bytes(b"offline-image")
+        original_import = HistoryStore.import_legacy
+
+        def importing(store, **kwargs):
+            self.window._poll()
+            self.assertTrue(self.window.busy)
+            self.assertIn("확인하는 중", self.window.table_note.get())
+            self.assertNotIn("아직 저장한 파일이 없습니다", self.window.table_note.get())
+            return original_import(store, **kwargs)
+
+        with patch.object(HistoryStore, "import_legacy", importing):
+            self.window._load(self.window.generation, self.account, "all", "", 0, True)
+        self.window._poll()
+        self.assertEqual(len(self.window.rows), 1)
+        self.assertFalse(self.window.table_message.winfo_manager())
+
+    def test_author_handle_with_at_prefix_finds_catalog_records(self):
+        self.records()
+        self.load()
+        self.window.query.set("  @alice  ")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.search()
+        arguments = thread.call_args.kwargs["args"]
+        self.assertEqual(arguments[3], "alice")
+        self.window._load(*arguments)
+        self.window._poll()
+        self.assertEqual([row["author"] for row in self.window.rows.values()], ["alice"])
+        self.window.query.set("@alice_1.jpg")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.search()
+        self.assertEqual(thread.call_args.kwargs["args"][3], "@alice_1.jpg")
+
     def test_backfill_is_disabled_while_downloading(self):
         self.window.busy = False
         self.window.is_downloading = lambda: True
@@ -101,6 +269,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertNotIn(scheduled, self.root.tk.call("after", "info"))
         self.assertEqual(self.root.winfo_exists(), 1)
         self.window._poll()  # A late callback is harmless after closing.
+        self.window.selection_text.set("late selection text")
 
     def test_closing_during_backfill_waits_for_result_then_cancels_poll(self):
         self.window.metadata_active = True
@@ -255,11 +424,43 @@ class HistoryGuiTests(unittest.TestCase):
         for tree in (self.window.tree, self.window.run_tree):
             self.assertEqual(str(tree.grid_info()["in"]), str(tree.master))
         self.assertTrue(self.window.tree.winfo_ismapped())
-        for variable in (self.window.selection_text, self.window.status_text):
-            label = next(widget for widget in self.window.wrapping_labels if str(widget.cget("textvariable")) == str(variable))
-            self.assertTrue(label.winfo_ismapped())
-            bottom = label.winfo_rooty() - self.window.winfo_rooty() + label.winfo_height()
+        status_label = next(widget for widget in self.window.wrapping_labels
+                            if str(widget.cget("textvariable")) == str(self.window.status_text))
+        for widget in (self.window.selection_detail, status_label):
+            self.assertTrue(widget.winfo_ismapped())
+            bottom = widget.winfo_rooty() - self.window.winfo_rooty() + widget.winfo_height()
             self.assertLessEqual(bottom, self.window.winfo_height())
+
+    def test_long_selected_path_is_scrollable_and_does_not_hide_table(self):
+        store = self.records()
+        row = dict(store.records()[0], path="C:/Google Drive/" + "long folder/" * 70 + "100_1.jpg")
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        width, height = self.window.minsize()
+        self.window.geometry(f"{width}x{height}")
+        self.window.deiconify()
+        self.window._display(store.summary(), [row], [])
+        self.window.tree.selection_set("0")
+        self.window.select_record()
+        self.root.update()
+        detail = self.window.selection_detail
+        self.assertGreaterEqual(self.window.tree.winfo_height(), 90)
+        self.assertEqual(detail.get("1.0", "end-1c"), self.window.selection_text.get())
+        self.assertEqual(str(detail.cget("state")), "disabled")
+        original = detail.get("1.0", "end-1c")
+        detail.insert("1.0", "unwanted edit")
+        self.assertEqual(detail.get("1.0", "end-1c"), original)
+        self.assertLess(detail.yview()[1], 1)
+        detail.yview_moveto(1)
+        self.root.update()
+        self.assertAlmostEqual(detail.yview()[1], 1)
+        self.assertIn("파일 안 기록", detail.get("@0,0", "end-1c"))
+        # Auto-refresh of the same selected file retains the user's scroll.
+        before = detail.yview()
+        self.window._display(store.summary(), [row], [])
+        self.root.update()
+        self.assertEqual(detail.yview(), before)
 
     def test_backfill_writes_only_within_current_account_and_preserves_save_times(self):
         store = self.records()

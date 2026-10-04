@@ -120,8 +120,7 @@ class App:
         self.detailed_progress = tk.BooleanVar(value=settings.get("detailed_progress", False) is True)
         self.progress_summary = tk.StringVar(value="")
         self.progress_details = tk.StringVar()
-        # Normal saving covers all available Likes. A short test is opt-in for
-        # each session, including after loading settings from older versions.
+        # A short test is opt-in for one run and is never loaded from settings.
         self.limited = tk.BooleanVar(value=False)
         scan = settings.get("scan_mode", "quick")
         self.scan_mode = tk.StringVar(value=next((k for k, v in SCAN_MODES.items() if v == scan), next(iter(SCAN_MODES))))
@@ -144,16 +143,15 @@ class App:
         self._auth_changed()
         self._preview_location()
         self._update_option_summary()
-        # The smallest window still shows every control, the progress details
-        # and a few log lines; large screens get more log space.
-        root.update_idletasks()
-        root.minsize(min(780, width), min(root.winfo_reqheight() + 60, root.winfo_screenheight() - 80))
+        # Short screens can scroll without shrinking the readable type.
+        root.minsize(min(780, width), min(760, root.winfo_screenheight() - 80))
         self.root.after(120, self._poll)
 
     # ------------------------------------------------------------------ layout
     def _build(self):
-        shell = ttk.Frame(self.root, padding=(24, 16))
-        shell.pack(fill="both", expand=True)
+        self.content_view = theme.ScrollableContent(self.root)
+        self.content_view.pack(fill="both", expand=True)
+        shell = self.content_view.content
         header = ttk.Frame(shell)
         header.pack(fill="x")
         titles = ttk.Frame(header)
@@ -168,12 +166,12 @@ class App:
         self._label(form, "내 X 아이디", 0)
         account = ttk.Entry(form, textvariable=self.account, font=theme.BODY)
         account.grid(row=0, column=1, sticky="ew", pady=(4, 0))
-        ttk.Label(form, text="예: my_account 또는 x.com/my_account", style="CardMuted.TLabel").grid(row=1, column=1, sticky="w", pady=(1, 4))
+        self._wrapping_label(form, text="예: my_account 또는 x.com/my_account", style="CardMuted.TLabel", wraplength=470).grid(row=1, column=1, sticky="ew", pady=(1, 4))
         self.inputs.append(account)
 
         self._label(form, "로그인", 2)
-        self.login_label = ttk.Label(form, textvariable=self.login_text, style="Disconnected.TLabel")
-        self.login_label.grid(row=2, column=1, sticky="w", pady=4)
+        self.login_label = self._wrapping_label(form, textvariable=self.login_text, style="Disconnected.TLabel", wraplength=470)
+        self.login_label.grid(row=2, column=1, sticky="ew", pady=4)
         self.login_button = ttk.Button(form, text="로그인 연결", command=self.show_connect)
         self.login_button.grid(row=2, column=2, sticky="e", padx=(12, 0), pady=4)
         self.inputs.append(self.login_button)
@@ -191,12 +189,13 @@ class App:
         preview = ttk.Frame(form, style="Plain.TFrame")
         preview.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(1, 2))
         ttk.Label(preview, text="파일 저장 위치:", style="CardMuted.TLabel").pack(side="left")
-        self.preview_label = ttk.Label(preview, textvariable=self.destination_preview, style="CardMuted.TLabel", wraplength=600)
-        self.preview_label.pack(side="left", padx=(6, 0))
+        self.preview_label = self._wrapping_label(preview, textvariable=self.destination_preview, style="CardMuted.TLabel", wraplength=600)
+        self.preview_label.pack(side="left", fill="x", expand=True, padx=(6, 0))
 
         ttk.Separator(form).grid(row=5, column=0, columnspan=3, sticky="ew", pady=6)
         self._label(form, "저장 방식", 6)
-        ttk.Label(form, textvariable=self.option_summary, style="Card.TLabel", wraplength=470, justify="left").grid(row=6, column=1, sticky="w", pady=4)
+        self.option_summary_label = self._wrapping_label(form, textvariable=self.option_summary, style="Card.TLabel", wraplength=470)
+        self.option_summary_label.grid(row=6, column=1, sticky="ew", pady=4)
         self.options_button = ttk.Button(form, text="옵션 변경", command=self.show_options)
         self.options_button.grid(row=6, column=2, sticky="e", padx=(12, 0), pady=4)
         self.inputs.append(self.options_button)
@@ -208,10 +207,10 @@ class App:
         self.stop_button = ttk.Button(actions, text="중단", style="Big.TButton", command=self.stop, state="disabled")
         self.stop_button.pack(side="left", padx=10)
 
-        ttk.Label(shell, text="X 공식 API가 아닌 방식이라 계정이 제한될 수 있습니다. 너무 자주 반복 실행하지 마세요.",
-                  style="Warn.TLabel", wraplength=880).pack(side="bottom", anchor="w", pady=(8, 0))
-        ttk.Label(shell, textvariable=self.status, style="Status.TLabel", wraplength=880, justify="left").pack(anchor="w")
-        ttk.Label(shell, textvariable=self.status_detail, style="Muted.TLabel", wraplength=880, justify="left").pack(anchor="w", pady=(2, 8))
+        self._wrapping_label(shell, text="X 공식 API가 아닌 방식이라 계정이 제한될 수 있습니다. 너무 자주 반복 실행하지 마세요.",
+                             style="Warn.TLabel", wraplength=880).pack(side="bottom", fill="x", pady=(8, 0))
+        self._wrapping_label(shell, textvariable=self.status, style="Status.TLabel", wraplength=880).pack(fill="x")
+        self._wrapping_label(shell, textvariable=self.status_detail, style="Muted.TLabel", wraplength=880).pack(fill="x", pady=(2, 8))
         tiles = ttk.Frame(shell)
         tiles.pack(fill="x")
         for column, (variable, caption) in enumerate(((self.saved_text, "이번에 새로 저장"), (self.skipped_text, "이미 저장돼 있음"),
@@ -222,22 +221,32 @@ class App:
         self.progress.pack(fill="x", pady=(10, 4))
         self.progress_heading = ttk.Frame(shell)
         self.progress_heading.pack(fill="x")
-        ttk.Label(self.progress_heading, textvariable=self.progress_summary, style="Muted.TLabel", wraplength=720).pack(side="left", fill="x", expand=True)
+        self._wrapping_label(self.progress_heading, textvariable=self.progress_summary, style="Muted.TLabel", wraplength=720).pack(side="left", fill="x", expand=True)
         ttk.Checkbutton(self.progress_heading, text="자세히", variable=self.detailed_progress, command=self._toggle_progress,
                         style="Plain.TCheckbutton").pack(side="right")
-        self.progress_detail_label = ttk.Label(shell, textvariable=self.progress_details, style="Muted.TLabel", wraplength=880, justify="left")
+        self.progress_detail_label = self._wrapping_label(shell, textvariable=self.progress_details, style="Muted.TLabel", wraplength=880)
         self.log_title = ttk.Label(shell, text="작업 기록", style="Muted.TLabel")
         self.log_title.pack(anchor="w", pady=(6, 2))
-        self.log_frame = ttk.Frame(shell)
+        self.log_frame = ttk.Frame(shell, style="Card.TFrame", padding=(10, 8))
         self.log_frame.pack(fill="both", expand=True)
-        self.log = tk.Text(self.log_frame, height=3, wrap="word", bg=theme.LOG_BG, fg=theme.INK, relief="solid", borderwidth=1,
-                           highlightthickness=0, padx=10, pady=6, state="disabled", font=theme.SMALL)
+        self.log = tk.Text(self.log_frame, height=3, wrap="word", bg=CARD, fg=theme.INK, relief="flat", borderwidth=0,
+                           highlightthickness=0, padx=4, pady=4, state="disabled", font=theme.SMALL)
         scroll = ttk.Scrollbar(self.log_frame, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
         if self.detailed_progress.get():
             self._toggle_progress()
+
+    def _wrapping_label(self, parent, **kwargs):
+        label = ttk.Label(parent, justify="left", **kwargs)
+        def resize(event):
+            width = max(1, event.width)
+            if int(label.cget("wraplength")) != width:
+                label.configure(wraplength=width)
+            self.content_view._schedule_layout()
+        label.bind("<Configure>", resize)
+        return label
 
     @staticmethod
     def _label(parent, text, row):
@@ -249,6 +258,7 @@ class App:
             self.progress_detail_label.pack(after=self.progress_heading, fill="x", pady=(2, 0))
         else:
             self.progress_detail_label.pack_forget()
+        self.content_view._schedule_layout()
 
     def _update_option_summary(self):
         layout = {"flat": "한 폴더", "author": "작성자별 폴더", "date": "날짜별 폴더"}[FOLDER_MODES[self.folder_mode.get()]]
@@ -339,7 +349,7 @@ class App:
         mode = AUTH_MODES[self.auth.get()]
         if mode == "managed":
             connected = has_session()
-            self.login_text.set("● 연결됨" if connected else "● 연결 필요 — 오른쪽 버튼을 눌러 연결하세요")
+            self.login_text.set("● 연결 정보 저장됨" if connected else "● 연결 필요 — 오른쪽 버튼을 눌러 연결하세요")
         else:
             self.token.set("")
             connected = bool(self.cookies.get().strip())
@@ -367,8 +377,7 @@ class App:
         window.configure(bg=CARD)
         window.transient(self.root)
         window.resizable(False, False)
-        body = ttk.Frame(window, style="Plain.TFrame", padding=(26, 22))
-        body.pack(fill="both", expand=True)
+        body = self._popup_content(window, padding=(26, 22))
         ttk.Label(body, text="X 로그인 연결", style="CardHeading.TLabel").pack(anchor="w")
         if notice:
             ttk.Label(body, text=notice, style="CardMuted.TLabel", foreground=theme.ORANGE, wraplength=600).pack(anchor="w", pady=(4, 0))
@@ -409,7 +418,24 @@ class App:
         ttk.Button(footer, text="닫기", command=self._close_connect).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", self._close_connect)
         self._auth_changed()
+        self._fit_popup(window)
         self.token_entry.focus_set()
+
+    @staticmethod
+    def _popup_content(window, *, padding):
+        view = window.content_view = theme.ScrollableContent(window, padding=padding)
+        view.configure(style="Plain.TFrame")
+        view.canvas.configure(background=CARD)
+        view.content.configure(style="Plain.TFrame")
+        view.pack(fill="both", expand=True)
+        return view.content
+
+    def _fit_popup(self, window):
+        window.update_idletasks()
+        body = window.content_view.content
+        width = min(body.winfo_reqwidth(), self.root.winfo_screenwidth() - 80)
+        height = min(body.winfo_reqheight(), self.root.winfo_screenheight() - 120)
+        window.geometry(f"{width}x{height}")
 
     def _close_connect(self):
         window, self.connect_window = self.connect_window, None
@@ -471,8 +497,7 @@ class App:
         window.configure(bg=CARD)
         window.transient(self.root)
         window.resizable(False, False)
-        body = ttk.Frame(window, style="Plain.TFrame", padding=(26, 20))
-        body.pack(fill="both", expand=True)
+        body = self._popup_content(window, padding=(26, 20))
 
         def heading(text, first=False):
             ttk.Label(body, text=text, style="CardHeading.TLabel").pack(anchor="w", pady=(0 if first else 18, 6))
@@ -508,6 +533,7 @@ class App:
         ttk.Checkbutton(body, text="시험 저장 — 새 파일 20개만 받고 멈춤 (이번 실행에만 적용)", variable=self.limited).pack(anchor="w")
         ttk.Button(body, text="닫기", command=self._close_options).pack(anchor="e", pady=(20, 0))
         window.protocol("WM_DELETE_WINDOW", self._close_options)
+        self._fit_popup(window)
 
     def _close_options(self):
         window, self.options_window = self.options_window, None
@@ -956,6 +982,7 @@ class App:
                     self._log("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))
             elif kind == "process_exit":
                 self.running = False
+                self.limited.set(False)
                 self.progress.stop()
                 self.progress.configure(mode="determinate", value=100 if self.final_status == "finished" else 0)
                 self._set_running(False)

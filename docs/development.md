@@ -10,7 +10,7 @@ VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니
 | --- | --- |
 | `entry.py` | GUI·worker·예약 실행(`--run-saved`)·자체 점검 실행 |
 | `xlikesaver/gui.py` | 메인 화면·로그인 연결 창·저장 옵션 창·사용 방법·작업 진행 |
-| `xlikesaver/theme.py` | 두 창이 함께 쓰는 글꼴 크기·색·카드·숫자 칸 스타일 |
+| `xlikesaver/theme.py` | 공통 글꼴·색·둥근 카드·버튼·스위치·작은 화면 스크롤 |
 | `xlikesaver/history_gui.py` | 기록·통계 화면(먼저 DB 내용을 보여 주고 폴더 재확인은 뒤에서)·출처·작성자 기록 |
 | `xlikesaver/core.py` | 수집·다운로드·완료 기록·빠른 확인·gallery-dl 호환성 검사 |
 | `xlikesaver/storage.py` | 미디어·기록 경로·이전 DB 복사·저장 경로 잠금 |
@@ -25,6 +25,8 @@ VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니
 `build.ps1`은 `--onefile --windowed`로 빌드합니다. Python/Tk와 전체 ExifTool 런타임을 포함하며 실행 시 임시 폴더에 풉니다. worker는 부모 앱이 살아 있는 동안 같은 임시 도구를 사용합니다. 사용자 사진과 기록, 설정, 인증정보는 실행 파일 밖에 남습니다. [PyInstaller 배포 방식](https://pyinstaller.org/en/stable/operating-mode.html)
 
 worker는 gallery-dl의 비공개 함수 몇 개(`TwitterExtractor._extract_media`, `DownloadJob.handle_url`, `HttpDownloader.receive` 등)를 감싸서 동작합니다. `core.check_gallery_hooks()`가 요청을 보내기 전에 이 함수들의 이름과 매개변수를 확인하고, 다르면 바로 중단합니다. 자체 점검(`--self-test`)도 같은 검사를 합니다. X 변경 때문에 gallery-dl을 올릴 때는 이 검사와 `tests/test_media.py`의 실제 추출 함수 테스트가 통과하는지 먼저 확인하세요.
+
+둥근 컨트롤은 앱에서 만든 PNG를 ttk 이미지 요소로 사용합니다. 새 UI 라이브러리나 실행 중 다운로드는 필요하지 않습니다. 글꼴 크기는 유지하고 창이 작으면 메인 화면을 스크롤합니다. [Tk 이미지 요소](https://www.tcl-lang.org/man/tcl8.5/TkCmd/ttk_image.htm)
 
 ## 로그인
 
