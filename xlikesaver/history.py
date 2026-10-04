@@ -35,9 +35,9 @@ _WRITE_BATCH = 200
 _RUN_FIELDS = {"saved", "skipped", "size_skipped", "visited", "last_tweet_id",
                "last_posted_at", "message"}
 _COUNTERS = {"saved", "skipped", "size_skipped", "visited"}
-_CSV_FIELDS = ("folder_mode", "tweet_id", "num", "media_type", "author", "filename",
+_CSV_FIELDS = ("folder_mode", "tweet_id", "num", "media_type", "author", "author_id", "filename",
                "posted_at", "posted_source", "saved_at", "path", "filesize", "status", "record_source",
-               "source_url", "metadata_status")
+               "source_url", "metadata_status", "author_metadata_status")
 
 
 class HistoryError(RuntimeError):
@@ -88,6 +88,17 @@ def _clean_text(value, limit=2000) -> str:
     if not isinstance(value, str):
         return ""
     return "".join(char for char in value[:limit] if ord(char) >= 32 and ord(char) != 127)
+
+
+def _author_fields(value) -> tuple[str, str]:
+    """Only gallery-dl's tweet author is authoritative, never its `user`."""
+    if not isinstance(value, dict):
+        return "", ""
+    name = value.get("name", "")
+    name = name.lstrip("@") if isinstance(name, str) else ""
+    ident = str(value.get("id") or "")
+    return (name if re.fullmatch(r"[A-Za-z0-9_]{1,15}", name) else "",
+            ident if re.fullmatch(r"[0-9]{1,20}", ident) else "")
 
 
 def _date_folder(name: str) -> bool:
@@ -165,6 +176,10 @@ class HistoryStore:
                     self._db.execute("ALTER TABLE media ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
                 if "metadata_status" not in columns:
                     self._db.execute("ALTER TABLE media ADD COLUMN metadata_status TEXT NOT NULL DEFAULT 'pending'")
+                if "author_id" not in columns:
+                    self._db.execute("ALTER TABLE media ADD COLUMN author_id TEXT NOT NULL DEFAULT ''")
+                if "author_metadata_status" not in columns:
+                    self._db.execute("ALTER TABLE media ADD COLUMN author_metadata_status TEXT NOT NULL DEFAULT 'pending'")
                 self._db.execute("UPDATE media SET source_url='https://x.com/i/web/status/' || tweet_id WHERE source_url=''")
             run_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}
             with self._db:
@@ -290,12 +305,16 @@ class HistoryStore:
     def _upsert(self, row: dict, *, replace_path=True) -> None:
         row["source_url"] = "https://x.com/i/web/status/" + row["tweet_id"]
         row.setdefault("metadata_status", "pending")
+        row.setdefault("author_id", "")
+        row.setdefault("author_metadata_status", "pending")
         previous = self._db.execute("SELECT * FROM media WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
                                     (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])).fetchone()
         if previous is not None:
             old = dict(previous)
             if not row["author"] or (row["record_source"] in {"archive", "file_scan"} and old["author"]):
                 row["author"] = old["author"]
+            if not row["author_id"]:
+                row["author_id"] = old["author_id"]
             if (not row["posted_at"] or (row["posted_source"] == "id_estimate" and
                                          old["posted_source"] == "metadata")):
                 row["posted_at"], row["posted_source"] = old["posted_at"], old["posted_source"]
@@ -312,6 +331,10 @@ class HistoryStore:
                 row["filename"] = old["filename"]
             if row["metadata_status"] == "pending":
                 row["metadata_status"] = old["metadata_status"]
+            if (row["author_metadata_status"] == "pending" and
+                    row["author"].casefold() == old["author"].casefold() and
+                    row["author_id"] == old["author_id"]):
+                row["author_metadata_status"] = old["author_metadata_status"]
             # An archive-only row describes an old photo, not the exact type of
             # a file that has since been imported with richer metadata.
             if row["record_source"] == "archive":
@@ -416,17 +439,24 @@ class HistoryStore:
         actual_path, filesize, filename = self._file(path)
         if status == "saved" and not actual_path:
             raise HistoryError(_HISTORY_HELP)
-        author = metadata.get("author")
-        author = _clean_text(author.get("name", ""), 100) if isinstance(author, dict) else ""
+        author_data = metadata.get("author")
+        # Preserve imported display/search text just as earlier catalogs did;
+        # only the metadata writer accepts this as a validated X handle.
+        author = _clean_text(author_data.get("name", ""), 100) if isinstance(author_data, dict) else ""
+        _, author_id = _author_fields(author_data)
         posted = _posted(metadata.get("date"))
         row = {"folder_mode": mode, "tweet_id": tweet_id, "num": number, "media_type": media_type,
-               "author": author, "filename": filename, "posted_at": posted,
+               "author": author, "author_id": author_id, "filename": filename, "posted_at": posted,
                "posted_source": "metadata" if posted else "", "saved_at": _now() if status == "saved" else None,
                "path": actual_path, "filesize": filesize, "status": status, "record_source": status}
         metadata_status = metadata.get("_xlikesaver_metadata_status", "pending")
         if metadata_status not in {"embedded", "failed", "unsupported", "pending"}:
             raise HistoryError(_HISTORY_HELP)
         row["metadata_status"] = metadata_status
+        author_status = metadata.get("_xlikesaver_author_metadata_status", "pending")
+        if author_status not in {"embedded", "unknown", "error", "pending"}:
+            raise HistoryError(_HISTORY_HELP)
+        row["author_metadata_status"] = author_status
         with self._db:
             self._upsert(row)
 
@@ -447,15 +477,20 @@ class HistoryStore:
         return row["metadata_status"] if row else "pending"
 
     @_safe
-    def mark_metadata(self, row: dict, status: str) -> None:
+    def mark_metadata(self, row: dict, status: str, *, author_status: str | None = None) -> None:
         """Update a local tag operation without changing the original save time."""
         if status not in {"embedded", "failed", "unsupported", "pending"}:
+            raise HistoryError(_HISTORY_HELP)
+        if author_status is not None and author_status not in {"embedded", "unknown", "error", "pending"}:
             raise HistoryError(_HISTORY_HELP)
         actual, size, _ = self._file(row.get("path") or "")
         actual = self._preserve_missing_location(row.get("path") or "", actual)
         with self._db:
             self._db.execute("UPDATE media SET metadata_status=?,source_url=?,path=?,filesize=?,updated_at=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
                              (status, "https://x.com/i/web/status/" + row["tweet_id"], actual, size, _now(), row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
+            if author_status is not None:
+                self._db.execute("UPDATE media SET author_metadata_status=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                                 (author_status, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
 
     def _legacy_row(self, mode: str, tweet_id: str, number: int, *, path="", filesize=None,
                     filename="", media_type="photo", author="", source="archive") -> dict:
@@ -612,6 +647,7 @@ class HistoryStore:
         result.update(counts)
         result["counts"] = counts
         result["embedded_sources"] = self._db.execute("SELECT COUNT(*) FROM media WHERE metadata_status='embedded'").fetchone()[0]
+        result["embedded_authors"] = self._db.execute("SELECT COUNT(*) FROM media WHERE author_metadata_status='embedded'").fetchone()[0]
         result["last_run"] = next(iter(self.runs(limit=1)), None)
         result["archivepaths"] = [str(self.account_dir / name) for name in _ARCHIVES.values()
                                   if (self.account_dir / name).is_file() and not (self.account_dir / name).is_symlink()]

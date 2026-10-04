@@ -72,6 +72,64 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(row["source_url"], "https://x.com/i/web/status/100")
         self.assertNotIn(SECRET, csv_path.read_text(encoding="utf-8-sig"))
 
+    def test_tweet_author_numeric_id_and_status_survive_refresh_and_csv(self):
+        data = self.metadata()
+        data["author"]["id"] = 123456789
+        data["user"] = {"name": "liking_account", "id": 999}
+        data["_xlikesaver_metadata_status"] = "embedded"
+        data["_xlikesaver_author_metadata_status"] = "embedded"
+        self.store.record_media("flat", data, self.file("100_1.jpg"))
+        original = self.store.records()[0]
+        self.assertEqual((original["author"], original["author_id"]), ("alice", "123456789"))
+        self.assertEqual(self.store.summary()["embedded_authors"], 1)
+        self.store.import_legacy(refresh=True)
+        self.assertEqual(self.store.records()[0]["author_metadata_status"], "embedded")
+        output = Path(self.temp.name) / "authors.csv"
+        self.store.export_records(output)
+        with output.open(encoding="utf-8-sig", newline="") as file:
+            row = next(csv.DictReader(file))
+        self.assertEqual(row["author_id"], "123456789")
+        self.assertEqual(row["author_metadata_status"], "embedded")
+        self.assertNotIn("liking_account", output.read_text(encoding="utf-8-sig"))
+
+    def test_author_is_unknown_without_tweet_author_even_when_liking_user_exists(self):
+        data = self.metadata()
+        data.pop("author")
+        data["user"] = {"name": "liking_account", "id": 999}
+        data["_xlikesaver_author_metadata_status"] = "unknown"
+        self.store.record_media("flat", data, self.file("100_1.jpg"))
+        row = self.store.records()[0]
+        self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]), ("", "", "unknown"))
+
+    def test_author_columns_upgrade_old_database_without_losing_source_or_save_time(self):
+        data = self.metadata()
+        data["_xlikesaver_metadata_status"] = "embedded"
+        self.store.record_media("flat", data, self.file("100_1.jpg"))
+        original = self.store.records()[0]
+        self.store._db.execute("ALTER TABLE media DROP COLUMN author_id")
+        self.store._db.execute("ALTER TABLE media DROP COLUMN author_metadata_status")
+        self.store._db.commit()
+        with closing(HistoryStore(self.account)) as upgraded:
+            row = upgraded.records()[0]
+            for key in ("saved_at", "path", "author", "metadata_status", "source_url"):
+                self.assertEqual(row[key], original[key])
+            self.assertEqual(row["author_id"], "")
+            self.assertEqual(row["author_metadata_status"], "pending")
+
+    def test_author_backfill_failure_preserves_source_save_time_and_relocation(self):
+        data = self.metadata()
+        data["author"]["id"] = 123
+        data["_xlikesaver_metadata_status"] = "embedded"
+        self.store.record_media("flat", data, self.file("100_1.jpg"))
+        relocated = self.relocated_store()
+        original = relocated.records()[0]
+        relocated.mark_metadata(original, "embedded", author_status="error")
+        updated = relocated.records()[0]
+        self.assertEqual(updated["metadata_status"], "embedded")
+        self.assertEqual(updated["author_metadata_status"], "error")
+        for key in ("saved_at", "path", "author", "author_id"):
+            self.assertEqual(updated[key], original[key])
+
     def test_copied_catalog_refresh_matches_new_paths_without_accessing_old_folder(self):
         self.store.record_media("flat", self.metadata(), self.file("100_1.jpg"))
         new_account = Path(self.temp.name) / "moved_account"

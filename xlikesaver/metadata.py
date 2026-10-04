@@ -1,4 +1,4 @@
-"""Lossless local source URL metadata, written through a bundled ExifTool.
+"""Lossless local tweet source and author metadata through bundled ExifTool.
 
 The original file is replaced only after the temporary copy's source tag has
 been read back successfully. No account credentials or network calls are used.
@@ -21,8 +21,11 @@ from pathlib import Path
 SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".mp4"})
 TIMEOUT_SECONDS = 20
 _ID = re.compile(r"[0-9]{1,20}\Z", re.ASCII)
+_HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z", re.ASCII)
 _URL = re.compile(r"https://x\.com/i/web/status/[0-9]{1,20}\Z", re.ASCII)
 _URL_CHARACTER = r"[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]"
+_AUTHOR_MARKER = "xlikesaver:x-author:"
+_AUTHOR_ID_MARKER = "xlikesaver:x-user-id:"
 _MESSAGES = {
     "embedded": "파일 안에 원본 트윗 주소를 기록했습니다.",
     "failed": "원본 트윗 주소를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다.",
@@ -60,7 +63,7 @@ class _ExifToolSession:
     """
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._counter = 0
         self._process = subprocess.Popen(
             [str(exiftool_path()), "-config", "", "-stay_open", "True", "-@", "-",
@@ -77,6 +80,9 @@ class _ExifToolSession:
         try:
             for line in iter(stream.readline, b""):
                 lines.put(line.decode("utf-8", errors="replace"))
+        except (OSError, ValueError):
+            # Another thread may be closing a failed process's pipe.
+            pass
         finally:
             lines.put(None)
 
@@ -96,10 +102,22 @@ class _ExifToolSession:
                 return collected, line
             collected.append(line)
 
+    @contextmanager
+    def _command_lock(self, deadline: float):
+        if not self._lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            raise TimeoutError("metadata timeout")
+        try:
+            yield
+        finally:
+            self._lock.release()
+
     def execute(self, arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
-        with self._lock:
+        with self._command_lock(deadline):
             if self._process.poll() is not None:
                 raise _SessionUnavailable("exiftool exited")
+            if time.monotonic() >= deadline:
+                self.close(force=True)
+                raise TimeoutError("metadata timeout")
             self._counter += 1
             number = self._counter
             ready, finished = f"{{ready{number}}}", f"{{finished{number} "
@@ -121,28 +139,53 @@ class _ExifToolSession:
             return subprocess.CompletedProcess(arguments, status, "".join(stdout), "".join(stderr))
 
     def close(self, *, force: bool = False) -> None:
-        process = self._process
-        if process.poll() is None and not force:
-            try:
-                process.stdin.write(b"-stay_open\nFalse\n")
-                process.stdin.flush()
-                process.wait(timeout=5)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        if process.poll() is None:
-            process.kill()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-        for stream in (process.stdin, process.stdout, process.stderr):
-            try:
-                stream.close()
-            except OSError:
-                pass
+        with self._lock:
+            process = self._process
+            if process.poll() is None and not force:
+                try:
+                    process.stdin.write(b"-stay_open\nFalse\n")
+                    process.stdin.flush()
+                    process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            if process.poll() is None:
+                try:
+                    process.kill()
+                    process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+            for stream in (process.stdin, process.stdout, process.stderr):
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
 
 
 _session: _ExifToolSession | None = None
+_session_lock = threading.RLock()
+_session_users = 0
+
+
+def _borrow_session() -> _ExifToolSession | None:
+    global _session_users
+    with _session_lock:
+        session = _session
+        if session is not None:
+            _session_users += 1
+        return session
+
+
+def _release_session(session: _ExifToolSession) -> None:
+    global _session, _session_users
+    close = False
+    with _session_lock:
+        if _session is session:
+            _session_users -= 1
+            if _session_users == 0:
+                _session = None
+                close = True
+    if close:
+        session.close()
 
 
 @contextmanager
@@ -153,21 +196,23 @@ def persistent():
     write takes three calls. Outside this block, or if the resident process
     fails, each call starts its own process exactly as before.
     """
-    global _session
-    if _session is not None or not available():
-        yield
-        return
-    try:
-        session = _ExifToolSession()
-    except OSError:
-        yield
-        return
-    _session = session
+    global _session, _session_users
+    # Overlapping callers share the process until the last context and active
+    # command release it. An outer context must not close another thread's tool.
+    with _session_lock:
+        session = _borrow_session()
+        if session is None and available():
+            try:
+                session = _ExifToolSession()
+            except OSError:
+                pass
+            else:
+                _session, _session_users = session, 1
     try:
         yield
     finally:
-        _session = None
-        session.close()
+        if session is not None:
+            _release_session(session)
 
 
 def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
@@ -178,7 +223,7 @@ def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("metadata timeout")
-    session = _session
+    session = _borrow_session()
     if session is not None:
         try:
             return session.execute(arguments, deadline)
@@ -186,6 +231,8 @@ def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("metadata timeout") from None
+        finally:
+            _release_session(session)
     return subprocess.run(
         [str(exiftool_path()), "-config", "", "-charset", "filename=UTF8", "-@", "-"],
         input="\n".join(arguments) + "\n", capture_output=True, text=True,
@@ -195,13 +242,71 @@ def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
 
 
 def _read_tags(path: Path, deadline: float) -> dict:
-    result = _run(["-j", "-G1", "-XMP-dc:Source", "-XMP-dc:Description", "-QuickTime:Comment", str(path)], deadline)
+    result = _run(["-j", "-G1", "-XMP-dc:Source", "-XMP-dc:Description",
+                   "-XMP-dc:Creator", "-XMP-dc:Relation", "-XMP-xmp:Identifier",
+                   "-QuickTime:Comment", str(path)], deadline)
     if result.returncode != 0:
         raise ValueError("metadata read failed")
     rows = json.loads(result.stdout)
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         raise ValueError("metadata read failed")
     return rows[0]
+
+
+def _values(value) -> list[str]:
+    """ExifTool JSON uses either a string or a list for list-valued tags."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    return []
+
+
+def _identity(author: str, author_id: str) -> dict[str, str]:
+    if not isinstance(author, str) or not isinstance(author_id, str):
+        raise ValueError("invalid author")
+    supplied_author = author
+    author = author.removeprefix("@")
+    if supplied_author and not author:
+        raise ValueError("invalid author")
+    if author and not _HANDLE.fullmatch(author):
+        raise ValueError("invalid author")
+    if author_id and not _ID.fullmatch(author_id):
+        raise ValueError("invalid author id")
+    profile_url = f"https://x.com/{author}" if author else (
+        f"https://x.com/i/user/{author_id}" if author_id else "")
+    return {"author": author, "author_id": author_id, "profile_url": profile_url}
+
+
+def _author_from_tags(tags: dict) -> dict[str, str]:
+    identities = _values(tags.get("XMP-xmp:Identifier"))
+    authors = {value[len(_AUTHOR_MARKER):] for value in identities
+               if value.startswith(_AUTHOR_MARKER) and _HANDLE.fullmatch(value[len(_AUTHOR_MARKER):])}
+    ids = {value[len(_AUTHOR_ID_MARKER):] for value in identities
+           if value.startswith(_AUTHOR_ID_MARKER) and _ID.fullmatch(value[len(_AUTHOR_ID_MARKER):])}
+    # A photographer's unrelated Creator entry is not a tweet-author identity.
+    # Conflicting markers are ambiguous; do not guess which author is current.
+    if len(authors) > 1 or len(ids) > 1:
+        return _identity("", "")
+    author = next(iter(authors), "")
+    author_id = next(iter(ids), "")
+    creators, relations = _values(tags.get("XMP-dc:Creator")), _values(tags.get("XMP-dc:Relation"))
+    if author and (f"@{author}" not in creators or f"https://x.com/{author}" not in relations):
+        author = ""
+    if author_id and f"https://x.com/i/user/{author_id}" not in relations:
+        author_id = ""
+    return _identity(author, author_id)
+
+
+def read_author(path: Path | str) -> dict[str, str]:
+    """Read the explicitly recorded tweet author; never infer it from a folder."""
+    try:
+        target = Path(path).resolve(strict=True)
+        if not available() or not target.is_file() or target.suffix.lower() not in SUPPORTED_SUFFIXES:
+            return _identity("", "")
+        return _author_from_tags(_read_tags(target, time.monotonic() + TIMEOUT_SECONDS))
+    except Exception:
+        return _identity("", "")
 
 
 def read_source(path: Path | str) -> str:
@@ -217,19 +322,25 @@ def read_source(path: Path | str) -> str:
         return ""
 
 
-def embed_source(path: Path | str, tweet_id: str) -> dict[str, str]:
-    """Embed a canonical source URL, preserving original data on any failure."""
+def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: str = "") -> dict[str, str]:
+    """Embed tweet source and optional author, preserving original on failure."""
     url = f"https://x.com/i/web/status/{tweet_id}" if isinstance(tweet_id, str) and _ID.fullmatch(tweet_id) else ""
     status = "failed"
     temporary = None
     text_files = []
+    identity = _identity("", "")
+    author_status = "unknown"
     try:
         if not url:
             raise ValueError("invalid tweet id")
+        identity = _identity(author, author_id)
+        has_author = bool(identity["author"] or identity["author_id"])
+        author_status = "error" if has_author else "unknown"
         target_input = Path(path)
         if target_input.suffix.lower() not in SUPPORTED_SUFFIXES:
             status = "unsupported"
-            return {"status": status, "url": url, "message": _MESSAGES[status]}
+            return {"status": status, "url": url, "message": _MESSAGES[status],
+                    "author_status": author_status, **identity}
         if target_input.is_symlink() or getattr(target_input, "is_junction", lambda: False)():
             raise ValueError("linked media")
         target = target_input.resolve(strict=True)
@@ -243,10 +354,18 @@ def embed_source(path: Path | str, tweet_id: str) -> dict[str, str]:
         temporary = Path(name)
         shutil.copy2(target, temporary)
         source_token = re.compile(r"(?<!" + _URL_CHARACTER + r")" + re.escape(url) + r"(?!" + _URL_CHARACTER + r")")
+        author_lines = []
+        if identity["author"]:
+            author_lines.append(f"X author: @{identity['author']} ({identity['profile_url']})")
+        if identity["author_id"]:
+            author_lines.append(f"X user ID: {identity['author_id']} (https://x.com/i/user/{identity['author_id']})")
         def text_argument(tag: str, old_value: str) -> tuple[str, str]:
             if not isinstance(old_value, str):
                 old_value = ""
             value = old_value if source_token.search(old_value) else (f"{old_value}\nSource: {url}" if old_value else url)
+            for line in author_lines:
+                if line not in value.splitlines():
+                    value += "\n" + line
             fd, name = tempfile.mkstemp(prefix=".xlikesaver-source-", suffix=".txt", dir=target.parent)
             text_path = Path(name)
             text_files.append(text_path)
@@ -256,6 +375,32 @@ def embed_source(path: Path | str, tweet_id: str) -> dict[str, str]:
 
         description_arg, description_value = text_argument("XMP-dc:Description-x-default", previous_tags.get("XMP-dc:Description", ""))
         arguments = ["-overwrite_original", "-P", f"-XMP-dc:Source={url}", description_arg]
+        required_tags = {}
+        if has_author:
+            identifiers = _values(previous_tags.get("XMP-xmp:Identifier"))
+            # Only our own author markers may be replaced (for a changed handle).
+            # Other creators, relations, and identifiers are left untouched.
+            kept_identifiers = []
+            for value in identifiers:
+                if value.startswith((_AUTHOR_MARKER, _AUTHOR_ID_MARKER)):
+                    arguments.append(f"-XMP-xmp:Identifier-={value}")
+                else:
+                    kept_identifiers.append(value)
+            wanted = {"XMP-dc:Creator": [], "XMP-dc:Relation": [], "XMP-xmp:Identifier": []}
+            if identity["author"]:
+                wanted["XMP-dc:Creator"].append(f"@{identity['author']}")
+                wanted["XMP-dc:Relation"].append(identity["profile_url"])
+                wanted["XMP-xmp:Identifier"].append(_AUTHOR_MARKER + identity["author"])
+            if identity["author_id"]:
+                wanted["XMP-dc:Relation"].append(f"https://x.com/i/user/{identity['author_id']}")
+                wanted["XMP-xmp:Identifier"].append(_AUTHOR_ID_MARKER + identity["author_id"])
+            for tag, values in wanted.items():
+                old_values = kept_identifiers if tag == "XMP-xmp:Identifier" else _values(previous_tags.get(tag))
+                required_tags[tag] = [*old_values]
+                for value in values:
+                    if value not in old_values:
+                        arguments.append(f"-{tag}+={value}")
+                        required_tags[tag].append(value)
         if target.suffix.lower() == ".mp4":
             # ItemList belongs to QuickTime. Other Comment locations remain intact.
             comment_arg, comment_value = text_argument("ItemList:Comment", previous_tags.get("ItemList:Comment", ""))
@@ -268,6 +413,13 @@ def embed_source(path: Path | str, tweet_id: str) -> dict[str, str]:
             raise ValueError("metadata verification failed")
         if target.suffix.lower() == ".mp4" and tags.get("ItemList:Comment") != comment_value:
             raise ValueError("metadata verification failed")
+        if has_author:
+            for tag, expected in required_tags.items():
+                actual = _values(tags.get(tag))
+                if any(actual.count(value) < expected.count(value) for value in expected):
+                    raise ValueError("author metadata verification failed")
+            if _author_from_tags(tags) != identity:
+                raise ValueError("author metadata verification failed")
         # Do not overwrite a file another local process changed during the copy.
         current = target.stat()
         if (current.st_size, current.st_mtime_ns, current.st_ino) != (original.st_size, original.st_mtime_ns, original.st_ino):
@@ -276,8 +428,11 @@ def embed_source(path: Path | str, tweet_id: str) -> dict[str, str]:
         os.replace(temporary, target)
         temporary = None
         status = "embedded"
+        author_status = "embedded" if has_author else "unknown"
     except Exception:
         status = "failed"
+        if author != "" or author_id != "":
+            author_status = "error"
     finally:
         for text_path in text_files:
             try:
@@ -291,4 +446,5 @@ def embed_source(path: Path | str, tweet_id: str) -> dict[str, str]:
                 Path(str(temporary) + "_exiftool_tmp").unlink(missing_ok=True)
             except OSError:
                 pass
-    return {"status": status, "url": url, "message": _MESSAGES[status]}
+    return {"status": status, "url": url, "message": _MESSAGES[status],
+            "author_status": author_status, **identity}

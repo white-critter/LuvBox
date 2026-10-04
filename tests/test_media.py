@@ -584,8 +584,91 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(next(event for event in events if event["type"] == "skipped")["metadata_status"], "embedded")
         self.assertEqual(self.history_rows()[0]["saved_at"], record["saved_at"])
 
+    def test_author_and_numeric_id_are_from_tweet_not_liking_account(self):
+        rows = [("100", 1, "photo", "alice", None, 123456789)]
+        code, events = self.worker(rows)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.embed_source.call_args.kwargs, {"author": "alice", "author_id": "123456789"})
+        saved = next(event for event in events if event["type"] == "saved")
+        self.assertEqual((saved["author"], saved["author_id"], saved["author_metadata_status"]), ("alice", "123456789", "embedded"))
+        row = self.history_rows()[0]
+        self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]), ("alice", "123456789", "embedded"))
+        self.assertNotEqual(row["author_id"], "999")
+        self.embed_source.reset_mock()
+        self.worker(rows)
+        self.embed_source.assert_not_called()
+
+    def test_old_source_tagged_file_gets_author_once_without_redownload(self):
+        rows = [("100", 1, "photo", "alice", None, 123)]
+        self.worker(rows)
+        original = self.history_rows()[0]
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+            db.execute("UPDATE media SET author_metadata_status='pending',author_id=''")
+            db.commit()
+        self.embed_source.reset_mock()
+        code, events = self.worker(rows)
+        self.assertEqual(code, 0)
+        self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (0, 1))
+        self.embed_source.assert_called_once_with(original["path"], "100", author="alice", author_id="123")
+        self.assertEqual(self.history_rows()[0]["saved_at"], original["saved_at"])
+        self.embed_source.reset_mock()
+        self.worker(rows)
+        self.embed_source.assert_not_called()
+        self.assertEqual(self.archive_keys(), {"twitter100_1"})
+
+    def test_newly_available_numeric_id_triggers_only_one_author_update(self):
+        self.worker([("100", 1, "photo", "alice")])
+        self.embed_source.reset_mock()
+        rows = [("100", 1, "photo", "alice", None, 123)]
+        self.worker(rows)
+        self.assertEqual(self.embed_source.call_args.kwargs["author_id"], "123")
+        self.embed_source.reset_mock()
+        self.worker(rows)
+        self.embed_source.assert_not_called()
+
+    def test_missing_author_is_unknown_and_source_is_not_rewritten_every_run(self):
+        options = replace(self.options, folder_mode="flat")
+        rows = [("100", 1, "photo", "")]
+        self.worker(rows, options=options)
+        self.assertEqual(self.embed_source.call_args.kwargs, {"author": "", "author_id": ""})
+        row = self.history_rows()[0]
+        self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]), ("", "", "unknown"))
+        self.embed_source.reset_mock()
+        self.worker(rows, options=options)
+        self.embed_source.assert_not_called()
+
+    def test_old_source_tagged_unknown_author_is_marked_unknown_without_rewriting(self):
+        options = replace(self.options, folder_mode="flat")
+        rows = [("100", 1, "photo", "")]
+        self.worker(rows, options=options)
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+            db.execute("UPDATE media SET author_metadata_status='pending'")
+            db.commit()
+        self.embed_source.reset_mock()
+        code, events = self.worker(rows, options=options)
+        self.assertEqual(code, 0)
+        self.embed_source.assert_not_called()
+        self.assertEqual(self.history_rows()[0]["author_metadata_status"], "unknown")
+        self.assertEqual(events[-1]["metadata_failed"], 0)
+
+    def test_failed_author_addition_keeps_verified_source_and_archive(self):
+        rows = [("100", 1, "photo", "alice")]
+        self.worker(rows)
+        original = self.history_rows()[0]
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+            db.execute("UPDATE media SET author_metadata_status='pending'")
+            db.commit()
+        self.embed_source.side_effect = lambda *args, **kwargs: {"status": "failed", "author_status": "error"}
+        code, events = self.worker(rows)
+        self.assertEqual(code, 0)
+        self.assertEqual(events[-1]["metadata_failed"], 1)
+        row = self.history_rows()[0]
+        self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "error"))
+        self.assertEqual(row["saved_at"], original["saved_at"])
+        self.assertEqual(self.archive_keys(), {"twitter100_1"})
+
     def test_source_failure_is_nonfatal_logged_once_and_existing_failure_can_retry(self):
-        self.embed_source.side_effect = lambda *args: {"status": "failed", "url": "", "message": test_core.SECRET}
+        self.embed_source.side_effect = lambda *args, **kwargs: {"status": "failed", "url": "", "message": test_core.SECRET, "author_status": "error"}
         rows = [("100", 1, "photo", "alice"), ("101", 1, "video", "alice")]
         code, events = self.worker(rows, options=self.all_media())
         self.assertEqual(code, 0)
@@ -595,7 +678,7 @@ class MediaTests(unittest.TestCase):
         self.assertEqual({row["metadata_status"] for row in self.history_rows()}, {"failed"})
         self.assertEqual(len(self.archive_keys()), 2)
         self.embed_source.reset_mock()
-        self.embed_source.side_effect = lambda path, tweet_id: {"status": "embedded", "url": f"https://x.com/i/web/status/{tweet_id}", "message": ""}
+        self.embed_source.side_effect = lambda path, tweet_id, **kwargs: {"status": "embedded", "url": f"https://x.com/i/web/status/{tweet_id}", "message": "", "author_status": "embedded"}
         code, events = self.worker(rows, options=self.all_media())
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 0)
@@ -617,10 +700,10 @@ class MediaTests(unittest.TestCase):
     def test_progress_final_counts_original_payload_after_source_tags_increase_size(self):
         chunks = [MP4_HEADER, b"a" * 20]
         size = sum(map(len, chunks))
-        def embed(path, tweet_id):
+        def embed(path, tweet_id, **kwargs):
             target = Path(path)
             target.write_bytes(target.read_bytes() + b"offline-metadata-tags")
-            return {"status": "embedded", "url": f"https://x.com/i/web/status/{tweet_id}", "message": ""}
+            return {"status": "embedded", "url": f"https://x.com/i/web/status/{tweet_id}", "message": "", "author_status": "embedded"}
         self.embed_source.side_effect = embed
         code, events, _ = self.http_worker([("100", 1, "video", "alice")], [self.response(chunks, size=size)])
         self.assertEqual(code, 0)
@@ -640,7 +723,7 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(self.history_rows()[0]["metadata_status"], "failed")
 
     def test_unsupported_source_status_is_saved_and_does_not_retry(self):
-        self.embed_source.side_effect = lambda *args: {"status": "unsupported", "url": "", "message": ""}
+        self.embed_source.side_effect = lambda *args, **kwargs: {"status": "unsupported", "url": "", "message": "", "author_status": "unknown"}
         rows = [("100", 1, "photo", "alice")]
         code, events = self.worker(rows)
         self.assertEqual(code, 0)

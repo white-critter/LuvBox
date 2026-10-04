@@ -19,6 +19,7 @@ from .storage import OutputGuard, StoragePaths
 MEDIA_LABELS = {"all": "전체", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF"}
 STATUS_LABELS = {"running": "진행 중", "finished": "종료", "stopped": "사용자 중단", "error": "오류", "interrupted": "중단됨", "limited": "테스트 한도 도달", "partial": "일부만 완료", "cancelled": "취소됨"}
 METADATA_LABELS = {"embedded": "파일에 출처 기록됨", "pending": "출처 기록 전", "failed": "파일 출처 기록 실패", "unsupported": "메타데이터 미지원 형식"}
+AUTHOR_METADATA_LABELS = {"embedded": "작성자 기록됨", "pending": "작성자 기록 전", "error": "작성자 기록 실패", "unknown": "작성자 정보 없음"}
 PAGE_SIZE = 100
 
 
@@ -102,7 +103,7 @@ class HistoryWindow(tk.Toplevel):
         ttk.Label(heading, text="기록 · 통계", font=("맑은 고딕", 17, "bold")).pack(side="left")
         ttk.Button(heading, text="새로고침", command=lambda: self.refresh(import_legacy=True)).pack(side="right")
         ttk.Button(heading, text="기록 위치", command=self.show_locations).pack(side="right", padx=8)
-        self.source_stop_button = ttk.Button(heading, text="출처 기록 중단", command=self.stop_metadata, state="disabled")
+        self.source_stop_button = ttk.Button(heading, text="메타데이터 기록 중단", command=self.stop_metadata, state="disabled")
         self.source_stop_button.pack(side="right", padx=(0, 8))
         ttk.Label(body, textvariable=self.location_text, wraplength=930).grid(row=1, column=0, sticky="w", pady=(5, 8))
         ttk.Label(body, textvariable=self.summary_text, font=("맑은 고딕", 11, "bold"), wraplength=930).grid(row=2, column=0, sticky="w")
@@ -145,7 +146,7 @@ class HistoryWindow(tk.Toplevel):
         actions.grid(row=3, column=0, sticky="ew", pady=8)
         ttk.Button(actions, text="파일 열기", command=self.open_file).pack(side="left")
         ttk.Button(actions, text="트윗 열기", command=self.open_tweet).pack(side="left", padx=8)
-        self.backfill_button = ttk.Button(actions, text="기존 파일에 출처 기록", command=self.backfill)
+        self.backfill_button = ttk.Button(actions, text="기존 파일에 출처·작성자 기록", command=self.backfill)
         self.backfill_button.pack(side="left", padx=(0, 8))
         pages = ttk.Frame(files)
         pages.grid(row=4, column=0, sticky="ew", pady=(0, 8))
@@ -326,7 +327,7 @@ class HistoryWindow(tk.Toplevel):
             self.run_rows[key] = row
             self.run_tree.insert("", "end", iid=key, values=(format_date(row.get("started_at")), format_date(row.get("finished_at")), STATUS_LABELS.get(row.get("status"), "기록 없음"), row.get("saved", 0), row.get("skipped", 0), row.get("size_skipped", 0), row.get("visited", 0), format_date(row.get("last_posted_at"))))
         warning = " ".join(summary.get("warnings", []))
-        self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") + f"파일에 출처 기록됨 {summary.get('embedded_sources', 0):,}개 · * 게시일 추정 · 저장 방식별 복사본도 집계합니다.")
+        self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") + f"파일에 출처 {summary.get('embedded_sources', 0):,}개 · 작성자 {summary.get('embedded_authors', 0):,}개 기록됨 · * 게시일 추정 · 저장 방식별 복사본도 집계합니다.")
         self.select_record()
 
     def selected(self):
@@ -340,7 +341,13 @@ class HistoryWindow(tk.Toplevel):
             return
         source = "트윗 ID에서 추정" if row.get("posted_source") == "id_estimate" else "X 목록의 게시일"
         metadata = METADATA_LABELS.get(row.get("metadata_status"), "출처 기록 전")
-        self.selection_text.set(f"트윗 {row['tweet_id']} · 게시일 출처: {source} · {metadata}\n출처: {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n파일: {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}")
+        author_status = AUTHOR_METADATA_LABELS.get(row.get("author_metadata_status"), "작성자 기록 전")
+        if not row.get("author") and not row.get("author_id"):
+            author_status = AUTHOR_METADATA_LABELS["unknown"]
+        author = "@" + row["author"] if row.get("author") else "정보 없음"
+        if row.get("author_id"):
+            author += " (ID " + row["author_id"] + ")"
+        self.selection_text.set(f"트윗 {row['tweet_id']} · 게시일 출처: {source} · {metadata}\n작성자: {author} · {author_status}\n출처: {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n파일: {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}")
 
     def select_run(self, _=None):
         selection = self.run_tree.selection()
@@ -408,7 +415,7 @@ class HistoryWindow(tk.Toplevel):
         self.metadata_stop.clear()
         self.source_stop_button.configure(state="normal")
         self.generation += 1
-        self.status_text.set("기존 파일에 출처를 기록합니다. 화질은 그대로이며 X에 요청하지 않습니다…")
+        self.status_text.set("출처와 알려진 작성자를 기록합니다. 화질은 그대로이며 X에 요청하지 않습니다…")
         threading.Thread(target=self._backfill, args=(self.generation, self.current_storage), daemon=True).start()
 
     def _backfill(self, generation, directory):
@@ -442,28 +449,35 @@ class HistoryWindow(tk.Toplevel):
                     for row in rows:
                         if self.metadata_stop.is_set():
                             break
-                        if row.get("metadata_status") == "embedded":
+                        known_author = bool(row.get("author") or row.get("author_id"))
+                        if (row.get("metadata_status") == "unsupported" or
+                                (row.get("metadata_status") == "embedded" and
+                                 (row.get("author_metadata_status") == "embedded" or not known_author))):
                             continue
                         path = Path(row["path"]) if row.get("path") else None
                         if path is None or not store.is_media_path(path) or not path.is_file():
                             unavailable += 1
                             continue
-                        result = embed_source(path, row["tweet_id"])
-                        store.mark_metadata(row, result["status"])
-                        if result["status"] == "embedded":
+                        result = embed_source(path, row["tweet_id"], author=row.get("author", ""), author_id=row.get("author_id", ""))
+                        source_status = result["status"]
+                        author_status = result.get("author_status", "error" if known_author else "unknown")
+                        if source_status == "failed" and row.get("metadata_status") == "embedded":
+                            source_status = "embedded"
+                        store.mark_metadata(row, source_status, author_status=author_status)
+                        if result["status"] == "embedded" and author_status != "error":
                             success += 1
                         else:
                             failed += 1
-                        self.results.put((generation, "metadata-progress", f"기존 파일 출처 기록 · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개"))
+                        self.results.put((generation, "metadata-progress", f"출처·작성자 기록 · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개"))
                     if self.metadata_stop.is_set():
                         break
                     offset += len(rows)
             state = "중단" if self.metadata_stop.is_set() else "종료"
-            self.results.put((generation, "backfilled", f"출처 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개. X 요청은 보내지 않았습니다."))
+            self.results.put((generation, "backfilled", f"출처·작성자 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개. X 요청은 보내지 않았습니다."))
         except ProtectionError as exc:
             self.results.put((generation, "error", str(exc)))
         except Exception:
-            self.results.put((generation, "error", "기존 파일 출처 기록을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."))
+            self.results.put((generation, "error", "메타데이터 기록을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."))
         finally:
             try:
                 if store is not None:
@@ -479,7 +493,7 @@ class HistoryWindow(tk.Toplevel):
     def stop_metadata(self):
         self.metadata_stop.set()
         self.source_stop_button.configure(state="disabled")
-        self.status_text.set("현재 파일 처리가 끝나면 출처 기록을 중단합니다…")
+        self.status_text.set("현재 파일 처리가 끝나면 메타데이터 기록을 중단합니다…")
 
     def close(self):
         self.metadata_stop.set()

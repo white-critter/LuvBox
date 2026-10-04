@@ -122,4 +122,3 @@ def run_saved(*, full: bool = False) -> int:
             code = run_worker(options, emit)
     _prune_logs(directory)
     return code
-

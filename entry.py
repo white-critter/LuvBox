@@ -50,15 +50,20 @@ def main() -> int:
                 target = Path(folder) / "한글 출처 확인.png"
                 target.write_bytes(base64.b64decode(
                     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGNUjl/AwMDAxAAGAA1FASYPxkisAAAAAElFTkSuQmCC"))
-                result = metadata.embed_source(target, "100")
+                author = {"author": "Example_Author", "author_id": "1234567890",
+                          "profile_url": "https://x.com/Example_Author"}
+                result = metadata.embed_source(target, "100", author["author"], author["author_id"])
                 assert result["status"] == "embedded"
+                assert result["author_status"] == "embedded"
                 assert metadata.read_source(target) == "https://x.com/i/web/status/100"
+                assert metadata.read_author(target) == author
                 resident = Path(folder) / "상주 출처 확인.png"
                 resident.write_bytes(target.read_bytes())
                 with metadata.persistent():
                     assert metadata._session is not None
-                    assert metadata.embed_source(resident, "101")["status"] == "embedded"
+                    assert metadata.embed_source(resident, "101", author["author"], author["author_id"])["status"] == "embedded"
                     assert metadata.read_source(resident) == "https://x.com/i/web/status/101"
+                    assert metadata.read_author(resident) == author
                 assert metadata._session is None
                 paths = resolve_storage(Path(folder), "example")
                 assert paths.media_dir == Path(folder).resolve()
@@ -66,7 +71,9 @@ def main() -> int:
                 try:
                     assert store.summary()["files"] == 0
                     store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo",
-                                                "_xlikesaver_metadata_status": "embedded"}, target)
+                                                "author": {"name": author["author"], "id": author["author_id"]},
+                                                "_xlikesaver_metadata_status": "embedded",
+                                                "_xlikesaver_author_metadata_status": "embedded"}, target)
                     previous = store.records()[0]
                 finally:
                     store.close()
@@ -80,6 +87,8 @@ def main() -> int:
                     assert record["path"] == str(target) and store.is_media_path(target)
                     assert record["saved_at"] == previous["saved_at"]
                     assert record["metadata_status"] == "embedded"
+                    assert record["author_metadata_status"] == "embedded"
+                    assert record["author_id"] == author["author_id"]
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -99,7 +108,8 @@ def main() -> int:
             report = {"ok": True, "version": __version__, "gallery_dl": version.__version__,
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
-                      "source_metadata": "embedded-and-read-back", "flat_storage": "direct",
+                      "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",
+                      "flat_storage": "direct",
                       "worker": "stopped-before-authentication", "record_relocation": "preserved-old-file",
                       "gallery_hooks": "verified", "resident_exiftool": "embedded-and-read-back"}
         except Exception as exc:

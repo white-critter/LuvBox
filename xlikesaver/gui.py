@@ -56,6 +56,7 @@ class App:
         self.relocating = False
         self._storage_action = None
         self._storage_plan = None
+        self._storage_fresh = False
         self.stopping = False
         self.closing = False
         self.stop_path: Path | None = None
@@ -189,7 +190,6 @@ class App:
         folder.bind("<Return>", lambda _: self._ensure_storage())
         # Wait until a clicked Start/History button has had a chance to queue
         # its action; never migrate on each keystroke of a path being typed.
-        folder.bind("<FocusOut>", lambda _: self.root.after(100, self._ensure_storage))
         ttk.Label(card, text="파일 위치", style="Hint.TLabel").grid(row=6, column=0, sticky="w", pady=(5, 0))
         self.preview_entry = ttk.Entry(card, textvariable=self.destination_preview, state="readonly", font=("맑은 고딕", 9))
         self.preview_entry.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(16, 0), pady=(5, 0))
@@ -467,14 +467,25 @@ class App:
         window = self.history_window
         if window is not None and window.winfo_exists() and window.metadata_active:
             self.folder.set(str(source.output_dir))
-            messagebox.showinfo("출처 기록 진행 중", "출처 기록이 끝난 뒤 저장 폴더를 바꿔 주세요.", parent=self.root)
+            messagebox.showinfo("메타데이터 기록 중", "출처·작성자 기록이 끝난 뒤 저장 폴더를 바꿔 주세요.", parent=self.root)
+            return False
+        fresh = not source.output_dir.is_dir()
+        if fresh and not messagebox.askyesno(
+                "이전 저장 폴더 연결 확인",
+                "이전 폴더를 찾을 수 없습니다.\n새 폴더에서 저장을 시작할까요?\n\n"
+                "이전 기록을 가져오지 못해 중복 저장될 수 있습니다.\n"
+                "기존 파일·기록은 보존됩니다. 이전 폴더를 다시 선택하면 기록을 합칠 수 있습니다.",
+                parent=self.root, default="no"):
+            self.folder.set(str(source.output_dir))
+            self.status.set("이전 저장 폴더를 유지했습니다. 폴더 연결을 확인해 주세요.")
             return False
         self.relocating = True
+        self._storage_fresh = fresh
         self._storage_action = action
         self._storage_plan = (source, destination)
         self._set_running(True)
         self.stop_button.configure(state="disabled")
-        self.status.set("저장 기록을 새 폴더로 옮기고 있습니다…")
+        self.status.set("새 저장 폴더를 준비하고 있습니다…" if fresh else "저장 기록을 새 폴더로 옮기고 있습니다…")
         self.progress_summary.set("기존 사진·영상은 원래 위치에 보관합니다")
         self.progress.configure(mode="indeterminate", value=0)
         self.progress.start(12)
@@ -493,9 +504,12 @@ class App:
         threading.Thread(target=self._relocate_records, args=(source, destination), daemon=True).start()
 
     def _relocate_records(self, source, destination):
-        from .storage import MigrationError, migrate_records
+        from .storage import MigrationError, initialize_storage, migrate_records
         try:
-            migrate_records(source, destination)
+            if self._storage_fresh:
+                initialize_storage(destination)
+            else:
+                migrate_records(source, destination)
             self.events.put({"type": "storage-finished", "ok": True})
         except MigrationError as exc:
             # This domain error contains only the app's fixed help messages.
@@ -507,6 +521,7 @@ class App:
     def _finish_relocation(self, event):
         source, destination = self._storage_plan
         action = self._storage_action
+        fresh = self._storage_fresh
         success = event.get("ok") is True
         if success:
             self.record_locations[source.account] = str(destination.output_dir)
@@ -519,11 +534,16 @@ class App:
             self.folder.set(str(source.output_dir))
         self.relocating = False
         self._storage_action = self._storage_plan = None
+        self._storage_fresh = False
         self.progress.stop()
         self._set_running(False)
         if success:
-            self.status.set("저장 폴더를 변경했습니다. 기존 기록을 이어서 사용합니다.")
-            self._log("기록 자동 이전 완료 · 기존 사진·영상은 원래 위치에 있습니다.")
+            if fresh:
+                self.status.set("새 저장 폴더를 준비했습니다. 이전 폴더의 기록은 연결 후 가져올 수 있습니다.")
+                self._log(self.status.get())
+            else:
+                self.status.set("저장 폴더를 변경했습니다. 기존 기록을 이어서 사용합니다.")
+                self._log("기록 자동 이전 완료 · 기존 사진·영상은 원래 위치에 있습니다.")
         else:
             self.status.set("기록을 옮기지 못해 이전 저장 폴더를 유지했습니다.")
             self._log(self.status.get())
@@ -573,10 +593,10 @@ class App:
                 "인증 토큰 연결로 한 번 저장을 마친 뒤 ‘예약 명령 복사’를 누르고, 명령 프롬프트(cmd)에 붙여 넣어 실행하면 매일 오전 9시에 새 Like만 저장합니다. 예약 실행은 마지막으로 저장을 시작할 때의 설정을 사용하며 창 없이 실행되고, 결과는 ‘예약 실행 기록’에 남습니다. 시각을 바꾸려면 명령의 09:00을 고치세요. 해제: schtasks /Delete /TN \"XlikeSaver 자동 저장\" /F. 실행 파일을 옮기거나 새 버전으로 바꾸면 다시 등록하세요. 너무 자주 예약하지 마세요.\n\n"
                 "동영상은 최고 제공 MP4 화질로, 움직이는 GIF도 MP4로 저장합니다. 용량 한도는 파일당 200MiB이며 0은 무제한입니다. 큰 파일은 건너뛰고, 한도를 올리면 다음에 다시 확인합니다.\n\n"
                 "출처와 기록 확인하기\n"
-                "파일 내부에 트윗 URL을 기록합니다. 재인코딩하지 않고 기존 설명을 보존합니다. ‘기록 · 통계’에서 파일과 트윗을 열고 CSV로 내보낼 수 있습니다. ‘기존 파일에 출처 기록’은 PC에서만 처리합니다. 출처 기록이 실패해도 미디어는 보존합니다.\n\n"
+                "파일 내부에 트윗 URL과 작성자 @아이디·프로필 주소를 기록합니다. 숫자 사용자 ID가 제공되면 함께 보관합니다. 재인코딩하지 않고 기존 설명을 보존합니다. ‘기록 · 통계’에서 파일과 트윗을 열고 CSV로 내보낼 수 있습니다. ‘기존 파일에 출처·작성자 기록’은 PC에 남은 정보로 처리하며, 작성자 정보가 없는 파일은 출처만 기록합니다. 실패해도 미디어는 보존합니다.\n\n"
                 "게시일 범위는 저장된 트윗의 범위이며, 그 날짜까지 전부 저장했다는 뜻은 아닙니다. 예전 저장 시각과 좋아요 시각은 복원할 수 없습니다. 진행률도 현재 파일 기준입니다.\n\n"
                 "중단과 요청 제한\n"
-                "중단·오류가 생겨도 완료 파일과 기록은 남습니다. 다시 시작하면 최근 좋아요부터 확인합니다. 저장 폴더를 바꾸면 기록을 자동으로 옮겨 이어서 사용합니다. 기존 사진·영상은 원래 위치에 있습니다. 작성자별·저장일별 정리 방식을 바꾸면 복사본이 생길 수 있습니다.\n\n"
+                "중단·오류가 생겨도 완료 파일과 기록은 남습니다. 다시 시작하면 최근 좋아요부터 확인합니다. 저장 폴더를 바꾸면 기록을 자동으로 옮겨 이어서 사용합니다. 경로를 직접 입력한 경우 Enter 또는 저장 시작·기록 보기를 누르면 적용합니다. 이전 폴더가 연결되지 않았으면 새 폴더에서 시작할지 확인합니다. 기존 사진·영상은 원래 위치에 있습니다. 작성자별·저장일별 정리 방식을 바꾸면 복사본이 생길 수 있습니다.\n\n"
                 "X의 비공식 수집 방식이라 느리게 요청해도 계정 제한 위험은 남습니다. 제한이 뜨면 안내된 시각까지 기다리세요. 계정 잠금·로그인 경고는 평소 X에서 확인하세요. 연결 정보를 바꿔도 제한은 해제되지 않습니다. 자주 반복 실행하지 마세요.")
         body = ttk.Frame(popup, padding=18)
         body.pack(fill="both", expand=True)
@@ -617,7 +637,7 @@ class App:
         if self.running:
             return
         if self.history_window is not None and self.history_window.winfo_exists() and self.history_window.metadata_active:
-            messagebox.showinfo("출처 기록 진행 중", "기존 파일의 출처 기록을 완료하거나 중단한 뒤 저장을 시작해 주세요.", parent=self.root)
+            messagebox.showinfo("메타데이터 기록 중", "기존 파일의 출처·작성자 기록을 완료하거나 중단한 뒤 저장을 시작해 주세요.", parent=self.root)
             return
         if AUTH_MODES[self.auth.get()] == "managed" and self.token.get():
             if not self.connect_token():
@@ -774,7 +794,7 @@ class App:
                 self.status.set(str(event.get("message", "작업이 종료되었습니다.")))
                 self._log(self.status.get())
                 if event.get("metadata_failed"):
-                    self._log(f"파일 내부 출처 기록 실패 {int(event['metadata_failed']):,}개 · 미디어는 보존했습니다. ‘기록 · 통계’에서 ‘기존 파일에 출처 기록’으로 다시 시도할 수 있습니다.")
+                    self._log(f"파일 내부 출처·작성자 기록 실패 {int(event['metadata_failed']):,}개 · 미디어는 보존했습니다. ‘기록 · 통계’에서 ‘기존 파일에 출처·작성자 기록’으로 다시 시도할 수 있습니다.")
                 if event.get("retry_at"):
                     self._log("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))
             elif kind == "process_exit":

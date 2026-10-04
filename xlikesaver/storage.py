@@ -330,12 +330,16 @@ def _media_score(row: dict) -> tuple:
     path = Path(row["path"]) if row.get("path") else None
     return (bool(path and path.is_file() and not _linked(path)), row.get("record_source") == "saved",
             row.get("posted_source") == "metadata", row.get("metadata_status") == "embedded",
+            row.get("author_metadata_status") == "embedded",
             row.get("updated_at") or "")
 
 
 def _merge_media(previous: dict, incoming: dict) -> dict:
     first, second = (incoming, previous) if _media_score(incoming) > _media_score(previous) else (previous, incoming)
     result = dict(first)
+    if "author_metadata_status" in first or "author_metadata_status" in second:
+        # The verified status belongs to the chosen file, not another copy.
+        result.setdefault("author_metadata_status", "pending")
     for key, value in second.items():
         if key not in result or result[key] in (None, ""):
             result[key] = value
@@ -343,8 +347,15 @@ def _merge_media(previous: dict, incoming: dict) -> dict:
         result["posted_at"], result["posted_source"] = second.get("posted_at"), "metadata"
     if any(row.get("status") == "saved" for row in (first, second)):
         result["status"], result["record_source"] = "saved", "saved"
-    if first.get("path") == second.get("path") and second.get("metadata_status") == "embedded":
-        result["metadata_status"] = "embedded"
+    if first.get("path") == second.get("path"):
+        for field in ("metadata_status", "author_metadata_status"):
+            if second.get(field) == "embedded":
+                result[field] = "embedded"
+    if result.get("author_metadata_status") == "embedded":
+        identity = lambda row: ((row.get("author") or "").casefold(), row.get("author_id") or "")
+        if identity(result) != identity(first):
+            # Enriching catalog information does not embed it into this file.
+            result["author_metadata_status"] = "pending"
     return result
 
 
@@ -436,6 +447,23 @@ def _publish_records(paths: StoragePaths, stage: Path) -> None:
         _recover_relocation(paths, protected=True)
     except MigrationError:
         pass
+
+
+def initialize_storage(paths: StoragePaths) -> None:
+    """Prepare a chosen destination while excluding concurrent writers."""
+    from .history import HistoryStore
+    from .protection import AccountGuard
+
+    account_guard = AccountGuard(paths.account, sleep=time.sleep)
+    output_guard = OutputGuard(paths.output_dir)
+    try:
+        account_guard.acquire(respect_cooldown=False)
+        output_guard.acquire()
+        store = HistoryStore.for_storage(paths, protected=True)
+        store.close()
+    finally:
+        output_guard.close()
+        account_guard.close()
 
 
 def migrate_records(source: StoragePaths, destination: StoragePaths) -> MigrationResult:

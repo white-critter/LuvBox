@@ -23,7 +23,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from .protection import API_INTERVAL, MEDIA_INTERVAL, AccountGuard, ProtectionError
-from .history import HistoryError, HistoryStore
+from .history import HistoryError, HistoryStore, _author_fields
 from .storage import OutputGuard, resolve_storage
 
 
@@ -45,7 +45,7 @@ _RECORD_ERROR = ("저장 기록을 읽거나 갱신하지 못했습니다. "
 _COMPATIBILITY_ERROR = ("내장 gallery-dl 구성이 이 버전의 XlikeSaver가 예상한 것과 달라 요청을 보내기 전에 중단했습니다. "
                         "배포된 실행 파일을 다시 받거나 setup.ps1로 고정된 버전을 설치해 주세요.")
 _HISTORY_ERROR = "저장 이력을 기록하지 못했습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
-_METADATA_ERROR = "원본 트윗 주소를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다."
+_METADATA_ERROR = "출처 또는 작성자를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다."
 _DATE_MOVE_ERROR = "저장 완료일 폴더로 옮기지 못했습니다. 기존 파일 위치와 중복 방지 기록은 보존했습니다."
 _LOCAL_WRITE_ERROR = ("미디어 파일을 쓰지 못해 중단했습니다. 저장 폴더의 쓰기 권한, 다른 프로그램의 파일 사용 여부, "
                       "디스크 여유 공간을 확인한 뒤 직접 다시 실행해 주세요. "
@@ -84,15 +84,16 @@ def _media_details(metadata: dict) -> dict:
         posted = posted.astimezone(_KOREA).isoformat()
     else:
         posted = ""
-    author = metadata.get("author") or {}
+    author, author_id = _author_fields(metadata.get("author"))
     tweet_id = str(metadata.get("tweet_id", ""))
     return {"tweet_id": tweet_id, "num": metadata.get("num", 0),
             "media_type": metadata.get("type", ""),
-            "author": author.get("name", "") if isinstance(author, dict) else str(author),
+            "author": author, "author_id": author_id,
             "posted_at": posted,
             "filename": f"{tweet_id}_{metadata.get('_xlikesaver_filename_part', metadata.get('num', 0))}.{metadata.get('extension', '')}",
             "source_url": f"https://x.com/i/web/status/{tweet_id}" if re.fullmatch(r"[0-9]{1,20}", tweet_id) else "",
-            "metadata_status": metadata.get("_xlikesaver_metadata_status", "pending")}
+            "metadata_status": metadata.get("_xlikesaver_metadata_status", "pending"),
+            "author_metadata_status": metadata.get("_xlikesaver_author_metadata_status", "pending")}
 
 
 class GalleryCompatibilityError(RuntimeError):
@@ -480,24 +481,49 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     def record_source(kwdict, media_path, media_status):
         nonlocal metadata_failed, metadata_warned
         try:
-            previous_status = (history.get_metadata_status(normalized.folder_mode, kwdict)
-                               if media_status == "existing" else "pending")
+            previous = (history.media_record(normalized.folder_mode, kwdict)
+                        if media_status == "existing" else None) or {}
         except HistoryError:
             raise exception.AbortExtraction("history store unavailable") from None
-        if previous_status in {"embedded", "unsupported"}:
+        previous_status = previous.get("metadata_status", "pending")
+        previous_author_status = previous.get("author_metadata_status", "pending")
+        author, author_id = _author_fields(kwdict.get("author"))
+        # A prior catalog can supply a known author when a current API result
+        # omits it. The account whose Likes are being saved is never used.
+        old_author, old_author_id = _author_fields({"name": previous.get("author", ""), "id": previous.get("author_id", "")})
+        author = author or old_author
+        author_id = author_id or old_author_id
+        if author or author_id:
+            details = kwdict.get("author") if isinstance(kwdict.get("author"), dict) else {}
+            kwdict["author"] = {**details, "name": author, "id": author_id}
+        known_author = bool(author or author_id)
+        same_author = author.casefold() == old_author.casefold() and author_id == old_author_id
+        author_done = not known_author or (previous_author_status == "embedded" and same_author)
+        if previous_status == "unsupported" or (previous_status == "embedded" and author_done):
             metadata_status = previous_status
+            author_status = previous_author_status if known_author else "unknown"
         elif metadata_available:
             try:
-                result = embed_source(media_path, str(kwdict["tweet_id"]))
+                result = embed_source(media_path, str(kwdict["tweet_id"]), author=author, author_id=author_id)
                 metadata_status = result.get("status")
                 if metadata_status not in {"embedded", "failed", "unsupported"}:
                     metadata_status = "failed"
+                author_status = result.get("author_status", "error" if known_author and metadata_status != "unsupported" else "unknown")
+                if author_status not in {"embedded", "unknown", "error"}:
+                    author_status = "error"
             except Exception:
                 metadata_status = "failed"
+                author_status = "error" if known_author else "unknown"
         else:
             metadata_status = "failed"
+            author_status = "error" if known_author else "unknown"
+        # A failed author addition preserves both the file and its previously
+        # verified source. Record the author failure separately for retry.
+        if metadata_status == "failed" and previous_status == "embedded":
+            metadata_status = "embedded"
         kwdict["_xlikesaver_metadata_status"] = metadata_status
-        if metadata_status == "failed":
+        kwdict["_xlikesaver_author_metadata_status"] = author_status
+        if metadata_status == "failed" or author_status == "error":
             metadata_failed += 1
             if not metadata_warned:
                 metadata_warned = True

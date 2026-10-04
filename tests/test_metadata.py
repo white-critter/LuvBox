@@ -7,9 +7,11 @@ import os
 import struct
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -93,6 +95,66 @@ class MetadataTransactionTests(unittest.TestCase):
                 self.assertNotIn(SECRET, str(result))
                 run.assert_not_called()
         self.assert_original()
+
+    def test_invalid_author_cannot_inject_metadata_or_process_arguments(self):
+        for author in ("@", "@@name", "name-with-dash", "a" * 16, "사용자", "ｎａｍｅ",
+                       "name\n-token=" + SECRET, "name\0extra", "name/other", None, 123):
+            with self.subTest(author=author), patch.object(metadata, "_run") as run:
+                result = metadata.embed_source(self.path, "100", author=author)
+                self.assertEqual((result["status"], result["author_status"]), ("failed", "error"))
+                self.assertNotIn(SECRET, str(result))
+                run.assert_not_called()
+        for author_id in ("１２３", "1" * 21, "1\n-token=" + SECRET, "123/other", None, 123):
+            with self.subTest(author_id=author_id), patch.object(metadata, "_run") as run:
+                result = metadata.embed_source(self.path, "100", author="writer", author_id=author_id)
+                self.assertEqual((result["status"], result["author_status"]), ("failed", "error"))
+                self.assertNotIn(SECRET, str(result))
+                run.assert_not_called()
+        self.assert_original()
+
+    def test_author_reader_requires_explicit_validated_markers(self):
+        empty = {"author": "", "author_id": "", "profile_url": ""}
+        for tags in (
+            {"XMP-dc:Creator": "@writer", "XMP-dc:Relation": "https://x.com/writer"},
+            {"XMP-xmp:Identifier": "xlikesaver:x-author:writer"},
+            {"XMP-xmp:Identifier": ["xlikesaver:x-author:writer", "xlikesaver:x-author:other"],
+             "XMP-dc:Creator": ["@writer", "@other"],
+             "XMP-dc:Relation": ["https://x.com/writer", "https://x.com/other"]},
+            {"XMP-xmp:Identifier": "xlikesaver:x-author:writer\n" + SECRET},
+            {"XMP-xmp:Identifier": "xlikesaver:x-user-id:123"},
+        ):
+            with self.subTest(tags=tags), patch.object(metadata, "available", return_value=True), \
+                    patch.object(metadata, "_read_tags", return_value=tags):
+                self.assertEqual(metadata.read_author(self.path), empty)
+        with patch.object(metadata, "available", return_value=True), \
+                patch.object(metadata, "_read_tags", side_effect=ValueError(SECRET)):
+            self.assertEqual(metadata.read_author(self.path), empty)
+
+    def test_author_verification_failure_preserves_original_even_with_valid_source(self):
+        valid = {"XMP-dc:Source": URL,
+                 "XMP-dc:Description": URL + "\nX author: @writer (https://x.com/writer)",
+                 "XMP-dc:Creator": ["Original creator", "@writer"],
+                 "XMP-dc:Relation": ["https://original.example/", "https://x.com/writer"],
+                 "XMP-xmp:Identifier": ["original-id", "xlikesaver:x-author:writer"]}
+        for tag in ("XMP-dc:Creator", "XMP-dc:Relation", "XMP-xmp:Identifier"):
+            incomplete = {**valid, tag: []}
+            def fake(arguments, deadline):
+                Path(arguments[-1]).write_bytes(b"changed-only-temp")
+                return subprocess.CompletedProcess([], 0, "", "")
+            with self.subTest(tag=tag), patch.object(metadata, "available", return_value=True), \
+                    patch.object(metadata, "_read_tags", side_effect=[{}, incomplete]), \
+                    patch.object(metadata, "_run", side_effect=fake):
+                result = metadata.embed_source(self.path, "100", "writer")
+                self.assertEqual((result["status"], result["author_status"]), ("failed", "error"))
+                self.assert_original()
+
+    def test_missing_author_remains_unknown_with_source_only_metadata(self):
+        with patch.object(metadata, "available", return_value=True), \
+                patch.object(metadata, "_read_tags", side_effect=[{}, {"XMP-dc:Source": URL, "XMP-dc:Description": URL}]), \
+                patch.object(metadata, "_run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            result = metadata.embed_source(self.path, "100")
+        self.assertEqual((result["status"], result["author_status"], result["author"], result["author_id"]),
+                         ("embedded", "unknown", "", ""))
 
     def test_unsupported_gif_has_explicit_status_without_tool_call(self):
         gif = self.root / "100_1.gif"
@@ -193,6 +255,83 @@ class ActualExifToolTests(unittest.TestCase):
         self.root = Path(self.temp.name) / "한글😀 저장 폴더"
         self.root.mkdir()
 
+    def media_payload(self, suffix):
+        if suffix != ".mp4":
+            return {".jpg": JPEG, ".png": PNG, ".webp": WEBP}[suffix]
+        fixture = metadata.exiftool_path().parent / "exiftool_files" / "t" / "images" / "QuickTime.mov"
+        movie = [(kind, data) for kind, data in atoms(fixture.read_bytes()) if kind != b"mdat"]
+        movie.insert(0, (b"ftyp", b"isom\x00\x00\x02\x00isomiso2mp41"))
+        movie.append((b"mdat", b"\x00\x00\x00\x04\x65\x88\x84\x00" * 32))
+        return b"".join(struct.pack(">I4s", len(data) + 8, kind) + data for kind, data in movie)
+
+    def test_author_roundtrips_all_formats_and_modes_preserve_prior_metadata_and_payload(self):
+        expected_author = {"author": "Example_User", "author_id": "1234567890",
+                           "profile_url": "https://x.com/Example_User"}
+        for resident in (False, True):
+            with metadata.persistent() if resident else nullcontext():
+                for suffix in (".jpg", ".png", ".webp", ".mp4"):
+                    with self.subTest(resident=resident, suffix=suffix):
+                        path = self.root / f"100_author_{resident}{suffix}"
+                        path.write_bytes(self.media_payload(suffix))
+                        initial = ["-overwrite_original", "-XMP-dc:Creator=원본 작가", "-XMP-dc:Creator+=@photographer",
+                                   "-XMP-dc:Relation=https://original.example/source", "-XMP-xmp:Identifier=original:123",
+                                   "-XMP-dc:Identifier=original image id", "-XMP-dc:Description=원본 설명",
+                                   "-XMP-dc:Description-fr=Texte original", "-XMP-dc:Description-ja=元の説明"]
+                        if suffix == ".mp4":
+                            initial.extend(["-ItemList:Comment=Original comment", "-UserData:Comment=Separate comment"])
+                        self.assertEqual(metadata._run(initial + [str(path)], time.monotonic() + 20).returncode, 0)
+                        # Existing downloaded files may already have their source URL.
+                        self.assertEqual(metadata.embed_source(path, "100")["status"], "embedded")
+                        os.utime(path, ns=(946684800000000000, 946684800123456700))
+                        mtime = path.stat().st_mtime_ns
+                        payload = ([data for kind, data in atoms(path.read_bytes()) if kind == b"mdat"]
+                                   if suffix == ".mp4" else image_payload(path.read_bytes(), suffix))
+                        result = metadata.embed_source(path, "100", author="@Example_User", author_id="1234567890")
+                        self.assertEqual((result["status"], result["author_status"]), ("embedded", "embedded"))
+                        self.assertEqual(metadata.read_author(path), expected_author)
+                        first = metadata._read_tags(path, time.monotonic() + 20)
+                        self.assertEqual(metadata._values(first["XMP-dc:Creator"]), ["원본 작가", "@photographer", "@Example_User"])
+                        self.assertEqual(set(metadata._values(first["XMP-dc:Relation"])),
+                                         {"https://original.example/source", "https://x.com/Example_User", "https://x.com/i/user/1234567890"})
+                        self.assertEqual(set(metadata._values(first["XMP-xmp:Identifier"])),
+                                         {"original:123", "xlikesaver:x-author:Example_User", "xlikesaver:x-user-id:1234567890"})
+                        self.assertIn("원본 설명\nSource: " + URL, first["XMP-dc:Description"])
+                        self.assertIn("X author: @Example_User (https://x.com/Example_User)", first["XMP-dc:Description"])
+                        self.assertEqual(metadata.embed_source(path, "100", "Example_User", "1234567890")["author_status"], "embedded")
+                        second = metadata._read_tags(path, time.monotonic() + 20)
+                        self.assertEqual(first, second)
+                        preserved = metadata._run(["-j", "-XMP-dc:Description-fr", "-XMP-dc:Description-ja", "-XMP-dc:Identifier", str(path)], time.monotonic() + 20)
+                        tags = json.loads(preserved.stdout)[0]
+                        self.assertEqual((tags["Description-fr"], tags["Description-ja"], tags["Identifier"]),
+                                         ("Texte original", "元の説明", "original image id"))
+                        current_payload = ([data for kind, data in atoms(path.read_bytes()) if kind == b"mdat"]
+                                           if suffix == ".mp4" else image_payload(path.read_bytes(), suffix))
+                        self.assertEqual(current_payload, payload)
+                        self.assertEqual(path.stat().st_mtime_ns, mtime)
+                        if suffix == ".mp4":
+                            self.assertIn("X author: @Example_User", first["ItemList:Comment"])
+                            self.assertEqual(first["UserData:Comment"], "Separate comment")
+                        self.assertFalse(list(self.root.glob(".xlikesaver-source-*")))
+
+    def test_numeric_author_id_without_handle_is_recorded_without_guessing_a_handle(self):
+        path = self.root / "100_numeric.png"
+        path.write_bytes(PNG)
+        result = metadata.embed_source(path, "100", author_id="12345")
+        self.assertEqual((result["status"], result["author_status"]), ("embedded", "embedded"))
+        self.assertEqual(metadata.read_author(path), {"author": "", "author_id": "12345", "profile_url": "https://x.com/i/user/12345"})
+        self.assertNotIn("XMP-dc:Creator", metadata._read_tags(path, time.monotonic() + 20))
+
+    def test_updated_handle_preserves_prior_creators_and_unrelated_identifiers(self):
+        path = self.root / "100_renamed.jpg"
+        path.write_bytes(JPEG)
+        self.assertEqual(metadata.embed_source(path, "100", "previous_name", "12345")["author_status"], "embedded")
+        self.assertEqual(metadata.embed_source(path, "100", "current_name", "12345")["author_status"], "embedded")
+        self.assertEqual(metadata.read_author(path), {"author": "current_name", "author_id": "12345", "profile_url": "https://x.com/current_name"})
+        tags = metadata._read_tags(path, time.monotonic() + 20)
+        self.assertEqual(metadata._values(tags["XMP-dc:Creator"]), ["@previous_name", "@current_name"])
+        self.assertEqual(set(metadata._values(tags["XMP-xmp:Identifier"])),
+                         {"xlikesaver:x-author:current_name", "xlikesaver:x-user-id:12345"})
+
     def test_jpeg_png_webp_roundtrip_preserves_compressed_pixels_and_mtime(self):
         for suffix, payload in ((".jpg", JPEG), (".png", PNG), (".webp", WEBP)):
             with self.subTest(suffix=suffix):
@@ -290,6 +429,100 @@ class ActualExifToolTests(unittest.TestCase):
             # Later calls still work through one-shot processes.
             self.assertEqual(metadata.embed_source(path, "301")["status"], "embedded")
         self.assertEqual(path.read_bytes()[:8], PNG[:8])
+
+    def test_overlapping_resident_contexts_keep_process_until_last_thread_finishes(self):
+        path = self.root / "400_1.png"
+        path.write_bytes(PNG)
+        entered, proceed = threading.Event(), threading.Event()
+        results = []
+        def work():
+            try:
+                with metadata.persistent():
+                    entered.set()
+                    if not proceed.wait(10):
+                        raise AssertionError("metadata test coordination timed out")
+                    results.append(metadata.embed_source(path, "400", "writer", "12345"))
+            except Exception as error:
+                results.append(error)
+        real_popen = subprocess.Popen
+        with patch.object(metadata.subprocess, "Popen", side_effect=real_popen) as popen, \
+                patch.object(metadata.subprocess, "run", side_effect=AssertionError("one-shot process used")):
+            with metadata.persistent():
+                session = metadata._session
+                worker = threading.Thread(target=work)
+                worker.start()
+                self.assertTrue(entered.wait(10))
+            try:
+                self.assertIs(metadata._session, session)
+                self.assertIsNone(session._process.poll())
+            finally:
+                proceed.set()
+                worker.join(20)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(results[0]["author_status"], "embedded")
+            self.assertEqual(popen.call_count, 1)
+        self.assertIsNone(metadata._session)
+        self.assertIsNotNone(session._process.poll())
+        self.assertEqual(metadata.read_author(path)["author"], "writer")
+
+    def test_standalone_command_borrows_resident_process_until_command_finishes(self):
+        path = self.root / "401_1.png"
+        path.write_bytes(PNG)
+        entered, proceed = threading.Event(), threading.Event()
+        results = []
+        with metadata.persistent():
+            session = metadata._session
+            execute = session.execute
+            def delayed(arguments, deadline):
+                entered.set()
+                if not proceed.wait(10):
+                    raise AssertionError("metadata test coordination timed out")
+                return execute(arguments, deadline)
+            def work():
+                try:
+                    results.append(metadata._run(["-j", str(path)], time.monotonic() + 20))
+                except Exception as error:
+                    results.append(error)
+            patcher = patch.object(session, "execute", side_effect=delayed)
+            patcher.start()
+            worker = threading.Thread(target=work)
+            worker.start()
+            self.assertTrue(entered.wait(10))
+        try:
+            self.assertIs(metadata._session, session)
+            self.assertIsNone(session._process.poll())
+        finally:
+            proceed.set()
+            worker.join(20)
+            patcher.stop()
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results[0].returncode, 0)
+        self.assertIsNone(metadata._session)
+        self.assertIsNotNone(session._process.poll())
+
+    def test_waiting_command_honors_deadline_without_killing_another_command(self):
+        path = self.root / "402_1.png"
+        path.write_bytes(PNG)
+        entered, proceed = threading.Event(), threading.Event()
+        with metadata.persistent():
+            session = metadata._session
+            def hold():
+                with session._lock:
+                    entered.set()
+                    proceed.wait(10)
+            worker = threading.Thread(target=hold)
+            worker.start()
+            self.assertTrue(entered.wait(10))
+            try:
+                started = time.monotonic()
+                with self.assertRaises(TimeoutError):
+                    session.execute(["-j", str(path)], time.monotonic() + 0.05)
+                self.assertLess(time.monotonic() - started, 1)
+                self.assertIsNone(session._process.poll())
+            finally:
+                proceed.set()
+                worker.join(10)
+            self.assertEqual(metadata.embed_source(path, "402", "writer")["author_status"], "embedded")
 
 
 class BundleExtractionTests(unittest.TestCase):

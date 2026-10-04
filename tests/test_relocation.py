@@ -120,6 +120,53 @@ class RelocationTests(unittest.TestCase):
         self.assertEqual(row["saved_at"], richer["saved_at"])
         self.assertEqual(len(self.archived(self.b)), 1)
 
+    def test_media_conflict_prefers_file_with_verified_author_metadata(self):
+        from xlikesaver.storage import _merge_media
+        old = self.record(self.a, 100)
+        newer = self.record(self.b, 100)
+        old.update(author_id="42", author_metadata_status="embedded")
+        newer.update(author_metadata_status="pending", updated_at="2099-01-01T00:00:00+00:00")
+        chosen = _merge_media(newer, old)
+        self.assertEqual(chosen["path"], old["path"])
+        self.assertEqual(chosen["author_metadata_status"], "embedded")
+        self.assertEqual(chosen["author_id"], "42")
+
+    def test_old_schema_selected_file_does_not_inherit_another_files_author_status(self):
+        from xlikesaver.storage import _merge_media
+        old = self.record(self.a, 100)
+        missing = self.record(self.b, 100)
+        Path(missing["path"]).unlink()
+        old.pop("author_metadata_status", None)
+        missing.update(author_id="42", author_metadata_status="embedded")
+        chosen = _merge_media(old, missing)
+        self.assertEqual(chosen["path"], old["path"])
+        self.assertEqual(chosen["author_metadata_status"], "pending")
+        self.assertEqual(chosen["author_id"], "42")
+
+    def test_same_file_keeps_author_verification_when_merging_record_versions(self):
+        from xlikesaver.storage import _merge_media
+        old = self.record(self.a, 100)
+        old.update(author_id="42", author_metadata_status="embedded", posted_source="unknown")
+        recent = dict(old, author_metadata_status="pending", posted_source="metadata")
+        chosen = _merge_media(old, recent)
+        self.assertEqual(chosen["author_metadata_status"], "embedded")
+
+    def test_identity_added_from_another_copy_requires_embedding_in_selected_file(self):
+        from xlikesaver.storage import _merge_media
+        chosen_file = self.record(self.a, 100)
+        other_file = self.record(self.b, 100)
+        chosen_file.update(author="author", author_id="", author_metadata_status="embedded",
+                           updated_at="2099-01-01T00:00:00+00:00")
+        other_file.update(author="author", author_id="42", author_metadata_status="embedded")
+        merged = _merge_media(chosen_file, other_file)
+        self.assertEqual(merged["path"], chosen_file["path"])
+        self.assertEqual(merged["author_id"], "42")
+        self.assertEqual(merged["author_metadata_status"], "pending")
+        chosen_file.update(author="", author_id="42")
+        merged = _merge_media(chosen_file, other_file)
+        self.assertEqual(merged["author"], "author")
+        self.assertEqual(merged["author_metadata_status"], "pending")
+
     def test_destination_existing_path_wins_when_source_file_is_missing(self):
         missing = self.record(self.a, 100)
         present = self.record(self.b, 100)

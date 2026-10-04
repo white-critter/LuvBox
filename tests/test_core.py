@@ -44,9 +44,11 @@ class FakeLikesExtractor(Extractor):
                 self.before_row(self, row)
             metadata = {"tweet_id": row[0], "num": row[1], "type": row[2],
                         "extension": "mp4" if row[2] in {"video", "animated_gif"} else "jpg",
-                        "author": {"name": row[3]}, "user": {"name": row[3]}}
+                        "author": {"name": row[3]}, "user": {"name": "myaccount", "id": 999}}
             if len(row) > 4:
                 metadata["date"] = row[4]
+            if len(row) > 5:
+                metadata["author"]["id"] = row[5]
             yield Message.Directory, "", metadata
             url = (f"https://video.twimg.com/{row[0]}_{row[1]}.mp4" if row[2] in {"video", "animated_gif"}
                    else f"https://pbs.twimg.com/media/{row[0]}_{row[1]}?format=jpg&name=orig")
@@ -88,7 +90,7 @@ class CoreTests(unittest.TestCase):
         self.metadata_available.start()
         self.addCleanup(self.metadata_available.stop)
         self.metadata_embed = patch("xlikesaver.metadata.embed_source",
-                                    side_effect=lambda path, tweet_id: {"status": "embedded", "url": f"https://x.com/i/web/status/{tweet_id}", "message": ""})
+                                    side_effect=lambda path, tweet_id, **values: {"status": "embedded", "url": f"https://x.com/i/web/status/{tweet_id}", "message": "", "author_status": "embedded" if values.get("author") or values.get("author_id") else "unknown"})
         self.embed_source = self.metadata_embed.start()
         self.addCleanup(self.metadata_embed.stop)
         FakeHttpDownloader.downloaded = []

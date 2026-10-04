@@ -22,6 +22,9 @@ class GuiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        self.guards = patch("xlikesaver.protection.state_directory", return_value=Path(self.temp.name) / "locks")
+        self.guards.start()
+        self.addCleanup(self.guards.stop)
         self.root = tk.Tk()
         self.root.withdraw()
         self.addCleanup(destroy_tk, self.root)
@@ -136,6 +139,56 @@ class GuiTests(unittest.TestCase):
             self.assertFalse(self.app._ensure_storage("start"))
         thread.assert_not_called()
         self.assertEqual(self.app.folder.get(), str(source.output_dir))
+
+    def test_typing_a_folder_does_not_apply_it_on_focus_change(self):
+        folder = next(widget for widget in self.app.inputs
+                      if isinstance(widget, tk.ttk.Entry) and
+                      str(widget.cget("textvariable")) == str(self.app.folder))
+        self.assertEqual(folder.bind("<FocusOut>"), "")
+        self.assertTrue(folder.bind("<Return>"))
+
+    def test_unavailable_previous_folder_requires_explicit_fresh_start(self):
+        source, target = self.relocation_source()
+        offline = source.output_dir.with_name("연결되지 않은 드라이브")
+        self.app.record_locations[source.account] = str(offline)
+        self.app.folder.set(str(target))
+        with patch("xlikesaver.gui.messagebox.askyesno", return_value=False) as notice, \
+                patch("xlikesaver.gui.threading.Thread") as thread:
+            self.assertFalse(self.app._ensure_storage("start"))
+        notice.assert_called_once()
+        thread.assert_not_called()
+        self.assertEqual(self.app.folder.get(), str(offline))
+        self.assertFalse(target.exists())
+
+    def test_explicit_fresh_start_preserves_destination_records_and_can_merge_old_records_later(self):
+        from xlikesaver.history import HistoryStore
+        from xlikesaver.storage import migrate_records, resolve_storage
+        source, target = self.relocation_source()
+        destination = resolve_storage(target, source.account)
+        store = HistoryStore.for_storage(destination)
+        file = target / "101_1.jpg"
+        file.write_bytes(b"new-media")
+        store.record_media("flat", {"tweet_id": "101", "num": 1, "type": "photo"}, file)
+        store.close()
+        self.app.record_locations[source.account] = str(source.output_dir.with_name("offline"))
+        self.app.folder.set(str(target))
+        with patch("xlikesaver.gui.messagebox.askyesno", return_value=True), \
+                patch("xlikesaver.gui.threading.Thread") as thread, \
+                patch("xlikesaver.storage.migrate_records") as migration, \
+                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+            self.assertFalse(self.app._ensure_storage())
+            self.app._relocate_records(*thread.call_args.kwargs["args"])
+            self.app._poll()
+        migration.assert_not_called()
+        self.assertEqual(self.app.record_locations[source.account], str(target))
+        self.assertFalse(self.app.relocating)
+        migrate_records(destination, source)
+        store = HistoryStore.for_storage(source)
+        try:
+            self.assertEqual({row["tweet_id"] for row in store.records()}, {"100", "101"})
+        finally:
+            store.close()
+        self.assertEqual(file.read_bytes(), b"new-media")
 
     def test_first_folder_choice_does_not_require_an_unused_default_directory(self):
         self.app.account.set("offline_test")

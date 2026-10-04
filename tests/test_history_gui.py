@@ -195,9 +195,9 @@ class HistoryGuiTests(unittest.TestCase):
         account.root.mkdir(parents=True, exist_ok=True)
         cooldown = json.dumps({"until": time.time() + 3600})
         account.state_path.write_text(cooldown, encoding="utf-8")
-        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded"}) as embed, patch("requests.Session.request") as network:
+        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, paths)
-        embed.assert_called_once_with(media, "100")
+        embed.assert_called_once_with(media, "100", author="", author_id="")
         network.assert_not_called()
         self.assertEqual(account.state_path.read_text(encoding="utf-8"), cooldown)
         with closing(HistoryStore.for_storage(paths)) as store:
@@ -258,9 +258,9 @@ class HistoryGuiTests(unittest.TestCase):
         store = self.records()
         original = store.records()[0]
         self.window.busy = False
-        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "url": "https://x.com/i/web/status/100", "message": "ok"}) as embed, patch("requests.Session.request") as network:
+        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "url": "https://x.com/i/web/status/100", "message": "ok", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, self.account)
-        embed.assert_called_once_with(Path(original["path"]), "100")
+        embed.assert_called_once_with(Path(original["path"]), "100", author="alice", author_id="")
         network.assert_not_called()
         self.assertEqual(store.records()[0]["metadata_status"], "embedded")
         self.assertEqual(store.records()[0]["saved_at"], original["saved_at"])
@@ -272,6 +272,48 @@ class HistoryGuiTests(unittest.TestCase):
             self.window._backfill(self.window.generation, self.account)
         embed.assert_not_called()
         self.assertEqual(outside.read_bytes(), b"untouched-outside-file")
+
+    def test_backfill_adds_known_author_to_already_source_tagged_files_once(self):
+        store = self.records()
+        original = store.records()[0]
+        store.mark_metadata(original, "embedded")
+        store._db.execute("UPDATE media SET author_id='123456789'")
+        store._db.commit()
+        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
+            self.window._backfill(self.window.generation, self.account)
+            embed.assert_called_once_with(Path(original["path"]), "100", author="alice", author_id="123456789")
+            self.window._backfill(self.window.generation, self.account)
+            embed.assert_called_once()
+        network.assert_not_called()
+        row = store.records()[0]
+        self.assertEqual(row["author_metadata_status"], "embedded")
+        self.assertEqual(row["saved_at"], original["saved_at"])
+        self.window._display(store.summary(), store.records(), store.runs())
+        self.window.tree.selection_set("0")
+        self.window.select_record()
+        self.assertIn("@alice (ID 123456789)", self.window.selection_text.get())
+        self.assertIn("작성자 기록됨", self.window.selection_text.get())
+
+    def test_backfill_does_not_guess_author_for_source_tagged_unknown_record(self):
+        store = self.records()
+        store._db.execute("UPDATE media SET author='',metadata_status='embedded'")
+        store._db.commit()
+        with patch("xlikesaver.metadata.embed_source") as embed, patch("requests.Session.request") as network:
+            self.window._backfill(self.window.generation, self.account)
+        embed.assert_not_called()
+        network.assert_not_called()
+        self.assertEqual(store.records()[0]["author"], "")
+
+    def test_author_backfill_failure_preserves_previous_source_and_original_save_time(self):
+        store = self.records()
+        original = store.records()[0]
+        store.mark_metadata(original, "embedded")
+        with patch("xlikesaver.metadata.embed_source", return_value={"status": "failed", "author_status": "error"}), patch("requests.Session.request") as network:
+            self.window._backfill(self.window.generation, self.account)
+        network.assert_not_called()
+        row = store.records()[0]
+        self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "error"))
+        self.assertEqual(row["saved_at"], original["saved_at"])
 
 
 if __name__ == "__main__":
