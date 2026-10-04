@@ -308,8 +308,16 @@ class ActualExifToolTests(unittest.TestCase):
                         self.assertEqual(metadata._values(first["XMP-dc:Creator"]), ["원본 작가", "@photographer", "@Example_User"])
                         self.assertEqual(set(metadata._values(first["XMP-dc:Relation"])),
                                          {"https://original.example/source", "https://x.com/Example_User", "https://x.com/i/user/1234567890"})
+                        ownership = {"xlikesaver:owned-author:v1:creator:Example_User",
+                                     "xlikesaver:owned-author:v1:profile:Example_User",
+                                     "xlikesaver:owned-author:v1:user-url:1234567890",
+                                     "xlikesaver:owned-author:v1:description-handle:Example_User",
+                                     "xlikesaver:owned-author:v1:description-id:1234567890"}
+                        if suffix == ".mp4":
+                            ownership.update({"xlikesaver:owned-author:v1:comment-handle:Example_User",
+                                              "xlikesaver:owned-author:v1:comment-id:1234567890"})
                         self.assertEqual(set(metadata._values(first["XMP-xmp:Identifier"])),
-                                         {"original:123", "xlikesaver:x-author:Example_User", "xlikesaver:x-user-id:1234567890"})
+                                         {"original:123", "xlikesaver:x-author:Example_User", "xlikesaver:x-user-id:1234567890"} | ownership)
                         self.assertIn("원본 설명\nSource: " + URL, first["XMP-dc:Description"])
                         self.assertIn("X author: @Example_User (https://x.com/Example_User)", first["XMP-dc:Description"])
                         self.assertEqual(metadata.embed_source(path, "100", "Example_User", "1234567890")["author_status"], "embedded")
@@ -351,7 +359,12 @@ class ActualExifToolTests(unittest.TestCase):
         self.assertEqual(set(metadata._values(tags["XMP-dc:Relation"])),
                          {"https://example.com/album", "https://x.com/current_name", "https://x.com/i/user/67890"})
         self.assertEqual(set(metadata._values(tags["XMP-xmp:Identifier"])),
-                         {"urn:other:1", "xlikesaver:x-author:current_name", "xlikesaver:x-user-id:67890"})
+                         {"urn:other:1", "xlikesaver:x-author:current_name", "xlikesaver:x-user-id:67890",
+                          "xlikesaver:owned-author:v1:creator:current_name",
+                          "xlikesaver:owned-author:v1:profile:current_name",
+                          "xlikesaver:owned-author:v1:user-url:67890",
+                          "xlikesaver:owned-author:v1:description-handle:current_name",
+                          "xlikesaver:owned-author:v1:description-id:67890"})
         self.assertEqual(tags["XMP-dc:Description"], URL + "\nX author: @current_name (https://x.com/current_name)\n"
                                                       "X user ID: 67890 (https://x.com/i/user/67890)")
 
@@ -364,6 +377,105 @@ class ActualExifToolTests(unittest.TestCase):
         self.assertEqual(metadata._values(tags["XMP-dc:Creator"]), ["@writer"])
         self.assertEqual(metadata._values(tags["XMP-dc:Relation"]), ["https://x.com/writer"])
         self.assertEqual(metadata.read_author(path)["author"], "writer")
+
+    def test_matching_external_author_values_are_not_claimed_or_removed(self):
+        old_lines = "X author: @previous_name (https://x.com/previous_name)\nX user ID: 12345 (https://x.com/i/user/12345)"
+        external_text = "외부 설명\r\n" + old_lines
+        unrelated = ["urn:external:1", "xlikesaver:x-author:old name", "xlikesaver:x-user-id:unknown",
+                     "xlikesaver:owned-author:v1:external:previous_name"]
+        with metadata.persistent():
+            for suffix in (".jpg", ".png", ".webp", ".mp4"):
+                with self.subTest(suffix=suffix):
+                    path = self.root / ("100_external" + suffix)
+                    path.write_bytes(self.media_payload(suffix))
+                    text_path = self.root / "external.txt"
+                    text_path.write_text(external_text, encoding="utf-8", newline="")
+                    arguments = ["-overwrite_original", "-XMP-dc:Creator=@previous_name",
+                                 "-XMP-dc:Relation=https://x.com/previous_name",
+                                 "-XMP-dc:Relation+=https://x.com/i/user/12345",
+                                 f"-XMP-dc:Description-x-default<={text_path}", "-XMP-dc:Description-fr=Texte original"]
+                    arguments.extend("-XMP-xmp:Identifier+=" + value for value in unrelated)
+                    if suffix == ".mp4":
+                        arguments.extend([f"-ItemList:Comment<={text_path}", "-UserData:Comment=Unrelated comment"])
+                    self.assertEqual(metadata._run(arguments + [str(path)], time.monotonic() + 20).returncode, 0)
+                    os.utime(path, ns=(946684800000000000, 946684800123456700))
+                    mtime = path.stat().st_mtime_ns
+                    original_payload = ([data for kind, data in atoms(path.read_bytes()) if kind == b"mdat"]
+                                        if suffix == ".mp4" else image_payload(path.read_bytes(), suffix))
+                    self.assertEqual(metadata.embed_source(path, "100", "previous_name", "12345")["author_status"], "embedded")
+                    first = metadata._read_tags(path, time.monotonic() + 20)
+                    self.assertEqual(set(metadata._values(first["XMP-xmp:Identifier"])),
+                                     set(unrelated) | {"xlikesaver:x-author:previous_name", "xlikesaver:x-user-id:12345"})
+                    self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
+                    changed = metadata._read_tags(path, time.monotonic() + 20)
+                    self.assertEqual(metadata._values(changed["XMP-dc:Creator"]), ["@previous_name", "@current_name"])
+                    self.assertEqual(set(metadata._values(changed["XMP-dc:Relation"])),
+                                     {"https://x.com/previous_name", "https://x.com/i/user/12345",
+                                      "https://x.com/current_name", "https://x.com/i/user/67890"})
+                    self.assertTrue(set(unrelated).issubset(metadata._values(changed["XMP-xmp:Identifier"])))
+                    self.assertTrue(changed["XMP-dc:Description"].startswith(external_text + "\nSource: " + URL))
+                    self.assertEqual(metadata.read_author(path), {"author": "current_name", "author_id": "67890",
+                                                                 "profile_url": "https://x.com/current_name"})
+                    if suffix == ".mp4":
+                        self.assertTrue(changed["ItemList:Comment"].startswith(external_text + "\nSource: " + URL))
+                        self.assertEqual(changed["UserData:Comment"], "Unrelated comment")
+                    self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
+                    self.assertEqual(metadata._read_tags(path, time.monotonic() + 20), changed)
+                    preserved = metadata._run(["-j", "-XMP-dc:Description-fr", str(path)], time.monotonic() + 20)
+                    self.assertEqual(json.loads(preserved.stdout)[0]["Description-fr"], "Texte original")
+                    current_payload = ([data for kind, data in atoms(path.read_bytes()) if kind == b"mdat"]
+                                       if suffix == ".mp4" else image_payload(path.read_bytes(), suffix))
+                    self.assertEqual(current_payload, original_payload)
+                    self.assertEqual(path.stat().st_mtime_ns, mtime)
+
+    def test_legacy_identity_markers_do_not_prove_ownership(self):
+        path = self.root / "100_legacy.jpg"
+        path.write_bytes(JPEG)
+        legacy_description = URL + "\nX author: @previous_name (https://x.com/previous_name)\nX user ID: 12345 (https://x.com/i/user/12345)"
+        text_path = self.root / "legacy.txt"
+        text_path.write_text(legacy_description, encoding="utf-8", newline="")
+        arguments = ["-overwrite_original", "-XMP-dc:Source=" + URL,
+                     "-XMP-dc:Creator=@previous_name", "-XMP-dc:Relation=https://x.com/previous_name",
+                     "-XMP-dc:Relation+=https://x.com/i/user/12345", f"-XMP-dc:Description-x-default<={text_path}",
+                     "-XMP-xmp:Identifier=xlikesaver:x-author:previous_name",
+                     "-XMP-xmp:Identifier+=xlikesaver:x-user-id:12345"]
+        self.assertEqual(metadata._run(arguments + [str(path)], time.monotonic() + 20).returncode, 0)
+        with metadata.persistent():
+            self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
+            tags = metadata._read_tags(path, time.monotonic() + 20)
+            self.assertEqual(metadata._values(tags["XMP-dc:Creator"]), ["@previous_name", "@current_name"])
+            self.assertTrue(tags["XMP-dc:Description"].startswith(legacy_description + "\n"))
+            self.assertIn("https://x.com/previous_name", metadata._values(tags["XMP-dc:Relation"]))
+            self.assertIn("https://x.com/i/user/12345", metadata._values(tags["XMP-dc:Relation"]))
+            self.assertNotIn("xlikesaver:x-author:previous_name", metadata._values(tags["XMP-xmp:Identifier"]))
+            self.assertNotIn("xlikesaver:x-user-id:12345", metadata._values(tags["XMP-xmp:Identifier"]))
+            self.assertEqual(metadata.read_author(path), {"author": "current_name", "author_id": "67890",
+                                                         "profile_url": "https://x.com/current_name"})
+
+    def test_owned_author_updates_preserve_original_line_separators(self):
+        with metadata.persistent():
+            for suffix in (".jpg", ".png", ".webp", ".mp4"):
+                for index, separators in enumerate((("\r\n", "\r", "\n"), ("\r", "\n", "\r\n"), ("\n", "\r\n", "\r"))):
+                    with self.subTest(suffix=suffix, separators=separators):
+                        path = self.root / (f"100_separators_{index}" + suffix)
+                        path.write_bytes(self.media_payload(suffix))
+                        original = "원본 첫 줄" + separators[0] + "Second line" + separators[1] + URL + separators[2]
+                        text_path = self.root / "separators.txt"
+                        text_path.write_text(original, encoding="utf-8", newline="")
+                        arguments = ["-overwrite_original", "-XMP-dc:Creator=", f"-XMP-dc:Description-x-default<={text_path}"]
+                        if suffix == ".mp4":
+                            arguments.append(f"-ItemList:Comment<={text_path}")
+                        self.assertEqual(metadata._run(arguments + [str(path)], time.monotonic() + 20).returncode, 0)
+                        self.assertEqual(metadata.embed_source(path, "100", "previous_name", "12345")["author_status"], "embedded")
+                        self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
+                        tags = metadata._read_tags(path, time.monotonic() + 20)
+                        expected = original + "\nX author: @current_name (https://x.com/current_name)\nX user ID: 67890 (https://x.com/i/user/67890)"
+                        self.assertEqual(tags["XMP-dc:Description"], expected)
+                        if suffix == ".mp4":
+                            self.assertEqual(tags["ItemList:Comment"], expected)
+                        self.assertEqual(metadata._values(tags["XMP-dc:Creator"]), ["@current_name"])
+                        self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
+                        self.assertEqual(metadata._read_tags(path, time.monotonic() + 20), tags)
 
     def test_invalid_author_text_still_records_the_source(self):
         for index, author in enumerate(("고양이", "a" * 16, "Alice Kim")):

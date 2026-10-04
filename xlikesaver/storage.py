@@ -347,12 +347,14 @@ def _merge_media(previous: dict, incoming: dict) -> dict:
         result["posted_at"], result["posted_source"] = second.get("posted_at"), "metadata"
     if any(row.get("status") == "saved" for row in (first, second)):
         result["status"], result["record_source"] = "saved", "saved"
+    identity = lambda row: (row.get("author") or "", row.get("author_id") or "")
     if first.get("path") == second.get("path"):
-        for field in ("metadata_status", "author_metadata_status"):
-            if second.get(field) == "embedded":
-                result[field] = "embedded"
+        if second.get("metadata_status") == "embedded":
+            result["metadata_status"] = "embedded"
+        if (second.get("author_metadata_status") == "embedded" and
+                identity(second) == identity(result)):
+            result["author_metadata_status"] = "embedded"
     if result.get("author_metadata_status") == "embedded":
-        identity = lambda row: ((row.get("author") or "").casefold(), row.get("author_id") or "")
         if identity(result) != identity(first):
             # Enriching catalog information does not embed it into this file.
             result["author_metadata_status"] = "pending"

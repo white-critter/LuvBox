@@ -332,7 +332,7 @@ class HistoryStore:
             if row["metadata_status"] == "pending":
                 row["metadata_status"] = old["metadata_status"]
             if (row["author_metadata_status"] == "pending" and
-                    row["author"].casefold() == old["author"].casefold() and
+                    row["author"] == old["author"] and
                     row["author_id"] == old["author_id"]):
                 row["author_metadata_status"] = old["author_metadata_status"]
             # An archive-only row describes an old photo, not the exact type of

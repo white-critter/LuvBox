@@ -101,6 +101,31 @@ class HistoryTests(unittest.TestCase):
         row = self.store.records()[0]
         self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]), ("", "", "unknown"))
 
+    def test_case_changed_author_stays_pending_through_refresh(self):
+        data = self.metadata()
+        data["author"] = {"name": "Writer", "id": 123}
+        data["_xlikesaver_metadata_status"] = "embedded"
+        data["_xlikesaver_author_metadata_status"] = "embedded"
+        path = self.file("100_1.jpg")
+        self.store.record_media("flat", data, path)
+        original = self.store.records()[0]
+
+        data["author"]["name"] = "writer"
+        data["_xlikesaver_author_metadata_status"] = "pending"
+        self.store.record_media("flat", data, path, status="existing")
+        self.store.import_legacy(refresh=True)
+        row = self.store.records()[0]
+        self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]),
+                         ("writer", "123", "pending"))
+        self.assertEqual(row["saved_at"], original["saved_at"])
+
+        # An unchanged author with no new write result still keeps the last
+        # successful result when refreshing or importing a record.
+        self.store.mark_metadata(row, "embedded", author_status="embedded")
+        del data["_xlikesaver_author_metadata_status"]
+        self.store.record_media("flat", data, path, status="existing")
+        self.assertEqual(self.store.records()[0]["author_metadata_status"], "embedded")
+
     def test_author_columns_upgrade_old_database_without_losing_source_or_save_time(self):
         data = self.metadata()
         data["_xlikesaver_metadata_status"] = "embedded"

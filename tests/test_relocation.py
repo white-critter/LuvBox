@@ -151,6 +151,16 @@ class RelocationTests(unittest.TestCase):
         chosen = _merge_media(old, recent)
         self.assertEqual(chosen["author_metadata_status"], "embedded")
 
+    def test_same_file_old_spelling_cannot_complete_a_pending_author_change(self):
+        from xlikesaver.storage import _merge_media
+        old = self.record(self.a, 100)
+        old.update(author="Writer", author_id="42", author_metadata_status="embedded", posted_source="unknown")
+        current = dict(old, author="writer", author_metadata_status="pending", posted_source="metadata")
+        merged = _merge_media(old, current)
+        self.assertEqual(merged["author"], "writer")
+        self.assertEqual(merged["author_metadata_status"], "pending")
+        self.assertEqual(merged["metadata_status"], "embedded")
+
     def test_identity_added_from_another_copy_requires_embedding_in_selected_file(self):
         from xlikesaver.storage import _merge_media
         chosen_file = self.record(self.a, 100)

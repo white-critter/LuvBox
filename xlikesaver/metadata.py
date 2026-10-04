@@ -26,6 +26,18 @@ _URL = re.compile(r"https://x\.com/i/web/status/[0-9]{1,20}\Z", re.ASCII)
 _URL_CHARACTER = r"[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]"
 _AUTHOR_MARKER = "xlikesaver:x-author:"
 _AUTHOR_ID_MARKER = "xlikesaver:x-user-id:"
+_OWNED_AUTHOR_MARKER = "xlikesaver:owned-author:v1:"
+# Ownership is separate from identity: an existing matching value may have
+# come from another program. Only values this app actually appends are owned.
+_AUTHOR_ENTRY_ROLES = {
+    "creator": ("XMP-dc:Creator", "author", "@{0}"),
+    "profile": ("XMP-dc:Relation", "author", "https://x.com/{0}"),
+    "user-url": ("XMP-dc:Relation", "author_id", "https://x.com/i/user/{0}"),
+    "description-handle": ("XMP-dc:Description", "author", "X author: @{0} (https://x.com/{0})"),
+    "description-id": ("XMP-dc:Description", "author_id", "X user ID: {0} (https://x.com/i/user/{0})"),
+    "comment-handle": ("ItemList:Comment", "author", "X author: @{0} (https://x.com/{0})"),
+    "comment-id": ("ItemList:Comment", "author_id", "X user ID: {0} (https://x.com/i/user/{0})"),
+}
 _MESSAGES = {
     "embedded": "파일 안에 원본 트윗 주소를 기록했습니다.",
     "failed": "원본 트윗 주소를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다.",
@@ -292,14 +304,37 @@ def author_identity(author, author_id) -> dict[str, str]:
                      author_id if _ID.fullmatch(author_id) else "")
 
 
-def _author_lines(identity: dict[str, str]) -> list[str]:
-    """Readable Description/Comment lines this app writes for an author."""
-    lines = []
-    if identity["author"]:
-        lines.append(f"X author: @{identity['author']} ({identity['profile_url']})")
-    if identity["author_id"]:
-        lines.append(f"X user ID: {identity['author_id']} (https://x.com/i/user/{identity['author_id']})")
-    return lines
+def _owned_author_entry(marker: str) -> tuple[str, str] | None:
+    """Recognize only bounded, valid ownership markers written by this app."""
+    if not marker.startswith(_OWNED_AUTHOR_MARKER):
+        return None
+    role, separator, value = marker[len(_OWNED_AUTHOR_MARKER):].partition(":")
+    specification = _AUTHOR_ENTRY_ROLES.get(role)
+    if not separator or specification is None:
+        return None
+    tag, field, template = specification
+    if not (_HANDLE if field == "author" else _ID).fullmatch(value):
+        return None
+    return tag, template.format(value)
+
+
+def _identity_marker(marker: str) -> bool:
+    return ((marker.startswith(_AUTHOR_MARKER) and
+             bool(_HANDLE.fullmatch(marker[len(_AUTHOR_MARKER):]))) or
+            (marker.startswith(_AUTHOR_ID_MARKER) and
+             bool(_ID.fullmatch(marker[len(_AUTHOR_ID_MARKER):]))))
+
+
+def _remove_owned_line(text: str, line: str) -> str:
+    # An appended author line owns its preceding LF, not a newline belonging
+    # to the original description. Keep all other separators byte-for-byte.
+    # In particular, keep an original CR immediately before our appended LF.
+    pattern = re.compile(r"\n" + re.escape(line) + r"(?=\r|\n|\Z)")
+    matches = list(pattern.finditer(text))
+    if not matches:
+        return text
+    match = matches[-1]
+    return text[:match.start()] + text[match.end():]
 
 
 def _author_from_tags(tags: dict) -> dict[str, str]:
@@ -378,37 +413,39 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         temporary = Path(name)
         shutil.copy2(target, temporary)
         source_token = re.compile(r"(?<!" + _URL_CHARACTER + r")" + re.escape(url) + r"(?!" + _URL_CHARACTER + r")")
-        author_lines = _author_lines(identity)
-        # Entries this app wrote for a previous identity (a renamed handle or a
-        # different ID) are removed, so other programs show a single author.
-        # The app's markers identify exactly which handle/ID it wrote before.
         identifiers = _values(previous_tags.get("XMP-xmp:Identifier"))
-        stale = {"XMP-dc:Creator": [], "XMP-dc:Relation": []}
-        stale_lines = set()
+        previous_owned = {}
+        wanted_entries = {}
+        owned_markers = []
         if has_author:
             for value in identifiers:
-                if value.startswith(_AUTHOR_MARKER):
-                    handle = value[len(_AUTHOR_MARKER):]
-                    if _HANDLE.fullmatch(handle) and handle != identity["author"]:
-                        old = _identity(handle, "")
-                        stale["XMP-dc:Creator"].append(f"@{handle}")
-                        stale["XMP-dc:Relation"].append(old["profile_url"])
-                        stale_lines.update(_author_lines(old))
-                elif value.startswith(_AUTHOR_ID_MARKER):
-                    old_id = value[len(_AUTHOR_ID_MARKER):]
-                    if _ID.fullmatch(old_id) and old_id != identity["author_id"]:
-                        stale["XMP-dc:Relation"].append(f"https://x.com/i/user/{old_id}")
-                        stale_lines.update(_author_lines(_identity("", old_id)))
+                entry = _owned_author_entry(value)
+                if entry:
+                    tag, content = entry
+                    previous_owned.setdefault(tag, set()).add(content)
+            for role, (tag, field, template) in _AUTHOR_ENTRY_ROLES.items():
+                if identity[field] and (tag != "ItemList:Comment" or target.suffix.lower() == ".mp4"):
+                    content = template.format(identity[field])
+                    marker = _OWNED_AUTHOR_MARKER + role + ":" + identity[field]
+                    wanted_entries.setdefault(tag, []).append((content, marker))
+
+        def stale_values(tag: str) -> set[str]:
+            wanted = {content for content, _ in wanted_entries.get(tag, ())}
+            return previous_owned.get(tag, set()) - wanted
 
         def text_argument(tag: str, old_value: str) -> tuple[str, str]:
             if not isinstance(old_value, str):
                 old_value = ""
-            if stale_lines and any(line in stale_lines for line in old_value.splitlines()):
-                old_value = "\n".join(line for line in old_value.splitlines() if line not in stale_lines)
+            ownership_tag = tag.removesuffix("-x-default")
+            for line in sorted(stale_values(ownership_tag)):
+                old_value = _remove_owned_line(old_value, line)
             value = old_value if source_token.search(old_value) else (f"{old_value}\nSource: {url}" if old_value else url)
-            for line in author_lines:
+            for line, marker in wanted_entries.get(ownership_tag, ()):
                 if line not in value.splitlines():
                     value += "\n" + line
+                    owned_markers.append(marker)
+                elif line in previous_owned.get(ownership_tag, ()):
+                    owned_markers.append(marker)
             fd, name = tempfile.mkstemp(prefix=".xlikesaver-source-", suffix=".txt", dir=target.parent)
             text_path = Path(name)
             text_files.append(text_path)
@@ -421,39 +458,44 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         required_tags = {}
         removed_tags = {}
         if has_author:
-            # Only this app's own author entries are replaced. Other creators,
-            # relations, and identifiers are left untouched.
-            kept_identifiers = []
-            for value in identifiers:
-                if value.startswith((_AUTHOR_MARKER, _AUTHOR_ID_MARKER)):
-                    arguments.append(f"-XMP-xmp:Identifier-={value}")
-                else:
-                    kept_identifiers.append(value)
-            wanted = {"XMP-dc:Creator": [], "XMP-dc:Relation": [], "XMP-xmp:Identifier": []}
-            if identity["author"]:
-                wanted["XMP-dc:Creator"].append(f"@{identity['author']}")
-                wanted["XMP-dc:Relation"].append(identity["profile_url"])
-                wanted["XMP-xmp:Identifier"].append(_AUTHOR_MARKER + identity["author"])
-            if identity["author_id"]:
-                wanted["XMP-dc:Relation"].append(f"https://x.com/i/user/{identity['author_id']}")
-                wanted["XMP-xmp:Identifier"].append(_AUTHOR_ID_MARKER + identity["author_id"])
-            for tag, values in stale.items():
+            # Legacy identity markers are not evidence that a matching value
+            # was appended by us. Unproven existing entries are preserved.
+            for tag in ("XMP-dc:Creator", "XMP-dc:Relation"):
                 present = _values(previous_tags.get(tag))
-                removed_tags[tag] = [value for value in dict.fromkeys(values) if value in present and value not in wanted[tag]]
+                removed_tags[tag] = [value for value in dict.fromkeys(present) if value in stale_values(tag)]
                 for value in removed_tags[tag]:
                     arguments.append(f"-{tag}-={value}")
-            for tag, values in wanted.items():
-                old_values = kept_identifiers if tag == "XMP-xmp:Identifier" else [
-                    value for value in _values(previous_tags.get(tag)) if value not in removed_tags.get(tag, ())]
+                old_values = [value for value in present if value not in removed_tags[tag]]
                 required_tags[tag] = [*old_values]
-                for value in values:
+                for value, marker in wanted_entries.get(tag, ()):
                     if value not in old_values:
                         arguments.append(f"-{tag}+={value}")
                         required_tags[tag].append(value)
+                        owned_markers.append(marker)
+                    elif value in previous_owned.get(tag, ()):
+                        owned_markers.append(marker)
         if target.suffix.lower() == ".mp4":
             # ItemList belongs to QuickTime. Other Comment locations remain intact.
             comment_arg, comment_value = text_argument("ItemList:Comment", previous_tags.get("ItemList:Comment", ""))
             arguments.append(comment_arg)
+        if has_author:
+            wanted_identifiers = []
+            if identity["author"]:
+                wanted_identifiers.append(_AUTHOR_MARKER + identity["author"])
+            if identity["author_id"]:
+                wanted_identifiers.append(_AUTHOR_ID_MARKER + identity["author_id"])
+            wanted_identifiers.extend(owned_markers)
+            kept_identifiers = []
+            for value in identifiers:
+                if (_identity_marker(value) or _owned_author_entry(value)) and value not in wanted_identifiers:
+                    arguments.append(f"-XMP-xmp:Identifier-={value}")
+                else:
+                    kept_identifiers.append(value)
+            required_tags["XMP-xmp:Identifier"] = [*kept_identifiers]
+            for value in wanted_identifiers:
+                if value not in kept_identifiers:
+                    arguments.append(f"-XMP-xmp:Identifier+={value}")
+                    required_tags["XMP-xmp:Identifier"].append(value)
         result = _run(arguments + [str(temporary)], deadline)
         if result.returncode != 0:
             raise ValueError("metadata write failed")

@@ -631,6 +631,64 @@ class MediaTests(unittest.TestCase):
         # The file still holds the older identity, so it is pending again.
         self.assertEqual((row["author_id"], row["author_metadata_status"]), ("123", "pending"))
 
+    def test_handle_case_change_is_deferred_then_explicitly_backfilled_once(self):
+        from contextlib import nullcontext
+        from queue import Queue
+        from threading import Event
+        from xlikesaver.history_gui import HistoryWindow
+        from xlikesaver.storage import resolve_storage
+
+        options = replace(self.options, folder_mode="flat")
+        self.worker([("100", 1, "photo", "Writer", None, 123)], options=options)
+        original = self.history_rows()[0]
+        path = Path(original["path"])
+        content, mtime = path.read_bytes(), path.stat().st_mtime_ns
+        self.embed_source.reset_mock()
+
+        code, events = self.worker([("100", 1, "photo", "writer", None, 123)], options=options)
+        self.assertEqual(code, 0)
+        self.embed_source.assert_not_called()
+        self.assertEqual((events[-1]["author_deferred"], events[-1]["metadata_failed"]), (1, 0))
+        row = self.history_rows()[0]
+        self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]),
+                         ("writer", "123", "pending"))
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), (content, mtime))
+
+        paths = resolve_storage(self.output, "myaccount", separate_accounts=options.separate_accounts)
+        window = SimpleNamespace(_store=HistoryStore.for_storage, metadata_stop=Event(), results=Queue())
+        with patch("xlikesaver.metadata.persistent", return_value=nullcontext()), \
+                patch("requests.Session.request") as network:
+            HistoryWindow._backfill(window, 1, paths)
+            self.embed_source.assert_called_once_with(path, "100", author="writer", author_id="123")
+            HistoryWindow._backfill(window, 1, paths)
+            self.embed_source.assert_called_once()
+        network.assert_not_called()
+        row = self.history_rows()[0]
+        self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "embedded"))
+        self.assertEqual(row["saved_at"], original["saved_at"])
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.flat.sqlite3")) as db:
+            self.assertEqual({entry for entry, in db.execute("SELECT entry FROM archive")}, {"twitter100_1"})
+
+    def test_deferred_prior_author_error_is_not_a_recording_failure_this_run(self):
+        rows = [("100", 1, "photo", "alice", None, 123)]
+        self.worker(rows)
+        original = self.history_rows()[0]
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+            db.execute("UPDATE media SET author_metadata_status='error'")
+            db.commit()
+        for helper_available in (True, False):
+            with self.subTest(helper_available=helper_available), \
+                    patch("xlikesaver.metadata.available", return_value=helper_available):
+                self.embed_source.reset_mock()
+                code, events = self.worker(rows)
+                self.assertEqual(code, 0)
+                self.embed_source.assert_not_called()
+                self.assertEqual((events[-1]["author_deferred"], events[-1]["metadata_failed"]), (1, 0))
+                self.assertFalse(any(event.get("level") == "warning" for event in events))
+                row = self.history_rows()[0]
+                self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "error"))
+                self.assertEqual(row["saved_at"], original["saved_at"])
+
     def test_missing_author_is_unknown_and_source_is_not_rewritten_every_run(self):
         options = replace(self.options, folder_mode="flat")
         rows = [("100", 1, "photo", "")]
