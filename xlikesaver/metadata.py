@@ -278,6 +278,30 @@ def _identity(author: str, author_id: str) -> dict[str, str]:
     return {"author": author, "author_id": author_id, "profile_url": profile_url}
 
 
+def author_identity(author, author_id) -> dict[str, str]:
+    """Keep only a valid X handle and numeric user ID; anything else is unknown.
+
+    Catalog text can come from an old folder name rather than a handle. Such a
+    value must never stop the source URL from being recorded.
+    """
+    if isinstance(author_id, int) and not isinstance(author_id, bool):
+        author_id = str(author_id)
+    author = author.removeprefix("@") if isinstance(author, str) else ""
+    author_id = author_id if isinstance(author_id, str) else ""
+    return _identity(author if _HANDLE.fullmatch(author) else "",
+                     author_id if _ID.fullmatch(author_id) else "")
+
+
+def _author_lines(identity: dict[str, str]) -> list[str]:
+    """Readable Description/Comment lines this app writes for an author."""
+    lines = []
+    if identity["author"]:
+        lines.append(f"X author: @{identity['author']} ({identity['profile_url']})")
+    if identity["author_id"]:
+        lines.append(f"X user ID: {identity['author_id']} (https://x.com/i/user/{identity['author_id']})")
+    return lines
+
+
 def _author_from_tags(tags: dict) -> dict[str, str]:
     identities = _values(tags.get("XMP-xmp:Identifier"))
     authors = {value[len(_AUTHOR_MARKER):] for value in identities
@@ -328,14 +352,14 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
     status = "failed"
     temporary = None
     text_files = []
-    identity = _identity("", "")
-    author_status = "unknown"
+    # An invalid handle or ID is treated as unknown: the author part is
+    # skipped and the source URL is still recorded.
+    identity = author_identity(author, author_id)
+    has_author = bool(identity["author"] or identity["author_id"])
+    author_status = "error" if has_author else "unknown"
     try:
         if not url:
             raise ValueError("invalid tweet id")
-        identity = _identity(author, author_id)
-        has_author = bool(identity["author"] or identity["author_id"])
-        author_status = "error" if has_author else "unknown"
         target_input = Path(path)
         if target_input.suffix.lower() not in SUPPORTED_SUFFIXES:
             status = "unsupported"
@@ -354,14 +378,33 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         temporary = Path(name)
         shutil.copy2(target, temporary)
         source_token = re.compile(r"(?<!" + _URL_CHARACTER + r")" + re.escape(url) + r"(?!" + _URL_CHARACTER + r")")
-        author_lines = []
-        if identity["author"]:
-            author_lines.append(f"X author: @{identity['author']} ({identity['profile_url']})")
-        if identity["author_id"]:
-            author_lines.append(f"X user ID: {identity['author_id']} (https://x.com/i/user/{identity['author_id']})")
+        author_lines = _author_lines(identity)
+        # Entries this app wrote for a previous identity (a renamed handle or a
+        # different ID) are removed, so other programs show a single author.
+        # The app's markers identify exactly which handle/ID it wrote before.
+        identifiers = _values(previous_tags.get("XMP-xmp:Identifier"))
+        stale = {"XMP-dc:Creator": [], "XMP-dc:Relation": []}
+        stale_lines = set()
+        if has_author:
+            for value in identifiers:
+                if value.startswith(_AUTHOR_MARKER):
+                    handle = value[len(_AUTHOR_MARKER):]
+                    if _HANDLE.fullmatch(handle) and handle != identity["author"]:
+                        old = _identity(handle, "")
+                        stale["XMP-dc:Creator"].append(f"@{handle}")
+                        stale["XMP-dc:Relation"].append(old["profile_url"])
+                        stale_lines.update(_author_lines(old))
+                elif value.startswith(_AUTHOR_ID_MARKER):
+                    old_id = value[len(_AUTHOR_ID_MARKER):]
+                    if _ID.fullmatch(old_id) and old_id != identity["author_id"]:
+                        stale["XMP-dc:Relation"].append(f"https://x.com/i/user/{old_id}")
+                        stale_lines.update(_author_lines(_identity("", old_id)))
+
         def text_argument(tag: str, old_value: str) -> tuple[str, str]:
             if not isinstance(old_value, str):
                 old_value = ""
+            if stale_lines and any(line in stale_lines for line in old_value.splitlines()):
+                old_value = "\n".join(line for line in old_value.splitlines() if line not in stale_lines)
             value = old_value if source_token.search(old_value) else (f"{old_value}\nSource: {url}" if old_value else url)
             for line in author_lines:
                 if line not in value.splitlines():
@@ -376,10 +419,10 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         description_arg, description_value = text_argument("XMP-dc:Description-x-default", previous_tags.get("XMP-dc:Description", ""))
         arguments = ["-overwrite_original", "-P", f"-XMP-dc:Source={url}", description_arg]
         required_tags = {}
+        removed_tags = {}
         if has_author:
-            identifiers = _values(previous_tags.get("XMP-xmp:Identifier"))
-            # Only our own author markers may be replaced (for a changed handle).
-            # Other creators, relations, and identifiers are left untouched.
+            # Only this app's own author entries are replaced. Other creators,
+            # relations, and identifiers are left untouched.
             kept_identifiers = []
             for value in identifiers:
                 if value.startswith((_AUTHOR_MARKER, _AUTHOR_ID_MARKER)):
@@ -394,8 +437,14 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             if identity["author_id"]:
                 wanted["XMP-dc:Relation"].append(f"https://x.com/i/user/{identity['author_id']}")
                 wanted["XMP-xmp:Identifier"].append(_AUTHOR_ID_MARKER + identity["author_id"])
+            for tag, values in stale.items():
+                present = _values(previous_tags.get(tag))
+                removed_tags[tag] = [value for value in dict.fromkeys(values) if value in present and value not in wanted[tag]]
+                for value in removed_tags[tag]:
+                    arguments.append(f"-{tag}-={value}")
             for tag, values in wanted.items():
-                old_values = kept_identifiers if tag == "XMP-xmp:Identifier" else _values(previous_tags.get(tag))
+                old_values = kept_identifiers if tag == "XMP-xmp:Identifier" else [
+                    value for value in _values(previous_tags.get(tag)) if value not in removed_tags.get(tag, ())]
                 required_tags[tag] = [*old_values]
                 for value in values:
                     if value not in old_values:
@@ -418,6 +467,9 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                 actual = _values(tags.get(tag))
                 if any(actual.count(value) < expected.count(value) for value in expected):
                     raise ValueError("author metadata verification failed")
+            for tag, removed in removed_tags.items():
+                if any(value in _values(tags.get(tag)) for value in removed):
+                    raise ValueError("author metadata verification failed")
             if _author_from_tags(tags) != identity:
                 raise ValueError("author metadata verification failed")
         # Do not overwrite a file another local process changed during the copy.
@@ -431,7 +483,7 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         author_status = "embedded" if has_author else "unknown"
     except Exception:
         status = "failed"
-        if author != "" or author_id != "":
+        if has_author:
             author_status = "error"
     finally:
         for text_path in text_files:

@@ -294,6 +294,22 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertIn("@alice (ID 123456789)", self.window.selection_text.get())
         self.assertIn("작성자 기록됨", self.window.selection_text.get())
 
+    def test_backfill_drops_catalog_author_text_that_is_not_a_handle(self):
+        store = self.records()
+        store._db.execute("UPDATE media SET author='고양이 폴더'")
+        store._db.commit()
+        original = store.records()[0]
+        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "author_status": "unknown"}) as embed, \
+                patch("requests.Session.request") as network:
+            self.window._backfill(self.window.generation, self.account)
+            embed.assert_called_once_with(Path(original["path"]), "100", author="", author_id="")
+            # Source recorded, author unknown: the next pass leaves the file alone.
+            self.window._backfill(self.window.generation, self.account)
+            embed.assert_called_once()
+        network.assert_not_called()
+        self.assertEqual((store.records()[0]["metadata_status"], store.records()[0]["author_metadata_status"]),
+                         ("embedded", "unknown"))
+
     def test_backfill_does_not_guess_author_for_source_tagged_unknown_record(self):
         store = self.records()
         store._db.execute("UPDATE media SET author='',metadata_status='embedded'")

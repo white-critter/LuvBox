@@ -425,6 +425,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     metadata_failed = 0
     metadata_available = False
     metadata_warned = False
+    author_deferred = 0
     stop_reason = ""
     status = "error"
     message = ""
@@ -479,7 +480,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 raise exception.AbortExtraction("history store unavailable") from None
 
     def record_source(kwdict, media_path, media_status):
-        nonlocal metadata_failed, metadata_warned
+        nonlocal metadata_failed, metadata_warned, author_deferred
         try:
             previous = (history.media_record(normalized.folder_mode, kwdict)
                         if media_status == "existing" else None) or {}
@@ -502,6 +503,15 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         if previous_status == "unsupported" or (previous_status == "embedded" and author_done):
             metadata_status = previous_status
             author_status = previous_author_status if known_author else "unknown"
+        elif previous_status == "embedded" and media_status == "existing":
+            # An already saved file is rewritten during a run only to retry a
+            # missing source. Adding or updating just its author is left to the
+            # explicit '기존 파일에 출처·작성자 기록' action, so a complete scan
+            # never rewrites a whole library (or makes cloud sync re-upload it).
+            # The catalog keeps the current author for that action.
+            metadata_status = "embedded"
+            author_status = previous_author_status if same_author else "pending"
+            author_deferred += 1
         elif metadata_available:
             try:
                 result = embed_source(media_path, str(kwdict["tweet_id"]), author=author, author_id=author_id)
@@ -517,10 +527,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         else:
             metadata_status = "failed"
             author_status = "error" if known_author else "unknown"
-        # A failed author addition preserves both the file and its previously
-        # verified source. Record the author failure separately for retry.
-        if metadata_status == "failed" and previous_status == "embedded":
-            metadata_status = "embedded"
         kwdict["_xlikesaver_metadata_status"] = metadata_status
         kwdict["_xlikesaver_author_metadata_status"] = author_status
         if metadata_status == "failed" or author_status == "error":
@@ -1083,10 +1089,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             logger.handlers = handlers
             logger.setLevel(level)
             logger.propagate = propagate
+    if author_deferred:
+        emit({"type": "log", "level": "info",
+              "message": f"이미 저장된 파일 {author_deferred:,}개는 작성자 정보를 기록 DB에만 반영했습니다. "
+                         "파일 안에도 넣으려면 ‘기록 · 통계 → 기존 파일에 출처·작성자 기록’을 실행하세요."})
     if status == "error":
         emit({"type": "log", "level": "error", "message": message})
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,
-          "size_skipped": size_skipped, "metadata_failed": metadata_failed,
+          "size_skipped": size_skipped, "metadata_failed": metadata_failed, "author_deferred": author_deferred,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,
           "last_posted_at": last_posted_at,
           "scan_mode": "quick" if quick_scan else "full", "retry_at": guard.retry_at if guard is not None else "", "message": message})

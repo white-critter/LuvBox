@@ -188,8 +188,6 @@ class App:
         folder_button.grid(row=5, column=2, pady=(8, 0))
         self.inputs.extend((folder, folder_button))
         folder.bind("<Return>", lambda _: self._ensure_storage())
-        # Wait until a clicked Start/History button has had a chance to queue
-        # its action; never migrate on each keystroke of a path being typed.
         ttk.Label(card, text="파일 위치", style="Hint.TLabel").grid(row=6, column=0, sticky="w", pady=(5, 0))
         self.preview_entry = ttk.Entry(card, textvariable=self.destination_preview, state="readonly", font=("맑은 고딕", 9))
         self.preview_entry.grid(row=6, column=1, columnspan=2, sticky="ew", padx=(16, 0), pady=(5, 0))

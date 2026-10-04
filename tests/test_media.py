@@ -598,33 +598,38 @@ class MediaTests(unittest.TestCase):
         self.worker(rows)
         self.embed_source.assert_not_called()
 
-    def test_old_source_tagged_file_gets_author_once_without_redownload(self):
+    def test_run_catalogues_author_of_saved_file_without_rewriting_it(self):
         rows = [("100", 1, "photo", "alice", None, 123)]
         self.worker(rows)
         original = self.history_rows()[0]
         with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
             db.execute("UPDATE media SET author_metadata_status='pending',author_id=''")
             db.commit()
-        self.embed_source.reset_mock()
-        code, events = self.worker(rows)
-        self.assertEqual(code, 0)
-        self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (0, 1))
-        self.embed_source.assert_called_once_with(original["path"], "100", author="alice", author_id="123")
-        self.assertEqual(self.history_rows()[0]["saved_at"], original["saved_at"])
-        self.embed_source.reset_mock()
-        self.worker(rows)
-        self.embed_source.assert_not_called()
+        for _ in range(2):
+            self.embed_source.reset_mock()
+            code, events = self.worker(rows)
+            self.assertEqual(code, 0)
+            self.assertEqual((events[-1]["saved"], events[-1]["skipped"], events[-1]["author_deferred"]), (0, 1, 1))
+            # Only the explicit existing-files action rewrites saved media.
+            self.embed_source.assert_not_called()
+            self.assertTrue(any("기존 파일에 출처·작성자 기록" in event.get("message", "")
+                                for event in events if event["type"] == "log"))
+            row = self.history_rows()[0]
+            self.assertEqual((row["author"], row["author_id"]), ("alice", "123"))
+            self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "pending"))
+            self.assertEqual(row["saved_at"], original["saved_at"])
         self.assertEqual(self.archive_keys(), {"twitter100_1"})
 
-    def test_newly_available_numeric_id_triggers_only_one_author_update(self):
+    def test_newly_available_numeric_id_is_catalogued_for_the_explicit_update(self):
         self.worker([("100", 1, "photo", "alice")])
+        self.assertEqual(self.history_rows()[0]["author_metadata_status"], "embedded")
         self.embed_source.reset_mock()
-        rows = [("100", 1, "photo", "alice", None, 123)]
-        self.worker(rows)
-        self.assertEqual(self.embed_source.call_args.kwargs["author_id"], "123")
-        self.embed_source.reset_mock()
-        self.worker(rows)
+        code, events = self.worker([("100", 1, "photo", "alice", None, 123)])
         self.embed_source.assert_not_called()
+        self.assertEqual(events[-1]["author_deferred"], 1)
+        row = self.history_rows()[0]
+        # The file still holds the older identity, so it is pending again.
+        self.assertEqual((row["author_id"], row["author_metadata_status"]), ("123", "pending"))
 
     def test_missing_author_is_unknown_and_source_is_not_rewritten_every_run(self):
         options = replace(self.options, folder_mode="flat")
@@ -651,19 +656,21 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(self.history_rows()[0]["author_metadata_status"], "unknown")
         self.assertEqual(events[-1]["metadata_failed"], 0)
 
-    def test_failed_author_addition_keeps_verified_source_and_archive(self):
+    def test_run_never_touches_a_source_tagged_file_for_author_only(self):
         rows = [("100", 1, "photo", "alice")]
         self.worker(rows)
         original = self.history_rows()[0]
         with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
             db.execute("UPDATE media SET author_metadata_status='pending'")
             db.commit()
+        self.embed_source.reset_mock()
         self.embed_source.side_effect = lambda *args, **kwargs: {"status": "failed", "author_status": "error"}
         code, events = self.worker(rows)
         self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["metadata_failed"], 1)
+        self.embed_source.assert_not_called()
+        self.assertEqual(events[-1]["metadata_failed"], 0)
         row = self.history_rows()[0]
-        self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "error"))
+        self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "pending"))
         self.assertEqual(row["saved_at"], original["saved_at"])
         self.assertEqual(self.archive_keys(), {"twitter100_1"})
 

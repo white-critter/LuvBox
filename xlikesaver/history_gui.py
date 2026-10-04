@@ -419,7 +419,7 @@ class HistoryWindow(tk.Toplevel):
         threading.Thread(target=self._backfill, args=(self.generation, self.current_storage), daemon=True).start()
 
     def _backfill(self, generation, directory):
-        from .metadata import embed_source, persistent
+        from .metadata import author_identity, embed_source, persistent
         from .protection import AccountGuard, ProtectionError
         store = None
         account_guard = None
@@ -449,7 +449,10 @@ class HistoryWindow(tk.Toplevel):
                     for row in rows:
                         if self.metadata_stop.is_set():
                             break
-                        known_author = bool(row.get("author") or row.get("author_id"))
+                        # Catalog text may be an old folder name; only a valid
+                        # handle or numeric ID counts as a known author.
+                        identity = author_identity(row.get("author", ""), row.get("author_id", ""))
+                        known_author = bool(identity["author"] or identity["author_id"])
                         if (row.get("metadata_status") == "unsupported" or
                                 (row.get("metadata_status") == "embedded" and
                                  (row.get("author_metadata_status") == "embedded" or not known_author))):
@@ -458,7 +461,7 @@ class HistoryWindow(tk.Toplevel):
                         if path is None or not store.is_media_path(path) or not path.is_file():
                             unavailable += 1
                             continue
-                        result = embed_source(path, row["tweet_id"], author=row.get("author", ""), author_id=row.get("author_id", ""))
+                        result = embed_source(path, row["tweet_id"], author=identity["author"], author_id=identity["author_id"])
                         source_status = result["status"]
                         author_status = result.get("author_status", "error" if known_author else "unknown")
                         if source_status == "failed" and row.get("metadata_status") == "embedded":

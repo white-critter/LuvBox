@@ -96,20 +96,35 @@ class MetadataTransactionTests(unittest.TestCase):
                 run.assert_not_called()
         self.assert_original()
 
-    def test_invalid_author_cannot_inject_metadata_or_process_arguments(self):
+    def test_invalid_author_is_dropped_and_never_reaches_tool_arguments(self):
+        calls = []
+
+        def record(arguments, deadline):
+            if "-j" in arguments:
+                return subprocess.CompletedProcess(arguments, 0, "[{}]", "")
+            calls.append(arguments)
+            raise ValueError("offline stop after capturing the write arguments")
+
         for author in ("@", "@@name", "name-with-dash", "a" * 16, "사용자", "ｎａｍｅ",
                        "name\n-token=" + SECRET, "name\0extra", "name/other", None, 123):
-            with self.subTest(author=author), patch.object(metadata, "_run") as run:
+            with self.subTest(author=author), patch.object(metadata, "available", return_value=True), \
+                    patch.object(metadata, "_run", side_effect=record):
+                calls.clear()
                 result = metadata.embed_source(self.path, "100", author=author)
-                self.assertEqual((result["status"], result["author_status"]), ("failed", "error"))
-                self.assertNotIn(SECRET, str(result))
-                run.assert_not_called()
-        for author_id in ("１２３", "1" * 21, "1\n-token=" + SECRET, "123/other", None, 123):
-            with self.subTest(author_id=author_id), patch.object(metadata, "_run") as run:
+                # Treated as unknown: the source is still attempted.
+                self.assertEqual((result["author"], result["author_id"], result["author_status"]), ("", "", "unknown"))
+                self.assertTrue(calls)
+                self.assertNotIn(SECRET, str(result) + str(calls))
+                self.assertFalse(any("x-author" in argument or argument.startswith("-XMP-dc:Creator")
+                                     for call in calls for argument in call))
+        for author_id in ("１２３", "1" * 21, "1\n-token=" + SECRET, "123/other", None):
+            with self.subTest(author_id=author_id), patch.object(metadata, "available", return_value=True), \
+                    patch.object(metadata, "_run", side_effect=record):
+                calls.clear()
                 result = metadata.embed_source(self.path, "100", author="writer", author_id=author_id)
-                self.assertEqual((result["status"], result["author_status"]), ("failed", "error"))
-                self.assertNotIn(SECRET, str(result))
-                run.assert_not_called()
+                self.assertEqual((result["author"], result["author_id"]), ("writer", ""))
+                self.assertNotIn(SECRET, str(result) + str(calls))
+        self.assertEqual(metadata.author_identity("writer", 123)["author_id"], "123")
         self.assert_original()
 
     def test_author_reader_requires_explicit_validated_markers(self):
@@ -321,16 +336,44 @@ class ActualExifToolTests(unittest.TestCase):
         self.assertEqual(metadata.read_author(path), {"author": "", "author_id": "12345", "profile_url": "https://x.com/i/user/12345"})
         self.assertNotIn("XMP-dc:Creator", metadata._read_tags(path, time.monotonic() + 20))
 
-    def test_updated_handle_preserves_prior_creators_and_unrelated_identifiers(self):
+    def test_updated_handle_replaces_only_this_apps_previous_author_entries(self):
         path = self.root / "100_renamed.jpg"
         path.write_bytes(JPEG)
+        result = metadata._run(["-overwrite_original", "-XMP-dc:Creator+=Studio Photographer",
+                                "-XMP-dc:Relation+=https://example.com/album", "-XMP-xmp:Identifier+=urn:other:1",
+                                str(path)], time.monotonic() + 20)
+        self.assertEqual(result.returncode, 0)
         self.assertEqual(metadata.embed_source(path, "100", "previous_name", "12345")["author_status"], "embedded")
-        self.assertEqual(metadata.embed_source(path, "100", "current_name", "12345")["author_status"], "embedded")
-        self.assertEqual(metadata.read_author(path), {"author": "current_name", "author_id": "12345", "profile_url": "https://x.com/current_name"})
+        self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
+        self.assertEqual(metadata.read_author(path), {"author": "current_name", "author_id": "67890", "profile_url": "https://x.com/current_name"})
         tags = metadata._read_tags(path, time.monotonic() + 20)
-        self.assertEqual(metadata._values(tags["XMP-dc:Creator"]), ["@previous_name", "@current_name"])
+        self.assertEqual(metadata._values(tags["XMP-dc:Creator"]), ["Studio Photographer", "@current_name"])
+        self.assertEqual(set(metadata._values(tags["XMP-dc:Relation"])),
+                         {"https://example.com/album", "https://x.com/current_name", "https://x.com/i/user/67890"})
         self.assertEqual(set(metadata._values(tags["XMP-xmp:Identifier"])),
-                         {"xlikesaver:x-author:current_name", "xlikesaver:x-user-id:12345"})
+                         {"urn:other:1", "xlikesaver:x-author:current_name", "xlikesaver:x-user-id:67890"})
+        self.assertEqual(tags["XMP-dc:Description"], URL + "\nX author: @current_name (https://x.com/current_name)\n"
+                                                      "X user ID: 67890 (https://x.com/i/user/67890)")
+
+    def test_handle_case_change_leaves_one_creator(self):
+        path = self.root / "100_case.png"
+        path.write_bytes(PNG)
+        self.assertEqual(metadata.embed_source(path, "100", "Writer")["author_status"], "embedded")
+        self.assertEqual(metadata.embed_source(path, "100", "writer")["author_status"], "embedded")
+        tags = metadata._read_tags(path, time.monotonic() + 20)
+        self.assertEqual(metadata._values(tags["XMP-dc:Creator"]), ["@writer"])
+        self.assertEqual(metadata._values(tags["XMP-dc:Relation"]), ["https://x.com/writer"])
+        self.assertEqual(metadata.read_author(path)["author"], "writer")
+
+    def test_invalid_author_text_still_records_the_source(self):
+        for index, author in enumerate(("고양이", "a" * 16, "Alice Kim")):
+            with self.subTest(author=author):
+                path = self.root / f"10{index}_invalid.png"
+                path.write_bytes(PNG)
+                result = metadata.embed_source(path, f"10{index}", author)
+                self.assertEqual((result["status"], result["author_status"]), ("embedded", "unknown"))
+                self.assertEqual(metadata.read_source(path), f"https://x.com/i/web/status/10{index}")
+                self.assertEqual(metadata.read_author(path)["author"], "")
 
     def test_jpeg_png_webp_roundtrip_preserves_compressed_pixels_and_mtime(self):
         for suffix, payload in ((".jpg", JPEG), (".png", PNG), (".webp", WEBP)):
