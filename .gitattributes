@@ -1,0 +1,2 @@
+assets/fonts/**/*.ttf filter=lfs diff=lfs merge=lfs -text
+tools/ffmpeg/runtime/*.exe filter=lfs diff=lfs merge=lfs -text
