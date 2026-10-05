@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import closing
 from datetime import datetime
+from functools import partial
 import os
 from pathlib import Path
 import queue
@@ -13,8 +14,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 import webbrowser
 
+from PIL import ImageTk
+
 from . import theme
 from .history import HistoryStore
+from .preview import PreviewLoader
 from .storage import OutputGuard, StoragePaths
 
 
@@ -25,7 +29,7 @@ AUTHOR_METADATA_LABELS = {"embedded": "작성자 기록됨", "pending": "작성�
 TILES = {"files": "저장한 파일", "posts": "트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "확인된 용량"}
 PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
-NO_SELECTION = ("표에서 파일을 고르면 출처와 저장 위치가 여기에 나옵니다. 두 번 누르면 파일이 열립니다.\n"
+NO_SELECTION = ("표에서 파일을 고르면 미리보기와 출처를 볼 수 있습니다. 두 번 누르면 파일이 열립니다.\n"
                 "위 검색칸에서 작성자 아이디, 파일명, 트윗 번호로 찾을 수 있습니다.")
 NO_RUN_SELECTION = "실행을 고르면 어떻게 끝났는지 볼 수 있습니다."
 
@@ -98,6 +102,12 @@ class HistoryWindow(tk.Toplevel):
         self._poll_timer = None
         self._pager_layout_timer = None
         self._pagers = []
+        self._preview_token = 0
+        self._preview_key = None
+        self._preview_image = None
+        self._preview_results = queue.Queue(maxsize=2)
+        self._preview_loader = PreviewLoader(self._preview_results)
+        self._preview_side = None
         self.loaded_locations = set()
         self.results = queue.Queue()
         self.rows = {}
@@ -120,16 +130,19 @@ class HistoryWindow(tk.Toplevel):
         self.page_size = tk.StringVar(self, value=str(PAGE_SIZE))
         self.page_input = tk.StringVar(self, value="1")
         self.run_page_input = tk.StringVar(self, value="1")
+        self.preview_note = tk.StringVar(self, value="파일을 고르면 미리보기가 나옵니다.")
         self._build()
         self.wrapping_labels = []
 
-        def collect_labels(widget):
-            for child in widget.winfo_children():
-                if isinstance(child, ttk.Label) and int(child.cget("wraplength") or 0):
-                    self.wrapping_labels.append(child)
-                collect_labels(child)
-        collect_labels(self)
+        widgets = list(self.winfo_children())
+        while widgets:
+            widget = widgets.pop()
+            if isinstance(widget, ttk.Label) and int(widget.cget("wraplength") or 0):
+                self.wrapping_labels.append(widget)
+            widgets.extend(widget.winfo_children())
         self.bind("<Configure>", self._resize_text, add="+")
+        for key in ("Prior", "Next", "Home", "End"):
+            self.bind("<" + key + ">", self._page_key, add="+")
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._poll_timer = self.after(100, self._poll)
         self.refresh(import_legacy=True)
@@ -188,7 +201,11 @@ class HistoryWindow(tk.Toplevel):
         self.export_button.pack(side="right", padx=(8, 0))
 
         columns = ("posted", "kind", "author", "filename", "size", "saved")
-        table = self._table(files, columns, row=1)
+        self.file_browser = ttk.Frame(files)
+        self.file_browser.grid(row=1, column=0, sticky="nsew")
+        self.file_browser.columnconfigure(0, weight=1)
+        self.file_browser.rowconfigure(0, weight=1)
+        table = self._table(self.file_browser, columns, row=0)
         self.tree = table
         for key, title, width in zip(columns, ("트윗 게시일", "종류", "작성자", "파일명", "크기", "저장한 때"),
                                      (150, 90, 140, 280, 90, 150)):
@@ -198,6 +215,21 @@ class HistoryWindow(tk.Toplevel):
         self.tree.bind("<Double-1>", lambda _: self.open_file())
         self.table_message = ttk.Label(self.tree.master, textvariable=self.table_note, style="CardMuted.TLabel",
                                        justify="center", font=theme.BODY)
+        self.preview_card = ttk.Frame(self.file_browser, style="Card.TFrame", padding=12)
+        self.preview_box = ttk.Frame(self.preview_card, style="Plain.TFrame", width=220, height=168)
+        self.preview_box.grid_propagate(False)
+        self.preview_box.columnconfigure(0, weight=1)
+        self.preview_box.rowconfigure(0, weight=1)
+        self.preview_label = ttk.Label(self.preview_box, style="CardMuted.TLabel", anchor="center",
+                                       text="미리보기", font=theme.BODY)
+        self.preview_label.grid(row=0, column=0, sticky="nsew")
+        self.preview_info = ttk.Frame(self.preview_card, style="Plain.TFrame")
+        ttk.Label(self.preview_info, text="파일 미리보기", style="CardHeading.TLabel").pack(anchor="w")
+        ttk.Label(self.preview_info, textvariable=self.preview_note, style="CardMuted.TLabel",
+                  wraplength=205, justify="left").pack(anchor="w", pady=(6, 0))
+        ttk.Button(self.preview_info, text="크게 열기", command=self.open_file,
+                   style="Compact.TButton").pack(anchor="w", pady=(8, 0))
+        self.file_browser.bind("<Configure>", self._queue_pager_layout)
 
         actions = ttk.Frame(files)
         actions.grid(row=3, column=0, sticky="ew", pady=(8, 6))
@@ -242,6 +274,10 @@ class HistoryWindow(tk.Toplevel):
         info.grid(row=0, column=0, sticky="ew", padx=(0, 12))
         navigation = ttk.Frame(bar)
         navigation.grid(row=0, column=1, sticky="e")
+        arrows = ttk.Frame(navigation)
+        arrows.grid(row=0, column=0, sticky="w")
+        jump_box = ttk.Frame(navigation)
+        jump_box.grid(row=0, column=1, sticky="e", padx=(12, 0))
         text = self.run_page_text if runs else self.page_text
         value = self.run_page_input if runs else self.page_input
         ttk.Label(info, textvariable=text, style="Muted.TLabel").pack(side="left")
@@ -257,14 +293,23 @@ class HistoryWindow(tk.Toplevel):
                 callback = lambda dest=destination: self.go_page(dest, runs=runs)
             else:
                 callback = lambda amount=destination: self.change_page(amount, runs=runs)
-            button = ttk.Button(navigation, text=caption, command=callback, width=5, style="Compact.TButton")
-            button.grid(row=0, column=column, padx=2)
+            button = ttk.Button(arrows, text=caption, command=callback, width=4 if name != "last" else 5, style="Compact.TButton")
+            button.grid(row=0, column=column if column < 2 else column + 5, padx=2)
             buttons[name] = button
-        entry = ttk.Entry(navigation, textvariable=value, width=4, justify="center", font=theme.SMALL)
-        entry.grid(row=0, column=4, padx=(8, 4))
+        page_buttons = []
+        for index in range(5):
+            button = ttk.Button(arrows, width=2, style="Compact.TButton")
+            button.grid(row=0, column=index + 2, padx=2)
+            button.grid_remove()
+            page_buttons.append(button)
+        ttk.Label(jump_box, text="페이지", style="Muted.TLabel").grid(row=0, column=0, padx=(0, 4))
+        entry = ttk.Entry(jump_box, textvariable=value, width=4, justify="center", font=theme.SMALL)
+        entry.grid(row=0, column=1, padx=(0, 4))
         entry.bind("<Return>", lambda _: self.jump_page(runs=runs))
-        jump = ttk.Button(navigation, text="이동", command=lambda: self.jump_page(runs=runs), width=5, style="Compact.TButton")
-        jump.grid(row=0, column=5)
+        jump = ttk.Button(jump_box, text="이동", command=lambda: self.jump_page(runs=runs), width=4, style="Compact.TButton")
+        jump.grid(row=0, column=2)
+        navigation._arrows = arrows
+        navigation._jump_box = jump_box
         self._pagers.append((bar, info, navigation))
         bar.bind("<Configure>", self._queue_pager_layout)
         prefix = "run_" if runs else ""
@@ -273,6 +318,7 @@ class HistoryWindow(tk.Toplevel):
         setattr(self, prefix + "page_entry", entry)
         setattr(self, prefix + "jump_button", jump)
         setattr(self, prefix + "size_combo", size)
+        setattr(self, prefix + "page_buttons", page_buttons)
 
     def _queue_pager_layout(self, _=None):
         if self._pager_layout_timer is None and not self._destroyed:
@@ -281,13 +327,38 @@ class HistoryWindow(tk.Toplevel):
     def _layout_pagers(self):
         self._pager_layout_timer = None
         self._layout_tiles()
+        self._layout_preview()
         for bar, info, navigation in self._pagers:
             if bar.winfo_width() <= 1:
                 continue
-            folded = info.winfo_reqwidth() + navigation.winfo_reqwidth() + 12 > bar.winfo_width()
+            arrows, jump = navigation._arrows, navigation._jump_box
+            navigation_need = arrows.winfo_reqwidth() + jump.winfo_reqwidth() + 12
+            folded = info.winfo_reqwidth() + navigation_need + 12 > bar.winfo_width()
             info.grid_configure(columnspan=2 if folded else 1, padx=(0, 0 if folded else 12))
             navigation.grid_configure(row=1 if folded else 0, column=0 if folded else 1,
                                       columnspan=2 if folded else 1, pady=(6 if folded else 0, 0))
+            available = bar.winfo_width() if folded else bar.winfo_width() - info.winfo_reqwidth() - 12
+            jump_folded = navigation_need > available
+            jump.grid_configure(row=1 if jump_folded else 0, column=0 if jump_folded else 1,
+                                sticky="e", pady=(6 if jump_folded else 0, 0),
+                                padx=(0 if jump_folded else 12, 0))
+
+    def _layout_preview(self):
+        width = self.file_browser.winfo_width()
+        if width <= 1:
+            return
+        side = width >= max(self.preview_box.winfo_reqwidth(), self.preview_info.winfo_reqwidth()) + 674
+        if side == self._preview_side:
+            return
+        self._preview_side = side
+        self.preview_card.grid(row=0 if side else 1, column=1 if side else 0,
+                               sticky="ns" if side else "ew",
+                               padx=(12 if side else 0, 0), pady=(0 if side else 8, 0))
+        self.preview_card.columnconfigure(0, weight=0)
+        self.preview_card.columnconfigure(1, weight=0 if side else 1)
+        self.preview_box.grid(row=0, column=0, sticky="n")
+        self.preview_info.grid(row=1 if side else 0, column=0 if side else 1, sticky="nw",
+                               padx=(0 if side else 16, 0), pady=(10 if side else 0, 0))
 
     def _layout_tiles(self):
         available = self._tile_frame.winfo_width()
@@ -362,6 +433,18 @@ class HistoryWindow(tk.Toplevel):
                 getattr(self, prefix + name + "_button").configure(state="normal" if page_ready and page + 1 < pages else "disabled")
             for name in ("page_entry", "jump_button"):
                 getattr(self, prefix + name).configure(state="normal" if page_ready and pages else "disabled")
+            first = max(0, min(displayed - 2, pages - 5))
+            for index, button in enumerate(getattr(self, prefix + "page_buttons")):
+                destination = first + index
+                if destination >= pages:
+                    button.grid_remove()
+                    continue
+                button.configure(text=str(destination + 1), width=max(2, len(str(destination + 1))),
+                                 style="CompactPrimary.TButton" if destination == displayed else "Compact.TButton",
+                                 command=lambda page=destination, target=runs: self.go_page(page, runs=target),
+                                 state="normal" if page_ready else "disabled")
+                button.grid()
+        self._queue_pager_layout()
         self.export_button.configure(state="normal" if ready else "disabled")
         self.backfill_button.configure(state="normal" if ready else "disabled")
 
@@ -410,6 +493,20 @@ class HistoryWindow(tk.Toplevel):
         self.go_page(page, runs=runs)
         value.set(str((self.run_page if runs else self.page) + 1))
 
+    def _page_key(self, event):
+        # Keep Home/End and Page Up/Down editing/scrolling behavior in fields
+        # and selected-file text. A table or page button can navigate pages.
+        if event.widget.winfo_class() in {"Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"}:
+            return
+        runs = self.tabs.index("current") == 1
+        if event.keysym == "Prior":
+            self.change_page(-1, runs=runs)
+        elif event.keysym == "Next":
+            self.change_page(1, runs=runs)
+        else:
+            self.go_page(0 if event.keysym == "Home" else None, runs=runs)
+        return "break"
+
     def refresh(self, *, import_legacy=False):
         if self.busy:
             self.pending = True
@@ -454,7 +551,7 @@ class HistoryWindow(tk.Toplevel):
         query = self.query.get().strip()
         if re.fullmatch(r"@[A-Za-z0-9_]{1,15}", query):
             query = query[1:]
-        threading.Thread(target=self._load, args=(generation, location, kind, query, self.page, do_import,
+        threading.Thread(target=partial(HistoryWindow._load_worker, self.results), args=(generation, location, kind, query, self.page, do_import,
                                                  self._page_size(), self.run_page), daemon=True).start()
 
     @staticmethod
@@ -462,9 +559,13 @@ class HistoryWindow(tk.Toplevel):
         return HistoryStore.for_storage(location) if isinstance(location, StoragePaths) else HistoryStore(location)
 
     def _load(self, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0):
+        return self._load_worker(self.results, generation, directory, kind, query, page, do_import, page_size, run_page)
+
+    @staticmethod
+    def _load_worker(results, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0):
         store = None
         try:
-            store = self._store(directory)
+            store = HistoryWindow._store(directory)
 
             def snapshot(warnings):
                 summary = store.summary()
@@ -477,13 +578,13 @@ class HistoryWindow(tk.Toplevel):
                 # Show what the catalog already holds at once. Re-checking every
                 # file of a large library takes seconds, and the table must not
                 # look empty meanwhile.
-                self.results.put((generation, "preview", snapshot([])))
+                results.put((generation, "preview", snapshot([])))
                 imported = store.import_legacy(refresh=True)
-                self.results.put((generation, "loaded", snapshot(imported.get("warnings", []))))
+                results.put((generation, "loaded", snapshot(imported.get("warnings", []))))
             else:
-                self.results.put((generation, "loaded", snapshot([])))
+                results.put((generation, "loaded", snapshot([])))
         except Exception:
-            self.results.put((generation, "error", "기록을 읽지 못했습니다. 저장 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."))
+            results.put((generation, "error", "기록을 읽지 못했습니다. 저장 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."))
         finally:
             if store is not None:
                 store.close()
@@ -538,6 +639,7 @@ class HistoryWindow(tk.Toplevel):
                     self.refresh()
         except queue.Empty:
             pass
+        self._poll_previews()
         if self.winfo_exists():
             self._poll_timer = self.after(120, self._poll)
 
@@ -625,7 +727,7 @@ class HistoryWindow(tk.Toplevel):
         warning = " ".join(summary.get("warnings", []))
         self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") +
                              f"파일 안에 출처가 기록된 파일 {summary.get('embedded_sources', 0):,}개 · 작성자까지 기록된 파일 {summary.get('embedded_authors', 0):,}개")
-        self.select_record()
+        self.select_record(force=True)
         self.select_run()
 
     @staticmethod
@@ -636,8 +738,9 @@ class HistoryWindow(tk.Toplevel):
         selection = self.tree.selection()
         return self.rows.get(selection[0]) if selection else None
 
-    def select_record(self, _=None):
+    def select_record(self, _=None, *, force=False):
         row = self.selected()
+        self._start_preview(row, force=force)
         if row is None:
             self.selection_text.set(NO_SELECTION)
             return
@@ -654,6 +757,45 @@ class HistoryWindow(tk.Toplevel):
             f"트윗     {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n"
             f"파일     {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}\n"
             f"파일 안 기록: {metadata} · {author_status} · 게시일 출처: {source}")
+
+    def _start_preview(self, row, *, force=False):
+        key = (str(self.current_account_dir), row.get("path")) if row else None
+        if key == self._preview_key and not force:
+            return
+        self._preview_key = key
+        self._preview_token += 1
+        self._preview_image = None
+        self.preview_label.configure(image="", text="미리보기")
+        if not row:
+            self.preview_note.set("파일을 고르면 미리보기가 나옵니다.")
+            return
+        if not row.get("path") or self.current_storage is None:
+            self.preview_note.set("파일 위치가 기록되어 있지 않습니다.")
+            return
+        self.preview_note.set("미리보기를 불러오는 중…")
+        location = self.current_storage
+
+        def permitted(path):
+            with closing(HistoryWindow._store(location)) as store:
+                return store.is_media_path(path)
+
+        self._preview_loader.request(self._preview_token, row["path"], permitted)
+
+    def _poll_previews(self):
+        try:
+            while True:
+                token, result = self._preview_results.get_nowait()
+                if token != self._preview_token:
+                    continue
+                self.preview_note.set(result.note)
+                if result.image is not None:
+                    self._preview_image = ImageTk.PhotoImage(result.image, master=self)
+                    self.preview_label.configure(image=self._preview_image, text="")
+                else:
+                    self._preview_image = None
+                    self.preview_label.configure(image="", text="미리보기 없음")
+        except queue.Empty:
+            pass
 
     def select_run(self, _=None):
         selection = self.run_tree.selection()
@@ -706,7 +848,7 @@ class HistoryWindow(tk.Toplevel):
         self._update_controls()
         self.generation += 1
         self.status_text.set("전체 파일 기록을 CSV로 내보내고 있습니다…")
-        threading.Thread(target=self._export, args=(self.generation, self.current_storage, destination), daemon=True).start()
+        threading.Thread(target=partial(HistoryWindow._export_worker, self.results), args=(self.generation, self.current_storage, destination), daemon=True).start()
 
     def backfill(self):
         if self.busy or self.current_account_dir is None:
@@ -734,9 +876,14 @@ class HistoryWindow(tk.Toplevel):
         self.source_stop_button.pack(side="right", padx=(0, 8))
         self.generation += 1
         self.status_text.set("출처와 작성자를 기록하는 중입니다… 화질은 그대로이며 X에 요청하지 않습니다.")
-        threading.Thread(target=self._backfill, args=(self.generation, self.current_storage), daemon=True).start()
+        threading.Thread(target=partial(HistoryWindow._backfill_worker, self.results, self.metadata_stop),
+                         args=(self.generation, self.current_storage), daemon=True).start()
 
     def _backfill(self, generation, directory):
+        return HistoryWindow._backfill_worker(self.results, self.metadata_stop, generation, directory)
+
+    @staticmethod
+    def _backfill_worker(results, metadata_stop, generation, directory):
         from .metadata import author_identity, embed_source, persistent
         from .protection import AccountGuard, ProtectionError
         store = None
@@ -749,7 +896,7 @@ class HistoryWindow(tk.Toplevel):
                 # without requiring the X request cooldown to have expired.
                 account_guard = AccountGuard(directory.account, sleep=lambda *_: None)
                 account_guard.acquire(respect_cooldown=False)
-            store = self._store(directory)
+            store = HistoryWindow._store(directory)
             if isinstance(directory, StoragePaths):
                 # Records can refer to files retained in earlier output roots.
                 # Lock every such root before changing any file metadata.
@@ -765,7 +912,7 @@ class HistoryWindow(tk.Toplevel):
                     if not rows:
                         break
                     for row in rows:
-                        if self.metadata_stop.is_set():
+                        if metadata_stop.is_set():
                             break
                         # Catalog text may be an old folder name; only a valid
                         # handle or numeric ID counts as a known author.
@@ -789,16 +936,16 @@ class HistoryWindow(tk.Toplevel):
                             success += 1
                         else:
                             failed += 1
-                        self.results.put((generation, "metadata-progress", f"출처·작성자 기록 · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개"))
-                    if self.metadata_stop.is_set():
+                        results.put((generation, "metadata-progress", f"출처·작성자 기록 · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개"))
+                    if metadata_stop.is_set():
                         break
                     offset += len(rows)
-            state = "중단" if self.metadata_stop.is_set() else "종료"
-            self.results.put((generation, "backfilled", f"출처·작성자 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개. X 요청은 보내지 않았습니다."))
+            state = "중단" if metadata_stop.is_set() else "종료"
+            results.put((generation, "backfilled", f"출처·작성자 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개. X 요청은 보내지 않았습니다."))
         except ProtectionError as exc:
-            self.results.put((generation, "error", str(exc)))
+            results.put((generation, "error", str(exc)))
         except Exception:
-            self.results.put((generation, "error", "메타데이터 기록을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."))
+            results.put((generation, "error", "메타데이터 기록을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."))
         finally:
             try:
                 if store is not None:
@@ -828,6 +975,8 @@ class HistoryWindow(tk.Toplevel):
         if self._destroyed:
             return
         self._destroyed = True
+        self._preview_loader.close()
+        self._preview_image = None
         self.selection_text.trace_remove("write", self._selection_trace)
         if self._pager_layout_timer is not None:
             self.tk.call("after", "cancel", self._pager_layout_timer)
@@ -835,16 +984,43 @@ class HistoryWindow(tk.Toplevel):
         if self._poll_timer is not None:
             self.tk.call("after", "cancel", self._poll_timer)
             self._poll_timer = None
+        widgets = list(self.winfo_children())
+        descendants = []
+        while widgets:
+            widget = widgets.pop()
+            descendants.append(widget)
+            widgets.extend(widget.winfo_children())
         super().destroy()
+        # Tk finalizers must run on the UI thread. Closed Toplevels otherwise
+        # form cycles through their stored widgets/parent links and callbacks,
+        # which a thumbnail decoder's ordinary Python GC could later collect.
+        theme.release_variables(self)
+        # Compound controls keep Python references to their destroyed children
+        # (e.g. ScrollableContent.canvas). Remove only those dead parent links;
+        # an open widget's normal hierarchy is never changed.
+        for widget in descendants:
+            widget.master = None
+        for name in ("_pagers", "_tiles", "wrapping_labels"):
+            getattr(self, name, []).clear()
+        for name, value in tuple(self.__dict__.items()):
+            if name != "master" and isinstance(value, tk.Misc):
+                setattr(self, name, None)
+            elif isinstance(value, list) and any(isinstance(child, tk.Misc) for child in value):
+                value.clear()
+        self.get_location = self.is_downloading = None
 
     def _export(self, generation, directory, destination):
+        return self._export_worker(self.results, generation, directory, destination)
+
+    @staticmethod
+    def _export_worker(results, generation, directory, destination):
         store = None
         try:
-            store = self._store(directory)
+            store = HistoryWindow._store(directory)
             store.export_records(Path(destination))
-            self.results.put((generation, "exported", f"CSV 내보내기 완료 · {destination}"))
+            results.put((generation, "exported", f"CSV 내보내기 완료 · {destination}"))
         except Exception:
-            self.results.put((generation, "error", "CSV 파일을 저장하지 못했습니다. 파일 접근 권한을 확인해 주세요."))
+            results.put((generation, "error", "CSV 파일을 저장하지 못했습니다. 파일 접근 권한을 확인해 주세요."))
         finally:
             if store is not None:
                 store.close()

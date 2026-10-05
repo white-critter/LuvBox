@@ -171,14 +171,14 @@ class MetadataTransactionTests(unittest.TestCase):
         self.assertEqual((result["status"], result["author_status"], result["author"], result["author_id"]),
                          ("embedded", "unknown", "", ""))
 
-    def test_unsupported_gif_has_explicit_status_without_tool_call(self):
-        gif = self.root / "100_1.gif"
-        gif.write_bytes(b"GIF89a")
+    def test_unsupported_bmp_has_explicit_status_without_tool_call(self):
+        gif = self.root / "100_1.bmp"
+        gif.write_bytes(b"BM")
         with patch.object(metadata, "_run") as run:
             result = metadata.embed_source(gif, "100")
         self.assertEqual((result["status"], result["url"]), ("unsupported", URL))
         run.assert_not_called()
-        self.assertEqual(gif.read_bytes(), b"GIF89a")
+        self.assertEqual(gif.read_bytes(), b"BM")
 
     def test_external_failure_timeout_and_verification_failure_preserve_original(self):
         for failure in ("write", "timeout", "read", "mismatch"):
@@ -278,6 +278,25 @@ class ActualExifToolTests(unittest.TestCase):
         movie.insert(0, (b"ftyp", b"isom\x00\x00\x02\x00isomiso2mp41"))
         movie.append((b"mdat", b"\x00\x00\x00\x04\x65\x88\x84\x00" * 32))
         return b"".join(struct.pack(">I4s", len(data) + 8, kind) + data for kind, data in movie)
+
+    def test_gif_source_author_roundtrip_preserves_animation_and_timing(self):
+        from PIL import Image, ImageSequence
+        path = self.root / "100_gif_1.gif"
+        frames = [Image.new("RGB", (24, 20), color) for color in ("red", "blue", "green")]
+        frames[0].save(path, save_all=True, append_images=frames[1:], duration=[100, 200, 150], loop=0)
+
+        def animation():
+            with Image.open(path) as image:
+                return image.size, image.info.get("loop"), [(frame.convert("RGB").tobytes(), frame.info.get("duration"))
+                                                             for frame in ImageSequence.Iterator(image)]
+        before = animation()
+        with metadata.persistent():
+            result = metadata.embed_source(path, "100", author="gif_writer", author_id="123456")
+            self.assertEqual((result["status"], result["author_status"]), ("embedded", "embedded"))
+            self.assertEqual(metadata.read_source(path), URL)
+            self.assertEqual(metadata.read_author(path), {"author": "gif_writer", "author_id": "123456",
+                                                         "profile_url": "https://x.com/gif_writer"})
+        self.assertEqual(animation(), before)
 
     def test_author_roundtrips_all_formats_and_modes_preserve_prior_metadata_and_payload(self):
         expected_author = {"author": "Example_User", "author_id": "1234567890",

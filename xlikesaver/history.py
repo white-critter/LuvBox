@@ -601,7 +601,7 @@ class HistoryStore:
             actual, size, filename = self._file(path)
             extension = match[4].lower()
             tag = (match[2] or "").lower()
-            media_type = "animated_gif" if tag in {"gif", "animated_gif"} else "video" if tag == "video" or extension == "mp4" else "photo"
+            media_type = "animated_gif" if tag in {"gif", "animated_gif"} or extension == "gif" else "video" if tag == "video" or extension == "mp4" else "photo"
             previous = known_paths.get(actual)
             if previous is not None:
                 # An author's handle can equal the account-folder name.

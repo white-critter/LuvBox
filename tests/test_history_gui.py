@@ -3,15 +3,25 @@
 from pathlib import Path
 from contextlib import closing
 import json
+import gc
+import queue
+import sys
 import tempfile
 import time
 import tkinter as tk
+import threading
 import unittest
+import weakref
 from unittest.mock import patch
+from types import SimpleNamespace
+
+from PIL import Image
 
 from xlikesaver.gui import App
 from xlikesaver.history import HistoryStore
 from xlikesaver.history_gui import HistoryWindow, NO_SELECTION, NO_RUN_SELECTION
+from xlikesaver.preview import PreviewLoader, Thumbnail
+from xlikesaver import theme
 from xlikesaver.protection import AccountGuard, ProtectionError
 from xlikesaver.storage import OutputGuard, resolve_storage
 from tests.test_gui import destroy_tk
@@ -307,6 +317,122 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._poll()
         self.assertEqual(self.window.rows, before)
 
+    def test_numbered_pages_highlight_current_and_keyboard_respects_editing(self):
+        self.records(550)
+        self.load(page=3)
+        buttons = self.window.page_buttons
+        self.assertEqual([button.cget("text") for button in buttons], ["2", "3", "4", "5", "6"])
+        self.assertEqual(buttons[2].cget("style"), "CompactPrimary.TButton")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            buttons[3].invoke()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(self.window.displayed_page, 4)
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            result = self.window._page_key(SimpleNamespace(widget=self.window.page_entry, keysym="Home"))
+        thread.assert_not_called()
+        self.assertIsNone(result)
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.assertEqual(self.window._page_key(SimpleNamespace(widget=self.window.tree, keysym="Home")), "break")
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(self.window.displayed_page, 0)
+        self.window.tabs.select(1)
+        with patch.object(self.window, "go_page") as go:
+            self.window._page_key(SimpleNamespace(widget=self.window.run_tree, keysym="End"))
+        go.assert_called_once_with(None, runs=True)
+
+    def test_preview_updates_only_current_selection_and_clear_releases_image(self):
+        self.records(2)
+        self.load()
+        with patch.object(self.window._preview_loader, "request") as request:
+            self.window.tree.selection_set("0")
+            self.window.select_record()
+            old_token = self.window._preview_token
+            first_path = self.window.selected()["path"]
+            self.assertEqual(request.call_args.args[1], first_path)
+            self.assertIn("불러오는 중", self.window.preview_note.get())
+            self.window.tree.selection_set("1")
+            self.window.select_record()
+            token = self.window._preview_token
+        self.assertGreater(token, old_token)
+        self.window._preview_results.put((old_token, Thumbnail(Image.new("RGB", (12, 12)), "stale")))
+        self.window._preview_results.put((token, Thumbnail(Image.new("RGB", (22, 15)), "사진 미리보기")))
+        self.window._poll_previews()
+        self.assertEqual(self.window.preview_note.get(), "사진 미리보기")
+        self.assertEqual((self.window._preview_image.width(), self.window._preview_image.height()), (22, 15))
+        self.assertTrue(self.window.preview_label.cget("image"))
+        self.window.tree.selection_remove(*self.window.tree.selection())
+        self.window.select_record()
+        self.assertIsNone(self.window._preview_image)
+        self.assertFalse(self.window.preview_label.cget("image"))
+        self.assertIn("고르면", self.window.preview_note.get())
+
+    def test_click_loads_real_local_photo_in_background_without_opening_apps_or_network(self):
+        self.records()
+        path = self.account / "100_1.jpg"
+        Image.new("RGB", (800, 600), "orange").save(path)
+        self.load()
+        with patch("requests.Session.request") as network, \
+                patch("xlikesaver.history_gui.os.startfile", create=True) as opened, \
+                patch("xlikesaver.history_gui.webbrowser.open") as browser:
+            self.window.tree.selection_set("0")
+            self.window.select_record()
+            deadline = time.monotonic() + 3
+            while self.window._preview_image is None and time.monotonic() < deadline:
+                self.window._poll_previews()
+                time.sleep(0.01)
+            self.assertIsNotNone(self.window._preview_image, self.window.preview_note.get())
+            self.assertEqual((self.window._preview_image.width(), self.window._preview_image.height()), (220, 165))
+            self.assertEqual(self.window.preview_note.get(), "사진 미리보기")
+        network.assert_not_called()
+        opened.assert_not_called()
+        browser.assert_not_called()
+
+    def test_preview_permission_uses_recorded_locations_and_excludes_unknown_paths(self):
+        paths, old_root, media = self.relocated_record()
+        self.window.busy = False
+        self.window.current_storage = paths
+        self.window.current_account_dir = paths.record_dir
+        with closing(HistoryStore.for_storage(paths)) as store:
+            rows = store.records()
+            self.window._display(store.summary(), rows, [])
+        with patch.object(self.window._preview_loader, "request") as request:
+            self.window.tree.selection_set("0")
+            self.window.select_record()
+        permitted = request.call_args.args[2]
+        self.assertTrue(permitted(media))
+        unknown = old_root / "unrecorded.jpg"
+        unknown.write_bytes(b"unrelated")
+        self.assertFalse(permitted(unknown))
+
+    def test_preview_reflows_below_table_and_paging_buttons_fit_large_fonts(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        self.window.deiconify()
+        paging = {"page": 3, "total": 100000, "pages": 1000, "page_size": 100}
+        self.window._display({"files": 100000}, [], [], 3, paging, paging)
+        self.window.geometry("860x720")
+        self.root.update()
+        self.assertFalse(self.window._preview_side)
+        self.assertEqual(int(self.window.preview_card.grid_info()["row"]), 1)
+        self.assertGreaterEqual(self.window.tree.winfo_height(), self.window.tree.winfo_reqheight())
+        self.assertLessEqual(self.window.preview_box.winfo_rootx() + self.window.preview_box.winfo_width(),
+                             self.window.file_browser.winfo_rootx() + self.window.file_browser.winfo_width())
+        self.window.geometry("1400x900")
+        self.root.update()
+        self.assertTrue(self.window._preview_side)
+        self.assertEqual(int(self.window.preview_card.grid_info()["column"]), 1)
+        for bar, info, navigation in self.window._pagers:
+            if not bar.winfo_ismapped():
+                continue
+            for group in (navigation._arrows, navigation._jump_box):
+                for child in group.winfo_children():
+                    if child.winfo_ismapped():
+                        self.assertLessEqual(child.winfo_rootx() + child.winfo_width(),
+                                             bar.winfo_rootx() + bar.winfo_width())
+
     def test_refresh_clamps_page_after_catalog_is_reduced(self):
         store = self.records(105)
         self.load(page=1)
@@ -355,7 +481,8 @@ class HistoryGuiTests(unittest.TestCase):
                             tree = window.run_tree if tab else window.tree
                             self.assertGreaterEqual(tree.winfo_height(), 90)
                             canvas = window.content_view.canvas
-                            expected_row = int(info.winfo_reqwidth() + navigation.winfo_reqwidth() + 12 > bar.winfo_width())
+                            expected_row = int(info.winfo_reqwidth() + navigation._arrows.winfo_reqwidth() +
+                                               navigation._jump_box.winfo_reqwidth() + 24 > bar.winfo_width())
                             self.assertEqual(int(navigation.grid_info()["row"]), expected_row)
                             if scaling == 2.0:
                                 self.assertTrue(window.content_view.scrollbar.winfo_manager())
@@ -506,13 +633,36 @@ class HistoryGuiTests(unittest.TestCase):
         layout = self.window._pager_layout_timer
         self.assertIn(scheduled, self.root.tk.call("after", "info"))
         self.assertIn(layout, self.root.tk.call("after", "info"))
+        selection_text = self.window.selection_text
         self.window.close()
         self.assertNotIn(scheduled, self.root.tk.call("after", "info"))
         self.assertNotIn(layout, self.root.tk.call("after", "info"))
         self.assertIsNone(self.window._pager_layout_timer)
         self.assertEqual(self.root.winfo_exists(), 1)
         self.window._poll()  # A late callback is harmless after closing.
-        self.window.selection_text.set("late selection text")
+        selection_text.set("late selection text")
+
+    def test_closed_history_releases_ui_variables_and_widget_cycles_on_main_thread(self):
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            window = HistoryWindow(self.root, lambda: ("offline", self.account))
+        worker = thread.call_args.kwargs["target"]
+        self.assertIs(worker.func, HistoryWindow._load_worker)
+        self.assertEqual(worker.args, (window.results,))
+        variables = [weakref.ref(value) for value in window.__dict__.values() if isinstance(value, tk.Variable)]
+        variable_refs = variables + [weakref.ref(value) for value in window.tile_values.values()]
+        window_ref = weakref.ref(window)
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            window.destroy()
+            self.assertTrue(all(ref() is None for ref in variable_refs))
+            del window
+            # No cyclic GC is required: worker target owns only a queue,
+            # and stored widget parents no longer retain the closed window.
+            self.assertIsNone(window_ref())
+        finally:
+            if enabled:
+                gc.enable()
 
     def test_closing_during_backfill_waits_for_result_then_cancels_poll(self):
         self.window.metadata_active = True
@@ -787,6 +937,60 @@ class HistoryGuiTests(unittest.TestCase):
         row = store.records()[0]
         self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "error"))
         self.assertEqual(row["saved_at"], original["saved_at"])
+
+
+class HistoryLifecycleTests(unittest.TestCase):
+    def test_root_history_preview_theme_resources_die_before_background_gc(self):
+        # A decoder's allocations can trigger Python's cyclic GC. Tk resources
+        # must already be released on the main thread before that can happen.
+        root = app = window = loader = None
+        automatic_gc = gc.isenabled()
+        old_hook = sys.unraisablehook
+        errors = []
+        sys.unraisablehook = lambda error: errors.append((str(error.exc_value), threading.current_thread().name))
+        gc.disable()
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                root = tk.Tk()
+                root.withdraw()
+                with patch("xlikesaver.gui.load_settings", return_value={"output_dir": directory}), \
+                        patch("xlikesaver.gui.has_session", return_value=False):
+                    app = App(root)
+                with patch("xlikesaver.history_gui.threading.Thread"):
+                    window = HistoryWindow(root, lambda: ("offline", Path(directory)))
+                app.history_window = window
+                window._preview_token = 1
+                window._preview_results.put((1, Thumbnail(Image.new("RGB", (30, 20), "red"), "ready")))
+                window._poll_previews()
+                refs = [weakref.ref(value) for value in
+                        (root, app, window, window.selection_text, app.status, window._preview_image)]
+                theme.apply(root, "dark")
+                self.assertEqual(theme.mode(root), "dark")
+                window.destroy()
+                root.destroy()
+                root = app = window = None
+                self.assertTrue(all(ref() is None for ref in refs), "Closed UI retained a Python cycle")
+                path = Path(directory) / "local.jpg"
+                path.write_bytes(b"local file for cache key")
+                results = queue.Queue(maxsize=2)
+                loader = PreviewLoader(results, decoder=lambda _: (gc.collect(), Thumbnail(None, "done"))[-1])
+                loader.request(1, path, lambda _: True)
+                self.assertEqual(results.get(timeout=3)[0], 1)
+                loader.close()
+                loader.thread.join(1)
+                self.assertFalse(loader.thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertTrue(all(ref() is None for ref in refs))
+        finally:
+            if loader is not None:
+                loader.close()
+            if root is not None:
+                root.destroy()
+            root = app = window = None
+            sys.unraisablehook = old_hook
+            if automatic_gc:
+                gc.enable()
+            gc.collect()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,61 @@
+{
+  "version": "7.1",
+  "license": "LGPL-2.1-or-later",
+  "target": "Windows x64",
+  "source": {
+    "filename": "ffmpeg-7.1.tar.xz",
+    "url": "https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz",
+    "sha256": "40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6"
+  },
+  "runtime": {
+    "filename": "runtime/ffmpeg.exe",
+    "sha256": "2f2d1287f8e623e905aa04fcef5e735912c9a0b3926d1c3f9843d6b7bb2a49ee",
+    "size": 5555200
+  },
+  "toolchain": {
+    "name": "w64devkit",
+    "version": "2.10.0",
+    "url": "https://github.com/skeeto/w64devkit/releases/download/v2.10.0/w64devkit-x64-2.10.0.7z.exe",
+    "sha256": "18d0a4c71a166f8401ab6305781bec5882b40b5e06ba9807c61cb5f3b3c6325e",
+    "compiler": "gcc.exe (GCC) 16.2.0"
+  },
+  "configure": [
+    "--target-os=mingw32",
+    "--arch=x86_64",
+    "--cc=gcc",
+    "--disable-autodetect",
+    "--disable-network",
+    "--disable-x86asm",
+    "--disable-asm",
+    "--disable-debug",
+    "--disable-doc",
+    "--disable-ffplay",
+    "--disable-ffprobe",
+    "--disable-shared",
+    "--enable-static",
+    "--disable-pthreads",
+    "--enable-w32threads",
+    "--disable-everything",
+    "--disable-iconv",
+    "--extra-ldflags=-static",
+    "--enable-decoder=h264,hevc,vp9,mpeg4,bmp,gif,wrapped_avframe",
+    "--enable-encoder=gif,bmp,mpeg4",
+    "--enable-demuxer=mov,image2,image2pipe",
+    "--enable-muxer=gif,image2,image2pipe,mov,mp4",
+    "--enable-protocol=file,pipe",
+    "--enable-filter=buffer,buffersink,palettegen,paletteuse,scale,format,testsrc2,null,split",
+    "--enable-indev=lavfi",
+    "--enable-parser=h264,hevc,vp9,mpeg4video"
+  ],
+  "runtime_dlls": [
+    "bcrypt.dll",
+    "KERNEL32.dll",
+    "msvcrt.dll",
+    "SHELL32.dll"
+  ],
+  "source_modified": false,
+  "build_files": {
+    "build.py": "9982b580525b0d75f9985c541ead26db6bc55098ac5650b3d44c13f88eb85050",
+    "configure-flags.json": "98f8422eb4d2c5b7a34a20c6cd85aaf93be92eb21758f0908488cc6934c897df"
+  }
+}

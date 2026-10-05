@@ -679,6 +679,70 @@ class GuiTests(unittest.TestCase):
         with patch("sys.argv", ["entry.py", "--login", "request", "events", "stop"]):
             self.assertEqual(entry.main(), 2)
 
+    def test_file_log_lines_include_their_own_author_and_posted_date(self):
+        for kind, author, day in (("saved", "alice", "2020-01-02"),
+                                  ("skipped", "bob", "2021-03-04"),
+                                  ("size-skipped", "carol", "2022-05-06")):
+            self.app.events.put({"type": kind, "author": author, "posted_at": day + "T10:20:30+09:00",
+                                 "tweet_id": "123", "filename": "123_1.jpg", "path": "123_1.jpg"})
+        self.app.events.put({"type": "log", "message": "전체 목록을 확인합니다."})
+        self.app._poll()
+        lines = self.app.log.get("1.0", "end").splitlines()
+        for line, author, day in zip(lines, ("alice", "bob", "carol"),
+                                     ("2020-01-02", "2021-03-04", "2022-05-06")):
+            self.assertIn("@" + author, line)
+            self.assertIn(day, line)
+            self.assertIn("10:20:30", line)
+        self.assertNotIn("@", lines[3])
+        self.assertEqual((self.app.saved, self.app.skipped, self.app.size_skipped), (1, 1, 1))
+
+    def test_conversion_progress_does_not_claim_the_file_is_already_saved(self):
+        self.app.events.put({"type": "converting", "stage": "started", "author": "alice",
+                             "posted_at": "2020-01-02T10:20:30+09:00", "filename": "123_gif_1.mp4"})
+        self.app._poll()
+        self.assertEqual(self.app.progress.cget("mode"), "indeterminate")
+        self.assertIn("GIF로 변환", self.app.status.get())
+        self.assertIn("alice", self.app.progress_details.get())
+        self.assertEqual(self.app.saved, 0)
+
+    def test_invalid_log_author_cannot_inject_another_line(self):
+        self.app._log("저장", {"tweet_id": "123", "author": "alice\nfake", "posted_at": "invalid"})
+        content = self.app.log.get("1.0", "end")
+        self.assertIn("작성자 미확인", content)
+        self.assertNotIn("fake", content)
+        self.assertEqual(len(content.strip().splitlines()), 1)
+
+    def test_theme_can_switch_during_work_and_preserves_unedited_settings(self):
+        from xlikesaver import theme
+        original = {"account": "remembered", "output_dir": "old-folder", "future_option": 7}
+        target = Path(self.temp.name) / "settings.json"
+        self.app.running = True
+        with patch("xlikesaver.gui.load_settings", return_value=original.copy()), \
+                patch("xlikesaver.gui.settings_path", return_value=target):
+            self.app.toggle_theme()
+            self.root.update_idletasks()
+            saved = json.loads(target.read_text(encoding="utf-8"))
+            self.assertEqual(saved, {**original, "appearance": "dark"})
+            self.assertEqual(self.app.appearance.get(), "dark")
+            self.assertEqual(self.app.log.cget("background"), theme.CARD)
+            self.assertEqual(str(self.app.theme_button.cget("state")), "normal")
+            self.app.toggle_theme()
+            self.assertEqual(self.app.appearance.get(), "light")
+
+    def test_persisted_dark_theme_is_loaded_without_starting_a_worker(self):
+        from xlikesaver import theme
+        with patch("xlikesaver.gui.load_settings", return_value={"appearance": "dark"}), \
+                patch("xlikesaver.gui.threading.Thread") as worker:
+            window = tk.Toplevel(self.root)
+            app = App(window)
+            self.root.update_idletasks()
+            self.assertEqual(app.appearance.get(), "dark")
+            self.assertEqual(app.log.cget("background"), theme.CARD)
+            self.assertEqual(app.theme_button_text.get(), "라이트 테마")
+            worker.assert_not_called()
+            window.destroy()
+        theme.apply(self.root, "light")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,7 +23,7 @@ VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니
 | `xlikesaver/scheduled.py` | 작업 스케줄러용 무인 실행·실행 기록 |
 | `build.ps1`, `tools/package_release.py` | 버전이 붙은 단일 exe·소스 포함 ZIP 제작 |
 
-`build.ps1`은 `--onefile --windowed`로 빌드합니다. Python/Tk, Pretendard Regular/Bold와 전체 ExifTool 런타임을 포함하며 실행 시 임시 폴더에 풉니다. worker는 부모 앱이 살아 있는 동안 같은 임시 도구를 사용합니다. 사용자 사진과 기록, 설정, 인증정보는 실행 파일 밖에 남습니다. [PyInstaller 배포 방식](https://pyinstaller.org/en/stable/operating-mode.html)
+`build.ps1`은 `--onefile --windowed`로 빌드합니다. Python/Tk, Pillow, Pretendard Regular/Bold, 최소 FFmpeg 및 전체 ExifTool 런타임을 포함하며 실행 시 임시 폴더에 풉니다. worker는 부모 앱이 살아 있는 동안 같은 임시 도구를 사용합니다. 사용자 사진과 기록, 설정, 인증정보는 실행 파일 밖에 남습니다. [PyInstaller 배포 방식](https://pyinstaller.org/en/stable/operating-mode.html)
 
 worker는 gallery-dl의 비공개 함수 몇 개(`TwitterExtractor._extract_media`, `DownloadJob.handle_url`, `HttpDownloader.receive` 등)를 감싸서 동작합니다. `core.check_gallery_hooks()`가 요청을 보내기 전에 이 함수들의 이름과 매개변수를 확인하고, 다르면 바로 중단합니다. 자체 점검(`--self-test`)도 같은 검사를 합니다. X 변경 때문에 gallery-dl을 올릴 때는 이 검사와 `tests/test_media.py`의 실제 추출 함수 테스트가 통과하는지 먼저 확인하세요.
 
@@ -53,7 +53,7 @@ SQLite WAL과 `synchronous=FULL`을 사용합니다. 기록 창의 폴더 재확
 
 과거 archive에서 정보가 부족하면 경로나 저장 시각을 임의로 만들지 않습니다. 파일 크기는 확인 가능한 것만 합산합니다. 게시물 ID에서 계산한 게시일은 추정으로 표시합니다. Like 시각과 실제 저장 시각은 별개입니다. [Like 시각 기능 검토](like-time-options.md)
 
-출처 메타데이터는 JPEG·PNG·WebP·MP4의 XMP Source/Description 및 MP4 ItemList Comment에 기록합니다. 기존 설명과 다른 언어 값은 유지합니다. 같은 폴더의 임시 복사본을 수정하고 URL을 다시 읽어 확인한 뒤 원본을 원자적으로 교체합니다. 실패 시 원본과 완료 기록을 보존합니다. 수정 시각은 유지하며 이미지·음성·영상 스트림을 재인코딩하지 않습니다. 다운로드와 기존 파일 출처 기록 동안에는 ExifTool을 `-stay_open`으로 하나만 띄워 재사용합니다(호출당 약 0.2초 → 0.01초). 상주 프로세스가 멈추거나 시간을 넘기면 종료하고 호출마다 새 프로세스를 쓰는 방식으로 돌아갑니다. 탐색기에서 모든 형식의 출처를 클릭할 수 있다는 보장은 없으므로 앱의 트윗 열기를 사용할 수 있습니다.
+출처 메타데이터는 JPEG·PNG·WebP·GIF·MP4의 XMP Source/Description 및 MP4 ItemList Comment에 기록합니다. 기존 설명과 다른 언어 값은 유지합니다. 같은 폴더의 임시 복사본을 수정하고 URL을 다시 읽어 확인한 뒤 원본을 원자적으로 교체합니다. 실패 시 원본과 완료 기록을 보존합니다. 수정 시각은 유지하며 이미지·음성·영상 스트림을 재인코딩하지 않습니다. 다운로드와 기존 파일 출처 기록 동안에는 ExifTool을 `-stay_open`으로 하나만 띄워 재사용합니다(호출당 약 0.2초 → 0.01초). 상주 프로세스가 멈추거나 시간을 넘기면 종료하고 호출마다 새 프로세스를 쓰는 방식으로 돌아갑니다. 탐색기에서 모든 형식의 출처를 클릭할 수 있다는 보장은 없으므로 앱의 트윗 열기를 사용할 수 있습니다.
 
 작성자의 X 핸들은 `XMP-dc:Creator`에 `@handle`, 프로필 URL은 `XMP-dc:Relation`에 저장합니다. 숫자 사용자 ID와 작성자 식별 마커는 배열 태그 `XMP-xmp:Identifier`에 저장하며 Description과 MP4 Comment에도 읽기 쉬운 설명을 추가합니다. Like한 계정이 아니라 트윗 작성자 정보(gallery-dl `author.name`, `author.id`)를 사용합니다. Creator·Relation·Identifier에서 다른 프로그램이 넣은 값은 보존합니다. 작성자 핸들이나 ID가 바뀌면 실제로 앱이 추가한 예전 `@handle`·프로필 URL·설명 줄만 지우고 새 값으로 바꿉니다. 핸들·숫자 ID 형식이 아닌 작성자 값은 알 수 없는 작성자로 보고 출처만 기록합니다. `metadata.read_author()`로 작성자·숫자 ID·프로필을 확인할 수 있습니다. 상세 DB는 `author_id`, `author_metadata_status`를 별도로 보관합니다. 저장 실행은 새로 받은 파일과 출처 기록이 아직 없는 기존 파일만 다시 씁니다. 출처가 이미 기록된 기존 파일은 작성자만 위해 다시 쓰지 않고 DB만 갱신합니다. 전체 확인이 라이브러리 전체를 다시 쓰거나 클라우드 동기화가 전체를 다시 올리는 일을 막기 위해서입니다. 이런 파일은 기록 창의 기존 파일 작업에서 한 번에 작성자를 추가하고, 실패하면 다시 시도할 수 있습니다. 기존 파일 작업은 알려진 로컬 작성자만 사용하며 모르는 작성자를 X에서 조회하지 않습니다.
 
@@ -87,3 +87,13 @@ HTTP 429와 계정 정지는 별개입니다. 잠금·보안 확인이 뜨면 X�
 실행에는 `release/XlikeSaver-<버전>.exe` 하나면 됩니다. 이름에 버전이 붙어 있어 이전 exe를 실행 중이어도 새로 빌드할 수 있습니다. 재배포에는 `XlikeSaver-<버전>.zip`의 소스·라이선스도 함께 제공합니다. 사용자 세션이나 cookies.txt를 배포하지 마세요. ExifTool/Perl 전체 도구와 의존성 라이선스를 포함합니다. [의존성 안내](../THIRD_PARTY_NOTICES.md)
 
 `build/`는 PyInstaller 중간 파일이며 지워도 됩니다. 예약 실행은 등록한 exe 경로를 그대로 실행하므로, 새 버전으로 바꾸면 **예약 명령 복사**로 다시 등록하세요.
+
+## 로컬 미디어와 테마
+
+`preview.py`는 Pillow로 사진/GIF 첫 프레임, 번들 FFmpeg로 동영상 첫 프레임을 읽습니다. 소형 메모리 캐시와 단일 디코더가 최신 선택만 처리하며 창을 닫으면 결과를 버립니다. 기록이 허용하는 로컬 경로만 읽고 네트워크 프로토콜을 사용하지 않습니다.
+
+`media.py`는 MP4 다운로드 완료 후 두 번의 palettegen/paletteuse 처리로 원본 크기의 GIF를 만들고, 최종 GIF와 archive 기록이 확정된 뒤 원본 임시 파일을 정리합니다. GIF는 256색으로 제한되며 10ms 시간 단위를 사용합니다. 실패·중단·용량 초과 시 `.mp4.part`와 크기/수정시각을 담은 완료 표식으로 로컬 재시도합니다. 기존 저장된 MP4의 미디어 ID와 archive 키는 유지합니다.
+
+`theme.apply(root, mode="light"|"dark")`는 같은 Tk 인터프리터의 기존·새 창을 함께 바꿉니다. 둥근 컨트롤 이미지는 재사용하고, `theme.Progressbar`는 실제 값과 시각 보간 값을 분리하므로 완료율을 만들어내지 않습니다. 테마 선택은 settings.json의 appearance에 보관하며 worker 옵션에는 보내지 않습니다.
+
+GIF 변환/동영상 섬네일에 쓰는 `tools/ffmpeg/runtime/ffmpeg.exe`는 필요한 로컬 코덱만 포함한 FFmpeg 7.1 빌드입니다. 실행 파일에 함께 들어가므로 사용자는 따로 설치할 필요가 없습니다. `tools/ffmpeg/build.py --check`로 바이너리·소스·빌드 설정의 SHA256을 확인합니다. 직접 다시 빌드하려면 `tools/ffmpeg/README.md`의 portable w64devkit 빌드 절차를 사용하세요. 배포 ZIP은 해당 버전의 원본 소스와 재현용 빌드 설정, 라이선스를 포함합니다.

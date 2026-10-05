@@ -21,4 +21,6 @@ if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
 if ($LASTEXITCODE -ne 0) { throw '패키지 설치에 실패했습니다.' }
 & '.\.venv\Scripts\python.exe' 'tools\exiftool\download.py'
 if ($LASTEXITCODE -ne 0) { throw '파일 출처 기록에 필요한 ExifTool 준비에 실패했습니다.' }
+& '.\.venv\Scripts\python.exe' 'tools\ffmpeg\build.py' '--check'
+if ($LASTEXITCODE -ne 0) { throw 'GIF 변환 도구 확인에 실패했습니다. tools\ffmpeg\README.md를 확인하세요.' }
 Write-Host '준비 완료: run.bat를 더블클릭하거나 .\.venv\Scripts\python.exe entry.py를 실행하세요.'

@@ -18,7 +18,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".mp4"})
+SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4"})
 TIMEOUT_SECONDS = 20
 _ID = re.compile(r"[0-9]{1,20}\Z", re.ASCII)
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z", re.ASCII)

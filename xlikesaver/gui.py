@@ -5,10 +5,12 @@ main screen stays short. Download work runs in a separate worker process.
 """
 
 from dataclasses import asdict
+import gc
 import json
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,7 +25,6 @@ from .core import QUICK_STOP_AFTER, JobOptions, _normal_account
 from .login import clear_session, has_session, save_auth_token
 from .settings import load_settings, settings_path
 from .storage import resolve_storage
-from .theme import BG, CARD
 
 
 AUTH_MODES = {
@@ -63,7 +64,7 @@ class App:
         height = min(880, max(680, root.winfo_screenheight() - 80))
         root.geometry(f"{width}x{height}")
         root.minsize(min(780, width), min(760, height))
-        root.configure(bg=BG)
+        root.configure(bg=theme.BG)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.events: queue.Queue = queue.Queue()
         self.running = False
@@ -87,6 +88,8 @@ class App:
         self.final_status = None
         self.inputs: list[tk.Widget] = []
         settings = load_settings()
+        self.appearance = tk.StringVar(root, value="dark" if settings.get("appearance") == "dark" else "light")
+        self.theme_button_text = tk.StringVar(root)
         self.record_locations = {}
         locations = settings.get("record_locations", {})
         if isinstance(locations, dict):
@@ -130,7 +133,8 @@ class App:
         self.saved_text, self.skipped_text, self.size_text = tk.StringVar(), tk.StringVar(), tk.StringVar()
         self.login_text = tk.StringVar()
         self.option_summary = tk.StringVar()
-        theme.apply_style(self.root)
+        theme.apply(self.root, mode=self.appearance.get())
+        self._update_theme_caption()
         self._build()
         self._update_counts()
         self.auth.trace_add("write", lambda *_: self._auth_changed())
@@ -146,6 +150,12 @@ class App:
         # Short screens can scroll without shrinking the readable type.
         root.minsize(min(780, width), min(760, root.winfo_screenheight() - 80))
         self.root.after(120, self._poll)
+        self.root.bind("<Destroy>", self._release_ui, add="+")
+
+    def _release_ui(self, event):
+        if event.widget is self.root:
+            theme.release_variables(self)
+            self.inputs.clear()
 
     # ------------------------------------------------------------------ layout
     def _build(self):
@@ -164,6 +174,9 @@ class App:
         navigation.grid(row=0, column=1, sticky="ne", pady=(6, 0))
         ttk.Button(navigation, text="기록 · 통계", width=11, command=self.show_history).pack(side="left", padx=(0, 8))
         ttk.Button(navigation, text="사용 방법", width=9, command=self.help).pack(side="left")
+        self.theme_button = ttk.Button(navigation, textvariable=self.theme_button_text, width=10,
+                                       command=self.toggle_theme)
+        self.theme_button.pack(side="left", padx=(8, 0))
         def fit_header(event):
             stacked = event.width < title.winfo_reqwidth() + navigation.winfo_reqwidth() + 18
             row = 1 if stacked else 0
@@ -235,7 +248,7 @@ class App:
                                                        (self.size_text, "용량 초과로 건너뜀"))):
             theme.tile(tiles, variable, caption).grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 10, 0))
             tiles.columnconfigure(column, weight=1, uniform="tile")
-        self.progress = ttk.Progressbar(shell, mode="determinate", value=0)
+        self.progress = theme.Progressbar(shell, mode="determinate", value=0)
         self.progress.pack(fill="x", pady=(10, 4))
         self.progress_heading = ttk.Frame(shell)
         self.progress_heading.pack(fill="x")
@@ -247,7 +260,7 @@ class App:
         self.log_title.pack(anchor="w", pady=(6, 2))
         self.log_frame = ttk.Frame(shell, style="Card.TFrame", padding=(10, 8))
         self.log_frame.pack(fill="both", expand=True)
-        self.log = tk.Text(self.log_frame, height=3, wrap="word", bg=CARD, fg=theme.INK, relief="flat", borderwidth=0,
+        self.log = tk.Text(self.log_frame, height=3, wrap="word", bg=theme.CARD, fg=theme.INK, relief="flat", borderwidth=0,
                            highlightthickness=0, padx=4, pady=4, state="disabled", font=theme.SMALL)
         scroll = ttk.Scrollbar(self.log_frame, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
@@ -273,6 +286,20 @@ class App:
         else:
             self.progress_detail_label.pack_forget()
         self.content_view._schedule_layout()
+
+    def _update_theme_caption(self):
+        self.theme_button_text.set("라이트 테마" if self.appearance.get() == "dark" else "다크 테마")
+
+    def toggle_theme(self):
+        self.appearance.set("light" if self.appearance.get() == "dark" else "dark")
+        theme.apply(self.root, mode=self.appearance.get())
+        self._update_theme_caption()
+        try:
+            data = load_settings()
+            data["appearance"] = self.appearance.get()
+            self._write_settings(data)
+        except OSError:
+            self._log("테마 설정을 기억하지 못했습니다. 다음 실행에서 다시 선택해 주세요.")
 
     def _update_option_summary(self):
         layout = {"flat": "한 폴더", "author": "작성자별 폴더", "date": "날짜별 폴더"}[FOLDER_MODES[self.folder_mode.get()]]
@@ -358,6 +385,20 @@ class App:
         if not self.stopping:
             self.status.set("파일을 저장하고 있습니다…")
 
+    def _update_conversion(self, event):
+        from .history_gui import format_date
+        finished = event.get("stage") == "finished"
+        self.progress_summary.set(("GIF 변환 완료" if finished else "GIF로 변환 중") +
+                                  " · " + str(event.get("filename") or "현재 파일"))
+        author = str(event.get("author") or "작성자 미확인")
+        self.progress_details.set(f"작성자 @{author} · 트윗 게시일 {format_date(event.get('posted_at'))}")
+        if not finished:
+            self.progress.stop()
+            self.progress.configure(mode="indeterminate", value=0)
+            self.progress.start()
+        if not self.stopping:
+            self.status.set("GIF 파일을 마무리하고 있습니다…" if finished else "GIF로 변환하고 있습니다…")
+
     # ------------------------------------------------------------------- login
     def _auth_changed(self):
         mode = AUTH_MODES[self.auth.get()]
@@ -388,7 +429,7 @@ class App:
             return
         window = self.connect_window = tk.Toplevel(self.root)
         window.title("X 로그인 연결")
-        window.configure(bg=CARD)
+        window.configure(bg=theme.CARD)
         window.transient(self.root)
         window.resizable(True, True)
         body = self._popup_content(window, padding=(28, 24))
@@ -439,7 +480,7 @@ class App:
     def _popup_content(window, *, padding):
         view = window.content_view = theme.ScrollableContent(window, padding=padding)
         view.configure(style="Plain.TFrame")
-        view.canvas.configure(background=CARD)
+        view.canvas.configure(background=theme.CARD)
         view.content.configure(style="Plain.TFrame")
         view.pack(fill="both", expand=True)
         return view.content
@@ -513,7 +554,7 @@ class App:
             return
         window = self.options_window = tk.Toplevel(self.root)
         window.title("저장 옵션")
-        window.configure(bg=CARD)
+        window.configure(bg=theme.CARD)
         window.transient(self.root)
         window.resizable(True, True)
         body = self._popup_content(window, padding=(28, 24))
@@ -542,10 +583,10 @@ class App:
         ttk.Checkbutton(media, text="움직이는 GIF", variable=self.include_gifs).pack(side="left", padx=(18, 0))
         size = ttk.Frame(body, style="Plain.TFrame")
         size.pack(anchor="w", pady=(8, 0))
-        ttk.Label(size, text="영상 1개 최대", style="Card.TLabel").pack(side="left")
+        ttk.Label(size, text="영상·GIF 1개 최대", style="Card.TLabel").pack(side="left")
         ttk.Spinbox(size, from_=0, to=100000, increment=50, width=7, textvariable=self.max_video_mb, font=theme.BODY).pack(side="left", padx=8)
         ttk.Label(size, text="MB", style="Card.TLabel").pack(side="left")
-        self._wrapping_label(body, text="0은 제한 없음 · 이 크기를 넘는 영상은 건너뜁니다.", style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+        self._wrapping_label(body, text="0은 제한 없음 · 원본 MP4와 변환된 GIF 모두 적용합니다.", style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
 
         heading("확인 범위")
         for key, value in SCAN_MODES.items():
@@ -587,7 +628,11 @@ class App:
                 "include_videos": self.include_videos.get(), "include_gifs": self.include_gifs.get(),
                 "max_video_mb": size, "separate_accounts": self.separate_accounts.get(),
                 "detailed_progress": self.detailed_progress.get(),
+                "appearance": self.appearance.get(),
                 "record_locations": self.record_locations}
+        self._write_settings(data)
+
+    def _write_settings(self, data):
         path = settings_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         name = None
@@ -757,13 +802,13 @@ class App:
             "직전 실행이 중단됐거나 옵션을 바꾸면 다음 한 번은 자동으로 전체를 확인합니다.",
         ), "폴더 정리 방식, 동영상·GIF 포함 여부, 영상 최대 크기는 ‘옵션 변경’에서 바꿉니다."),
         ("저장되는 파일", (
-            "사진은 원본 크기로, 동영상과 움직이는 GIF는 가장 좋은 화질의 MP4로 저장합니다.",
+            "사진은 원본 크기로, 동영상은 최고 화질의 MP4로 저장합니다. 움직이는 GIF는 GIF로 변환해 저장합니다.",
             "영상이 최대 크기(기본 200MB)보다 크면 건너뜁니다. 크기를 늘리면 다음에 받습니다.",
             "새로 받은 파일 안에는 트윗 주소와 작성자 아이디가 기록됩니다.",
         ), None),
         ("기록 · 통계", (
             "지금까지 저장한 모든 파일과 실행 기록을 봅니다.",
-            "파일을 고르고 ‘파일 열기’나 ‘트윗 열기’를 누르세요.",
+            "파일을 고르면 썸네일이 보입니다. ‘파일 열기’나 ‘트윗 열기’로 원본을 확인하세요.",
             "예전 파일에 출처·작성자를 넣으려면 ‘출처·작성자 기록’을 누르세요.",
         ), "이 작업은 파일을 다시 쓰므로 Google Drive·OneDrive 폴더라면 파일이 다시 올라갈 수 있습니다."),
         ("매일 자동 저장", (
@@ -789,7 +834,7 @@ class App:
         height = min(800, max(480, self.root.winfo_screenheight() - 120))
         popup.geometry(f"{width}x{height}")
         popup.minsize(min(640, width), min(480, height))
-        popup.configure(bg=BG)
+        popup.configure(bg=theme.BG)
         popup.transient(self.root)
         heading = ttk.Frame(popup, padding=(24, 20, 24, 0))
         heading.pack(fill="x")
@@ -804,7 +849,7 @@ class App:
         ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).grid(row=1, column=0, sticky="w")
         ttk.Button(links, text="닫기", width=9, command=popup.destroy).grid(row=1, column=1, sticky="e")
         body = theme.card(popup, fill="both", expand=True, padx=24, pady=(16, 0))
-        content = tk.Text(body, wrap="word", background=CARD, foreground=theme.INK, relief="flat", borderwidth=0,
+        content = tk.Text(body, wrap="word", background=theme.CARD, foreground=theme.INK, relief="flat", borderwidth=0,
                           highlightthickness=0, padx=4, pady=2, font=theme.BODY, spacing1=2, spacing3=4, cursor="arrow")
         scrollbar = ttk.Scrollbar(body, command=content.yview)
         content.configure(yscrollcommand=scrollbar.set)
@@ -980,22 +1025,25 @@ class App:
                     return
             elif kind == "progress":
                 self._update_progress(event)
+            elif kind == "converting":
+                self._update_conversion(event)
             elif kind in ("saved", "skipped", "size-skipped"):
                 if kind == "saved":
                     self.saved += 1
-                    self._log("저장 · " + str(event.get("path", "")))
+                    self._log("저장 · " + str(event.get("path", "")), event)
                 elif kind == "skipped":
                     self.skipped += 1
+                    self._log("이미 저장 · " + str(event.get("filename") or event.get("path") or "파일"), event)
                 else:
                     self.size_skipped += 1
-                    self._log("용량 초과로 건너뜀 · " + str(event.get("filename") or event.get("tweet_id") or "파일"))
+                    self._log("용량 초과로 건너뜀 · " + str(event.get("filename") or event.get("tweet_id") or "파일"), event)
                 self._update_counts()
                 self._schedule_history_refresh()
                 if not self.stopping:
                     self.status.set("파일을 저장하고 있습니다…")
                     self.status_detail.set("이미 저장한 파일은 건너뛰고 새 파일만 받습니다.")
             elif kind == "log":
-                self._log(str(event.get("message", "")))
+                self._log(str(event.get("message", "")), event)
             elif kind == "finished":
                 self.received_final = True
                 self.final_status = event.get("status")
@@ -1034,7 +1082,12 @@ class App:
                     return
         self.root.after(120, self._poll)
 
-    def _log(self, text):
+    def _log(self, text, event=None):
+        if event and any(event.get(key) for key in ("tweet_id", "author", "posted_at")):
+            from .history_gui import format_date
+            author = str(event.get("author") or "").lstrip("@")
+            author = "@" + author if re.fullmatch(r"[A-Za-z0-9_]{1,15}", author) else "작성자 미확인"
+            text = f"{author} · 게시 {format_date(event.get('posted_at'))} · {text}"
         self.log.configure(state="normal")
         self.log.insert("end", time.strftime("%H:%M:%S") + "  " + text + "\n")
         if int(self.log.index("end-1c").split(".")[0]) > 1000:
@@ -1059,5 +1112,10 @@ class App:
 
 def launch():
     root = tk.Tk()
-    App(root)
-    root.mainloop()
+    app = App(root)
+    try:
+        root.mainloop()
+    finally:
+        app = None
+        root = None
+        gc.collect()

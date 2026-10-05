@@ -54,7 +54,18 @@ class VariantExtractor(test_core.FakeLikesExtractor):
 
 
 class MediaTests(unittest.TestCase):
-    setUp = test_core.CoreTests.setUp
+    def setUp(self):
+        test_core.CoreTests.setUp(self)
+        # Selection/HTTP tests use deliberately invalid short media payloads;
+        # real FFmpeg conversion is covered by test_gif_conversion separately.
+        def convert(source, **kwargs):
+            kwargs.get("check_stop", lambda: None)()
+            target = source.parent / ".offline-conversion.gif"
+            target.write_bytes(b"GIF89a\x02\x00\x02\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff;" )
+            return target
+        conversion_patch = patch("xlikesaver.core.convert_mp4_to_gif", side_effect=convert)
+        self.gif_convert = conversion_patch.start()
+        self.addCleanup(conversion_patch.stop)
     tearDown = test_core.CoreTests.tearDown
     write_cookies = test_core.CoreTests.write_cookies
     worker = test_core.CoreTests.worker
@@ -124,7 +135,7 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 3)
         folder = self.output / "myaccount" / "alice"
         self.assertEqual({path.name for path in folder.iterdir()},
-                         {"100_1.jpg", "100_video_2.mp4", "100_gif_3.mp4"})
+                         {"100_1.jpg", "100_video_2.mp4", "100_gif_3.gif"})
         self.assertEqual({event["media_type"] for event in events if event["type"] == "saved"},
                          {"photo", "video", "animated_gif"})
         self.assertEqual(len(self.history_rows()), 3)
@@ -241,7 +252,9 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
         self.assertEqual(events[-1]["size_skipped"], 0)
-        self.assertEqual((self.output / "myaccount" / "alice" / "100_gif_1.mp4").stat().st_size, MIB + len(MP4_HEADER))
+        gif = self.output / "myaccount" / "alice" / "100_gif_1.gif"
+        self.assertTrue(gif.read_bytes().startswith(b"GIF89a"))
+        self.assertFalse(list(self.output.rglob("*.part*")))
 
     def test_size_skip_never_attempts_fallback(self):
         def items(extractor):

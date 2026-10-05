@@ -1,0 +1,127 @@
+"""Local media conversion using the FFmpeg binary shipped with this app."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Callable
+
+
+CONVERSION_TIMEOUT = 600
+
+
+class ConversionError(RuntimeError):
+    """A local conversion failed; the downloaded source is still intact."""
+
+
+class ConversionSizeLimit(ConversionError):
+    """The resulting GIF would exceed the user's media size limit."""
+
+
+def ffmpeg_path() -> Path | None:
+    """Find our pinned package's binary, ignoring PATH and environment overrides."""
+    bundled = Path(__file__).resolve().parent.parent / "tools" / "ffmpeg" / "runtime" / "ffmpeg.exe"
+    if bundled.is_file():
+        return bundled
+    if getattr(sys, "frozen", False):
+        return None
+    try:
+        import imageio_ffmpeg
+    except ImportError:
+        return None
+    directory = Path(imageio_ffmpeg.__file__).resolve().parent / "binaries"
+    for executable in sorted(directory.glob("ffmpeg-*")):
+        if executable.is_file() and (os.name != "nt" or executable.suffix == ".exe"):
+            return executable
+    return None
+
+
+def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: float,
+         output: Path | None = None, max_bytes: int = 0) -> None:
+    # A temporary stderr file cannot block on a full pipe. Raw diagnostics may
+    # contain local filenames, so callers get only our fixed safe error text.
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=errors,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        try:
+            while True:
+                check_stop()
+                if time.monotonic() >= deadline:
+                    raise ConversionError("GIF 변환 시간이 너무 오래 걸려 중단했습니다. MP4 임시 파일은 보존했습니다.")
+                if output is not None and max_bytes and output.stat().st_size > max_bytes:
+                    raise ConversionSizeLimit("변환된 GIF가 용량 제한을 초과했습니다. MP4 임시 파일은 보존했습니다.")
+                if process.poll() is not None:
+                    if process.returncode:
+                        raise ConversionError("GIF로 변환하지 못했습니다. MP4 임시 파일은 보존했습니다. 다시 저장을 시작하면 재시도합니다.")
+                    return
+                time.sleep(0.1)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2)
+
+
+def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | None = None,
+                       max_bytes: int = 0) -> Path:
+    """Create a complete temporary GIF beside source; never modify source.
+
+    The caller atomically finalizes the returned path and then removes source.
+    Both palette passes stream frames; they do not retain the whole animation.
+    Original dimensions and frame timestamps are kept, rounded to GIF's 10 ms
+    time unit. GIF is necessarily limited to 256 colors and has no audio.
+    """
+    source = Path(source)
+    check_stop = check_stop or (lambda: None)
+    check_stop()
+    executable = ffmpeg_path()
+    if executable is None:
+        raise ConversionError("GIF 변환 도구를 찾지 못했습니다. MP4 임시 파일은 보존했습니다. 실행 파일을 다시 받아 주세요.")
+    palette = output = None
+    try:
+        if not source.is_file():
+            raise ConversionError("GIF로 변환할 MP4 임시 파일을 찾지 못했습니다.")
+        fd, name = tempfile.mkstemp(prefix=".xlikesaver-gif-palette-", suffix=".bmp", dir=source.parent)
+        os.close(fd)
+        palette = Path(name)
+        fd, name = tempfile.mkstemp(prefix=".xlikesaver-gif-", suffix=".gif", dir=source.parent)
+        os.close(fd)
+        output = Path(name)
+        common = [str(executable), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                  "-protocol_whitelist", "file,pipe", "-threads", "1", "-filter_threads", "1",
+                  "-filter_complex_threads", "1"]
+        deadline = time.monotonic() + CONVERSION_TIMEOUT
+        _run([*common, "-i", str(source), "-map", "0:v:0", "-vf",
+              "palettegen=max_colors=256:reserve_transparent=0", "-frames:v", "1", str(palette)],
+             check_stop=check_stop, deadline=deadline)
+        _run([*common, "-i", str(source), "-i", str(palette), "-lavfi",
+              "[0:v:0][1:v:0]paletteuse=dither=sierra2_4a", "-an", "-fps_mode", "passthrough",
+              "-loop", "0", "-f", "gif", str(output)],
+             check_stop=check_stop, deadline=deadline, output=output, max_bytes=max_bytes)
+        check_stop()
+        if max_bytes and output.stat().st_size > max_bytes:
+            raise ConversionSizeLimit("변환된 GIF가 용량 제한을 초과했습니다. MP4 임시 파일은 보존했습니다.")
+        with output.open("rb") as stream:
+            header = stream.read(10)
+            stream.seek(-1, os.SEEK_END)
+            trailer = stream.read(1)
+        if (header[:6] not in {b"GIF87a", b"GIF89a"} or trailer != b";" or
+                not int.from_bytes(header[6:8], "little") or not int.from_bytes(header[8:10], "little")):
+            raise ConversionError("GIF 변환 결과를 확인하지 못했습니다. MP4 임시 파일은 보존했습니다.")
+        completed = output
+        output = None
+        return completed
+    except (OSError, subprocess.SubprocessError):
+        raise ConversionError("GIF로 변환하지 못했습니다. MP4 임시 파일은 보존했습니다. 저장 폴더와 디스크 여유 공간을 확인해 주세요.") from None
+    finally:
+        for temporary in (palette, output):
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)

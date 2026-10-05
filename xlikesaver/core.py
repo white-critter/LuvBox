@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import json
 import logging
 import os
 import re
@@ -25,6 +26,7 @@ from urllib.parse import urlsplit
 from .protection import API_INTERVAL, MEDIA_INTERVAL, AccountGuard, ProtectionError
 from .history import HistoryError, HistoryStore, _author_fields
 from .storage import OutputGuard, resolve_storage
+from .media import ConversionError, ConversionSizeLimit, convert_mp4_to_gif
 
 
 EventSink = Callable[[dict], None]
@@ -76,6 +78,29 @@ def _move_without_overwrite(source: Path, destination: Path) -> None:
             raise
 
 
+def _gif_source_complete(source: Path) -> bool:
+    """Only retry conversion locally for a source our downloader completed."""
+    try:
+        with Path(str(source) + ".xlikesaver-complete").open(encoding="utf-8") as stream:
+            marker = json.loads(stream.read(256))
+        stat = source.stat()
+        return marker == {"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def _mark_gif_source_complete(source: Path) -> None:
+    stat = source.stat()
+    fd, name = tempfile.mkstemp(prefix=".xlikesaver-gif-complete-", dir=source.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump({"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}, stream)
+        os.replace(temporary, str(source) + ".xlikesaver-complete")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _media_details(metadata: dict) -> dict:
     posted = metadata.get("date")
     if isinstance(posted, _Datetime) and posted:
@@ -124,6 +149,9 @@ _GALLERY_HOOKS = (
     ("gallery_dl.output", "NullOutput", "skip", ("self", "path")),
     ("gallery_dl.path", "PathFormat", "part_enable", ("self", "part_directory")),
     ("gallery_dl.path", "PathFormat", "part_size", ("self",)),
+    ("gallery_dl.path", "PathFormat", "set_extension", ("self", "extension")),
+    ("gallery_dl.path", "PathFormat", "finalize", ("self",)),
+    ("gallery_dl.path", "PathFormat", "set_mtime", ("self",)),
 )
 _GALLERY_NAMES = (
     ("gallery_dl.extractor.common", ("CACHE_COOKIES", "CACHE_MEMORY")),
@@ -367,7 +395,10 @@ class _GalleryLogHandler(logging.Handler):
             self._error_priority = priority
         if message != self._last_message:
             self._last_message = message
-            self._emit({"type": "log", "level": level, "message": message})
+            media = getattr(getattr(record, "job", None), "current_media", None)
+            details = (_media_details(media) if record.name in {"download", "http"} and
+                       isinstance(media, dict) and media.get("tweet_id") else {})
+            self._emit({"type": "log", "level": level, "message": message, **details})
 
 
 def _configure_gallery(options: JobOptions, archive_path: Path, account_folder: str) -> None:
@@ -540,7 +571,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             metadata_failed += 1
             if not metadata_warned:
                 metadata_warned = True
-                emit({"type": "log", "level": "warning", "message": _METADATA_ERROR})
+                emit({"type": "log", "level": "warning", "message": _METADATA_ERROR,
+                      **_media_details(kwdict)})
 
     class SizeLimit(exception.ControlException):
         default = "media size exceeded"
@@ -562,6 +594,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.progress_started = self.progress_last = None
             self.progress_offset = 0
             self.size_exceeded = False
+            self.gif_source = self.gif_temporary = None
+            self.gif_finalize = None
             self.photo_positions = {}
             self.photo_counts = {}
             extract_media = getattr(self.extractor, "_extract_media", None)
@@ -699,6 +733,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.progress_bytes = self.progress_total = 0
             self.progress_offset = 0
             self.size_exceeded = False
+            self.gif_source = self.gif_temporary = None
+            self.gif_finalize = None
             if normalized.folder_mode == "date":
                 kwdict = dict(kwdict, _xlikesaver_date=_save_day().isoformat())
             self.current_media = kwdict
@@ -707,11 +743,24 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             super().handle_directory(kwdict)
             self.pathfmt.set_filename(kwdict)
             self.pathfmt.build_path()
+            # Keep existing MP4 GIFs untouched. New GIF downloads still use a
+            # resumable MP4 .part file, but a completed .gif is also a file hit
+            # when a ledger was missing or has just moved to another folder.
+            if media_type == "animated_gif" and Path(self.pathfmt.path).with_suffix(".gif").is_file():
+                self.pathfmt.set_filename(dict(kwdict, extension="gif"))
+                kwdict = self.pathfmt.kwdict
+                self.current_media = kwdict
+                self.pathfmt.build_path()
             if (not history.is_download_path(self.pathfmt.path) or
                     not history.is_download_path(self.pathfmt.path + ".part")):
                 raise exception.AbortExtraction("permissionerror unsafe media output")
             try:
                 super().handle_url(url, kwdict)
+            except ConversionSizeLimit:
+                size_skipped += 1
+                self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
+                emit({"type": "size-skipped", "path": "", "max_video_mb": normalized.max_video_mb,
+                      "stage": "conversion", **_media_details(kwdict)})
             except SizeLimit:
                 size_skipped += 1
                 if self.pathfmt.temppath:
@@ -723,6 +772,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if self.last_output:
                     media_status, media_path = self.last_output
                     if media_status == "saved":
+                        if self.gif_source is not None:
+                            # The GIF is finalized and archived now. Until this
+                            # point the source remains recoverable on any error.
+                            self.gif_source.unlink(missing_ok=True)
+                            Path(str(self.gif_source) + ".xlikesaver-complete").unlink(missing_ok=True)
+                            self.gif_source = None
                         saved += 1
                         if normalized.folder_mode == "date":
                             completed_day = _save_day().isoformat()
@@ -738,7 +793,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                         raise OSError("date folder changed outside the account")
                                     _move_without_overwrite(original_path, completed_path)
                                 except OSError:
-                                    emit({"type": "log", "level": "warning", "message": _DATE_MOVE_ERROR})
+                                    emit({"type": "log", "level": "warning", "message": _DATE_MOVE_ERROR,
+                                          **_media_details(kwdict)})
                                 else:
                                     media_path = str(completed_path)
                                     kwdict["_xlikesaver_date"] = completed_day
@@ -757,6 +813,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             candidate = Path(known_path)
                             if history.is_media_path(candidate) and candidate.is_file():
                                 media_path = str(candidate)
+                                if media_type == "animated_gif":
+                                    kwdict["extension"] = candidate.suffix.lstrip(".")
                     self.last_output = (media_status, media_path)
                     kwdict["_xlikesaver_path"] = media_path
                     original_size = Path(media_path).stat().st_size if Path(media_path).is_file() else 0
@@ -770,7 +828,15 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         except HistoryError:
                             raise exception.AbortExtraction("history store unavailable") from None
                     if media_status == "saved":
-                        self.progress(original_size, self.progress_total, force=True, final=True)
+                        payload_size = self.progress_bytes if media_type == "animated_gif" else original_size
+                        self.progress(payload_size, self.progress_total, force=True, final=True)
+            finally:
+                if self.gif_finalize is not None:
+                    self.pathfmt.finalize = self.gif_finalize
+                    self.gif_finalize = None
+                if self.gif_temporary is not None:
+                    self.gif_temporary.unlink(missing_ok=True)
+                    self.gif_temporary = None
             history_update(saved=saved, skipped=skipped, size_skipped=size_skipped)
             # Archive insertion happens after out.success; stop only once the
             # completed file has been recorded, so reruns remain consistent.
@@ -812,7 +878,21 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             # gallery-dl's media downloader catches exceptions from request()
             # and returns False. Re-raise a protection failure before its parent
             # attempts other image sizes or the next photo.
-            result = super().download(url)
+            is_gif = self.current_media.get("type") == "animated_gif"
+            if is_gif:
+                # A conversion failure must never leave a completed-looking
+                # MP4 that gallery-dl would archive as a success on the next run.
+                self.pathfmt.part_enable()
+            local_source = Path(self.pathfmt.temppath) if is_gif else None
+            locally_complete = is_gif and _gif_source_complete(local_source)
+            if locally_complete:
+                cap = normalized.max_video_mb * 1024 * 1024
+                if cap and local_source.stat().st_size > cap:
+                    raise ConversionSizeLimit()
+                self.progress(local_source.stat().st_size, local_source.stat().st_size, force=True)
+                result = True
+            else:
+                result = super().download(url)
             if guard.failure:
                 raise exception.AbortExtraction(guard.failure)
             if self.size_exceeded:
@@ -823,6 +903,53 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 # fallback image size and removes the resumable .part file. A
                 # completed download is left to finalize and be archived.
                 check_stop()
+            if result and is_gif and self.pathfmt.temppath:
+                source = Path(self.pathfmt.temppath)
+                self.gif_source = source
+                if not locally_complete:
+                    _mark_gif_source_complete(source)
+                # Completion describes the MP4 transfer. Conversion can make
+                # the GIF much larger; it must not inflate downloaded bytes.
+                source_bytes = source.stat().st_size
+                self.progress(source_bytes, self.progress_total or source_bytes, force=True)
+                emit({"type": "converting", "stage": "started", "message": "GIF로 변환하고 있습니다.",
+                      **_media_details(self.current_media)})
+                emit({"type": "log", "level": "info", "message": "GIF로 변환하고 있습니다.",
+                      **_media_details(self.current_media)})
+                try:
+                    converted = convert_mp4_to_gif(source, check_stop=check_stop,
+                                                  max_bytes=normalized.max_video_mb * 1024 * 1024)
+                except ConversionSizeLimit:
+                    raise
+                except ConversionError as exc:
+                    guard.failure = str(exc)
+                    emit({"type": "log", "level": "error", "message": guard.failure,
+                          **_media_details(self.current_media)})
+                    raise exception.AbortExtraction(guard.failure) from None
+                self.gif_temporary = converted
+                self.pathfmt.set_extension("gif")
+                self.pathfmt.build_path()
+                self.pathfmt.temppath = str(converted)
+                self.gif_finalize = self.pathfmt.finalize
+
+                def finalize_gif():
+                    check_stop()
+                    destination = Path(self.pathfmt.realpath)
+                    if not history.is_download_path(self.pathfmt.path):
+                        raise exception.AbortExtraction("permissionerror unsafe GIF output")
+                    try:
+                        _move_without_overwrite(converted, destination)
+                    except OSError:
+                        guard.failure = "GIF 파일을 저장하지 못했습니다. 같은 이름의 파일이나 저장 폴더를 확인해 주세요. MP4 임시 파일은 보존했습니다."
+                        raise exception.AbortExtraction(guard.failure) from None
+                    self.pathfmt.part = False
+                    self.pathfmt.temppath = self.pathfmt.realpath
+                    self.pathfmt.set_mtime()
+                    return True
+
+                self.pathfmt.finalize = finalize_gif
+                emit({"type": "converting", "stage": "finished", "message": "GIF 변환을 마쳤습니다.",
+                      **_media_details(self.current_media)})
             return result
 
         def get_downloader(self, scheme):
@@ -1000,7 +1127,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         _configure_gallery(normalized, archive_path, storage.legacy_dir.name)
         common.CACHE_COOKIES.clear()
         common.CACHE_MEMORY.clear()
-        emit({"type": "log", "level": "info", "message": "본인 계정의 마음에 들어요 목록에서 사진은 원본 크기를 우선하고, 선택한 동영상·GIF는 가장 높은 비트레이트의 MP4를 찾습니다."})
+        emit({"type": "log", "level": "info", "message": "사진은 원본 크기, 동영상은 가장 높은 화질로 저장합니다. 새 GIF는 MP4를 받은 뒤 이 PC에서 GIF로 변환합니다."})
         emit({"type": "log", "level": "info", "message": f"X 목록 요청은 최소 {API_INTERVAL:g}초, 미디어 요청은 최소 {MEDIA_INTERVAL:g}초 간격으로 보냅니다. 남은 요청 한도가 5회 이하이거나 요청 한도·계정 인증 제한을 만나면 중단합니다."})
         if scan_note:
             emit({"type": "log", "level": "info", "message": scan_note})

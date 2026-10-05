@@ -14,3 +14,4 @@ cookies*.txt
 /settings.json
 tools/exiftool/*
 !tools/exiftool/download.py
+tools/ffmpeg/*.tar.xz

@@ -4,6 +4,8 @@ $taskPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $taskPython)) { throw '먼저 .\setup.ps1을 실행하세요.' }
 & $taskPython 'tools\exiftool\download.py'
 if ($LASTEXITCODE -ne 0) { throw 'ExifTool 준비에 실패했습니다.' }
+& $taskPython 'tools\ffmpeg\build.py' '--check'
+if ($LASTEXITCODE -ne 0) { throw '번들 GIF 변환 도구 확인에 실패했습니다. tools\ffmpeg\README.md를 확인하세요.' }
 
 $version = (& $taskPython -c "from xlikesaver import __version__; print(__version__)" | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw '버전을 읽지 못했습니다. xlikesaver\__init__.py를 확인하세요.' }
@@ -20,9 +22,11 @@ if (Test-Path -LiteralPath $target) {
 # collect the workspace, saved settings, account records, or authentication.
 & $taskPython -m PyInstaller --noconfirm --clean --windowed --onefile --name $name `
     --distpath release --workpath build\onefile `
-    --collect-all gallery_dl --copy-metadata requests --copy-metadata urllib3 `
+    --collect-all gallery_dl --collect-binaries PIL --collect-data PIL --exclude-module imageio_ffmpeg `
+    --copy-metadata pillow --copy-metadata requests --copy-metadata urllib3 `
     --copy-metadata certifi --copy-metadata charset-normalizer --copy-metadata idna `
     --add-data 'tools\exiftool\runtime;tools/exiftool/runtime' `
+    --add-data 'tools\ffmpeg\runtime;tools/ffmpeg/runtime' `
     --add-data 'assets\fonts\Pretendard;assets/fonts/Pretendard' `
     --add-data 'README.md;.' --add-data 'LICENSE;.' --add-data 'THIRD_PARTY_NOTICES.md;.' entry.py
 if ($LASTEXITCODE -ne 0) { throw '실행 파일 빌드에 실패했습니다.' }

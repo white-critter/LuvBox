@@ -5,6 +5,7 @@ import importlib.metadata
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import zipfile
 
@@ -18,17 +19,21 @@ SOURCE_FILES = (
     "requirements-dev.txt", "requirements-lock.txt", "README.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "XlikeSaver.code-workspace",
     "tools/exiftool/download.py", "tools/package_release.py",
+    "tools/ffmpeg/build.py", "tools/ffmpeg/README.md", "tools/ffmpeg/manifest.json",
+    "tools/ffmpeg/configure-flags.json", "tools/ffmpeg/build-info.txt", "tools/ffmpeg/LICENSE.LGPLv2.1.txt",
+    "tools/ffmpeg/COPYING.MinGW-w64-runtime.txt", "tools/ffmpeg/COPYING.GCC-runtime-exception.txt",
     "assets/fonts/Pretendard/Pretendard-Regular.ttf", "assets/fonts/Pretendard/Pretendard-Bold.ttf",
     "assets/fonts/Pretendard/OFL.txt", "assets/fonts/Pretendard/manifest.json",
 )
 DEPENDENCIES = (
-    "gallery_dl", "requests", "urllib3", "certifi", "charset-normalizer", "idna",
+    "gallery_dl", "pillow", "requests", "urllib3", "certifi", "charset-normalizer", "idna",
     "pyinstaller", "pyinstaller-hooks-contrib", "altgraph", "packaging", "pefile",
     "pywin32-ctypes", "setuptools",
 )
 
 
 def package() -> None:
+    subprocess.run([sys.executable, str(ROOT / "tools/ffmpeg/build.py"), "--check"], check=True)
     output = ROOT / "release"
     if output.is_symlink() or getattr(output, "is_junction", lambda: False)():
         raise ValueError("Release directory must be inside the project")
@@ -48,6 +53,13 @@ def package() -> None:
             archive.write(ROOT / "LICENSE", "LICENSE")
             archive.write(ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")
             archive.write(ROOT / "assets/fonts/Pretendard/OFL.txt", "licenses/Pretendard-OFL.txt")
+            archive.write(ROOT / "tools/ffmpeg/LICENSE.LGPLv2.1.txt", "licenses/FFmpeg-LGPLv2.1.txt")
+            for name in ("COPYING.MinGW-w64-runtime.txt", "COPYING.GCC-runtime-exception.txt"):
+                archive.write(ROOT / "tools/ffmpeg" / name, "licenses/" + name)
+            archive.write(ROOT / "tools/ffmpeg/ffmpeg-7.1.tar.xz", "source/tools/ffmpeg/ffmpeg-7.1.tar.xz")
+            for path in sorted((ROOT / "tools/ffmpeg/runtime").rglob("*")):
+                if path.is_file():
+                    archive.write(path, "source/tools/ffmpeg/runtime/" + path.relative_to(ROOT / "tools/ffmpeg/runtime").as_posix())
             for name in SOURCE_FILES:
                 archive.write(ROOT / name, "source/" + name)
             for folder, pattern in (("xlikesaver", "*.py"), ("tests", "*.py"),

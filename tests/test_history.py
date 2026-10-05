@@ -36,6 +36,13 @@ class HistoryTests(unittest.TestCase):
         path.write_bytes(content)
         return path
 
+    def test_gif_without_a_kind_marker_imports_as_an_animation(self):
+        self.file("100_1.gif", b"GIF89a" + b"offline-local-animation")
+        self.store.import_legacy(refresh=True)
+        rows = self.store.records()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["media_type"], "animated_gif")
+
     def metadata(self, number=1, kind="photo", *, ident="100", author="alice", posted=None):
         return {"tweet_id": ident, "num": number, "type": kind, "author": {"name": author},
                 "date": posted, "url": "https://invalid.example/?token=" + SECRET,
@@ -324,7 +331,7 @@ class HistoryTests(unittest.TestCase):
         self.file("alice/100_gif_1.mp4", b"ccc")
         self.file("100_1.png", b"dddd")
         self.file("2026-10-04/100_1.webp", b"eeeee")
-        self.file("alice/101_1.gif", b"gif-format-is-not-x-type")
+        self.file("alice/101_1.gif", b"gif-animation-format")
         self.file("alice/100_2.jpg.part", b"partial")
         self.file("alice/random.jpg", b"unrecognized")
         self.file("alice/100_0.jpg", b"invalid-number")
@@ -332,9 +339,9 @@ class HistoryTests(unittest.TestCase):
         summary = self.store.summary()
         self.assertEqual(summary["files"], 6)
         self.assertEqual(summary["posts"], 2)
-        self.assertEqual(summary["photo"], 4)
+        self.assertEqual(summary["photo"], 3)
         self.assertEqual(summary["video"], 1)
-        self.assertEqual(summary["animated_gif"], 1)
+        self.assertEqual(summary["animated_gif"], 2)
         self.assertTrue(all(row["saved_at"] is None for row in self.store.records()))
         self.assertEqual(archive.read_bytes(), before)
         alice_rows = [row for row in self.store.records() if row["folder_mode"] == "author"]

@@ -1,0 +1,12 @@
+ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers
+built with gcc 16.2.0 (GCC)
+configuration: --target-os=mingw32 --arch=x86_64 --cc=gcc --disable-autodetect --disable-network --disable-x86asm --disable-asm --disable-debug --disable-doc --disable-ffplay --disable-ffprobe --disable-shared --enable-static --disable-pthreads --enable-w32threads --disable-everything --disable-iconv --extra-ldflags=-static --enable-decoder='h264,hevc,vp9,mpeg4,bmp,gif,wrapped_avframe' --enable-encoder='gif,bmp,mpeg4' --enable-demuxer='mov,image2,image2pipe' --enable-muxer='gif,image2,image2pipe,mov,mp4' --enable-protocol='file,pipe' --enable-filter='buffer,buffersink,palettegen,paletteuse,scale,format,testsrc2,null,split' --enable-indev=lavfi --enable-parser='h264,hevc,vp9,mpeg4video'
+libavutil      59. 39.100 / 59. 39.100
+libavcodec     61. 19.100 / 61. 19.100
+libavformat    61.  7.100 / 61.  7.100
+libavdevice    61.  3.100 / 61.  3.100
+libavfilter    10.  4.100 / 10.  4.100
+libswscale      8.  3.100 /  8.  3.100
+libswresample   5.  3.100 /  5.  3.100
+
+Runtime DLLs: bcrypt.dll, KERNEL32.dll, msvcrt.dll, SHELL32.dll
