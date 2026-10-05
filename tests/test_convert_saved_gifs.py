@@ -12,7 +12,7 @@ from unittest.mock import patch
 from PIL import Image
 
 from xlikesaver import media, metadata
-from xlikesaver.history import HistoryStore
+from xlikesaver.history import HistoryError, HistoryStore
 from xlikesaver.history_gui import HistoryWindow
 
 
@@ -104,6 +104,26 @@ class ConvertSavedGifTests(unittest.TestCase):
         self.assertFalse((self.account / "100_gif_1.gif").exists())
         self.assertEqual(self.row("100")["path"], str(source.resolve()))
         self.assert_no_temporary_files()
+
+    def test_record_update_failure_keeps_the_mp4_and_continues(self):
+        first, second = self.movie("100_gif_1.mp4"), self.movie("101_gif_1.mp4")
+        self.record("100", first)
+        self.record("101", second)
+        original = HistoryStore.replace_media_file
+
+        def refuse_first(store, row, *args, **kwargs):
+            if row["tweet_id"] == "100":
+                raise HistoryError("catalog busy")
+            return original(store, row, *args, **kwargs)
+
+        with patch.object(HistoryStore, "replace_media_file", refuse_first):
+            messages, _ = self.convert()
+        self.assertIn("바꿈 1개 / MP4로 둠 0개 / 실패 1개", messages[-1][2])
+        self.assertEqual(self.recycled, [second])
+        self.assertTrue(first.is_file())
+        self.assertFalse((self.account / "100_gif_1.gif").exists())
+        self.assertEqual(self.row("100")["path"], str(first.resolve()))
+        self.assertTrue((self.account / "101_gif_1.gif").is_file())
 
     def test_no_recycle_bin_existing_gif_or_size_limit_keep_the_mp4_untouched(self):
         source = self.movie("100_gif_1.mp4")

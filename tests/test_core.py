@@ -1,7 +1,6 @@
 """Offline checks using the real gallery-dl job/path/archive pipeline."""
 
 import json
-import logging
 import re
 import sqlite3
 import tempfile

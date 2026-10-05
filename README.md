@@ -1,12 +1,12 @@
-# XlikeSaver 1.7.0
+# XlikeSaver 1.7.1
 
 내 X(트위터) 계정에서 Like한 게시물의 사진·동영상·움직이는 GIF를 저장하는 Windows 프로그램입니다.
 
 ## 실행하기
 
-`release/XlikeSaver-1.7.0.exe`를 더블클릭하세요. 실행 파일 이름에 버전이 붙어 있어 이전 버전을 실행 중이어도 새 버전을 만들거나 받을 수 있습니다. Python이나 IDE 설치 없이 실행 파일 하나로 사용할 수 있습니다. 처음 실행할 때 내부 도구를 임시 폴더에 풀어 잠시 시간이 걸릴 수 있습니다.
+`release/XlikeSaver-1.7.1.exe`를 더블클릭하세요. 실행 파일 이름에 버전이 붙어 있어 이전 버전을 실행 중이어도 새 버전을 만들거나 받을 수 있습니다. Python이나 IDE 설치 없이 실행 파일 하나로 사용할 수 있습니다. 처음 실행할 때 내부 도구를 임시 폴더에 풀어 잠시 시간이 걸릴 수 있습니다.
 
-배포용 `release/XlikeSaver-1.7.0.zip`에는 exe, 짧은 사용 안내, 소스와 라이선스가 들어 있습니다. 압축을 풀고 exe를 실행하세요.
+배포용 `release/XlikeSaver-1.7.1.zip`에는 exe, 짧은 사용 안내, 소스와 라이선스가 들어 있습니다. 압축을 풀고 exe를 실행하세요.
 
 ## 사용하기
 
@@ -57,7 +57,7 @@ X의 Like 목록은 최근에 누른 Like부터 나옵니다. **새 Like만 빠�
 인증 토큰 연결로 한 번 저장을 마친 뒤, **사용 방법 → 예약 명령 복사**를 누르고 명령 프롬프트(cmd)에 붙여 넣어 실행하면 Windows 작업 스케줄러가 매일 오전 9시에 새 Like만 저장합니다. 등록되는 명령은 다음과 같은 형태입니다.
 
 ```bat
-schtasks /Create /TN "XlikeSaver 자동 저장" /SC DAILY /ST 09:00 /TR "\"C:\경로\XlikeSaver-1.7.0.exe\" --run-saved" /F
+schtasks /Create /TN "XlikeSaver 자동 저장" /SC DAILY /ST 09:00 /TR "\"C:\경로\XlikeSaver-1.7.1.exe\" --run-saved" /F
 ```
 
 - 예약 실행은 마지막으로 저장을 시작할 때의 설정(아이디·저장 경로·정리 방식·미디어 옵션)을 사용하며 창 없이 실행됩니다.

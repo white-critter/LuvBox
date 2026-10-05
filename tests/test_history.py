@@ -250,6 +250,20 @@ class HistoryTests(unittest.TestCase):
         with patch.object(Path, "is_symlink", lambda candidate: candidate == self.account or is_symlink(candidate)):
             self.assertFalse(relocated.is_media_path(known))
 
+    def test_converted_gif_beside_a_former_root_original_can_replace_its_record(self):
+        original = self.file("100_gif_1.mp4")
+        self.store.record_media("flat", self.metadata(kind="animated_gif"), original)
+        relocated = self.relocated_store()
+        [row] = relocated.mp4_gif_records()
+        elsewhere = self.file("other/100_gif_1.gif", b"GIF89a not beside the original")
+        with self.assertRaises(HistoryError):
+            relocated.replace_media_file(row, elsewhere, "embedded", author_status="embedded")
+        converted = self.file("100_gif_1.gif", b"GIF89a converted")
+        self.assertTrue(relocated.replace_media_file(row, converted, "embedded", author_status="embedded"))
+        self.assertEqual(relocated.records()[0]["path"], str(converted.resolve()))
+        self.assertTrue(relocated.is_media_path(converted))
+        self.assertFalse(relocated.is_media_path(elsewhere))
+
     def test_missing_former_file_keeps_location_until_drive_or_file_returns(self):
         path = self.file("100_1.jpg")
         self.store.record_media("flat", self.metadata(), path)

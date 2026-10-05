@@ -17,7 +17,7 @@ import webbrowser
 from PIL import ImageTk
 
 from . import dialogs, theme
-from .history import HistoryStore
+from .history import HistoryError, HistoryStore
 from .preview import PreviewLoader
 from .storage import OutputGuard, StoragePaths
 
@@ -1032,12 +1032,20 @@ class HistoryWindow(tk.Toplevel):
                         continue
                     finally:
                         temporary.unlink(missing_ok=True)
-                    if not recycle(source):
-                        # The MP4 is still in place, so the new copy is removed.
+                    # Record first, then recycle: either step failing leaves the
+                    # MP4 and its record exactly as before, without the new GIF.
+                    try:
+                        recorded = store.replace_media_file(row, destination, status, author_status=author_status)
+                    except HistoryError:
+                        recorded = False
+                    if recorded and not recycle(source):
+                        store.replace_media_file(dict(row, path=str(destination.resolve())), source,
+                                                 row["metadata_status"], author_status=row["author_metadata_status"])
+                        recorded = False
+                    if not recorded:
                         destination.unlink(missing_ok=True)
                         failed += 1
                         continue
-                    store.replace_media_file(row, destination, status, author_status=author_status)
                     converted += 1
             state = "GIF 변환 중단" if stop.is_set() else "GIF 변환 끝"
             recycled = " 바꾼 파일의 원본 MP4는 휴지통에 있습니다." if converted else ""

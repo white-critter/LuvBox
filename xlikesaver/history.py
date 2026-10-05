@@ -510,9 +510,22 @@ class HistoryStore:
             raise HistoryError(_HISTORY_HELP)
         if author_status not in {"embedded", "unknown", "error", "pending"}:
             raise HistoryError(_HISTORY_HELP)
-        actual, size, filename = self._file(path)
-        if not actual:
+        candidate = Path(path)
+        # A former output root only authorizes paths already in the catalog,
+        # so also accept the converted file beside such a recorded original.
+        beside_original = (row.get("path") and self.is_media_path(row["path"]) and
+                           Path(os.path.abspath(candidate)).parent == Path(os.path.abspath(row["path"])).parent and
+                           any(self._path_in_root(candidate, root) is not None for root in self.media_roots))
+        if not (beside_original or self.is_media_path(candidate)):
             raise HistoryError(_HISTORY_HELP)
+        try:
+            candidate = candidate.resolve(strict=True)
+            size = candidate.stat().st_size
+        except OSError:
+            raise HistoryError(_HISTORY_HELP) from None
+        if not candidate.is_file():
+            raise HistoryError(_HISTORY_HELP)
+        actual, filename = str(candidate), candidate.name
         with self._db:
             changed = self._db.execute(
                 "UPDATE media SET path=?,filename=?,filesize=?,metadata_status=?,author_metadata_status=?,updated_at=? "
