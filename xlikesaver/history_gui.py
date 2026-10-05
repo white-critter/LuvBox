@@ -495,8 +495,12 @@ class HistoryWindow(tk.Toplevel):
 
     def _page_key(self, event):
         # Keep Home/End and Page Up/Down editing/scrolling behavior in fields
-        # and selected-file text. A table or page button can navigate pages.
-        if event.widget.winfo_class() in {"Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"}:
+        # and selected-file text. In a table these keys scroll its rows, so
+        # pages change there only with Ctrl; other widgets need no modifier.
+        widget_class = event.widget.winfo_class()
+        if widget_class in {"Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"}:
+            return
+        if widget_class == "Treeview" and not getattr(event, "state", 0) & 0x4:
             return
         runs = self.tabs.index("current") == 1
         if event.keysym == "Prior":

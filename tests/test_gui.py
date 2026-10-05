@@ -1,5 +1,6 @@
 """Native UI workflow checks without account or browser access."""
 
+import gc
 import json
 from pathlib import Path
 import tempfile
@@ -18,6 +19,17 @@ def destroy_tk(root):
     root.destroy()
 
 
+def release_tk(test, *names):
+    """Free a test's Tk objects on the main thread right after destroy.
+
+    Otherwise a later automatic collection may run on a worker thread of
+    another test, and freeing a Tcl interpreter there aborts the process.
+    """
+    for name in names:
+        test.__dict__.pop(name, None)
+    gc.collect()
+
+
 class GuiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -27,6 +39,7 @@ class GuiTests(unittest.TestCase):
         self.addCleanup(self.guards.stop)
         self.root = tk.Tk()
         self.root.withdraw()
+        self.addCleanup(release_tk, self, "app", "root")
         self.addCleanup(destroy_tk, self.root)
         self.session = patch("xlikesaver.gui.has_session", return_value=False)
         self.session_mock = self.session.start()
@@ -680,21 +693,57 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(entry.main(), 2)
 
     def test_file_log_lines_include_their_own_author_and_posted_date(self):
+        folder = Path(self.temp.name) / "아주 긴 저장 폴더 이름"
         for kind, author, day in (("saved", "alice", "2020-01-02"),
-                                  ("skipped", "bob", "2021-03-04"),
                                   ("size-skipped", "carol", "2022-05-06")):
             self.app.events.put({"type": kind, "author": author, "posted_at": day + "T10:20:30+09:00",
-                                 "tweet_id": "123", "filename": "123_1.jpg", "path": "123_1.jpg"})
+                                 "tweet_id": "123", "filename": "123_1.jpg", "path": str(folder / "123_1.jpg")})
         self.app.events.put({"type": "log", "message": "전체 목록을 확인합니다."})
         self.app._poll()
         lines = self.app.log.get("1.0", "end").splitlines()
-        for line, author, day in zip(lines, ("alice", "bob", "carol"),
-                                     ("2020-01-02", "2021-03-04", "2022-05-06")):
-            self.assertIn("@" + author, line)
-            self.assertIn(day, line)
-            self.assertIn("10:20:30", line)
-        self.assertNotIn("@", lines[3])
-        self.assertEqual((self.app.saved, self.app.skipped, self.app.size_skipped), (1, 1, 1))
+        for line, author, day in zip(lines, ("alice", "carol"), ("2020-01-02", "2022-05-06")):
+            self.assertIn("123_1.jpg · @" + author, line)
+            self.assertIn("게시 " + day + " 10:20", line)
+            self.assertNotIn(str(folder), line)
+        self.assertNotIn("@", lines[2])
+        self.assertEqual((self.app.saved, self.app.size_skipped), (1, 1))
+
+    def test_skipped_files_are_summarized_instead_of_one_line_each(self):
+        from xlikesaver import gui
+        days = ("2021-03-04", "2020-01-02", "2021-03-04")
+        for index, day in enumerate(days):
+            self.app.events.put({"type": "skipped", "author": "bob", "posted_at": day + "T10:20:30+09:00",
+                                 "tweet_id": str(index), "filename": f"{index}_1.jpg", "path": f"{index}_1.jpg"})
+        self.app.events.put({"type": "saved", "author": "alice", "posted_at": "2022-05-06T10:20:30+09:00",
+                             "tweet_id": "9", "path": "9_1.jpg"})
+        self.app._poll()
+        lines = self.app.log.get("1.0", "end").strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertIn("이미 저장된 파일 3개 건너뜀 · 게시 2020-01-02 ~ 2021-03-04", lines[0])
+        self.assertNotIn("@bob", lines[0])
+        self.assertIn("저장 · 9_1.jpg · @alice", lines[1])
+        self.assertEqual(self.app.skipped, 3)
+        # A long run of known files still reports regularly, then at the end.
+        with patch.object(gui, "SKIP_LOG_BATCH", 2):
+            for index in range(3):
+                self.app.events.put({"type": "skipped", "tweet_id": str(index), "posted_at": "invalid"})
+            self.app.events.put({"type": "finished", "status": "finished", "message": "완료"})
+            self.app._poll()
+        lines = self.app.log.get("1.0", "end").strip().splitlines()
+        self.assertTrue(lines[2].endswith("이미 저장된 파일 2개 건너뜀"))
+        self.assertTrue(lines[3].endswith("이미 저장된 파일 1개 건너뜀"))
+        self.assertTrue(lines[4].endswith("완료"))
+
+    def test_conversion_fallback_tells_the_original_mp4_is_saved(self):
+        self.app.events.put({"type": "converting", "stage": "fallback", "author": "alice",
+                             "posted_at": "2020-01-02T10:20:30+09:00", "filename": "123_gif_1.mp4"})
+        self.app.events.put({"type": "log", "level": "warning", "message": "GIF로 바꾸지 못해 원본 MP4로 저장합니다.",
+                             "author": "alice", "posted_at": "2020-01-02T10:20:30+09:00",
+                             "tweet_id": "123", "filename": "123_gif_1.mp4"})
+        self.app._poll()
+        self.assertIn("원본 MP4", self.app.progress_summary.get())
+        self.assertIn("원본 MP4", self.app.status.get())
+        self.assertIn("원본 MP4로 저장합니다 · 123_gif_1.mp4 · @alice", self.app.log.get("1.0", "end"))
 
     def test_conversion_progress_does_not_claim_the_file_is_already_saved(self):
         self.app.events.put({"type": "converting", "stage": "started", "author": "alice",

@@ -130,14 +130,44 @@ class GifWorkerTests(unittest.TestCase):
             convert.assert_called_once()
         self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 1)
 
-    def test_failed_conversion_preserves_complete_mp4_and_retries_without_redownload(self):
-        rows = [("100", 1, "animated_gif", "alice")]
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=media.ConversionError("GIF 변환을 다시 시도해 주세요.")):
+    def assert_saved_as_original_mp4(self, events, message):
+        mp4 = self.output / "myaccount" / "alice" / "100_gif_1.mp4"
+        self.assertTrue(mp4.is_file())
+        self.assertFalse(list(self.output.rglob("*.part*")))
+        self.assertFalse(list(self.output.rglob("*.gif")))
+        self.assertEqual(self.keys(), {"twitter100_animated_gif_1", "twitter101_1"})
+        row = next(row for row in self.records() if row["tweet_id"] == "100")
+        self.assertEqual((row["path"], row["media_type"]), (str(mp4), "animated_gif"))
+        self.assertEqual([event["stage"] for event in events if event["type"] == "converting"], ["started", "fallback"])
+        warnings = [event for event in events if event["type"] == "log" and event.get("level") == "warning"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn(message, warnings[0]["message"])
+        self.assertEqual(warnings[0]["author"], "alice")
+
+    def test_failed_conversion_saves_original_mp4_and_later_files(self):
+        # One unconvertible GIF used to abort every run before later Likes.
+        rows = [("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")]
+        failure = media.ConversionError("GIF로 변환하지 못했습니다.")
+        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=failure) as convert:
             code, events = self.worker(rows, options=self.options_all())
-        self.assertNotEqual(code, 0)
-        self.assertEqual((events[-1]["saved"], self.keys(), self.records()), (0, set(), []))
+            self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "finished", 2))
+            self.assert_saved_as_original_mp4(events, "원본 MP4로 저장")
+            code, events = self.worker(rows, options=self.options_all())
+            self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 0, 2))
+            convert.assert_called_once()
+        self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 2)
+
+    def test_interrupted_conversion_retries_locally_without_redownload(self):
+        rows = [("100", 1, "animated_gif", "alice")]
+        flag = self.base / "stop"
+        def stop(source, **kwargs):
+            flag.touch()
+            kwargs["check_stop"]()
+        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=stop):
+            self.worker(rows, options=self.options_all(), stop_file=str(flag))
         source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
         self.assertTrue(core._gif_source_complete(source))
+        flag.unlink()
         with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert):
             code, events = self.worker(rows, options=self.options_all())
         self.assertEqual((code, events[-1]["saved"]), (0, 1))
@@ -158,13 +188,26 @@ class GifWorkerTests(unittest.TestCase):
         source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
         self.assertTrue(core._gif_source_complete(source))
 
-    def test_conversion_size_cap_is_not_archived_and_next_file_can_save(self):
+    def test_gif_over_size_cap_saves_original_mp4_and_next_file(self):
         with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=media.ConversionSizeLimit()):
             code, events = self.worker([("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")],
                                       options=self.options_all())
+        self.assertEqual((code, events[-1]["saved"], events[-1]["size_skipped"]), (0, 2, 0))
+        self.assert_saved_as_original_mp4(events, "200MB를 넘어 원본 MP4로 저장")
+
+    def test_completed_source_over_a_lowered_cap_is_size_skipped_and_removed(self):
+        source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"0" * (2 * 1024 * 1024))
+        core._mark_gif_source_complete(source)
+        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+            code, events = self.worker([("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")],
+                                      options=self.options_all(max_video_mb=1))
+        convert.assert_not_called()
         self.assertEqual((code, events[-1]["saved"], events[-1]["size_skipped"]), (0, 1, 1))
         self.assertEqual(self.keys(), {"twitter101_1"})
-        self.assertTrue(list(self.output.rglob("*.mp4.part")))
+        self.assertFalse(list(self.output.rglob("*.part*")))
+        self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 1)
 
     def test_destination_created_during_conversion_is_not_overwritten_or_archived(self):
         destination = self.output / "myaccount" / "alice" / "100_gif_1.gif"

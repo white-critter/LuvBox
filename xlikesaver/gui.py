@@ -27,6 +27,16 @@ from .settings import load_settings, settings_path
 from .storage import resolve_storage
 
 
+SKIP_LOG_BATCH = 200
+
+
+def _file_label(event) -> str:
+    """A short, single-line file name for the work log."""
+    name = Path(str(event.get("path") or "")).name or str(event.get("filename") or "")
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    return name or "파일 " + str(event.get("tweet_id") or "미확인")
+
+
 AUTH_MODES = {
     "인증 토큰 (권장)": "managed",
     "cookies.txt 파일": "file",
@@ -79,6 +89,7 @@ class App:
         self.saved = 0
         self.skipped = 0
         self.size_skipped = 0
+        self.skip_batch: list[str] = []
         self.history_window = None
         self.connect_window = None
         self.options_window = None
@@ -385,19 +396,23 @@ class App:
         if not self.stopping:
             self.status.set("파일을 저장하고 있습니다…")
 
+    CONVERSION_STAGES = {"started": ("GIF로 변환 중", "GIF로 변환하고 있습니다…"),
+                         "finished": ("GIF 변환 완료", "GIF 파일을 마무리하고 있습니다…"),
+                         "fallback": ("GIF 대신 원본 MP4로 저장", "원본 MP4로 저장하고 있습니다…")}
+
     def _update_conversion(self, event):
         from .history_gui import format_date
-        finished = event.get("stage") == "finished"
-        self.progress_summary.set(("GIF 변환 완료" if finished else "GIF로 변환 중") +
-                                  " · " + str(event.get("filename") or "현재 파일"))
+        stage = event.get("stage") if event.get("stage") in self.CONVERSION_STAGES else "started"
+        summary, status = self.CONVERSION_STAGES[stage]
+        self.progress_summary.set(summary + " · " + str(event.get("filename") or "현재 파일"))
         author = str(event.get("author") or "작성자 미확인")
         self.progress_details.set(f"작성자 @{author} · 트윗 게시일 {format_date(event.get('posted_at'))}")
-        if not finished:
+        if stage == "started":
             self.progress.stop()
             self.progress.configure(mode="indeterminate", value=0)
             self.progress.start()
         if not self.stopping:
-            self.status.set("GIF 파일을 마무리하고 있습니다…" if finished else "GIF로 변환하고 있습니다…")
+            self.status.set(status)
 
     # ------------------------------------------------------------------- login
     def _auth_changed(self):
@@ -914,6 +929,7 @@ class App:
         self.account.set(options.account)
         self.folder.set(options.output_dir)
         self.saved = self.skipped = self.size_skipped = 0
+        self.skip_batch = []
         self.received_final = False
         self.final_status = None
         self.running = True
@@ -1030,20 +1046,27 @@ class App:
             elif kind in ("saved", "skipped", "size-skipped"):
                 if kind == "saved":
                     self.saved += 1
-                    self._log("저장 · " + str(event.get("path", "")), event)
+                    self._log("저장 · " + _file_label(event), event)
                 elif kind == "skipped":
+                    # A quick scan alone ends with 100 known files. One line per
+                    # file would bury the new saves, so report them in batches.
                     self.skipped += 1
-                    self._log("이미 저장 · " + str(event.get("filename") or event.get("path") or "파일"), event)
+                    self.skip_batch.append(str(event.get("posted_at") or ""))
+                    if len(self.skip_batch) >= SKIP_LOG_BATCH:
+                        self._flush_skips()
                 else:
                     self.size_skipped += 1
-                    self._log("용량 초과로 건너뜀 · " + str(event.get("filename") or event.get("tweet_id") or "파일"), event)
+                    self._log("용량 초과로 건너뜀 · " + _file_label(event), event)
                 self._update_counts()
                 self._schedule_history_refresh()
                 if not self.stopping:
                     self.status.set("파일을 저장하고 있습니다…")
                     self.status_detail.set("이미 저장한 파일은 건너뛰고 새 파일만 받습니다.")
             elif kind == "log":
-                self._log(str(event.get("message", "")), event)
+                message = str(event.get("message", ""))
+                if event.get("filename"):
+                    message = message.rstrip(".") + " · " + _file_label(event)
+                self._log(message, event)
             elif kind == "finished":
                 self.received_final = True
                 self.final_status = event.get("status")
@@ -1082,12 +1105,28 @@ class App:
                     return
         self.root.after(120, self._poll)
 
+    def _flush_skips(self):
+        if not self.skip_batch:
+            return
+        from .history_gui import format_short
+        days = sorted(format_short(value)[:10] for value in self.skip_batch if format_short(value) != "–")
+        count, self.skip_batch = len(self.skip_batch), []
+        span = ""
+        if days:
+            span = f" · 게시 {days[0]}" if days[0] == days[-1] else f" · 게시 {days[0]} ~ {days[-1]}"
+        self._write_log(f"이미 저장된 파일 {count:,}개 건너뜀{span}")
+
     def _log(self, text, event=None):
+        self._flush_skips()
         if event and any(event.get(key) for key in ("tweet_id", "author", "posted_at")):
-            from .history_gui import format_date
+            from .history_gui import format_short
             author = str(event.get("author") or "").lstrip("@")
             author = "@" + author if re.fullmatch(r"[A-Za-z0-9_]{1,15}", author) else "작성자 미확인"
-            text = f"{author} · 게시 {format_date(event.get('posted_at'))} · {text}"
+            posted = format_short(event.get("posted_at"))
+            text = f"{text} · {author} · 게시 {posted if posted != '–' else '미확인'}"
+        self._write_log(text)
+
+    def _write_log(self, text):
         self.log.configure(state="normal")
         self.log.insert("end", time.strftime("%H:%M:%S") + "  " + text + "\n")
         if int(self.log.index("end-1c").split(".")[0]) > 1000:

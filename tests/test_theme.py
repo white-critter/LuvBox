@@ -24,6 +24,9 @@ class ThemeTests(unittest.TestCase):
         for timer in self.root.tk.call("after", "info"):
             self.root.tk.call("after", "cancel", timer)
         self.root.destroy()
+        # Collect on the main thread; see tests.test_gui.release_tk.
+        del self.root
+        gc.collect()
 
     def test_rounded_progress_bar_renders_the_actual_download_fraction(self):
         bar = ttk.Progressbar(self.root, length=300, maximum=100)

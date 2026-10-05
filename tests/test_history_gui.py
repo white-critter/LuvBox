@@ -24,7 +24,7 @@ from xlikesaver.preview import PreviewLoader, Thumbnail
 from xlikesaver import theme
 from xlikesaver.protection import AccountGuard, ProtectionError
 from xlikesaver.storage import OutputGuard, resolve_storage
-from tests.test_gui import destroy_tk
+from tests.test_gui import destroy_tk, release_tk
 
 
 class HistoryGuiTests(unittest.TestCase):
@@ -37,6 +37,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.account = Path(self.temporary.name) / "offline"
         self.root = tk.Tk()
         self.root.withdraw()
+        self.addCleanup(release_tk, self, "window", "root")
         self.addCleanup(destroy_tk, self.root)
         with patch("xlikesaver.gui.load_settings", return_value={}), patch("xlikesaver.gui.has_session", return_value=False):
             App(self.root)
@@ -332,15 +333,24 @@ class HistoryGuiTests(unittest.TestCase):
             result = self.window._page_key(SimpleNamespace(widget=self.window.page_entry, keysym="Home"))
         thread.assert_not_called()
         self.assertIsNone(result)
+        # Without Ctrl the table keeps its own row scrolling.
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
-            self.assertEqual(self.window._page_key(SimpleNamespace(widget=self.window.tree, keysym="Home")), "break")
+            self.assertIsNone(self.window._page_key(SimpleNamespace(widget=self.window.tree, keysym="Home", state=0)))
+        thread.assert_not_called()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.assertEqual(self.window._page_key(SimpleNamespace(widget=self.window.tree, keysym="Home", state=0x4)),
+                             "break")
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual(self.window.displayed_page, 0)
         self.window.tabs.select(1)
         with patch.object(self.window, "go_page") as go:
-            self.window._page_key(SimpleNamespace(widget=self.window.run_tree, keysym="End"))
+            self.window._page_key(SimpleNamespace(widget=self.window.run_tree, keysym="End", state=0x4))
         go.assert_called_once_with(None, runs=True)
+        # A page button needs no modifier.
+        with patch.object(self.window, "change_page") as change:
+            self.window._page_key(SimpleNamespace(widget=self.window.tabs, keysym="Next", state=0))
+        change.assert_called_once_with(1, runs=True)
 
     def test_preview_updates_only_current_selection_and_clear_releases_image(self):
         self.records(2)

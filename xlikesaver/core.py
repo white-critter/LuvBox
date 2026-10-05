@@ -756,11 +756,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 raise exception.AbortExtraction("permissionerror unsafe media output")
             try:
                 super().handle_url(url, kwdict)
-            except ConversionSizeLimit:
-                size_skipped += 1
-                self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
-                emit({"type": "size-skipped", "path": "", "max_video_mb": normalized.max_video_mb,
-                      "stage": "conversion", **_media_details(kwdict)})
             except SizeLimit:
                 size_skipped += 1
                 if self.pathfmt.temppath:
@@ -888,7 +883,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             if locally_complete:
                 cap = normalized.max_video_mb * 1024 * 1024
                 if cap and local_source.stat().st_size > cap:
-                    raise ConversionSizeLimit()
+                    # The limit was lowered after this MP4 finished. Treat it
+                    # like any other oversized video and drop the temporary file.
+                    Path(str(local_source) + ".xlikesaver-complete").unlink(missing_ok=True)
+                    raise SizeLimit()
                 self.progress(local_source.stat().st_size, local_source.stat().st_size, force=True)
                 result = True
             else:
@@ -919,13 +917,19 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 try:
                     converted = convert_mp4_to_gif(source, check_stop=check_stop,
                                                   max_bytes=normalized.max_video_mb * 1024 * 1024)
-                except ConversionSizeLimit:
-                    raise
                 except ConversionError as exc:
-                    guard.failure = str(exc)
-                    emit({"type": "log", "level": "error", "message": guard.failure,
+                    # One unconvertible GIF must not block every later Like.
+                    # Keep the original MP4 path; the normal finalize saves and
+                    # archives it, and handle_url then removes the marker.
+                    if isinstance(exc, ConversionSizeLimit):
+                        message = f"GIF로 바꾸면 {normalized.max_video_mb}MB를 넘어 원본 MP4로 저장합니다."
+                    else:
+                        message = "GIF로 바꾸지 못해 원본 MP4로 저장합니다."
+                    emit({"type": "converting", "stage": "fallback", "message": message,
                           **_media_details(self.current_media)})
-                    raise exception.AbortExtraction(guard.failure) from None
+                    emit({"type": "log", "level": "warning", "message": message,
+                          **_media_details(self.current_media)})
+                    return result
                 self.gif_temporary = converted
                 self.pathfmt.set_extension("gif")
                 self.pathfmt.build_path()
