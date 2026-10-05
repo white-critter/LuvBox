@@ -653,11 +653,9 @@ class HistoryStore:
                                   if (self.account_dir / name).is_file() and not (self.account_dir / name).is_symlink()]
         return result
 
-    @_safe
-    def records(self, limit=100, offset=0, media_type="all", query="") -> list[dict]:
-        if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
-                isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
-                media_type not in _TYPES | {"all"} or not isinstance(query, str)):
+    @staticmethod
+    def _record_filter(media_type, query):
+        if media_type not in _TYPES | {"all"} or not isinstance(query, str):
             raise HistoryError(_HISTORY_HELP)
         clauses, params = [], []
         if media_type != "all":
@@ -667,17 +665,50 @@ class HistoryStore:
             clauses.append("(author LIKE ? ESCAPE '\\' OR tweet_id LIKE ? ESCAPE '\\' OR filename LIKE ? ESCAPE '\\')")
             query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.extend(["%" + query + "%"] * 3)
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        return " WHERE " + " AND ".join(clauses) if clauses else "", params
+
+    @_safe
+    def records(self, limit=100, offset=0, media_type="all", query="") -> list[dict]:
+        if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
+                isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
+                media_type not in _TYPES | {"all"} or not isinstance(query, str)):
+            raise HistoryError(_HISTORY_HELP)
+        where, params = self._record_filter(media_type, query)
         rows = self._db.execute("SELECT * FROM media" + where +
-                                " ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num LIMIT ? OFFSET ?",
+                                " ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num,folder_mode,media_type LIMIT ? OFFSET ?",
                                 (*params, limit, offset))
         return [dict(row) for row in rows]
 
     @_safe
-    def runs(self, limit=20) -> list[dict]:
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+    def runs(self, limit=20, offset=0) -> list[dict]:
+        if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000 or
+                isinstance(offset, bool) or not isinstance(offset, int) or offset < 0):
             raise HistoryError(_HISTORY_HELP)
-        return [dict(row) for row in self._db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,))]
+        return [dict(row) for row in self._db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))]
+
+    @_safe
+    def record_page(self, page=0, page_size=100, media_type="all", query="") -> dict:
+        where, params = self._record_filter(media_type, query)
+        return self._page("media" + where, params, page, page_size,
+                          lambda limit, offset: self.records(limit, offset, media_type, query))
+
+    @_safe
+    def run_page(self, page=0, page_size=100) -> dict:
+        return self._page("runs", (), page, page_size, self.runs)
+
+    def _page(self, table, params, page, page_size, reader):
+        if (isinstance(page, bool) or not isinstance(page, int) or page < 0 or
+                isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000):
+            raise HistoryError(_HISTORY_HELP)
+        # A short read snapshot keeps totals and rows consistent while the
+        # downloader writes new records through a separate WAL connection.
+        with self._db:
+            self._db.execute("BEGIN")
+            total = self._db.execute("SELECT COUNT(*) FROM " + table, params).fetchone()[0]
+            pages = (total + page_size - 1) // page_size
+            page = min(page, max(0, pages - 1))
+            rows = reader(page_size, page * page_size)
+        return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
     @_safe
     def export_records(self, destination: Path | str) -> int:

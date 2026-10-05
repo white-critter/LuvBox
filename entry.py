@@ -24,6 +24,7 @@ def main() -> int:
             import subprocess
             import tempfile
             import tkinter as tk
+            from tkinter import font as tkfont
             import certifi
             from gallery_dl import extractor, version
             from xlikesaver.gui import App, worker_command
@@ -43,6 +44,12 @@ def main() -> int:
             root.withdraw()
             app = App(root)
             root.update_idletasks()
+            from xlikesaver import fonts, theme
+            actual_font = tkfont.Font(root=root, font=theme.BODY).actual("family")
+            assert actual_font == fonts.FAMILY
+            report["font"] = actual_font
+            for name in fonts.FILES:
+                assert (fonts.asset_directory() / name).is_file()
             assert app.auth.get()
             assert metadata.available()
             # This also verifies the extracted Perl runtime and Unicode paths.
@@ -89,6 +96,9 @@ def main() -> int:
                     assert record["metadata_status"] == "embedded"
                     assert record["author_metadata_status"] == "embedded"
                     assert record["author_id"] == author["author_id"]
+                    page = store.record_page(page=9, page_size=50)
+                    assert page["total"] == 1 and page["page"] == 0 and len(page["rows"]) == 1
+                    assert store.run_page()["total"] == 0
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -106,6 +116,7 @@ def main() -> int:
                 assert final["type"] == "finished" and final["status"] == "stopped"
                 assert final["saved"] == 0
             report = {"ok": True, "version": __version__, "gallery_dl": version.__version__,
+                      "font": actual_font, "record_pagination": "queried-and-clamped",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",

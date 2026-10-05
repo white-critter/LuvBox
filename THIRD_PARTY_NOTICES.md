@@ -5,6 +5,7 @@ XlikeSaver is provided under GNU GPL version 2. The license text is in LICENSE. 
 - gallery-dl 1.32.15 by Mike Fährmann: GPL-2.0-only. https://codeberg.org/mikf/gallery-dl
 - Requests and its HTTP dependencies retain their own licenses in the included package metadata. https://github.com/psf/requests
 - Python 3.12 and Tcl/Tk retain their upstream licenses. https://www.python.org/ and https://www.tcl.tk/
+- Pretendard 1.3.9 by Kil Hyung-jin and upstream contributors: SIL Open Font License 1.1. The unmodified Regular/Bold TrueType fonts and copyright/license text are bundled under assets/fonts/Pretendard; the ZIP also includes licenses/Pretendard-OFL.txt. https://github.com/orioncactus/pretendard
 - PyInstaller 6.22.3 includes a bootloader exception allowing application redistribution; its own notices remain applicable. https://pyinstaller.org/en/stable/license.html
 
 The single executable bundles Python/Tk, gallery-dl and the complete local ExifTool runtime. It extracts required files to a temporary directory when running. Account authentication, downloaded media, settings and local records are not included in the release. Authentication uses a user-supplied X auth_token or Netscape cookies.txt. No Playwright/browser runtime, yt-dlp, FFmpeg or media transcoder is required.

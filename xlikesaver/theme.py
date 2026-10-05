@@ -11,8 +11,10 @@ import tkinter as tk
 from tkinter import ttk
 import zlib
 
+from .fonts import load_family
 
-FONT = "맑은 고딕"
+
+FONT = load_family()
 BG = "#f4f6fb"
 CARD = "#ffffff"
 LINE = "#e0e6f0"
@@ -137,11 +139,11 @@ def _control_images(root, style):
     panel("entry_focus", CARD, "#8299ef", radius=10, stroke=2)
     panel("entry_disabled", "#f0f3f8", "#e2e8f2", radius=10)
     panel("entry_readonly", "#f8faff", "#d6dfed", radius=10)
-    panel("tab", "#e9eef7", "#e9eef7", radius=10)
-    panel("tab_active", "#e1e8f8", "#e1e8f8", radius=10)
-    panel("tab_selected", "#e3eaff", "#e3eaff", radius=10)
-    panel("tab_focus", "#e9eef7", "#91a7f3", radius=10, stroke=2)
-    panel("tab_selected_focus", "#e3eaff", "#91a7f3", radius=10, stroke=2)
+    panel("tab", BG, BG, radius=11)
+    panel("tab_active", "#e9eef9", "#e9eef9", radius=11)
+    panel("tab_selected", CARD, "#d6dff6", radius=11)
+    panel("tab_focus", BG, "#91a7f3", radius=11, stroke=2)
+    panel("tab_selected_focus", CARD, "#91a7f3", radius=11, stroke=2)
     panel("tab_disabled", "#f0f3f8", "#f0f3f8", radius=10)
     panel("progress_trough", "#e6ecf7", "#e6ecf7", radius=7, width=28, height=14)
     panel("progress_bar", BLUE, BLUE, radius=7, width=28, height=14)
@@ -211,10 +213,14 @@ def apply_style(root: tk.Misc) -> None:
         style.layout(name, [(element, {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
     style.configure("TButton", font=BODY, padding=(14, 8), relief="flat", borderwidth=0, foreground=INK)
-    style.map("TButton", foreground=[("disabled", "#99a5b9"), ("!disabled", INK)])
+    # Clam's inherited pressed/active grey backgrounds remain rectangular even
+    # when its border is replaced by our transparent rounded image element.
+    style.map("TButton", background=[("disabled", BG), ("!disabled", BG)],
+              foreground=[("disabled", "#99a5b9"), ("!disabled", INK)])
     style.configure("Primary.TButton", font=(FONT, 14, "bold"), padding=(30, 11), foreground=CARD)
     style.map("Primary.TButton", foreground=[("disabled", "#f8faff"), ("!disabled", CARD)])
     style.configure("Big.TButton", font=(FONT, 13), padding=(20, 10))
+    style.configure("Compact.TButton", font=SMALL, padding=(8, 5))
     style.layout("TEntry", [("Soft.Entry", {"sticky": "nsew", "children": [
         ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
     style.layout("TSpinbox", [("Soft.Entry", {"sticky": "nsew", "children": [
@@ -229,7 +235,8 @@ def apply_style(root: tk.Misc) -> None:
         style.configure(name, padding=(10, 6), fieldbackground=CARD, foreground=INK,
                         borderwidth=0, relief="flat", arrowcolor=MUTED, arrowsize=13,
                         selectbackground=BLUE, selectforeground=CARD)
-        style.map(name, foreground=[("disabled", "#99a5b9")], fieldbackground=[("disabled", "#f0f3f8"), ("readonly", "#f8faff")])
+        style.map(name, background=[("disabled", BG), ("!disabled", BG)],
+                  foreground=[("disabled", "#99a5b9")], fieldbackground=[("disabled", "#f0f3f8"), ("readonly", "#f8faff")])
     for name, prefix, element in (("TCheckbutton", "Checkbutton", "Soft.Switch"), ("TRadiobutton", "Radiobutton", "Soft.Radio")):
         style.layout(name, [(prefix + ".padding", {"sticky": "nsew", "children": [
             (element, {"side": "left"}), (prefix + ".label", {"side": "left", "sticky": "nsew"})]})])
@@ -239,18 +246,72 @@ def apply_style(root: tk.Misc) -> None:
     style.layout("Horizontal.TProgressbar", [("Soft.Progress.trough", {"sticky": "nsew", "children": [
         ("Soft.Progress.pbar", {"side": "left", "sticky": "ns"})]})])
     style.configure("Horizontal.TProgressbar", background=BLUE, troughcolor="#e6ecf7", borderwidth=0, thickness=14)
-    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 8))
+    style.configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 10),
+                    bordercolor=BG, lightcolor=BG, darkcolor=BG, relief="flat")
     style.layout("TNotebook.Tab", [("Soft.Tab", {"sticky": "nsew", "children": [
         ("Notebook.padding", {"sticky": "nsew", "children": [("Notebook.label", {"sticky": "nsew"})]})]})])
-    style.configure("TNotebook.Tab", font=BODY, padding=(18, 8), foreground=MUTED)
-    style.map("TNotebook.Tab", foreground=[("disabled", "#99a5b9"), ("selected", BLUE_ACTIVE), ("!selected", MUTED)])
+    style.configure("TNotebook.Tab", font=BOLD, padding=(20, 9), foreground=MUTED, background=BG)
+    # Selected tabs inherited a smaller padding from clam and visibly jumped
+    # in size. Keep every tab's geometry and transparent backdrop identical.
+    style.map("TNotebook.Tab", padding=[], expand=[],
+              background=[("disabled", BG), ("!disabled", BG)],
+              foreground=[("disabled", "#99a5b9"), ("selected", BLUE_ACTIVE), ("!selected", MUTED)])
     style.configure("Treeview", font=SMALL, rowheight=32, background=CARD, fieldbackground=CARD,
                     foreground=INK, bordercolor=LINE, lightcolor=LINE, darkcolor=LINE, relief="flat", borderwidth=1)
     style.map("Treeview", background=[("selected", "#e3eaff")], foreground=[("selected", "#314fbb")])
     style.configure("Treeview.Heading", font=(FONT, 11, "bold"), padding=(8, 7), background="#f1f5fc",
                     foreground=MUTED, borderwidth=0, relief="flat", bordercolor="#f1f5fc", lightcolor="#f1f5fc", darkcolor="#f1f5fc")
     style.map("Treeview.Heading", background=[("active", "#e8eef9")], relief=[("pressed", "flat")])
+    _bind_surfaces(root, style)
     root.tk.call("set", "::xlikesaver_style", 1)
+
+
+def _bind_surfaces(root, style):
+    """Match rounded control backdrops to their actual card/window surface.
+
+    A Map binding covers controls created later in popups as well as the main
+    form. Derived styles retain native behavior and the chosen base style.
+    """
+    configured = set()
+    controls = {"TButton", "TEntry", "TSpinbox", "TCombobox", "TCheckbutton", "TRadiobutton"}
+
+    def surface(parent):
+        if isinstance(parent, ttk.Widget):
+            name = parent.cget("style") or parent.winfo_class()
+            # Card.TFrame's exterior is BG; content lies on its white center.
+            if str(name).endswith("Card.TFrame"):
+                return CARD
+            return style.lookup(name, "background") or BG
+        try:
+            return parent.cget("background")
+        except tk.TclError:
+            return BG
+
+    def mapped(event):
+        widget = event.widget
+        if not isinstance(widget, ttk.Widget):
+            return
+        klass = widget.winfo_class()
+        base = str(widget.cget("style") or klass)
+        for prefix in ("SurfaceCard.", "SurfaceBg."):
+            if base.startswith(prefix):
+                base = base[len(prefix):]
+                break
+        if klass not in controls and not base.endswith("Card.TFrame"):
+            return
+        color = surface(widget.master)
+        # The application has two surfaces; don't reinterpret custom colors.
+        if color not in {CARD, BG}:
+            return
+        name = ("SurfaceCard." if color == CARD else "SurfaceBg.") + base
+        if name not in configured:
+            style.configure(name, background=color)
+            style.map(name, background=[("disabled", color), ("!disabled", color)])
+            configured.add(name)
+        if widget.cget("style") != name:
+            widget.configure(style=name)
+
+    root.bind_all("<Map>", mapped, add="+")
 
 
 def card(parent, **pack) -> ttk.Frame:

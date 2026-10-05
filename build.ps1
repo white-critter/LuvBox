@@ -23,6 +23,7 @@ if (Test-Path -LiteralPath $target) {
     --collect-all gallery_dl --copy-metadata requests --copy-metadata urllib3 `
     --copy-metadata certifi --copy-metadata charset-normalizer --copy-metadata idna `
     --add-data 'tools\exiftool\runtime;tools/exiftool/runtime' `
+    --add-data 'assets\fonts\Pretendard;assets/fonts/Pretendard' `
     --add-data 'README.md;.' --add-data 'LICENSE;.' --add-data 'THIRD_PARTY_NOTICES.md;.' entry.py
 if ($LASTEXITCODE -ne 0) { throw '실행 파일 빌드에 실패했습니다.' }
 & $taskPython 'tools\package_release.py'

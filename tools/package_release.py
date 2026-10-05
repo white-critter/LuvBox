@@ -18,6 +18,8 @@ SOURCE_FILES = (
     "requirements-dev.txt", "requirements-lock.txt", "README.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "XlikeSaver.code-workspace",
     "tools/exiftool/download.py", "tools/package_release.py",
+    "assets/fonts/Pretendard/Pretendard-Regular.ttf", "assets/fonts/Pretendard/Pretendard-Bold.ttf",
+    "assets/fonts/Pretendard/OFL.txt", "assets/fonts/Pretendard/manifest.json",
 )
 DEPENDENCIES = (
     "gallery_dl", "requests", "urllib3", "certifi", "charset-normalizer", "idna",
@@ -45,6 +47,7 @@ def package() -> None:
             archive.write(ROOT / "docs" / "사용안내.txt", "사용안내.txt")
             archive.write(ROOT / "LICENSE", "LICENSE")
             archive.write(ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")
+            archive.write(ROOT / "assets/fonts/Pretendard/OFL.txt", "licenses/Pretendard-OFL.txt")
             for name in SOURCE_FILES:
                 archive.write(ROOT / name, "source/" + name)
             for folder, pattern in (("xlikesaver", "*.py"), ("tests", "*.py"),

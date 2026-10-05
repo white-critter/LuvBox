@@ -154,54 +154,72 @@ class App:
         shell = self.content_view.content
         header = ttk.Frame(shell)
         header.pack(fill="x")
+        header.columnconfigure(0, weight=1)
         titles = ttk.Frame(header)
-        titles.pack(side="left")
-        ttk.Label(titles, text="XlikeSaver", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(titles, text="내가 좋아요한 사진·동영상을 PC에 저장합니다", style="Subtitle.TLabel").pack(anchor="w")
-        ttk.Button(header, text="사용 방법", command=self.help).pack(side="right", anchor="n")
-        ttk.Button(header, text="기록 · 통계", command=self.show_history).pack(side="right", anchor="n", padx=8)
+        titles.grid(row=0, column=0, sticky="ew", padx=(0, 18))
+        title = ttk.Label(titles, text="XlikeSaver", style="Title.TLabel")
+        title.pack(anchor="w")
+        self._wrapping_label(titles, text="내가 좋아요한 사진·동영상을 PC에 저장합니다", style="Subtitle.TLabel", wraplength=560).pack(fill="x", pady=(4, 0))
+        navigation = ttk.Frame(header)
+        navigation.grid(row=0, column=1, sticky="ne", pady=(6, 0))
+        ttk.Button(navigation, text="기록 · 통계", width=11, command=self.show_history).pack(side="left", padx=(0, 8))
+        ttk.Button(navigation, text="사용 방법", width=9, command=self.help).pack(side="left")
+        def fit_header(event):
+            stacked = event.width < title.winfo_reqwidth() + navigation.winfo_reqwidth() + 18
+            row = 1 if stacked else 0
+            if int(navigation.grid_info()["row"]) != row:
+                titles.grid_configure(padx=(0, 0 if stacked else 18))
+                navigation.grid_configure(row=row, column=0 if stacked else 1,
+                                          sticky="w" if stacked else "ne", pady=(12 if stacked else 6, 0))
+                self.content_view._schedule_layout()
+        header.bind("<Configure>", fit_header)
 
-        form = theme.card(shell, fill="x", pady=(14, 0))
-        form.columnconfigure(1, weight=1)
-        self._label(form, "내 X 아이디", 0)
-        account = ttk.Entry(form, textvariable=self.account, font=theme.BODY)
-        account.grid(row=0, column=1, sticky="ew", pady=(4, 0))
-        self._wrapping_label(form, text="예: my_account 또는 x.com/my_account", style="CardMuted.TLabel", wraplength=470).grid(row=1, column=1, sticky="ew", pady=(1, 4))
+        form = theme.card(shell, fill="x", pady=(18, 0))
+        form.columnconfigure(0, weight=3, uniform="account")
+        form.columnconfigure(1, weight=2, uniform="account")
+        ttk.Label(form, text="내 X 아이디", style="CardBold.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(form, text="로그인", style="CardBold.TLabel").grid(row=0, column=1, sticky="w", padx=(24, 0), pady=(0, 8))
+        account = self.account_entry = ttk.Entry(form, textvariable=self.account, width=1, font=theme.BODY)
+        account.grid(row=1, column=0, sticky="ew")
+        self._wrapping_label(form, text="예: my_account 또는 x.com/my_account", style="CardMuted.TLabel", wraplength=470).grid(row=2, column=0, sticky="new", pady=(6, 0))
         self.inputs.append(account)
 
-        self._label(form, "로그인", 2)
         self.login_label = self._wrapping_label(form, textvariable=self.login_text, style="Disconnected.TLabel", wraplength=470)
-        self.login_label.grid(row=2, column=1, sticky="ew", pady=4)
-        self.login_button = ttk.Button(form, text="로그인 연결", command=self.show_connect)
-        self.login_button.grid(row=2, column=2, sticky="e", padx=(12, 0), pady=4)
+        self.login_label.grid(row=1, column=1, sticky="w", padx=(24, 0))
+        self.login_button = ttk.Button(form, text="로그인 연결", width=12, command=self.show_connect)
+        self.login_button.grid(row=2, column=1, sticky="w", padx=(24, 0), pady=(6, 0))
         self.inputs.append(self.login_button)
 
-        self._label(form, "저장 폴더", 3)
-        folder = ttk.Entry(form, textvariable=self.folder, font=theme.BODY)
-        folder.grid(row=3, column=1, sticky="ew", pady=(10, 0))
+        ttk.Label(form, text="저장 폴더", style="CardBold.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(20, 8))
+        folder_row = ttk.Frame(form, style="Plain.TFrame")
+        folder_row.grid(row=4, column=0, columnspan=2, sticky="ew")
+        folder_row.columnconfigure(0, weight=1)
+        folder = self.folder_entry = ttk.Entry(folder_row, textvariable=self.folder, width=1, font=theme.BODY)
+        folder.grid(row=0, column=0, sticky="ew")
         folder.bind("<Return>", lambda _: self._ensure_storage())
-        folder_buttons = ttk.Frame(form, style="Plain.TFrame")
-        folder_buttons.grid(row=3, column=2, sticky="e", padx=(12, 0), pady=(10, 0))
-        browse = ttk.Button(folder_buttons, text="찾아보기", command=self.choose_folder)
-        browse.pack(side="left")
-        ttk.Button(folder_buttons, text="열기", command=self.open_folder).pack(side="left", padx=(6, 0))
+        browse = ttk.Button(folder_row, text="찾아보기", width=9, command=self.choose_folder)
+        browse.grid(row=0, column=1, padx=(10, 0))
+        ttk.Button(folder_row, text="열기", width=6, command=self.open_folder).grid(row=0, column=2, padx=(8, 0))
         self.inputs.extend((folder, browse))
         preview = ttk.Frame(form, style="Plain.TFrame")
-        preview.grid(row=4, column=1, columnspan=2, sticky="ew", pady=(1, 2))
-        ttk.Label(preview, text="파일 저장 위치:", style="CardMuted.TLabel").pack(side="left")
+        preview.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        ttk.Label(preview, text="저장 위치", style="CardMuted.TLabel").pack(side="left", anchor="n")
         self.preview_label = self._wrapping_label(preview, textvariable=self.destination_preview, style="CardMuted.TLabel", wraplength=600)
-        self.preview_label.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.preview_label.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
-        ttk.Separator(form).grid(row=5, column=0, columnspan=3, sticky="ew", pady=6)
-        self._label(form, "저장 방식", 6)
-        self.option_summary_label = self._wrapping_label(form, textvariable=self.option_summary, style="Card.TLabel", wraplength=470)
-        self.option_summary_label.grid(row=6, column=1, sticky="ew", pady=4)
-        self.options_button = ttk.Button(form, text="옵션 변경", command=self.show_options)
-        self.options_button.grid(row=6, column=2, sticky="e", padx=(12, 0), pady=4)
+        ttk.Separator(form).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(18, 14))
+        summary = ttk.Frame(form, style="Plain.TFrame")
+        summary.grid(row=7, column=0, columnspan=2, sticky="ew")
+        summary.columnconfigure(0, weight=1)
+        ttk.Label(summary, text="저장 방식", style="CardBold.TLabel").grid(row=0, column=0, sticky="w")
+        self.option_summary_label = self._wrapping_label(summary, textvariable=self.option_summary, style="CardMuted.TLabel", wraplength=650)
+        self.option_summary_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.options_button = ttk.Button(summary, text="옵션 변경", width=11, command=self.show_options)
+        self.options_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
         self.inputs.append(self.options_button)
 
         actions = ttk.Frame(shell)
-        actions.pack(fill="x", pady=(12, 8))
+        actions.pack(fill="x", pady=(18, 14))
         self.start_button = ttk.Button(actions, text="저장 시작", style="Primary.TButton", command=self.start)
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(actions, text="중단", style="Big.TButton", command=self.stop, state="disabled")
@@ -244,14 +262,10 @@ class App:
             width = max(1, event.width)
             if int(label.cget("wraplength")) != width:
                 label.configure(wraplength=width)
-            self.content_view._schedule_layout()
+            view = getattr(label.winfo_toplevel(), "content_view", self.content_view)
+            view._schedule_layout()
         label.bind("<Configure>", resize)
         return label
-
-    @staticmethod
-    def _label(parent, text, row):
-        ttk.Label(parent, text=text, style="CardBold.TLabel").grid(row=row, column=0, sticky="w", padx=(0, 18),
-                                                                   pady=(10 if row == 3 else 4, 0))
 
     def _toggle_progress(self):
         if self.detailed_progress.get():
@@ -349,7 +363,7 @@ class App:
         mode = AUTH_MODES[self.auth.get()]
         if mode == "managed":
             connected = has_session()
-            self.login_text.set("● 연결 정보 저장됨" if connected else "● 연결 필요 — 오른쪽 버튼을 눌러 연결하세요")
+            self.login_text.set("● 연결 정보 저장됨" if connected else "● 연결 필요")
         else:
             self.token.set("")
             connected = bool(self.cookies.get().strip())
@@ -376,50 +390,50 @@ class App:
         window.title("X 로그인 연결")
         window.configure(bg=CARD)
         window.transient(self.root)
-        window.resizable(False, False)
-        body = self._popup_content(window, padding=(26, 22))
+        window.resizable(True, True)
+        body = self._popup_content(window, padding=(28, 24))
         ttk.Label(body, text="X 로그인 연결", style="CardHeading.TLabel").pack(anchor="w")
         if notice:
-            ttk.Label(body, text=notice, style="CardMuted.TLabel", foreground=theme.ORANGE, wraplength=600).pack(anchor="w", pady=(4, 0))
+            self._wrapping_label(body, text=notice, style="CardMuted.TLabel", foreground=theme.ORANGE, wraplength=640).pack(fill="x", pady=(6, 0))
         modes = ttk.Frame(body, style="Plain.TFrame")
-        modes.pack(anchor="w", pady=(12, 10))
+        modes.pack(anchor="w", pady=(18, 16))
         for label in AUTH_MODES:
-            ttk.Radiobutton(modes, text=label, value=label, variable=self.auth).pack(side="left", padx=(0, 18))
+            ttk.Radiobutton(modes, text=label, value=label, variable=self.auth).pack(anchor="w", pady=(0, 4))
 
         self.token_controls = ttk.Frame(body, style="Plain.TFrame")
-        ttk.Label(self.token_controls, text=TOKEN_STEPS, style="Card.TLabel", justify="left").pack(anchor="w")
+        self._wrapping_label(self.token_controls, text=TOKEN_STEPS, style="Card.TLabel", wraplength=640).pack(fill="x")
         row = ttk.Frame(self.token_controls, style="Plain.TFrame")
-        row.pack(fill="x", pady=(12, 6))
-        self.token_entry = ttk.Entry(row, textvariable=self.token, show="●", width=40, font=theme.BODY)
+        row.pack(fill="x", pady=(16, 8))
+        self.token_entry = ttk.Entry(row, textvariable=self.token, show="●", width=1, font=theme.BODY)
         self.token_entry.pack(side="left", fill="x", expand=True)
         self.token_entry.bind("<Return>", lambda _: self._connect_from_window())
-        self.token_button = ttk.Button(row, text="연결 저장", command=self._connect_from_window)
+        self.token_button = ttk.Button(row, text="연결 저장", width=11, command=self._connect_from_window)
         self.token_button.pack(side="left", padx=(8, 0))
-        ttk.Label(self.token_controls, text="토큰은 이 PC의 Windows 계정에서만 열 수 있게 암호화해 저장합니다.\n비밀번호처럼 다루고 다른 사람에게 보내지 마세요.",
-                  style="CardMuted.TLabel", justify="left").pack(anchor="w")
+        self._wrapping_label(self.token_controls, text="토큰은 이 PC의 Windows 계정에서만 열 수 있게 암호화해 저장합니다.\n비밀번호처럼 다루고 다른 사람에게 보내지 마세요.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x")
         self.clear_button = ttk.Button(self.token_controls, text="저장된 연결 지우기", command=self.disconnect)
         self.clear_button.pack(anchor="w", pady=(10, 0))
 
         self.cookie_controls = ttk.Frame(body, style="Plain.TFrame")
-        ttk.Label(self.cookie_controls, text="로그인된 x.com 쿠키를 Netscape 형식(cookies.txt)으로 내보낸 파일을 고릅니다.",
-                  style="Card.TLabel", wraplength=600, justify="left").pack(anchor="w")
+        self._wrapping_label(self.cookie_controls, text="로그인된 x.com 쿠키를 Netscape 형식(cookies.txt)으로 내보낸 파일을 고릅니다.",
+                             style="Card.TLabel", wraplength=640).pack(fill="x")
         row = ttk.Frame(self.cookie_controls, style="Plain.TFrame")
-        row.pack(fill="x", pady=(12, 6))
-        self.cookie_entry = ttk.Entry(row, textvariable=self.cookies, width=40, font=theme.BODY)
+        row.pack(fill="x", pady=(16, 8))
+        self.cookie_entry = ttk.Entry(row, textvariable=self.cookies, width=1, font=theme.BODY)
         self.cookie_entry.pack(side="left", fill="x", expand=True)
-        self.cookie_button = ttk.Button(row, text="파일 선택", command=self.choose_cookies)
+        self.cookie_button = ttk.Button(row, text="파일 선택", width=11, command=self.choose_cookies)
         self.cookie_button.pack(side="left", padx=(8, 0))
-        ttk.Label(self.cookie_controls, text="파일 위치는 기억하지 않아 앱을 다시 열면 다시 골라야 합니다. 예약 실행에는 쓸 수 없습니다.",
-                  style="CardMuted.TLabel", wraplength=600, justify="left").pack(anchor="w")
+        self._wrapping_label(self.cookie_controls, text="파일 위치는 기억하지 않아 앱을 다시 열면 다시 골라야 합니다. 예약 실행에는 쓸 수 없습니다.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x")
 
         footer = ttk.Frame(body, style="Plain.TFrame")
-        footer.pack(side="bottom", fill="x", pady=(18, 0))
-        ttk.Button(footer, text="크롬 쿠키 화면 안내", command=lambda: webbrowser.open("https://developer.chrome.com/docs/devtools/application/cookies/")).pack(side="left")
-        ttk.Button(footer, text="닫기", command=self._close_connect).pack(side="right")
+        footer.pack(side="bottom", fill="x", pady=(24, 0))
+        ttk.Button(footer, text="쿠키 확인 방법", command=lambda: webbrowser.open("https://developer.chrome.com/docs/devtools/application/cookies/")).pack(side="left")
+        ttk.Button(footer, text="닫기", width=9, command=self._close_connect).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", self._close_connect)
         self._auth_changed()
         self._fit_popup(window)
-        self.token_entry.focus_set()
+        (self.token_entry if AUTH_MODES[self.auth.get()] == "managed" else self.cookie_entry).focus_set()
 
     @staticmethod
     def _popup_content(window, *, padding):
@@ -431,10 +445,15 @@ class App:
         return view.content
 
     def _fit_popup(self, window):
+        # Set a readable width before measuring wrapped text. Natural widget
+        # widths can otherwise push a single long instruction off the screen.
+        width = min(740, max(480, self.root.winfo_screenwidth() - 80))
+        max_height = max(360, self.root.winfo_screenheight() - 120)
+        window.geometry(f"{width}x{max_height}")
         window.update_idletasks()
         body = window.content_view.content
-        width = min(body.winfo_reqwidth(), self.root.winfo_screenwidth() - 80)
-        height = min(body.winfo_reqheight(), self.root.winfo_screenheight() - 120)
+        height = min(body.winfo_reqheight(), max_height)
+        window.minsize(min(600, width), min(360, height))
         window.geometry(f"{width}x{height}")
 
     def _close_connect(self):
@@ -496,19 +515,24 @@ class App:
         window.title("저장 옵션")
         window.configure(bg=CARD)
         window.transient(self.root)
-        window.resizable(False, False)
-        body = self._popup_content(window, padding=(26, 20))
+        window.resizable(True, True)
+        body = self._popup_content(window, padding=(28, 24))
 
-        def heading(text, first=False):
-            ttk.Label(body, text=text, style="CardHeading.TLabel").pack(anchor="w", pady=(0 if first else 18, 6))
+        ttk.Label(body, text="저장 옵션", style="CardHeading.TLabel").pack(anchor="w")
+        self._wrapping_label(body, text="바꾼 옵션은 다음 저장에 적용됩니다.", style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
 
-        heading("폴더 정리", first=True)
-        for key, (label, example) in FOLDER_CHOICES.items():
+        def heading(text):
+            ttk.Separator(body).pack(fill="x", pady=(20, 16))
+            ttk.Label(body, text=text, style="CardBold.TLabel").pack(anchor="w", pady=(0, 8))
+
+        heading("폴더 정리")
+        for key, (_, example) in FOLDER_CHOICES.items():
             row = ttk.Frame(body, style="Plain.TFrame")
-            row.pack(fill="x")
-            ttk.Radiobutton(row, text=label, value=key, variable=self.folder_mode).pack(side="left")
-            ttk.Label(row, text="예) " + example, style="CardMuted.TLabel").pack(side="right", padx=(24, 0))
-        ttk.Checkbutton(body, text="내 아이디 이름의 폴더 안에 저장 (여러 계정을 쓸 때)", variable=self.separate_accounts).pack(anchor="w", pady=(6, 0))
+            row.pack(fill="x", pady=(0, 6))
+            ttk.Radiobutton(row, text=key, value=key, variable=self.folder_mode).pack(anchor="w")
+            self._wrapping_label(row, text="예) " + example, style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(32, 0))
+        ttk.Checkbutton(body, text="계정별 폴더로 구분", variable=self.separate_accounts).pack(anchor="w", pady=(4, 0))
+        self._wrapping_label(body, text="여러 계정을 쓸 때 내 아이디 폴더 안에 저장합니다.", style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(56, 0))
 
         heading("저장할 미디어")
         ttk.Label(body, text="사진은 항상 저장합니다.", style="CardMuted.TLabel").pack(anchor="w")
@@ -520,18 +544,21 @@ class App:
         size.pack(anchor="w", pady=(8, 0))
         ttk.Label(size, text="영상 1개 최대", style="Card.TLabel").pack(side="left")
         ttk.Spinbox(size, from_=0, to=100000, increment=50, width=7, textvariable=self.max_video_mb, font=theme.BODY).pack(side="left", padx=8)
-        ttk.Label(size, text="MB   (0 = 제한 없음, 넘는 영상은 건너뜀)", style="CardMuted.TLabel").pack(side="left")
+        ttk.Label(size, text="MB", style="Card.TLabel").pack(side="left")
+        self._wrapping_label(body, text="0은 제한 없음 · 이 크기를 넘는 영상은 건너뜁니다.", style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
 
         heading("확인 범위")
         for key, value in SCAN_MODES.items():
-            ttk.Radiobutton(body, text=key, value=key, variable=self.scan_mode).pack(anchor="w")
-            ttk.Label(body, text=SCAN_HINTS[value], style="CardMuted.TLabel").pack(anchor="w", padx=(28, 0), pady=(0, 4))
-        ttk.Label(body, text="직전 실행이 중단됐거나 미디어 옵션을 바꾸면, 다음 한 번은 자동으로 전체를 확인합니다.",
-                  style="CardMuted.TLabel", wraplength=620, justify="left").pack(anchor="w")
+            label = "새 Like만 확인 (권장)" if value == "quick" else key
+            ttk.Radiobutton(body, text=label, value=key, variable=self.scan_mode).pack(anchor="w")
+            self._wrapping_label(body, text=SCAN_HINTS[value], style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(32, 0), pady=(0, 8))
+        self._wrapping_label(body, text="직전 실행이 중단됐거나 미디어 옵션을 바꾸면, 다음 한 번은 자동으로 전체를 확인합니다.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x")
 
         heading("시험")
-        ttk.Checkbutton(body, text="시험 저장 — 새 파일 20개만 받고 멈춤 (이번 실행에만 적용)", variable=self.limited).pack(anchor="w")
-        ttk.Button(body, text="닫기", command=self._close_options).pack(anchor="e", pady=(20, 0))
+        ttk.Checkbutton(body, text="시험 저장", variable=self.limited).pack(anchor="w")
+        self._wrapping_label(body, text="새 파일 20개만 저장하고 멈춥니다. 이번 실행에만 적용됩니다.", style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(56, 0))
+        ttk.Button(body, text="닫기", width=9, command=self._close_options).pack(anchor="e", pady=(24, 0))
         window.protocol("WM_DELETE_WINDOW", self._close_options)
         self._fit_popup(window)
 
@@ -758,20 +785,27 @@ class App:
             return
         popup = self.help_window = tk.Toplevel(self.root)
         popup.title("XlikeSaver 사용 방법")
-        popup.geometry(f"780x{min(760, max(560, self.root.winfo_screenheight() - 120))}")
-        popup.minsize(640, 480)
+        width = min(800, max(600, self.root.winfo_screenwidth() - 80))
+        height = min(800, max(480, self.root.winfo_screenheight() - 120))
+        popup.geometry(f"{width}x{height}")
+        popup.minsize(min(640, width), min(480, height))
         popup.configure(bg=BG)
         popup.transient(self.root)
-        links = ttk.Frame(popup, padding=(18, 10))
+        heading = ttk.Frame(popup, padding=(24, 20, 24, 0))
+        heading.pack(fill="x")
+        ttk.Label(heading, text="사용 방법", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(heading, text="처음 연결부터 저장 기록 확인까지", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+        links = ttk.Frame(popup, padding=(24, 12, 24, 20))
         links.pack(side="bottom", fill="x")
-        ttk.Button(links, text="예약 명령 복사", command=self.copy_schedule_command).pack(side="left")
-        ttk.Button(links, text="예약 실행 기록", command=self.open_schedule_logs).pack(side="left", padx=8)
-        ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).pack(side="left")
-        ttk.Button(links, text="닫기", command=popup.destroy).pack(side="right")
-        body = ttk.Frame(popup, padding=(18, 16, 18, 0))
-        body.pack(fill="both", expand=True)
-        content = tk.Text(body, wrap="word", background=CARD, foreground=theme.INK, relief="solid", borderwidth=1,
-                          highlightthickness=0, padx=22, pady=14, font=theme.BODY, spacing1=2, spacing3=4, cursor="arrow")
+        links.columnconfigure(0, weight=1)
+        links.columnconfigure(1, weight=1)
+        ttk.Button(links, text="예약 명령 복사", command=self.copy_schedule_command).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 8))
+        ttk.Button(links, text="예약 실행 기록", command=self.open_schedule_logs).grid(row=0, column=1, sticky="ew", pady=(0, 8))
+        ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).grid(row=1, column=0, sticky="w")
+        ttk.Button(links, text="닫기", width=9, command=popup.destroy).grid(row=1, column=1, sticky="e")
+        body = theme.card(popup, fill="both", expand=True, padx=24, pady=(16, 0))
+        content = tk.Text(body, wrap="word", background=CARD, foreground=theme.INK, relief="flat", borderwidth=0,
+                          highlightthickness=0, padx=4, pady=2, font=theme.BODY, spacing1=2, spacing3=4, cursor="arrow")
         scrollbar = ttk.Scrollbar(body, command=content.yview)
         content.configure(yscrollcommand=scrollbar.set)
         content.pack(side="left", fill="both", expand=True)

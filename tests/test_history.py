@@ -471,6 +471,57 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("'@danger", [row["author"] for row in rows])
         self.assertNotIn(SECRET, destination.read_text(encoding="utf-8-sig"))
 
+    def test_pages_use_filtered_totals_and_clamp_empty_or_outdated_positions(self):
+        for number, kind, author in ((1, "photo", "bob_50%"), (2, "photo", "bob_50%"),
+                                     (3, "video", "bob_50%"), (4, "photo", "other")):
+            self.store.record_media("flat", self.metadata(number, kind, author=author), self.file(f"100_{number}.mp4"))
+        first = self.store.record_page(page_size=1, media_type="photo", query="bob_50%")
+        last = self.store.record_page(page=99, page_size=1, media_type="photo", query="bob_50%")
+        self.assertEqual((first["total"], first["pages"], first["page"]), (2, 2, 0))
+        self.assertEqual((last["total"], last["pages"], last["page"]), (2, 2, 1))
+        self.assertNotEqual(first["rows"][0]["num"], last["rows"][0]["num"])
+        empty = self.store.record_page(page=99, page_size=50, query="absent")
+        self.assertEqual((empty["total"], empty["pages"], empty["page"], empty["rows"]), (0, 0, 0, []))
+        for bad in ({"page": -1}, {"page": True}, {"page_size": 0}, {"page_size": 1001}, {"page_size": "100"}):
+            with self.subTest(bad=bad), self.assertRaises(HistoryError):
+                self.store.record_page(**bad)
+
+    def test_page_total_and_rows_share_a_read_snapshot_without_blocking_writer(self):
+        self.store.record_media("flat", self.metadata(), self.file("100_1.jpg"))
+        other = HistoryStore(self.account)
+        self.addCleanup(other.close)
+        original = self.store.records
+
+        def concurrent_insert(*args):
+            other.record_media("flat", self.metadata(2), self.file("100_2.jpg"))
+            return original(*args)
+
+        with patch.object(self.store, "records", side_effect=concurrent_insert):
+            page = self.store.record_page()
+        self.assertEqual((page["total"], len(page["rows"])), (1, 1))
+        self.assertEqual(self.store.record_page()["total"], 2)
+
+    def test_page_boundaries_have_stable_order_when_saved_times_tie(self):
+        path = self.file("100_1.jpg")
+        for mode in ("flat", "author", "date"):
+            self.store.record_media(mode, self.metadata(), path)
+        self.store._db.execute("UPDATE media SET saved_at='2026-10-05T00:00:00+09:00'")
+        self.store._db.commit()
+        rows = [self.store.record_page(page=index, page_size=1)["rows"][0] for index in range(3)]
+        self.assertEqual([row["folder_mode"] for row in rows], ["author", "date", "flat"])
+        self.assertEqual(rows, self.store.record_page()["rows"])
+
+    def test_all_execution_history_is_pageable_with_clamped_last_page(self):
+        ids = [self.store.start_run("flat") for _ in range(7)]
+        first = self.store.run_page(page_size=3)
+        last = self.store.run_page(page=99, page_size=3)
+        self.assertEqual((first["total"], first["pages"]), (7, 3))
+        self.assertEqual([row["id"] for row in first["rows"]], ids[-1:-4:-1])
+        self.assertEqual((last["page"], [row["id"] for row in last["rows"]]), (2, [ids[0]]))
+        self.assertEqual([row["id"] for row in self.store.runs(limit=2, offset=3)], [ids[3], ids[2]])
+        with self.assertRaises(HistoryError):
+            self.store.runs(offset=-1)
+
     def test_outside_paths_and_missing_saved_files_are_rejected_without_catalog_rows(self):
         outside = Path(self.temp.name) / "outside.jpg"
         outside.write_bytes(b"outside")

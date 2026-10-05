@@ -182,7 +182,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.next_button.cget("state")), "disabled")
         self.window._load(*arguments)
         self.window._poll()
-        self.assertEqual(self.window.page_text.get(), "101–105번째")
+        self.assertEqual(self.window.page_text.get(), "총 105개 · 2 / 2페이지")
         self.assertEqual(str(self.window.previous_button.cget("state")), "normal")
         self.assertEqual(str(self.window.next_button.cget("state")), "disabled")
 
@@ -197,15 +197,253 @@ class HistoryGuiTests(unittest.TestCase):
             self.window._load(*arguments)
             self.window._poll()
             pending_arguments = thread.call_args.kwargs["args"]
-        self.assertEqual(self.window.page_text.get(), "101–105번째")
+        # The older page response must not replace the visible snapshot once
+        # a newer search is pending, even briefly while its worker starts.
+        self.assertEqual(self.window.page_text.get(), "총 105개 · 1 / 2페이지")
         self.assertEqual(self.window.page, 0)
-        self.assertEqual(self.window.displayed_page, 1)
+        self.assertEqual(self.window.displayed_page, 0)
         self.assertEqual(pending_arguments[4], 0)
         self.assertEqual(str(self.window.previous_button.cget("state")), "disabled")
         self.window._load(*pending_arguments)
         self.window._poll()
-        self.assertEqual(self.window.page_text.get(), "1–1번째")
+        self.assertEqual(self.window.page_text.get(), "총 1개 · 1 / 1페이지")
         self.assertEqual(len(self.window.rows), 1)
+
+    def test_page_size_last_first_jump_and_empty_filtered_count(self):
+        self.records(105)
+        self.load()
+        self.window.page_size.set("50")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.change_page_size()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(len(self.window.rows), 50)
+        self.assertEqual(self.window.page_text.get(), "총 105개 · 1 / 3페이지")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.last_button.invoke()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual((self.window.page, len(self.window.rows)), (2, 5))
+        self.assertEqual(str(self.window.last_button.cget("state")), "disabled")
+        self.window.page_input.set("999")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.jump_page()
+        thread.assert_not_called()
+        self.assertEqual(self.window.page_input.get(), "3")
+        self.window.page_input.set("2")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.jump_page()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual((self.window.page, len(self.window.rows)), (1, 50))
+        self.window.page_input.set("invalid")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.jump_page()
+        thread.assert_not_called()
+        self.assertEqual(self.window.page_input.get(), "2")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.first_button.invoke()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(self.window.page, 0)
+        self.window.query.set("absent")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.search()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(self.window.page_text.get(), "총 0개 · 0 / 0페이지")
+        for button in (self.window.first_button, self.window.previous_button, self.window.next_button,
+                       self.window.last_button, self.window.jump_button):
+            self.assertEqual(str(button.cget("state")), "disabled")
+
+    def test_execution_history_pagination_preserves_selected_run_and_resets_with_size(self):
+        store = self.records()
+        ids = [store.start_run("flat") for _ in range(105)]
+        self.load()
+        self.assertEqual(len(self.window.run_rows), 100)
+        self.assertEqual(self.window.run_page_text.get(), "총 105회 · 1 / 2페이지")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.run_last_button.invoke()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual([row["id"] for row in self.window.run_rows.values()], ids[4::-1])
+        self.window.run_tree.selection_set("0")
+        self.window.select_run()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.refresh()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(self.window.run_rows[self.window.run_tree.selection()[0]]["id"], ids[4])
+        self.window.page_size.set("200")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.change_page_size()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(self.window.run_page, 0)
+        self.assertEqual(len(self.window.run_rows), 105)
+        self.assertEqual(self.window.run_page_text.get(), "총 105회 · 1 / 1페이지")
+
+    def test_page_size_changed_during_load_discards_older_preview_and_result(self):
+        self.records(105)
+        self.load()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.change_page(1)
+            old_args = thread.call_args.kwargs["args"]
+            self.window.page_size.set("50")
+            self.window.change_page_size()
+            self.window._load(*old_args)
+            self.window._poll()
+            new_args = thread.call_args.kwargs["args"]
+        self.assertEqual(len(self.window.rows), 100)
+        self.assertEqual(self.window.displayed_page_size, 100)
+        self.assertEqual(new_args[4], 0)
+        self.assertEqual(new_args[6], 50)
+        self.window._load(*new_args)
+        self.window._poll()
+        self.assertEqual((len(self.window.rows), self.window.displayed_page_size), (50, 50))
+        # An old generation arriving after the new snapshot is harmless too.
+        before = dict(self.window.rows)
+        self.window.results.put((self.window.generation - 1, "loaded", (self.account, {}, [], [], 1)))
+        self.window._poll()
+        self.assertEqual(self.window.rows, before)
+
+    def test_refresh_clamps_page_after_catalog_is_reduced(self):
+        store = self.records(105)
+        self.load(page=1)
+        store._db.execute("DELETE FROM media WHERE tweet_id!='100'")
+        store._db.commit()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.refresh()
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual((self.window.page, self.window.displayed_page), (0, 0))
+        self.assertEqual([row["tweet_id"] for row in self.window.rows.values()], ["100"])
+        self.assertEqual(self.window.page_text.get(), "총 1개 · 1 / 1페이지")
+
+    def test_large_totals_and_large_fonts_keep_both_pagers_and_tables_usable(self):
+        # Scaling must be set before the interpreter creates its fonts; changing
+        # scaling after a theme is built can leave its cached metrics unchanged.
+        for scaling in (4 / 3, 2.0):
+            with self.subTest(scaling=scaling):
+                root = tk.Tk()
+                root.attributes("-alpha", 0)
+                previous_scaling = root.tk.call("tk", "scaling")
+                window = None
+                try:
+                    root.tk.call("tk", "scaling", scaling)
+                    with patch("xlikesaver.history_gui.threading.Thread"):
+                        window = HistoryWindow(root, lambda: ("offline", self.account))
+                    window.attributes("-alpha", 0)
+                    window.geometry("860x720")
+                    for total in (5750, 100000):
+                        paging = {"page": 0, "total": total, "pages": (total + 99) // 100, "page_size": 100}
+                        window._display({"files": total, "posts": total,
+                                         "oldest_posted_at": "2022-01-01T00:00:00+09:00",
+                                         "newest_posted_at": "2026-10-05T00:00:00+09:00"}, [], [], 0, paging, paging)
+                        for tab in (0, 1):
+                            window.tabs.select(tab)
+                            root.update()
+                            bar, info, navigation = window._pagers[tab]
+                            self.assertTrue(bar.winfo_ismapped())
+                            for frame in (info, navigation):
+                                self.assertGreaterEqual(frame.winfo_width(), frame.winfo_reqwidth())
+                                self.assertLessEqual(frame.winfo_x() + frame.winfo_width(), bar.winfo_width())
+                                for child in frame.winfo_children():
+                                    self.assertGreaterEqual(child.winfo_width(), child.winfo_reqwidth())
+                                    self.assertLessEqual(child.winfo_rootx() + child.winfo_width(),
+                                                         bar.winfo_rootx() + bar.winfo_width())
+                            tree = window.run_tree if tab else window.tree
+                            self.assertGreaterEqual(tree.winfo_height(), 90)
+                            canvas = window.content_view.canvas
+                            expected_row = int(info.winfo_reqwidth() + navigation.winfo_reqwidth() + 12 > bar.winfo_width())
+                            self.assertEqual(int(navigation.grid_info()["row"]), expected_row)
+                            if scaling == 2.0:
+                                self.assertTrue(window.content_view.scrollbar.winfo_manager())
+                                canvas.yview_moveto(0)
+                                button = window.run_next_button if tab else window.next_button
+                                button.event_generate("<MouseWheel>", delta=-120)
+                                root.update()
+                                self.assertGreater(canvas.yview()[0], 0)
+                                canvas.yview_moveto(0)
+                                tree.event_generate("<MouseWheel>", delta=-120)
+                                root.update()
+                                self.assertEqual(canvas.yview()[0], 0)
+                                canvas.yview_moveto(1)
+                                root.update()
+                                bottom = bar.winfo_rooty() - canvas.winfo_rooty() + bar.winfo_height()
+                                self.assertLessEqual(bottom, canvas.winfo_height())
+                            # A second geometry pass must not undo folding or
+                            # continually resize the content and reset scrolling.
+                            before = (int(navigation.grid_info()["row"]), bar.winfo_width(), canvas.yview())
+                            root.update()
+                            after = (int(navigation.grid_info()["row"]), bar.winfo_width(), canvas.yview())
+                            self.assertEqual(before, after)
+                finally:
+                    root.tk.call("tk", "scaling", previous_scaling)
+                    if window is not None:
+                        window.destroy()
+                    destroy_tk(root)
+
+    def test_large_statistics_tiles_reflow_without_clipping_and_restore_six_columns(self):
+        for scaling in (4 / 3, 2.0):
+            with self.subTest(scaling=scaling):
+                root = tk.Tk()
+                root.attributes("-alpha", 0)
+                previous_scaling = root.tk.call("tk", "scaling")
+                window = None
+                try:
+                    root.tk.call("tk", "scaling", scaling)
+                    with patch("xlikesaver.history_gui.threading.Thread"):
+                        window = HistoryWindow(root, lambda: ("offline", self.account))
+                    window.attributes("-alpha", 0)
+                    window.geometry("860x720")
+                    paging = {"page": 0, "total": 100000, "pages": 1000, "page_size": 100}
+                    window._display({"files": 100000, "posts": 90317, "photo": 97000,
+                                     "video": 2400, "animated_gif": 600, "bytes": 1_000_000_000_000,
+                                     "oldest_posted_at": "2022-01-01T00:00:00+09:00",
+                                     "newest_posted_at": "2026-10-05T00:00:00+09:00"}, [], [], 0, paging, paging)
+                    root.update()
+                    self.assertEqual(window._tile_columns, 3)
+                    for key, tile in zip(window.tile_values, window._tiles):
+                        self.assertGreaterEqual(tile.winfo_width(), tile.winfo_reqwidth())
+                        self.assertEqual(str(tile.winfo_children()[0].cget("text")), window.tile_values[key].get())
+                        for label in tile.winfo_children():
+                            self.assertGreaterEqual(label.winfo_width(), label.winfo_reqwidth())
+                            self.assertLessEqual(label.winfo_rootx() + label.winfo_width(),
+                                                 tile.winfo_rootx() + tile.winfo_width())
+                    for column in range(3, 6):
+                        self.assertEqual(window._tile_frame.grid_columnconfigure(column)["weight"], 0)
+                        self.assertFalse(window._tile_frame.grid_columnconfigure(column)["uniform"])
+                    for tab in (0, 1):
+                        window.tabs.select(tab)
+                        root.update()
+                        tree = window.run_tree if tab else window.tree
+                        self.assertGreaterEqual(tree.winfo_height(), tree.winfo_reqheight())
+                        canvas = window.content_view.canvas
+                        canvas.yview_moveto(1)
+                        root.update()
+                        pager = window._pagers[tab][0]
+                        bottom = pager.winfo_rooty() - canvas.winfo_rooty() + pager.winfo_height()
+                        self.assertLessEqual(bottom, canvas.winfo_height())
+                    # Wide windows keep the original single statistics row,
+                    # including a large font and all of the large numbers.
+                    window.geometry("1400x900")
+                    root.update()
+                    self.assertEqual(window._tile_columns, 6)
+                    self.assertEqual({int(tile.grid_info()["row"]) for tile in window._tiles}, {0})
+                    for tile in window._tiles:
+                        for label in tile.winfo_children():
+                            self.assertGreaterEqual(label.winfo_width(), label.winfo_reqwidth())
+                    # Repeated layout passes with unchanged columns must not
+                    # re-grid cards or reset the user's scroll position.
+                    with patch.object(window._tiles[0], "grid_configure") as grid:
+                        window._layout_tiles()
+                    grid.assert_not_called()
+                finally:
+                    root.tk.call("tk", "scaling", previous_scaling)
+                    if window is not None:
+                        window.destroy()
+                    destroy_tk(root)
 
     def test_empty_catalog_preview_stays_loading_until_folder_scan_finishes(self):
         self.account.mkdir()
@@ -258,15 +496,20 @@ class HistoryGuiTests(unittest.TestCase):
                 self.window.is_downloading = lambda: downloading
                 with patch("xlikesaver.history_gui.threading.Thread") as thread:
                     self.window.refresh(import_legacy=True)
-                self.assertIs(thread.call_args.kwargs["args"][-1], expected)
+                self.assertIs(thread.call_args.kwargs["args"][5], expected)
                 if downloading:
                     self.assertIn("재확인을 건너뛰고", self.window.status_text.get())
 
     def test_closing_history_cancels_poll_without_closing_main_window(self):
         scheduled = self.window._poll_timer
+        self.window._queue_pager_layout()
+        layout = self.window._pager_layout_timer
         self.assertIn(scheduled, self.root.tk.call("after", "info"))
+        self.assertIn(layout, self.root.tk.call("after", "info"))
         self.window.close()
         self.assertNotIn(scheduled, self.root.tk.call("after", "info"))
+        self.assertNotIn(layout, self.root.tk.call("after", "info"))
+        self.assertIsNone(self.window._pager_layout_timer)
         self.assertEqual(self.root.winfo_exists(), 1)
         self.window._poll()  # A late callback is harmless after closing.
         self.window.selection_text.set("late selection text")
@@ -428,6 +671,12 @@ class HistoryGuiTests(unittest.TestCase):
                             if str(widget.cget("textvariable")) == str(self.window.status_text))
         for widget in (self.window.selection_detail, status_label):
             self.assertTrue(widget.winfo_ismapped())
+            # Readable statistics may occupy two rows in a narrow window.
+            # The outer scrollbar then keeps both the selected file and
+            # status reachable while preserving the table's useful height.
+            self.window.content_view._ensure_visible(widget)
+            self.root.update()
+            self.assertGreaterEqual(widget.winfo_rooty(), self.window.winfo_rooty())
             bottom = widget.winfo_rooty() - self.window.winfo_rooty() + widget.winfo_height()
             self.assertLessEqual(bottom, self.window.winfo_height())
 

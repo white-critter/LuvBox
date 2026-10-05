@@ -24,6 +24,7 @@ METADATA_LABELS = {"embedded": "파일에 출처 기록됨", "pending": "출처 
 AUTHOR_METADATA_LABELS = {"embedded": "작성자 기록됨", "pending": "작성자 기록 전", "error": "작성자 기록 실패", "unknown": "작성자 정보 없음"}
 TILES = {"files": "저장한 파일", "posts": "트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "확인된 용량"}
 PAGE_SIZE = 100
+PAGE_SIZES = (50, 100, 200)
 NO_SELECTION = ("표에서 파일을 고르면 출처와 저장 위치가 여기에 나옵니다. 두 번 누르면 파일이 열립니다.\n"
                 "위 검색칸에서 작성자 아이디, 파일명, 트윗 번호로 찾을 수 있습니다.")
 NO_RUN_SELECTION = "실행을 고르면 어떻게 끝났는지 볼 수 있습니다."
@@ -73,7 +74,7 @@ class HistoryWindow(tk.Toplevel):
         width = min(1120, max(860, self.winfo_screenwidth() - 80))
         height = min(860, max(640, self.winfo_screenheight() - 100))
         self.geometry(f"{width}x{height}")
-        self.minsize(min(860, width), min(680, height))
+        self.minsize(min(860, width), min(720, height))
         self.configure(bg=theme.BG)
         self.transient(parent)
         self.get_location = get_location
@@ -81,6 +82,11 @@ class HistoryWindow(tk.Toplevel):
         self.page = 0
         self.displayed_page = 0
         self.has_next_page = False
+        self.total_pages = 0
+        self.run_page = 0
+        self.displayed_run_page = 0
+        self.run_total_pages = 0
+        self.displayed_page_size = PAGE_SIZE
         self.busy = False
         self.metadata_active = False
         self.metadata_stop = threading.Event()
@@ -90,6 +96,8 @@ class HistoryWindow(tk.Toplevel):
         self.closing = False
         self._destroyed = False
         self._poll_timer = None
+        self._pager_layout_timer = None
+        self._pagers = []
         self.loaded_locations = set()
         self.results = queue.Queue()
         self.rows = {}
@@ -98,16 +106,20 @@ class HistoryWindow(tk.Toplevel):
         self.current_storage = None
         self.current_summary = {}
         self.completion_text = ""
-        self.summary_text = tk.StringVar(value="기록을 불러오는 중…")
-        self.tile_values = {key: tk.StringVar(value="–") for key in TILES}
-        self.date_text = tk.StringVar()
-        self.location_text = tk.StringVar()
-        self.status_text = tk.StringVar()
-        self.table_note = tk.StringVar(value="기록을 불러오는 중…")
-        self.selection_text = tk.StringVar(value=NO_SELECTION)
-        self.media_filter = tk.StringVar(value="전체")
-        self.query = tk.StringVar()
-        self.page_text = tk.StringVar()
+        self.summary_text = tk.StringVar(self, value="기록을 불러오는 중…")
+        self.tile_values = {key: tk.StringVar(self, value="–") for key in TILES}
+        self.date_text = tk.StringVar(self)
+        self.location_text = tk.StringVar(self)
+        self.status_text = tk.StringVar(self)
+        self.table_note = tk.StringVar(self, value="기록을 불러오는 중…")
+        self.selection_text = tk.StringVar(self, value=NO_SELECTION)
+        self.media_filter = tk.StringVar(self, value="전체")
+        self.query = tk.StringVar(self)
+        self.page_text = tk.StringVar(self)
+        self.run_page_text = tk.StringVar(self)
+        self.page_size = tk.StringVar(self, value=str(PAGE_SIZE))
+        self.page_input = tk.StringVar(self, value="1")
+        self.run_page_input = tk.StringVar(self, value="1")
         self._build()
         self.wrapping_labels = []
 
@@ -117,14 +129,15 @@ class HistoryWindow(tk.Toplevel):
                     self.wrapping_labels.append(child)
                 collect_labels(child)
         collect_labels(self)
-        self.bind("<Configure>", self._resize_text)
+        self.bind("<Configure>", self._resize_text, add="+")
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._poll_timer = self.after(100, self._poll)
         self.refresh(import_legacy=True)
 
     def _build(self):
-        body = ttk.Frame(self, padding=(22, 16))
-        body.pack(fill="both", expand=True)
+        self.content_view = theme.ScrollableContent(self, padding=(22, 16))
+        self.content_view.pack(fill="both", expand=True)
+        body = self.content_view.content
         body.columnconfigure(0, weight=1)
         body.rowconfigure(4, weight=1)
         heading = ttk.Frame(body)
@@ -137,12 +150,21 @@ class HistoryWindow(tk.Toplevel):
 
         tiles = ttk.Frame(body)
         tiles.grid(row=2, column=0, sticky="ew")
+        self._tile_frame = tiles
+        self._tiles = []
+        self._tile_columns = 6
         for column, (key, caption) in enumerate(TILES.items()):
-            theme.tile(tiles, self.tile_values[key], caption).grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
+            tile = theme.tile(tiles, self.tile_values[key], caption)
+            tile.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
+            self._tiles.append(tile)
+            tile.bind("<Configure>", self._queue_pager_layout)
+            for label in tile.winfo_children():
+                label.bind("<Configure>", self._queue_pager_layout)
             tiles.columnconfigure(column, weight=1, uniform="tile")
+        tiles.bind("<Configure>", self._queue_pager_layout)
         ttk.Label(body, textvariable=self.date_text, style="Muted.TLabel", wraplength=1000, justify="left").grid(row=3, column=0, sticky="w", pady=(8, 10))
 
-        tabs = ttk.Notebook(body)
+        tabs = self.tabs = ttk.Notebook(body)
         tabs.grid(row=4, column=0, sticky="nsew")
         files = ttk.Frame(tabs, padding=(10, 12))
         runs = ttk.Frame(tabs, padding=(10, 12))
@@ -183,11 +205,7 @@ class HistoryWindow(tk.Toplevel):
         ttk.Button(actions, text="트윗 열기", command=self.open_tweet).pack(side="left", padx=8)
         self.backfill_button = ttk.Button(actions, text="출처·작성자 기록", command=self.backfill)
         self.backfill_button.pack(side="left")
-        self.next_button = ttk.Button(actions, text="다음 ▶", command=lambda: self.change_page(1))
-        self.next_button.pack(side="right")
-        self.previous_button = ttk.Button(actions, text="◀ 이전", command=lambda: self.change_page(-1))
-        self.previous_button.pack(side="right", padx=8)
-        ttk.Label(actions, textvariable=self.page_text, style="Muted.TLabel").pack(side="right", padx=8)
+        self._pagination(files, row=2)
         details = ttk.Frame(files, style="Card.TFrame", padding=(14, 8))
         details.grid(row=4, column=0, sticky="ew")
         details.columnconfigure(0, weight=1)
@@ -208,12 +226,87 @@ class HistoryWindow(tk.Toplevel):
                 (160, 160, 110, 90, 90, 90, 100, 220)):
             self.run_tree.heading(key, text=title)
             self.run_tree.column(key, width=width, minwidth=60, stretch=key == "last")
-        self.run_text = tk.StringVar(value=NO_RUN_SELECTION)
+        self.run_text = tk.StringVar(self, value=NO_RUN_SELECTION)
         self.run_tree.bind("<<TreeviewSelect>>", self.select_run)
         run_details = theme.card(runs)
-        run_details.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self._pagination(runs, row=1, runs=True)
+        run_details.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(run_details, textvariable=self.run_text, style="Card.TLabel", wraplength=1000, justify="left").pack(anchor="w")
         ttk.Label(body, textvariable=self.status_text, style="Muted.TLabel", wraplength=1000, justify="left").grid(row=5, column=0, sticky="w", pady=(10, 0))
+
+    def _pagination(self, parent, *, row, runs=False):
+        bar = ttk.Frame(parent)
+        bar.grid(row=row, column=0, sticky="ew", pady=(8, 0))
+        bar.columnconfigure(0, weight=1)
+        info = ttk.Frame(bar)
+        info.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+        navigation = ttk.Frame(bar)
+        navigation.grid(row=0, column=1, sticky="e")
+        text = self.run_page_text if runs else self.page_text
+        value = self.run_page_input if runs else self.page_input
+        ttk.Label(info, textvariable=text, style="Muted.TLabel").pack(side="left")
+        ttk.Label(info, text="개씩", style="Muted.TLabel").pack(side="right")
+        size = ttk.Combobox(info, textvariable=self.page_size, values=[str(v) for v in PAGE_SIZES],
+                            state="readonly", width=4, font=theme.SMALL)
+        size.pack(side="right", padx=(8, 4))
+        size.bind("<<ComboboxSelected>>", lambda _: self.change_page_size())
+        buttons = {}
+        for column, (name, caption, destination) in enumerate(
+                (("first", "처음", 0), ("previous", "이전", -1), ("next", "다음", 1), ("last", "마지막", None))):
+            if name in {"first", "last"}:
+                callback = lambda dest=destination: self.go_page(dest, runs=runs)
+            else:
+                callback = lambda amount=destination: self.change_page(amount, runs=runs)
+            button = ttk.Button(navigation, text=caption, command=callback, width=5, style="Compact.TButton")
+            button.grid(row=0, column=column, padx=2)
+            buttons[name] = button
+        entry = ttk.Entry(navigation, textvariable=value, width=4, justify="center", font=theme.SMALL)
+        entry.grid(row=0, column=4, padx=(8, 4))
+        entry.bind("<Return>", lambda _: self.jump_page(runs=runs))
+        jump = ttk.Button(navigation, text="이동", command=lambda: self.jump_page(runs=runs), width=5, style="Compact.TButton")
+        jump.grid(row=0, column=5)
+        self._pagers.append((bar, info, navigation))
+        bar.bind("<Configure>", self._queue_pager_layout)
+        prefix = "run_" if runs else ""
+        for name, button in buttons.items():
+            setattr(self, prefix + name + "_button", button)
+        setattr(self, prefix + "page_entry", entry)
+        setattr(self, prefix + "jump_button", jump)
+        setattr(self, prefix + "size_combo", size)
+
+    def _queue_pager_layout(self, _=None):
+        if self._pager_layout_timer is None and not self._destroyed:
+            self._pager_layout_timer = self.after_idle(self._layout_pagers)
+
+    def _layout_pagers(self):
+        self._pager_layout_timer = None
+        self._layout_tiles()
+        for bar, info, navigation in self._pagers:
+            if bar.winfo_width() <= 1:
+                continue
+            folded = info.winfo_reqwidth() + navigation.winfo_reqwidth() + 12 > bar.winfo_width()
+            info.grid_configure(columnspan=2 if folded else 1, padx=(0, 0 if folded else 12))
+            navigation.grid_configure(row=1 if folded else 0, column=0 if folded else 1,
+                                      columnspan=2 if folded else 1, pady=(6 if folded else 0, 0))
+
+    def _layout_tiles(self):
+        available = self._tile_frame.winfo_width()
+        if available <= 1:
+            return
+        largest = max(tile.winfo_reqwidth() for tile in self._tiles)
+        columns = next((count for count in (6, 3, 2) if count * largest + (count - 1) * 8 <= available), 1)
+        if columns == self._tile_columns:
+            return
+        self._tile_columns = columns
+        # Empty columns retain their weight after re-gridding unless explicitly
+        # reset; that would steal width from the visible statistics cards.
+        for column in range(6):
+            self._tile_frame.columnconfigure(column, weight=1 if column < columns else 0,
+                                              uniform="tile" if column < columns else "", minsize=0)
+        for index, tile in enumerate(self._tiles):
+            row, column = divmod(index, columns)
+            tile.grid_configure(row=row, column=column,
+                                padx=(8 if column else 0, 0), pady=(8 if row else 0, 0))
 
     def _resize_text(self, event):
         if event.widget is self:
@@ -229,7 +322,7 @@ class HistoryWindow(tk.Toplevel):
         frame.grid(row=row, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
         frame.rowconfigure(0, weight=1)
-        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=8)
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse", height=3)
         tree.grid(row=0, column=0, sticky="nsew")
         vertical = ttk.Scrollbar(frame, command=tree.yview)
         vertical.grid(row=0, column=1, sticky="ns")
@@ -257,21 +350,65 @@ class HistoryWindow(tk.Toplevel):
 
     def _update_controls(self):
         ready = not self.busy and self.current_storage is not None
-        page_ready = ready and self.page == self.displayed_page
-        self.previous_button.configure(state="normal" if page_ready and self.page else "disabled")
-        self.next_button.configure(state="normal" if page_ready and self.has_next_page else "disabled")
+        for runs in (False, True):
+            prefix = "run_" if runs else ""
+            page = self.run_page if runs else self.page
+            displayed = self.displayed_run_page if runs else self.displayed_page
+            pages = self.run_total_pages if runs else self.total_pages
+            page_ready = ready and page == displayed and self._page_size() == self.displayed_page_size
+            for name in ("first", "previous"):
+                getattr(self, prefix + name + "_button").configure(state="normal" if page_ready and page else "disabled")
+            for name in ("next", "last"):
+                getattr(self, prefix + name + "_button").configure(state="normal" if page_ready and page + 1 < pages else "disabled")
+            for name in ("page_entry", "jump_button"):
+                getattr(self, prefix + name).configure(state="normal" if page_ready and pages else "disabled")
         self.export_button.configure(state="normal" if ready else "disabled")
         self.backfill_button.configure(state="normal" if ready else "disabled")
+
+    def _page_size(self):
+        try:
+            size = int(self.page_size.get())
+        except ValueError:
+            return PAGE_SIZE
+        return size if size in PAGE_SIZES else PAGE_SIZE
 
     def search(self):
         self.page = 0
         self.refresh()
 
-    def change_page(self, amount):
-        if self.busy or self.page != self.displayed_page:
-            return
-        self.page = max(0, self.page + amount)
+    def change_page_size(self):
+        self.page = self.run_page = 0
         self.refresh()
+
+    def change_page(self, amount, *, runs=False):
+        current = self.run_page if runs else self.page
+        self.go_page(current + amount, runs=runs)
+
+    def go_page(self, page, *, runs=False):
+        current = self.run_page if runs else self.page
+        displayed = self.displayed_run_page if runs else self.displayed_page
+        pages = self.run_total_pages if runs else self.total_pages
+        if self.busy or current != displayed or self._page_size() != self.displayed_page_size or not pages:
+            return
+        page = pages - 1 if page is None else min(max(0, page), pages - 1)
+        if page == current:
+            return
+        if runs:
+            self.run_page = page
+        else:
+            self.page = page
+        self.refresh()
+
+    def jump_page(self, *, runs=False):
+        value = self.run_page_input if runs else self.page_input
+        current = self.displayed_run_page if runs else self.displayed_page
+        try:
+            page = int(value.get().strip()) - 1
+        except ValueError:
+            value.set(str(current + 1))
+            return
+        self.go_page(page, runs=runs)
+        value.set(str((self.run_page if runs else self.page) + 1))
 
     def refresh(self, *, import_legacy=False):
         if self.busy:
@@ -284,7 +421,7 @@ class HistoryWindow(tk.Toplevel):
             self.current_account_dir = None
             self.current_storage = None
             self.completion_text = ""
-            self.page = 0
+            self.page = self.run_page = 0
             self.location_text.set("")
             self._display({}, [], [])
             self.status_text.set("먼저 메인 화면에 X 아이디와 저장 폴더를 입력해 주세요.")
@@ -293,7 +430,7 @@ class HistoryWindow(tk.Toplevel):
         location = directory
         directory = location.record_dir if isinstance(location, StoragePaths) else Path(location)
         if directory != self.current_account_dir:
-            self.page = 0
+            self.page = self.run_page = 0
             self.completion_text = ""
             # A media identity or run ID is local to its account catalog.
             # Clear the previous catalog before accepting the new snapshot.
@@ -317,13 +454,14 @@ class HistoryWindow(tk.Toplevel):
         query = self.query.get().strip()
         if re.fullmatch(r"@[A-Za-z0-9_]{1,15}", query):
             query = query[1:]
-        threading.Thread(target=self._load, args=(generation, location, kind, query, self.page, do_import), daemon=True).start()
+        threading.Thread(target=self._load, args=(generation, location, kind, query, self.page, do_import,
+                                                 self._page_size(), self.run_page), daemon=True).start()
 
     @staticmethod
     def _store(location):
         return HistoryStore.for_storage(location) if isinstance(location, StoragePaths) else HistoryStore(location)
 
-    def _load(self, generation, directory, kind, query, page, do_import):
+    def _load(self, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0):
         store = None
         try:
             store = self._store(directory)
@@ -331,8 +469,9 @@ class HistoryWindow(tk.Toplevel):
             def snapshot(warnings):
                 summary = store.summary()
                 summary["warnings"] = warnings
-                rows = store.records(limit=PAGE_SIZE + 1, offset=page * PAGE_SIZE, media_type=kind, query=query)
-                return store.account_dir, summary, rows, store.runs(limit=30), page
+                files = store.record_page(page, page_size, kind, query)
+                runs = store.run_page(run_page, page_size)
+                return store.account_dir, summary, files["rows"], runs["rows"], files["page"], files, runs
 
             if do_import:
                 # Show what the catalog already holds at once. Re-checking every
@@ -366,6 +505,8 @@ class HistoryWindow(tk.Toplevel):
                     self.status_text.set(result)
                     continue
                 if kind == "preview":
+                    if self.pending:
+                        continue
                     self._display(*result[1:], scanning=True)
                     self.status_text.set("폴더의 파일을 다시 확인하는 중입니다… 그동안 지금까지의 기록을 먼저 보여 드립니다.")
                     continue
@@ -380,7 +521,8 @@ class HistoryWindow(tk.Toplevel):
                 if kind == "loaded":
                     directory, *snapshot = result
                     self.loaded_locations.add(directory)
-                    self._display(*snapshot)
+                    if not self.pending:
+                        self._display(*snapshot)
                 else:
                     self.status_text.set(result)
                     if kind == "backfilled":
@@ -399,7 +541,7 @@ class HistoryWindow(tk.Toplevel):
         if self.winfo_exists():
             self._poll_timer = self.after(120, self._poll)
 
-    def _display(self, summary, records, runs, page=None, *, scanning=False):
+    def _display(self, summary, records, runs, page=None, file_paging=None, run_paging=None, *, scanning=False):
         self.current_summary = summary
         files = summary.get("files", 0) or 0
         values = {"files": files, "posts": summary.get("posts", 0) or 0, "photo": summary.get("photo", 0) or 0,
@@ -423,7 +565,8 @@ class HistoryWindow(tk.Toplevel):
         selected_identity = self._record_identity(selected) if selected else None
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
-        for index, row in enumerate(records[:PAGE_SIZE]):
+        page_size = file_paging["page_size"] if file_paging else self._page_size()
+        for index, row in enumerate(records[:page_size]):
             key = str(index)
             self.rows[key] = row
             posted = format_short(row.get("posted_at"))
@@ -448,11 +591,13 @@ class HistoryWindow(tk.Toplevel):
         else:
             self._show_table_note("아직 저장한 파일이 없습니다.\n메인 화면에서 ‘저장 시작’을 누르면 여기에 쌓입니다.")
         self.displayed_page = self.page if page is None else page
-        self.has_next_page = len(records) > PAGE_SIZE
-        self._update_controls()
-        start = self.displayed_page * PAGE_SIZE
-        shown = len(records[:PAGE_SIZE])
-        self.page_text.set(f"{start + 1:,}–{start + shown:,}번째" if shown else "")
+        self.displayed_page_size = page_size
+        total = file_paging["total"] if file_paging else len(records)
+        self.total_pages = file_paging["pages"] if file_paging else (total + page_size - 1) // page_size
+        self.page = self.displayed_page
+        self.has_next_page = self.displayed_page + 1 < self.total_pages
+        self.page_text.set(f"총 {total:,}개 · {self.displayed_page + 1 if total else 0} / {self.total_pages:,}페이지")
+        self.page_input.set(str(self.displayed_page + 1))
         run_selection = self.run_tree.selection()
         selected_run = self.run_rows.get(run_selection[0]) if run_selection else None
         selected_run_id = selected_run.get("id") if selected_run else None
@@ -469,6 +614,14 @@ class HistoryWindow(tk.Toplevel):
                 self.run_tree.selection_set(key)
                 self.run_tree.focus(key)
                 self.run_tree.see(key)
+        run_total = run_paging["total"] if run_paging else len(runs)
+        self.run_total_pages = run_paging["pages"] if run_paging else (run_total + page_size - 1) // page_size
+        self.displayed_run_page = run_paging["page"] if run_paging else self.run_page
+        self.run_page = self.displayed_run_page
+        self.run_page_text.set(f"총 {run_total:,}회 · {self.displayed_run_page + 1 if run_total else 0} / {self.run_total_pages:,}페이지")
+        self.run_page_input.set(str(self.displayed_run_page + 1))
+        self._queue_pager_layout()
+        self._update_controls()
         warning = " ".join(summary.get("warnings", []))
         self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") +
                              f"파일 안에 출처가 기록된 파일 {summary.get('embedded_sources', 0):,}개 · 작성자까지 기록된 파일 {summary.get('embedded_authors', 0):,}개")
@@ -676,6 +829,9 @@ class HistoryWindow(tk.Toplevel):
             return
         self._destroyed = True
         self.selection_text.trace_remove("write", self._selection_trace)
+        if self._pager_layout_timer is not None:
+            self.tk.call("after", "cancel", self._pager_layout_timer)
+            self._pager_layout_timer = None
         if self._poll_timer is not None:
             self.tk.call("after", "cancel", self._poll_timer)
             self._poll_timer = None

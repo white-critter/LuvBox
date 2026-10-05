@@ -354,11 +354,50 @@ class GuiTests(unittest.TestCase):
     def test_narrow_window_wraps_option_summary_inside_its_column(self):
         self.root.attributes("-alpha", 0)
         self.root.geometry("780x880")
+        self.app.folder_mode.set("작성자별 폴더")
+        self.app.separate_accounts.set(True)
+        self.app.max_video_mb.set("100000")
+        self.app.scan_mode.set("전체 목록 다시 확인")
+        self.app.option_summary.set(self.app.option_summary.get() + " · 미디어 옵션을 바꿔 전체 목록을 다시 확인합니다.")
         self.root.deiconify()
         self.root.update()
         label = self.app.option_summary_label
         self.assertLessEqual(label.winfo_reqwidth(), label.winfo_width() + 2)
         self.assertGreater(label.winfo_height(), 25)
+
+    def test_narrow_form_aligns_fields_and_preserves_folder_input_space(self):
+        self.root.attributes("-alpha", 0)
+        self.root.geometry("780x880")
+        self.root.deiconify()
+        self.root.update()
+        account, folder = self.app.account_entry, self.app.folder_entry
+        self.assertEqual(account.winfo_rootx(), folder.winfo_rootx())
+        self.assertGreater(folder.winfo_width(), account.winfo_width())
+        self.assertGreater(folder.winfo_width(), 300)
+        for widget in (account, folder, self.app.login_button, self.app.options_button):
+            self.assertGreaterEqual(widget.winfo_rootx(), self.root.winfo_rootx())
+            right = widget.winfo_rootx() - self.root.winfo_rootx() + widget.winfo_width()
+            self.assertLessEqual(right, self.root.winfo_width())
+
+    def test_large_font_login_instructions_fit_the_popup(self):
+        original_scaling = self.root.tk.call("tk", "scaling")
+        self.addCleanup(self.root.tk.call, "tk", "scaling", original_scaling)
+        self.root.tk.call("tk", "scaling", 2.0)
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.app.show_connect()
+        window = self.app.connect_window
+        window.attributes("-alpha", 0)
+        window.update()
+        view = window.content_view
+        labels = [widget for widget in self.app.token_controls.winfo_children()
+                  if widget.winfo_class() == "TLabel"]
+        for label in labels:
+            self.assertLessEqual(label.winfo_reqwidth(), label.winfo_width() + 2)
+            right = label.winfo_rootx() - window.winfo_rootx() + label.winfo_width()
+            self.assertLessEqual(right, window.winfo_width())
+        self.assertGreater(self.app.token_entry.winfo_width(), 250)
+        self.assertGreaterEqual(view.content.winfo_height(), view.content.winfo_reqheight())
 
     def test_short_screen_keeps_full_log_reachable_and_wheel_scrolls(self):
         window = tk.Toplevel(self.root)

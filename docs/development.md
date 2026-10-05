@@ -10,7 +10,8 @@ VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니
 | --- | --- |
 | `entry.py` | GUI·worker·예약 실행(`--run-saved`)·자체 점검 실행 |
 | `xlikesaver/gui.py` | 메인 화면·로그인 연결 창·저장 옵션 창·사용 방법·작업 진행 |
-| `xlikesaver/theme.py` | 공통 글꼴·색·둥근 카드·버튼·스위치·작은 화면 스크롤 |
+| `xlikesaver/theme.py` | 공통 글꼴·색·부모 배경을 맞춘 둥근 카드·버튼·탭·작은 화면 스크롤 |
+| `xlikesaver/fonts.py` | 번들 Pretendard를 Windows 프로세스 안에서 등록(시스템 설치 없음) |
 | `xlikesaver/history_gui.py` | 기록·통계 화면(먼저 DB 내용을 보여 주고 폴더 재확인은 뒤에서)·출처·작성자 기록 |
 | `xlikesaver/core.py` | 수집·다운로드·완료 기록·빠른 확인·gallery-dl 호환성 검사 |
 | `xlikesaver/storage.py` | 미디어·기록 경로·이전 DB 복사·저장 경로 잠금 |
@@ -22,11 +23,11 @@ VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니
 | `xlikesaver/scheduled.py` | 작업 스케줄러용 무인 실행·실행 기록 |
 | `build.ps1`, `tools/package_release.py` | 버전이 붙은 단일 exe·소스 포함 ZIP 제작 |
 
-`build.ps1`은 `--onefile --windowed`로 빌드합니다. Python/Tk와 전체 ExifTool 런타임을 포함하며 실행 시 임시 폴더에 풉니다. worker는 부모 앱이 살아 있는 동안 같은 임시 도구를 사용합니다. 사용자 사진과 기록, 설정, 인증정보는 실행 파일 밖에 남습니다. [PyInstaller 배포 방식](https://pyinstaller.org/en/stable/operating-mode.html)
+`build.ps1`은 `--onefile --windowed`로 빌드합니다. Python/Tk, Pretendard Regular/Bold와 전체 ExifTool 런타임을 포함하며 실행 시 임시 폴더에 풉니다. worker는 부모 앱이 살아 있는 동안 같은 임시 도구를 사용합니다. 사용자 사진과 기록, 설정, 인증정보는 실행 파일 밖에 남습니다. [PyInstaller 배포 방식](https://pyinstaller.org/en/stable/operating-mode.html)
 
 worker는 gallery-dl의 비공개 함수 몇 개(`TwitterExtractor._extract_media`, `DownloadJob.handle_url`, `HttpDownloader.receive` 등)를 감싸서 동작합니다. `core.check_gallery_hooks()`가 요청을 보내기 전에 이 함수들의 이름과 매개변수를 확인하고, 다르면 바로 중단합니다. 자체 점검(`--self-test`)도 같은 검사를 합니다. X 변경 때문에 gallery-dl을 올릴 때는 이 검사와 `tests/test_media.py`의 실제 추출 함수 테스트가 통과하는지 먼저 확인하세요.
 
-둥근 컨트롤은 앱에서 만든 PNG를 ttk 이미지 요소로 사용합니다. 새 UI 라이브러리나 실행 중 다운로드는 필요하지 않습니다. 글꼴 크기는 유지하고 창이 작으면 메인 화면을 스크롤합니다. [Tk 이미지 요소](https://www.tcl-lang.org/man/tcl8.5/TkCmd/ttk_image.htm)
+둥근 컨트롤은 앱에서 만든 PNG를 ttk 이미지 요소로 사용합니다. 새 UI 라이브러리나 실행 중 다운로드는 필요하지 않습니다. Pretendard 1.3.9 정적 TrueType Regular/Bold를 `assets/fonts/Pretendard`에서 읽고 `AddFontResourceExW(FR_PRIVATE)`로 등록합니다. 시스템 글꼴은 바꾸지 않으며 등록 실패 시 맑은 고딕으로 표시합니다. 폰트 원본 URL·SHA256과 OFL 라이선스도 함께 보관합니다. 글꼴 크기는 유지하고 창이 작으면 메인 화면을 스크롤합니다. [Tk 이미지 요소](https://www.tcl-lang.org/man/tcl8.5/TkCmd/ttk_image.htm)
 
 ## 로그인
 
@@ -45,6 +46,8 @@ cookies.txt는 Netscape 형식으로 X 사이트의 쿠키만 내보내 지정�
 앱은 계정별 마지막 기록 위치를 설정의 `record_locations`에 보관합니다. 폴더 선택 또는 Enter·저장 시작·기록 보기를 누른 후 경로가 바뀌면 원본과 새 경로를 잠그고 SQLite 읽기 전용 backup으로 기록을 준비합니다. 목적지에 기록이 있으면 archive·상세 내역·실행 이력을 합쳐 검증한 후 계정 기록 폴더를 교체합니다. 중간에 종료되면 이전 기록 폴더를 복구하며, 실패한 경우 이전 설정을 유지합니다. 요청 제한 중에도 이 로컬 작업은 가능하며 제한 대기 기록은 유지합니다.
 
 기존 미디어를 이동하지 않습니다. 이전에 선택한 루트와 정확히 기록된 파일 경로만 파일 열기·출처 기록에 허용하고, 신규 다운로드는 현재 저장 루트 안에서만 진행합니다. 여러 번 경로를 바꾸거나 이전 위치로 돌아와도 알려진 파일·실행 기록이 중복되지 않게 합칩니다. 이전 폴더가 없으면 사용자에게 새 폴더에서 시작할지 확인합니다. 동의한 경우 계정·목적지 잠금을 확보해 기존 목적지 기록을 보존하며 초기화합니다. 이전 기록을 가져오지 못하므로 중복 다운로드될 수 있습니다. 이전 드라이브를 다시 연결해 앱에서 선택하면 양쪽 기록을 합칠 수 있습니다. 손상된 DB나 경로 검증 실패는 이 선택으로 우회하지 않습니다. OS 잠금은 이 앱의 작업끼리 보호하며, 다른 도구가 DB를 수정하는 동안의 임의 변경까지 제어하지는 않습니다.
+
+파일·실행 목록은 페이지당 50/100/200개를 조회합니다. 파일 검색 조건을 적용한 총수와 페이지 목록은 짧은 SQLite 읽기 트랜잭션에서 함께 읽고, 범위를 벗어난 페이지는 마지막 페이지로 보정합니다. 파일 정렬에는 저장 방식과 미디어 유형을 포함해 같은 시각의 행도 안정적으로 나눕니다. 조회 중 검색이 바뀌면 이전 결과를 표시하지 않고 최신 조건을 다시 조회합니다.
 
 SQLite WAL과 `synchronous=FULL`을 사용합니다. 기록 창의 폴더 재확인은 파일을 트랜잭션 밖에서 읽고 200건씩 짧게 커밋하므로, 같은 기록 DB를 쓰는 다운로드 worker가 잠금 대기로 실패하지 않습니다. 다운로드 중에는 기록 창이 폴더 재확인 자체를 건너뜁니다. 비정상 종료 기록은 다음 worker가 계정 잠금을 확보한 뒤 중단됨으로 정리합니다. 모르는 종료 시각을 만들어 넣지 않습니다. 하드웨어 고장·정전의 완전 복구, 손상 DB 자동 복구, 완료 파일 전체 해시·디코더 검증은 제공하지 않습니다. 옮기거나 지운 완료 파일도 중복 방지 기록에 남아 있으면 자동으로 다시 받지 않습니다.
 
