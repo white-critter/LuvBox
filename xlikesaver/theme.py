@@ -7,6 +7,7 @@ nine-slice element support and stay alive for the whole Tk interpreter.
 
 import math
 import struct
+import sys
 import time
 import tkinter as tk
 from tkinter import ttk
@@ -332,6 +333,9 @@ def apply_style(root: tk.Misc, mode=None) -> None:
     configure("CompactPrimary.TButton", font=SMALL, padding=(8, 5))
     style.layout("CompactPrimary.TButton", style.layout("Primary.TButton"))
     style.map("CompactPrimary.TButton", foreground=[("disabled", PRIMARY_INK), ("!disabled", PRIMARY_INK)])
+    configure("DialogPrimary.TButton", font=BOLD, padding=(18, 8), foreground=PRIMARY_INK)
+    style.layout("DialogPrimary.TButton", style.layout("Primary.TButton"))
+    style.map("DialogPrimary.TButton", foreground=[("disabled", PRIMARY_INK), ("!disabled", PRIMARY_INK)])
     style.layout("TEntry", [("Soft.Entry", {"sticky": "nsew", "children": [
         ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
     style.layout("TSpinbox", [("Soft.Entry", {"sticky": "nsew", "children": [
@@ -409,6 +413,9 @@ def _bind_surfaces(root, style):
 
     def mapped(event):
         widget = event.widget
+        if isinstance(widget, (tk.Tk, tk.Toplevel)):
+            # Windows creates the title bar when a window is first shown.
+            title_bar(widget, mode(owner))
         _refresh_classic(widget, mode(owner))
         if not isinstance(widget, ttk.Widget):
             return
@@ -434,6 +441,34 @@ def _bind_surfaces(root, style):
 
     owner._xlikesaver_surface_binding = mapped
     root.bind_all("<Map>", mapped, add="+")
+
+
+def title_bar(window, selected) -> bool:
+    """Ask Windows 10/11 to draw this window's title bar dark or light.
+
+    Returns False where the system has no such option (older Windows, other
+    platforms) or the window has no frame yet; it is applied again when shown.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        frame = int(window.wm_frame(), 16)
+        if not frame:
+            return False
+        hwnd = ctypes.c_void_p(frame)
+        value = ctypes.c_int(1 if selected == "dark" else 0)
+        set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        # DWMWA_USE_IMMERSIVE_DARK_MODE is 20, or 19 before Windows 10 20H1.
+        if all(set_attribute(hwnd, key, ctypes.byref(value), ctypes.sizeof(value)) != 0 for key in (20, 19)):
+            return False
+        # Repaint the frame now rather than at the next focus change.
+        nosize, nomove, nozorder, noactivate, framechanged = 0x1, 0x2, 0x4, 0x10, 0x20
+        ctypes.windll.user32.SetWindowPos(hwnd, None, 0, 0, 0, 0,
+                                          nosize | nomove | nozorder | noactivate | framechanged)
+        return True
+    except (tk.TclError, OSError, AttributeError, ValueError):
+        return False
 
 
 def _refresh_classic(widget, selected):
@@ -482,6 +517,8 @@ def _refresh_widgets(owner, selected):
     pending = [owner]
     while pending:
         widget = pending.pop()
+        if isinstance(widget, (tk.Tk, tk.Toplevel)):
+            title_bar(widget, selected)
         _refresh_classic(widget, selected)
         if binding and isinstance(widget, ttk.Widget):
             binding(SimpleNamespace(widget=widget))

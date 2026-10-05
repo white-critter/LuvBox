@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime
 from functools import partial
 import os
@@ -11,12 +11,12 @@ import queue
 import re
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 import webbrowser
 
 from PIL import ImageTk
 
-from . import theme
+from . import dialogs, theme
 from .history import HistoryStore
 from .preview import PreviewLoader
 from .storage import OutputGuard, StoragePaths
@@ -29,6 +29,7 @@ AUTHOR_METADATA_LABELS = {"embedded": "작성자 기록됨", "pending": "작성�
 TILES = {"files": "저장한 파일", "posts": "트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "확인된 용량"}
 PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
+GIF_SIZE_LABELS = {"original": "원본 크기", "720": "최대 720px · 초당 15장", "480": "최대 480px · 초당 12장"}
 NO_SELECTION = ("표에서 파일을 고르면 미리보기와 출처를 볼 수 있습니다. 두 번 누르면 파일이 열립니다.\n"
                 "위 검색칸에서 작성자 아이디, 파일명, 트윗 번호로 찾을 수 있습니다.")
 NO_RUN_SELECTION = "실행을 고르면 어떻게 끝났는지 볼 수 있습니다."
@@ -71,7 +72,8 @@ def format_day(value: str | None) -> str:
 
 
 class HistoryWindow(tk.Toplevel):
-    def __init__(self, parent, get_location, is_downloading=lambda: False):
+    def __init__(self, parent, get_location, is_downloading=lambda: False,
+                 get_gif_options=lambda: ("original", 200)):
         super().__init__(parent)
         theme.apply_style(self)
         self.title("XlikeSaver · 기록과 통계")
@@ -83,6 +85,8 @@ class HistoryWindow(tk.Toplevel):
         self.transient(parent)
         self.get_location = get_location
         self.is_downloading = is_downloading
+        # (GIF size preset, media size limit in MB) chosen in save options.
+        self.get_gif_options = get_gif_options
         self.page = 0
         self.displayed_page = 0
         self.has_next_page = False
@@ -213,6 +217,9 @@ class HistoryWindow(tk.Toplevel):
             self.tree.column(key, width=width, minwidth=60, stretch=key == "filename")
         self.tree.bind("<<TreeviewSelect>>", self.select_record)
         self.tree.bind("<Double-1>", lambda _: self.open_file())
+        self._file_columns = columns
+        self._shown_columns = columns
+        self.tree.bind("<Configure>", lambda _: self._layout_columns(), add="+")
         self.table_message = ttk.Label(self.tree.master, textvariable=self.table_note, style="CardMuted.TLabel",
                                        justify="center", font=theme.BODY)
         self.preview_card = ttk.Frame(self.file_browser, style="Card.TFrame", padding=12)
@@ -237,6 +244,8 @@ class HistoryWindow(tk.Toplevel):
         ttk.Button(actions, text="트윗 열기", command=self.open_tweet).pack(side="left", padx=8)
         self.backfill_button = ttk.Button(actions, text="출처·작성자 기록", command=self.backfill)
         self.backfill_button.pack(side="left")
+        self.convert_button = ttk.Button(actions, text="MP4 GIF를 GIF로", command=self.convert_gifs)
+        self.convert_button.pack(side="left", padx=(8, 0))
         self._pagination(files, row=2)
         details = ttk.Frame(files, style="Card.TFrame", padding=(14, 8))
         details.grid(row=4, column=0, sticky="ew")
@@ -360,6 +369,32 @@ class HistoryWindow(tk.Toplevel):
         self.preview_info.grid(row=1 if side else 0, column=0 if side else 1, sticky="nw",
                                padx=(0 if side else 16, 0), pady=(10 if side else 0, 0))
 
+    # Columns hidden first when the table is narrower than its contents; the
+    # selected file's details still show them. A cut-off file name is worse.
+    OPTIONAL_COLUMNS = ("saved", "size")
+
+    def _column_need(self, key):
+        if key == "filename":
+            sample = "1840025000000000000_gif_1.gif"
+            return int(self.tk.call("font", "measure", theme.SMALL, sample)) + 24
+        return int(self.tree.column(key, "width"))
+
+    def _layout_columns(self):
+        # Until the window is laid out, its content takes the table's own
+        # requested width, which hiding a column changes. Decide only from the
+        # window's actual width, which the table cannot affect.
+        available = self.tree.winfo_width()
+        if available <= 1 or not self.winfo_viewable() or self.content_view.canvas.winfo_width() <= 1:
+            return
+        shown = list(self._file_columns)
+        for key in self.OPTIONAL_COLUMNS:
+            if sum(self._column_need(column) for column in shown) <= available:
+                break
+            shown.remove(key)
+        if tuple(shown) != self._shown_columns:
+            self._shown_columns = tuple(shown)
+            self.tree.configure(displaycolumns=shown)
+
     def _layout_tiles(self):
         available = self._tile_frame.winfo_width()
         if available <= 1:
@@ -447,6 +482,9 @@ class HistoryWindow(tk.Toplevel):
         self._queue_pager_layout()
         self.export_button.configure(state="normal" if ready else "disabled")
         self.backfill_button.configure(state="normal" if ready else "disabled")
+        mp4_gifs = int(self.current_summary.get("mp4_gifs", 0) or 0)
+        self.convert_button.configure(text=f"MP4 GIF {mp4_gifs:,}개를 GIF로" if mp4_gifs else "MP4 GIF를 GIF로",
+                                      state="normal" if ready and mp4_gifs else "disabled")
 
     def _page_size(self):
         try:
@@ -606,7 +644,7 @@ class HistoryWindow(tk.Toplevel):
                 generation, kind, result = self.results.get_nowait()
                 if generation != self.generation:
                     continue
-                if kind == "metadata-progress":
+                if kind in {"metadata-progress", "convert-progress"}:
                     self.status_text.set(result)
                     continue
                 if kind == "preview":
@@ -630,7 +668,7 @@ class HistoryWindow(tk.Toplevel):
                         self._display(*snapshot)
                 else:
                     self.status_text.set(result)
-                    if kind == "backfilled":
+                    if kind in {"backfilled", "converted"}:
                         self.completion_text = result
                     elif kind == "error" and not self.tree.get_children():
                         self._show_table_note("기록을 읽지 못했습니다.\n아래 안내를 확인해 주세요.")
@@ -639,7 +677,7 @@ class HistoryWindow(tk.Toplevel):
                     self.pending = False
                     do_import, self.pending_import = self.pending_import, False
                     self.refresh(import_legacy=do_import)
-                elif kind == "backfilled":
+                elif kind in {"backfilled", "converted"}:
                     self.refresh()
         except queue.Empty:
             pass
@@ -749,6 +787,7 @@ class HistoryWindow(tk.Toplevel):
             self.selection_text.set(NO_SELECTION)
             return
         source = "트윗 번호로 추정" if row.get("posted_source") == "id_estimate" else "X 목록"
+        saved = format_short(row.get("saved_at"))
         metadata = METADATA_LABELS.get(row.get("metadata_status"), "출처 기록 전")
         author_status = AUTHOR_METADATA_LABELS.get(row.get("author_metadata_status"), "작성자 기록 전")
         if not row.get("author") and not row.get("author_id"):
@@ -760,7 +799,7 @@ class HistoryWindow(tk.Toplevel):
             f"작성자  {author}\n"
             f"트윗     {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n"
             f"파일     {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}\n"
-            f"파일 안 기록: {metadata} · {author_status} · 게시일 출처: {source}")
+            f"저장한 때 {saved if saved != '–' else '알 수 없음'} · 파일 안 기록: {metadata} · {author_status} · 게시일 출처: {source}")
 
     def _start_preview(self, row, *, force=False):
         key = (str(self.current_account_dir), row.get("path")) if row else None
@@ -823,12 +862,12 @@ class HistoryWindow(tk.Toplevel):
             except Exception:
                 permitted = False
         if not permitted or path is None or not path.is_file():
-            messagebox.showinfo("파일 위치 확인", "파일을 찾지 못했습니다. 이동·삭제되었거나 이전 다운로드 기록에 위치가 남아 있지 않습니다.", parent=self)
+            dialogs.showinfo("파일 위치 확인", "파일을 찾지 못했습니다. 이동·삭제되었거나 이전 다운로드 기록에 위치가 남아 있지 않습니다.", parent=self)
             return
         try:
             os.startfile(str(path))
         except OSError:
-            messagebox.showerror("파일 열기 실패", "이 파일을 여는 프로그램과 파일 접근 권한을 확인해 주세요.", parent=self)
+            dialogs.showerror("파일 열기 실패", "이 파일을 여는 프로그램과 파일 접근 권한을 확인해 주세요.", parent=self)
 
     def open_tweet(self):
         row = self.selected()
@@ -840,7 +879,7 @@ class HistoryWindow(tk.Toplevel):
             return
         archives = self.current_summary.get("archivepaths", [])
         archive_text = "\n".join(map(str, archives)) or "아직 다운로드 기록 파일이 없습니다."
-        messagebox.showinfo("기록 저장 위치", f"기록·통계:\n{self.current_account_dir / '.xlikesaver-history.sqlite3'}\n\n중복 방지:\n{archive_text}\n\n기록은 계정별로 관리합니다. 저장 폴더의 .xlikesaver 폴더를 지우면 앱이 저장 내역을 잊습니다. 파일 목록은 저장 시각 순서이며 예전 저장 시각은 알 수 없습니다.", parent=self)
+        dialogs.showinfo("기록 저장 위치", f"기록·통계:\n{self.current_account_dir / '.xlikesaver-history.sqlite3'}\n\n중복 방지:\n{archive_text}\n\n기록은 계정별로 관리합니다. 저장 폴더의 .xlikesaver 폴더를 지우면 앱이 저장 내역을 잊습니다. 파일 목록은 저장 시각 순서이며 예전 저장 시각은 알 수 없습니다.", parent=self)
 
     def export(self):
         if self.busy or self.current_account_dir is None:
@@ -858,30 +897,166 @@ class HistoryWindow(tk.Toplevel):
         if self.busy or self.current_account_dir is None:
             return
         if self.is_downloading():
-            messagebox.showinfo("다운로드 진행 중", "저장 작업이 끝난 뒤 출처·작성자를 기록해 주세요. 이 작업은 X에 요청하지 않습니다.", parent=self)
+            dialogs.showinfo("다운로드 진행 중", "저장 작업이 끝난 뒤 출처·작성자를 기록해 주세요. 이 작업은 X에 요청하지 않습니다.", parent=self)
             return
         from .metadata import available
         if not available():
-            messagebox.showinfo("출처 기록 도구 없음", "배포 파일을 다시 받아주세요. 개발 중이면 setup.ps1을 실행해 주세요.", parent=self)
+            dialogs.showinfo("출처 기록 도구 없음", "배포 파일을 다시 받아주세요. 개발 중이면 setup.ps1을 실행해 주세요.", parent=self)
             return
-        if not messagebox.askyesno(
+        if not dialogs.askyesno(
                 "출처·작성자 기록",
                 "예전에 받은 파일 안에 트윗 주소와 작성자를 기록합니다.\n\n"
                 "· 화질은 그대로이며 X에 요청하지 않습니다.\n"
                 "· 파일을 다시 쓰므로 Google Drive·OneDrive 폴더라면 다시 올라갈 수 있습니다.\n"
                 "· 이미 기록된 파일은 건너뜁니다. 중간에 멈춰도 됩니다.\n\n계속할까요?", parent=self):
             return
+        self._start_local_job("출처·작성자 기록 중단", "출처와 작성자를 기록하는 중입니다… 화질은 그대로이며 X에 요청하지 않습니다.")
+        threading.Thread(target=partial(HistoryWindow._backfill_worker, self.results, self.metadata_stop),
+                         args=(self.generation, self.current_storage), daemon=True).start()
+
+    def _start_local_job(self, stop_text, status):
+        """Start one local file job (metadata or GIF conversion) at a time."""
         self.completion_text = ""
         self.busy = True
         self._update_controls()
         self.metadata_active = True
         self.metadata_stop.clear()
-        self.source_stop_button.configure(state="normal")
+        self.source_stop_button.configure(text=stop_text, state="normal")
         self.source_stop_button.pack(side="right", padx=(0, 8))
         self.generation += 1
-        self.status_text.set("출처와 작성자를 기록하는 중입니다… 화질은 그대로이며 X에 요청하지 않습니다.")
-        threading.Thread(target=partial(HistoryWindow._backfill_worker, self.results, self.metadata_stop),
-                         args=(self.generation, self.current_storage), daemon=True).start()
+        self.status_text.set(status)
+
+    def convert_gifs(self):
+        count = int(self.current_summary.get("mp4_gifs", 0) or 0)
+        if self.busy or self.current_storage is None or not count:
+            return
+        if self.is_downloading():
+            dialogs.showinfo("저장 진행 중", "저장 작업이 끝난 뒤 GIF로 바꿔 주세요.", parent=self)
+            return
+        from .media import ffmpeg_path
+        if ffmpeg_path() is None:
+            dialogs.showinfo("GIF 변환 도구 없음", "배포 파일을 다시 받아 주세요. 개발 중이면 setup.ps1을 실행해 주세요.", parent=self)
+            return
+        size, max_mb = self.get_gif_options()
+        if not dialogs.askyesno(
+                "MP4 GIF를 GIF로 바꾸기",
+                f"MP4로 저장된 움직이는 GIF {count:,}개를 .gif 파일로 바꿉니다.\n\n"
+                f"· GIF 크기: {GIF_SIZE_LABELS.get(size, size)} (저장 옵션에서 바꿀 수 있습니다)\n"
+                "· GIF는 보통 MP4보다 용량이 몇 배 커집니다. 영상 용량 제한을 넘는 파일은 MP4로 둡니다.\n"
+                "· 바꾼 파일의 원본 MP4는 휴지통으로 옮깁니다. 휴지통이 없는 위치의 파일은 바꾸지 않습니다.\n"
+                "· Google Drive·OneDrive 폴더라면 새 GIF가 다시 올라갑니다.\n"
+                "· X에 요청하지 않으며, 중간에 멈춰도 됩니다.\n\n계속할까요?", parent=self):
+            return
+        self._start_local_job("GIF 변환 중단", "MP4 GIF를 GIF로 바꾸는 중입니다… X에 요청하지 않습니다.")
+        threading.Thread(target=partial(HistoryWindow._convert_worker, self.results, self.metadata_stop),
+                         args=(self.generation, self.current_storage, size, max_mb), daemon=True).start()
+
+    @staticmethod
+    def _convert_worker(results, stop, generation, directory, size, max_mb):
+        from .media import (ConversionError, ConversionSizeLimit, can_recycle, convert_mp4_to_gif,
+                            move_without_overwrite, recycle)
+        from .metadata import author_identity, available, embed_source, persistent
+        from .protection import AccountGuard, ProtectionError
+
+        class Stopped(Exception):
+            pass
+
+        def check_stop():
+            if stop.is_set():
+                raise Stopped()
+
+        store = account_guard = None
+        output_guards = []
+        converted = kept = failed = missing = 0
+        recyclable = {}
+
+        def report(state):
+            return (f"{state} · 바꿈 {converted:,}개 / MP4로 둠 {kept:,}개 / "
+                    f"실패 {failed:,}개 / 파일 없음 {missing:,}개")
+
+        try:
+            if isinstance(directory, StoragePaths):
+                account_guard = AccountGuard(directory.account, sleep=lambda *_: None)
+                account_guard.acquire(respect_cooldown=False)
+            store = HistoryWindow._store(directory)
+            if isinstance(directory, StoragePaths):
+                for root in sorted(store.media_roots, key=lambda value: os.path.normcase(str(value))):
+                    guard = OutputGuard(root)
+                    output_guards.append(guard)
+                    guard.acquire()
+            tagging = available()
+            with persistent() if tagging else nullcontext():
+                rows = store.mp4_gif_records()
+                for index, row in enumerate(rows, 1):
+                    if stop.is_set():
+                        break
+                    results.put((generation, "convert-progress", report(f"GIF로 바꾸는 중 {index:,}/{len(rows):,}")))
+                    source = Path(row["path"])
+                    if not store.is_media_path(source) or not source.is_file():
+                        missing += 1
+                        continue
+                    destination = source.with_suffix(".gif")
+                    drive = os.path.normcase(os.path.splitdrive(str(source))[0])
+                    if drive not in recyclable:
+                        recyclable[drive] = can_recycle(source)
+                    # Never replace another file, and never delete an MP4 that
+                    # could not be restored from the Recycle Bin.
+                    if destination.exists() or not recyclable[drive]:
+                        kept += 1
+                        continue
+                    try:
+                        temporary = convert_mp4_to_gif(source, check_stop=check_stop,
+                                                       max_bytes=max_mb * 1024 * 1024, size=size)
+                    except Stopped:
+                        break
+                    except ConversionSizeLimit:
+                        kept += 1
+                        continue
+                    except ConversionError:
+                        failed += 1
+                        continue
+                    status = author_status = "pending"
+                    try:
+                        if tagging:
+                            identity = author_identity(row.get("author", ""), row.get("author_id", ""))
+                            tagged = embed_source(temporary, row["tweet_id"], author=identity["author"],
+                                                  author_id=identity["author_id"])
+                            status = tagged["status"]
+                            author_status = tagged.get("author_status", "error" if identity["author"] or identity["author_id"] else "unknown")
+                        # Keep the original file time, which sorts by tweet date.
+                        times = source.stat()
+                        os.utime(temporary, ns=(times.st_atime_ns, times.st_mtime_ns))
+                        move_without_overwrite(temporary, destination)
+                    except OSError:
+                        failed += 1
+                        continue
+                    finally:
+                        temporary.unlink(missing_ok=True)
+                    if not recycle(source):
+                        # The MP4 is still in place, so the new copy is removed.
+                        destination.unlink(missing_ok=True)
+                        failed += 1
+                        continue
+                    store.replace_media_file(row, destination, status, author_status=author_status)
+                    converted += 1
+            state = "GIF 변환 중단" if stop.is_set() else "GIF 변환 끝"
+            recycled = " 바꾼 파일의 원본 MP4는 휴지통에 있습니다." if converted else ""
+            results.put((generation, "converted", report(state) + "." + recycled + " X 요청은 보내지 않았습니다."))
+        except ProtectionError as exc:
+            results.put((generation, "error", str(exc)))
+        except Exception:
+            results.put((generation, "error", "GIF 변환을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."))
+        finally:
+            try:
+                if store is not None:
+                    store.close()
+            finally:
+                try:
+                    for guard in reversed(output_guards):
+                        guard.close()
+                finally:
+                    if account_guard is not None:
+                        account_guard.close()
 
     def _backfill(self, generation, directory):
         return HistoryWindow._backfill_worker(self.results, self.metadata_stop, generation, directory)
@@ -965,7 +1140,7 @@ class HistoryWindow(tk.Toplevel):
     def stop_metadata(self):
         self.metadata_stop.set()
         self.source_stop_button.configure(state="disabled")
-        self.status_text.set("현재 파일 처리가 끝나면 메타데이터 기록을 중단합니다…")
+        self.status_text.set("현재 파일 처리가 끝나면 작업을 멈춥니다…")
 
     def close(self):
         self.metadata_stop.set()
@@ -1011,7 +1186,7 @@ class HistoryWindow(tk.Toplevel):
                 setattr(self, name, None)
             elif isinstance(value, list) and any(isinstance(child, tk.Misc) for child in value):
                 value.clear()
-        self.get_location = self.is_downloading = None
+        self.get_location = self.is_downloading = self.get_gif_options = None
 
     def _export(self, generation, directory, destination):
         return self._export_worker(self.results, generation, directory, destination)

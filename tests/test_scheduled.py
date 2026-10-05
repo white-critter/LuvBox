@@ -56,6 +56,10 @@ class ScheduledRunTests(unittest.TestCase):
         self.assertIn("종료 · finished · 저장 1개", log)
         self.assertNotIn("old.jpg", log)
         self.assertEqual(self.run_saved(self.settings, full=True)[1][0].scan_mode, "full")
+        # Earlier settings have no GIF choices; they keep converting at full size.
+        self.assertEqual((options.gif_format, options.gif_size), ("gif", "original"))
+        options = self.run_saved(dict(self.settings, gif_format="mp4", gif_size="720"))[1][0]
+        self.assertEqual((options.gif_format, options.gif_size), ("mp4", "720"))
 
     def test_runs_that_cannot_start_safely_are_refused_and_logged(self):
         cases = (
@@ -63,6 +67,8 @@ class ScheduledRunTests(unittest.TestCase):
             (dict(self.settings, auth_mode="file"), "인증 토큰 연결"),
             (dict(self.settings, record_locations={"offline_test": str(self.root / "다른 폴더")}), "저장 폴더 변경이 끝나지"),
             (dict(self.settings, max_video_mb="200"), "0 이상의 정수"),
+            (dict(self.settings, gif_format=["gif"]), "GIF 저장 형식"),
+            (dict(self.settings, gif_size="1080"), "GIF 저장 형식"),
         )
         for settings, expected in cases:
             with self.subTest(expected=expected):

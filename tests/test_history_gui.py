@@ -443,6 +443,26 @@ class HistoryGuiTests(unittest.TestCase):
                         self.assertLessEqual(child.winfo_rootx() + child.winfo_width(),
                                              bar.winfo_rootx() + bar.winfo_width())
 
+    def test_narrow_table_hides_save_time_column_instead_of_cutting_file_names(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        self.window.deiconify()
+        store = self.records(1)
+        self.load()
+        need = self.window._column_need("filename")
+        for size, hidden in (("1600x900", ()), ("1120x860", ("saved",)), ("860x720", ("saved",))):
+            with self.subTest(size=size):
+                self.window.geometry(size)
+                self.root.update()
+                shown = self.window._shown_columns
+                self.assertEqual(tuple(key for key in self.window._file_columns if key not in shown), hidden)
+                self.assertGreaterEqual(int(self.window.tree.column("filename", "width")), need - 24)
+        # The hidden save time is still shown for the selected file.
+        self.window.tree.selection_set(self.window.tree.get_children()[0])
+        self.window.select_record()
+        self.assertIn("저장한 때 " + store.records()[0]["saved_at"][:10], self.window.selection_text.get())
+
     def test_refresh_clamps_page_after_catalog_is_reduced(self):
         store = self.records(105)
         self.load(page=1)
@@ -619,10 +639,50 @@ class HistoryGuiTests(unittest.TestCase):
     def test_backfill_is_disabled_while_downloading(self):
         self.window.busy = False
         self.window.is_downloading = lambda: True
-        with patch("xlikesaver.history_gui.messagebox.showinfo") as notice, patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("xlikesaver.history_gui.dialogs.showinfo") as notice, patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.backfill()
         notice.assert_called_once()
         thread.assert_not_called()
+
+    def test_gif_conversion_button_counts_mp4_gifs_and_starts_after_confirmation(self):
+        self.load()
+        self.assertEqual(str(self.window.convert_button.cget("state")), "disabled")
+        store = HistoryStore(self.account)
+        self.addCleanup(store.close)
+        path = self.account / "100_gif_1.mp4"
+        path.write_bytes(b"offline animation")
+        store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "animated_gif", "author": {"name": "alice"}}, path)
+        self.load()
+        self.assertEqual(str(self.window.convert_button.cget("state")), "normal")
+        self.assertIn("1개", self.window.convert_button.cget("text"))
+        self.window.get_gif_options = lambda: ("720", 50)
+        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=False) as ask, \
+                patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.convert_gifs()
+        thread.assert_not_called()
+        self.assertIn("1개", ask.call_args.args[1])
+        self.assertIn("최대 720px", ask.call_args.args[1])
+        self.assertIn("휴지통", ask.call_args.args[1])
+        self.window.is_downloading = lambda: True
+        with patch("xlikesaver.history_gui.dialogs.showinfo") as notice, \
+                patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.convert_gifs()
+        notice.assert_called_once()
+        thread.assert_not_called()
+        self.window.is_downloading = lambda: False
+        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True), \
+                patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.convert_gifs()
+        self.assertEqual(thread.call_args.kwargs["args"][2:], ("720", 50))
+        self.assertTrue(self.window.metadata_active)
+        self.assertEqual(self.window.source_stop_button.cget("text"), "GIF 변환 중단")
+        self.assertEqual(str(self.window.convert_button.cget("state")), "disabled")
+        self.window.results.put((self.window.generation, "converted", "GIF 변환 끝 · 바꿈 1개"))
+        with patch("xlikesaver.history_gui.threading.Thread") as refresh:
+            self.window._poll()
+        refresh.assert_called_once()
+        self.assertFalse(self.window.metadata_active)
+        self.assertIn("GIF 변환 끝", self.window.completion_text)
 
     def test_refresh_skips_whole_folder_rescan_while_downloading(self):
         # The worker records every file itself; a rescan would only compete
@@ -801,7 +861,7 @@ class HistoryGuiTests(unittest.TestCase):
         unknown = old_root / "999_1.jpg"
         unknown.write_bytes(b"unrelated-file")
         self.window.rows["0"]["path"] = str(unknown)
-        with patch("xlikesaver.history_gui.os.startfile", create=True) as opened, patch("xlikesaver.history_gui.messagebox.showinfo") as notice:
+        with patch("xlikesaver.history_gui.os.startfile", create=True) as opened, patch("xlikesaver.history_gui.dialogs.showinfo") as notice:
             self.window.open_file()
         opened.assert_not_called()
         notice.assert_called_once()

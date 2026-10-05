@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -12,6 +13,9 @@ from typing import Callable
 
 
 CONVERSION_TIMEOUT = 600
+# GIF size presets: longest side in pixels and maximum frames per second.
+# Zero keeps the source value. Smaller GIFs are often several times lighter.
+GIF_SIZES = {"original": (0, 0), "720": (720, 15), "480": (480, 12)}
 
 
 class ConversionError(RuntimeError):
@@ -41,9 +45,12 @@ def ffmpeg_path() -> Path | None:
 
 
 def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: float,
-         output: Path | None = None, max_bytes: int = 0) -> None:
-    # A temporary stderr file cannot block on a full pipe. Raw diagnostics may
-    # contain local filenames, so callers get only our fixed safe error text.
+         output: Path | None = None, max_bytes: int = 0) -> bytes:
+    """Run FFmpeg and return its diagnostics for local parsing only.
+
+    A temporary stderr file cannot block on a full pipe. Raw diagnostics may
+    contain local filenames, so callers get only our fixed safe error text.
+    """
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=errors,
@@ -58,7 +65,8 @@ def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: floa
                 if process.poll() is not None:
                     if process.returncode:
                         raise ConversionError("GIF로 변환하지 못했습니다. MP4 임시 파일은 보존했습니다. 다시 저장을 시작하면 재시도합니다.")
-                    return
+                    errors.seek(0)
+                    return errors.read(1024 * 1024)
                 time.sleep(0.1)
         finally:
             if process.poll() is None:
@@ -71,14 +79,23 @@ def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: floa
 
 
 def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | None = None,
-                       max_bytes: int = 0) -> Path:
+                       max_bytes: int = 0, size: str = "original") -> Path:
     """Create a complete temporary GIF beside source; never modify source.
 
     The caller atomically finalizes the returned path and then removes source.
     Both palette passes stream frames; they do not retain the whole animation.
-    Original dimensions and frame timestamps are kept, rounded to GIF's 10 ms
-    time unit. GIF is necessarily limited to 256 colors and has no audio.
+    By default original dimensions and frame timestamps are kept, rounded to
+    GIF's 10 ms time unit. A smaller ``size`` preset fits the frames in a
+    square box without upscaling and drops frames above its rate. GIF is
+    necessarily limited to 256 colors and has no audio.
     """
+    if size not in GIF_SIZES:
+        raise ValueError("unknown GIF size preset")
+    side, fps = GIF_SIZES[size]
+    scale = (f"scale=w='min(iw,{side})':h='min(ih,{side})':force_original_aspect_ratio=decrease:"
+             f"force_divisible_by=2:flags=lanczos" if side else "")
+    # -fpsmax needs FFmpeg's constant-rate output; otherwise keep timestamps.
+    timing = ["-fpsmax", str(fps)] if fps else ["-fps_mode", "passthrough"]
     source = Path(source)
     check_stop = check_stop or (lambda: None)
     check_stop()
@@ -99,11 +116,22 @@ def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | N
                   "-protocol_whitelist", "file,pipe", "-threads", "1", "-filter_threads", "1",
                   "-filter_complex_threads", "1"]
         deadline = time.monotonic() + CONVERSION_TIMEOUT
-        _run([*common, "-i", str(source), "-map", "0:v:0", "-vf",
-              "palettegen=max_colors=256:reserve_transparent=0", "-frames:v", "1", str(palette)],
-             check_stop=check_stop, deadline=deadline)
+        # With a frame cap, the first pass also reports the source duration.
+        report = ["-loglevel", "info"] if fps else []
+        diagnostics = _run([*common, *report, "-i", str(source), "-map", "0:v:0", "-vf",
+                            (scale + "," if scale else "") + "palettegen=max_colors=256:reserve_transparent=0",
+                            "-frames:v", "1", str(palette)],
+                           check_stop=check_stop, deadline=deadline)
+        if fps:
+            # Constant-rate output keeps up to two frames past the end, which
+            # would add a pause to every loop; end exactly with the source.
+            found = re.search(rb"Duration: (\d+):(\d\d):(\d\d(?:\.\d+)?)", diagnostics)
+            if found:
+                hours, minutes, seconds = int(found[1]), int(found[2]), float(found[3])
+                timing += ["-t", f"{hours * 3600 + minutes * 60 + seconds:.3f}"]
+        frames = f"[0:v:0]{scale}[v];[v][1:v:0]" if scale else "[0:v:0][1:v:0]"
         _run([*common, "-i", str(source), "-i", str(palette), "-lavfi",
-              "[0:v:0][1:v:0]paletteuse=dither=sierra2_4a", "-an", "-fps_mode", "passthrough",
+              frames + "paletteuse=dither=sierra2_4a", "-an", *timing,
               "-loop", "0", "-f", "gif", str(output)],
              check_stop=check_stop, deadline=deadline, output=output, max_bytes=max_bytes)
         check_stop()
@@ -125,3 +153,67 @@ def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | N
         for temporary in (palette, output):
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+
+def move_without_overwrite(source: Path, destination: Path) -> None:
+    """Move within the account filesystem without replacing another file."""
+    if os.name == "nt":
+        # Windows rename is atomic and fails if the destination already exists.
+        source.rename(destination)
+    else:
+        # POSIX rename replaces existing files. Linking is an exclusive create
+        # and keeps the original intact until the second operation succeeds.
+        os.link(source, destination)
+        try:
+            source.unlink()
+        except OSError:
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+            raise
+
+
+def can_recycle(path: Path | str) -> bool:
+    """Whether this file's drive has a Windows Recycle Bin to restore from."""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    class Info(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("i64Size", ctypes.c_longlong),
+                    ("i64NumItems", ctypes.c_longlong)]
+
+    info = Info()
+    info.cbSize = ctypes.sizeof(info)
+    drive = os.path.splitdrive(os.path.abspath(path))[0]
+    if not drive:
+        return False
+    return ctypes.windll.shell32.SHQueryRecycleBinW(drive + "\\", ctypes.byref(info)) == 0
+
+
+def recycle(path: Path | str) -> bool:
+    """Move one file to the Recycle Bin; never delete it permanently unasked.
+
+    If Windows cannot keep the file (e.g. it is larger than the bin), it asks
+    the user first. Returns True only when the file is gone afterwards.
+    """
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    class Operation(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT),
+                    ("pFrom", wintypes.LPCWSTR), ("pTo", wintypes.LPCWSTR),
+                    ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+
+    path = Path(os.path.abspath(path))
+    delete, silent, no_confirmation, allow_undo, no_error_ui, nuke_warning = 3, 0x4, 0x10, 0x40, 0x400, 0x4000
+    # pFrom is a double-NUL-terminated list; ctypes adds the final NUL.
+    operation = Operation(None, delete, str(path) + "\0", None,
+                          silent | no_confirmation | allow_undo | no_error_ui | nuke_warning, False, None, None)
+    result = ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation))
+    return result == 0 and not operation.fAnyOperationsAborted and not path.exists()

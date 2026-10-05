@@ -28,6 +28,34 @@ class ThemeTests(unittest.TestCase):
         del self.root
         gc.collect()
 
+    @unittest.skipUnless(os.name == "nt", "Windows draws the title bar")
+    def test_title_bar_follows_dark_and_light_appearance(self):
+        import ctypes
+        window = tk.Toplevel(self.root)
+        window.attributes("-alpha", 0)
+        window.update()
+
+        def dark():
+            value = ctypes.c_int(-1)
+            ctypes.windll.dwmapi.DwmGetWindowAttribute(ctypes.c_void_p(int(window.wm_frame(), 16)), 20,
+                                                       ctypes.byref(value), ctypes.sizeof(value))
+            return value.value
+
+        # A window shown after switching gets the dark frame automatically.
+        theme.apply(self.root, "dark")
+        self.addCleanup(theme.apply, self.root, "light")
+        window.update()
+        self.assertEqual(dark(), 1)
+        later = tk.Toplevel(self.root)
+        later.attributes("-alpha", 0)
+        later.update()
+        self.assertTrue(theme.title_bar(later, "dark"))
+        theme.apply(self.root, "light")
+        self.assertEqual(dark(), 0)
+        later.destroy()
+        window.destroy()
+        self.assertFalse(theme.title_bar(window, "dark"))
+
     def test_rounded_progress_bar_renders_the_actual_download_fraction(self):
         bar = ttk.Progressbar(self.root, length=300, maximum=100)
         bar.pack()

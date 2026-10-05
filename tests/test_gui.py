@@ -131,7 +131,7 @@ class GuiTests(unittest.TestCase):
         self.app.folder.set(str(target))
         with patch("xlikesaver.gui.threading.Thread") as thread, \
                 patch("xlikesaver.storage.migrate_records", side_effect=OSError("private-error")), \
-                patch("xlikesaver.gui.messagebox.showerror") as error:
+                patch("xlikesaver.gui.dialogs.showerror") as error:
             self.assertFalse(self.app._ensure_storage("start"))
             self.app._relocate_records(*thread.call_args.kwargs["args"])
             self.app._poll()
@@ -168,7 +168,7 @@ class GuiTests(unittest.TestCase):
         offline = source.output_dir.with_name("연결되지 않은 드라이브")
         self.app.record_locations[source.account] = str(offline)
         self.app.folder.set(str(target))
-        with patch("xlikesaver.gui.messagebox.askyesno", return_value=False) as notice, \
+        with patch("xlikesaver.gui.dialogs.askyesno", return_value=False) as notice, \
                 patch("xlikesaver.gui.threading.Thread") as thread:
             self.assertFalse(self.app._ensure_storage("start"))
         notice.assert_called_once()
@@ -188,7 +188,7 @@ class GuiTests(unittest.TestCase):
         store.close()
         self.app.record_locations[source.account] = str(source.output_dir.with_name("offline"))
         self.app.folder.set(str(target))
-        with patch("xlikesaver.gui.messagebox.askyesno", return_value=True), \
+        with patch("xlikesaver.gui.dialogs.askyesno", return_value=True), \
                 patch("xlikesaver.gui.threading.Thread") as thread, \
                 patch("xlikesaver.storage.migrate_records") as migration, \
                 patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
@@ -219,7 +219,7 @@ class GuiTests(unittest.TestCase):
         source, target = self.relocation_source()
         self.app.folder.set(str(target))
         with patch("xlikesaver.gui.threading.Thread"), patch.object(self.app, "_save_settings", side_effect=PermissionError), \
-                patch("xlikesaver.gui.messagebox.showerror"):
+                patch("xlikesaver.gui.dialogs.showerror"):
             self.app._ensure_storage()
             self.app._finish_relocation({"ok": True})
         self.assertEqual(self.app.folder.get(), str(source.output_dir))
@@ -477,7 +477,7 @@ class GuiTests(unittest.TestCase):
         self.app.limited.set(True)
         self.session_mock.return_value = True
         self.app.max_video_mb.set("bad")
-        with patch("xlikesaver.gui.messagebox.showerror"), patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("xlikesaver.gui.dialogs.showerror"), patch("xlikesaver.gui.threading.Thread") as thread:
             self.app.start()
             thread.assert_not_called()
         self.assertTrue(self.app.limited.get())
@@ -547,7 +547,7 @@ class GuiTests(unittest.TestCase):
         self.session_mock.return_value = True
         for invalid in ("bad", "1.5", "-1"):
             self.app.max_video_mb.set(invalid)
-            with patch("xlikesaver.gui.messagebox.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
+            with patch("xlikesaver.gui.dialogs.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
                 self.app.start()
             error.assert_called_once()
             thread.assert_not_called()
@@ -601,7 +601,7 @@ class GuiTests(unittest.TestCase):
     def test_invalid_account_stops_before_worker(self):
         self.app.account.set("bad account")
         self.session_mock.return_value = True
-        with patch("xlikesaver.gui.messagebox.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("xlikesaver.gui.dialogs.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
             self.app.start()
         self.assertTrue(error.called)
         thread.assert_not_called()
@@ -627,7 +627,7 @@ class GuiTests(unittest.TestCase):
         self.session_mock.return_value = True  # A previous saved connection exists.
         secret = "offline-invalid-new-token"
         self.app.token.set(secret)
-        with patch("xlikesaver.gui.save_auth_token", side_effect=ValueError("인증 토큰을 확인해 주세요.")), patch("xlikesaver.gui.messagebox.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("xlikesaver.gui.save_auth_token", side_effect=ValueError("인증 토큰을 확인해 주세요.")), patch("xlikesaver.gui.dialogs.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
             self.app.start()
         error.assert_called_once()
         thread.assert_not_called()
@@ -694,45 +694,50 @@ class GuiTests(unittest.TestCase):
 
     def test_file_log_lines_include_their_own_author_and_posted_date(self):
         folder = Path(self.temp.name) / "아주 긴 저장 폴더 이름"
-        for kind, author, day in (("saved", "alice", "2020-01-02"),
-                                  ("size-skipped", "carol", "2022-05-06")):
+        cases = (("saved", "alice", "2020-01-02", "저장 · "),
+                 ("skipped", "bob", "2021-03-04", "이미 저장 · "),
+                 ("skipped", "dave", "2021-03-05", "이미 저장 · "),
+                 ("size-skipped", "carol", "2022-05-06", "용량 초과로 건너뜀 · "))
+        for kind, author, day, _ in cases:
             self.app.events.put({"type": kind, "author": author, "posted_at": day + "T10:20:30+09:00",
                                  "tweet_id": "123", "filename": "123_1.jpg", "path": str(folder / "123_1.jpg")})
         self.app.events.put({"type": "log", "message": "전체 목록을 확인합니다."})
         self.app._poll()
-        lines = self.app.log.get("1.0", "end").splitlines()
-        for line, author, day in zip(lines, ("alice", "carol"), ("2020-01-02", "2022-05-06")):
-            self.assertIn("123_1.jpg · @" + author, line)
+        lines = self.app.log.get("1.0", "end").strip().splitlines()
+        self.assertEqual(len(lines), 5)
+        # Every file, including each already saved one, has its own line.
+        for line, (_, author, day, action) in zip(lines, cases):
+            self.assertIn(action + "123_1.jpg · @" + author, line)
             self.assertIn("게시 " + day + " 10:20", line)
             self.assertNotIn(str(folder), line)
-        self.assertNotIn("@", lines[2])
-        self.assertEqual((self.app.saved, self.app.size_skipped), (1, 1))
+        self.assertNotIn("@", lines[4])
+        self.assertEqual((self.app.saved, self.app.skipped, self.app.size_skipped), (1, 2, 1))
 
-    def test_skipped_files_are_summarized_instead_of_one_line_each(self):
+    def test_gif_options_are_saved_summarized_and_sent_to_the_worker(self):
         from xlikesaver import gui
-        days = ("2021-03-04", "2020-01-02", "2021-03-04")
-        for index, day in enumerate(days):
-            self.app.events.put({"type": "skipped", "author": "bob", "posted_at": day + "T10:20:30+09:00",
-                                 "tweet_id": str(index), "filename": f"{index}_1.jpg", "path": f"{index}_1.jpg"})
-        self.app.events.put({"type": "saved", "author": "alice", "posted_at": "2022-05-06T10:20:30+09:00",
-                             "tweet_id": "9", "path": "9_1.jpg"})
-        self.app._poll()
-        lines = self.app.log.get("1.0", "end").strip().splitlines()
-        self.assertEqual(len(lines), 2)
-        self.assertIn("이미 저장된 파일 3개 건너뜀 · 게시 2020-01-02 ~ 2021-03-04", lines[0])
-        self.assertNotIn("@bob", lines[0])
-        self.assertIn("저장 · 9_1.jpg · @alice", lines[1])
-        self.assertEqual(self.app.skipped, 3)
-        # A long run of known files still reports regularly, then at the end.
-        with patch.object(gui, "SKIP_LOG_BATCH", 2):
-            for index in range(3):
-                self.app.events.put({"type": "skipped", "tweet_id": str(index), "posted_at": "invalid"})
-            self.app.events.put({"type": "finished", "status": "finished", "message": "완료"})
-            self.app._poll()
-        lines = self.app.log.get("1.0", "end").strip().splitlines()
-        self.assertTrue(lines[2].endswith("이미 저장된 파일 2개 건너뜀"))
-        self.assertTrue(lines[3].endswith("이미 저장된 파일 1개 건너뜀"))
-        self.assertTrue(lines[4].endswith("완료"))
+        self.assertEqual(self.app._gif_options(), ("original", 200))
+        self.app.gif_size.set("최대 480px · 초당 12장 (가장 작게)")
+        self.assertIn("GIF 480px", self.app.option_summary.get())
+        self.assertEqual(self.app._gif_options(), ("480", 200))
+        self.app.gif_format.set("원본 MP4 그대로 저장")
+        self.assertIn("GIF(MP4 그대로)", self.app.option_summary.get())
+        target = Path(self.temp.name) / "settings.json"
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        self.session_mock.return_value = True
+        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=target):
+            self.app.start()
+        options = thread.call_args.kwargs["args"][0]
+        self.assertEqual((options.gif_format, options.gif_size), ("mp4", "480"))
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual((saved["gif_format"], saved["gif_size"]), ("mp4", "480"))
+        other_root = tk.Tk()
+        other_root.withdraw()
+        self.addCleanup(destroy_tk, other_root)
+        with patch("xlikesaver.gui.load_settings", return_value=saved):
+            restored = gui.App(other_root)
+        self.assertEqual((restored.gif_format.get(), restored.gif_size.get()),
+                         ("원본 MP4 그대로 저장", "최대 480px · 초당 12장 (가장 작게)"))
 
     def test_conversion_fallback_tells_the_original_mp4_is_saved(self):
         self.app.events.put({"type": "converting", "stage": "fallback", "author": "alice",

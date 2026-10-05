@@ -57,6 +57,28 @@ class HistoryTests(unittest.TestCase):
             db.commit()
         return path
 
+    def test_mp4_gifs_are_listed_and_a_converted_file_keeps_its_save_time(self):
+        mp4 = self.file("100_gif_1.mp4")
+        self.store.record_media("flat", dict(self.metadata(kind="animated_gif"), _xlikesaver_metadata_status="embedded"), mp4)
+        self.store.record_media("flat", self.metadata(kind="animated_gif", ident="101"), self.file("101_gif_1.gif"))
+        self.store.record_media("flat", self.metadata(kind="video", ident="102"), self.file("102_video_1.mp4"))
+        self.assertEqual(self.store.summary()["mp4_gifs"], 1)
+        [row] = self.store.mp4_gif_records()
+        self.assertEqual(row["path"], str(mp4.resolve()))
+        gif = self.file("100_gif_1.gif", b"GIF89a converted animation")
+        with self.assertRaises(HistoryError):
+            self.store.replace_media_file(row, gif, "unknown-status", author_status="embedded")
+        with self.assertRaises(HistoryError):
+            self.store.replace_media_file(row, Path(self.temp.name) / "outside.gif", "embedded", author_status="embedded")
+        self.assertTrue(self.store.replace_media_file(row, gif, "embedded", author_status="embedded"))
+        updated = self.store.records(media_type="animated_gif", query="100")[0]
+        self.assertEqual((updated["path"], updated["filename"], updated["filesize"]),
+                         (str(gif.resolve()), "100_gif_1.gif", gif.stat().st_size))
+        self.assertEqual((updated["saved_at"], updated["author_metadata_status"]), (row["saved_at"], "embedded"))
+        self.assertEqual((self.store.summary()["mp4_gifs"], self.store.mp4_gif_records()), (0, []))
+        # A record that moved meanwhile is left alone.
+        self.assertFalse(self.store.replace_media_file(row, gif, "embedded", author_status="embedded"))
+
     def test_source_metadata_status_and_csv_do_not_change_original_save_time(self):
         path = self.file("100_1.jpg")
         data = self.metadata()

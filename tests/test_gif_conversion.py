@@ -50,6 +50,39 @@ class GifConversionTests(unittest.TestCase):
         converted.unlink()
         self.assert_source_only()
 
+    def make_source(self, name, size, rate):
+        source = self.directory / name
+        subprocess.run([str(self.executable), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                        "-f", "lavfi", "-i", f"testsrc2=size={size}:rate={rate}:duration=1",
+                        "-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-f", "mp4", str(source)],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=20)
+        return source
+
+    def test_smaller_size_presets_fit_a_box_and_cap_the_frame_rate(self):
+        cases = ((("wide.mp4", "1280x720", 30), "480", (480, 270)),
+                 (("tall.mp4", "360x640", 30), "480", (270, 480)),
+                 (("wide.mp4", "1280x720", 30), "720", (720, 406)),
+                 # Small or slow sources are never enlarged or given extra frames.
+                 (("slow.mp4", "300x200", 10), "480", (300, 200)))
+        for (name, size, rate), preset, dimensions in cases:
+            with self.subTest(name=name, preset=preset):
+                source = self.make_source(name, size, rate)
+                converted = media.convert_mp4_to_gif(source, size=preset)
+                try:
+                    with Image.open(converted) as image:
+                        self.assertEqual(image.size, dimensions)
+                        durations = [frame.info["duration"] for frame in ImageSequence.Iterator(image)]
+                    limit = media.GIF_SIZES[preset][1]
+                    self.assertEqual(len(durations), min(rate, limit))
+                    self.assertEqual(sum(durations), 1000)
+                finally:
+                    converted.unlink()
+                    source.unlink()
+        with self.assertRaises(ValueError):
+            media.convert_mp4_to_gif(self.source, size="1080")
+        self.assert_source_only()
+
     def test_converter_does_not_accept_environment_override(self):
         with patch.dict(os.environ, {"IMAGEIO_FFMPEG_EXE": "C:/untrusted/ffmpeg.exe"}):
             self.assertEqual(media.ffmpeg_path(), self.executable)
@@ -243,6 +276,41 @@ class GifWorkerTests(unittest.TestCase):
         convert.assert_not_called()
         self.assertEqual(path.read_bytes(), b"previous downloaded MP4")
         self.assertEqual(self.records()[0]["path"], str(path))
+
+    def test_gif_choices_are_validated_and_size_reaches_the_converter(self):
+        for changes in ({"gif_format": "webm"}, {"gif_size": "1080"}, {"gif_format": ["gif"]}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "GIF 저장 형식"):
+                self.options_all(**changes).validate()
+        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
+            code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all(gif_size="720"))
+        self.assertEqual(code, 0)
+        self.assertEqual(convert.call_args.kwargs["size"], "720")
+
+    def test_mp4_choice_saves_the_original_without_converting(self):
+        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+            code, events = self.worker([("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")],
+                                      options=self.options_all(gif_format="mp4"))
+        convert.assert_not_called()
+        self.assertEqual((code, events[-1]["saved"]), (0, 2))
+        mp4 = self.output / "myaccount" / "alice" / "100_gif_1.mp4"
+        self.assertTrue(mp4.is_file())
+        self.assertFalse(list(self.output.rglob("*.part*")))
+        self.assertEqual(self.keys(), {"twitter100_animated_gif_1", "twitter101_1"})
+        self.assertEqual(next(row for row in self.records() if row["tweet_id"] == "100")["path"], str(mp4))
+        self.assertFalse([event for event in events if event["type"] == "converting"])
+
+    def test_mp4_choice_finishes_an_interrupted_gif_source_without_downloading(self):
+        source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"completed earlier for a GIF")
+        core._mark_gif_source_complete(source)
+        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+            code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all(gif_format="mp4"))
+        convert.assert_not_called()
+        self.assertEqual((code, events[-1]["saved"]), (0, 1))
+        self.assertEqual((source.parent / "100_gif_1.mp4").read_bytes(), b"completed earlier for a GIF")
+        self.assertFalse(list(self.output.rglob("*.part*")))
+        self.assertEqual(test_core.FakeHttpDownloader.downloaded, [])
 
     def test_existing_gif_without_ledger_is_recognized(self):
         path = self.output / "myaccount" / "alice" / "100_gif_1.gif"

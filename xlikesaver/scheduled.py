@@ -66,6 +66,8 @@ def _options_from_settings(settings: dict, full: bool):
         include_gifs=settings.get("include_gifs", True) is not False,
         max_video_mb=size if isinstance(size, int) and not isinstance(size, bool) else -1,
         separate_accounts=settings.get("separate_accounts", False) is True,
+        gif_format=settings.get("gif_format", "gif"),
+        gif_size=settings.get("gif_size", "original"),
     ).validate()
 
 

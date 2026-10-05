@@ -17,17 +17,14 @@ import tempfile
 import threading
 import time
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, ttk
 import webbrowser
 
-from . import __version__, theme
+from . import __version__, dialogs, theme
 from .core import QUICK_STOP_AFTER, JobOptions, _normal_account
 from .login import clear_session, has_session, save_auth_token
 from .settings import load_settings, settings_path
 from .storage import resolve_storage
-
-
-SKIP_LOG_BATCH = 200
 
 
 def _file_label(event) -> str:
@@ -48,6 +45,13 @@ FOLDER_CHOICES = {
     "저장일별 폴더": ("저장한 날짜별 폴더로 나누기", "2026-10-05\\게시물ID_1.jpg"),
 }
 SCAN_MODES = {"새 Like만 빠르게 확인 (권장)": "quick", "전체 목록 다시 확인": "full"}
+GIF_FORMATS = {"GIF로 바꿔 저장": "gif", "원본 MP4 그대로 저장": "mp4"}
+GIF_FORMAT_HINTS = {
+    "gif": "어디서나 바로 움직이는 .gif 파일입니다. 색이 256개로 줄고 용량이 MP4보다 몇 배 커질 수 있습니다.",
+    "mp4": "X가 주는 원본 MP4를 그대로 저장합니다. 용량이 작고 화질이 그대로입니다.",
+}
+GIF_SIZES = {"원본 크기": "original", "최대 720px · 초당 15장 (용량 절약)": "720",
+             "최대 480px · 초당 12장 (가장 작게)": "480"}
 SCAN_HINTS = {
     "quick": f"이미 저장한 파일이 {QUICK_STOP_AFTER}개 연속으로 나오면 멈춥니다. 평소에는 이것을 쓰세요.",
     "full": "오래된 Like까지 처음부터 다시 확인합니다. 시간이 오래 걸립니다.",
@@ -89,7 +93,6 @@ class App:
         self.saved = 0
         self.skipped = 0
         self.size_skipped = 0
-        self.skip_batch: list[str] = []
         self.history_window = None
         self.connect_window = None
         self.options_window = None
@@ -131,6 +134,10 @@ class App:
         self.include_videos = tk.BooleanVar(value=settings.get("include_videos", True) is not False)
         self.include_gifs = tk.BooleanVar(value=settings.get("include_gifs", True) is not False)
         self.max_video_mb = tk.StringVar(value=str(settings.get("max_video_mb", 200)))
+        gif_format = settings.get("gif_format", "gif")
+        self.gif_format = tk.StringVar(value=next((k for k, v in GIF_FORMATS.items() if v == gif_format), next(iter(GIF_FORMATS))))
+        gif_size = settings.get("gif_size", "original")
+        self.gif_size = tk.StringVar(value=next((k for k, v in GIF_SIZES.items() if v == gif_size), next(iter(GIF_SIZES))))
         self.detailed_progress = tk.BooleanVar(value=settings.get("detailed_progress", False) is True)
         self.progress_summary = tk.StringVar(value="")
         self.progress_details = tk.StringVar()
@@ -153,7 +160,7 @@ class App:
         for variable in (self.account, self.folder, self.folder_mode, self.separate_accounts):
             variable.trace_add("write", lambda *_: self._preview_location())
         for variable in (self.folder_mode, self.separate_accounts, self.include_videos, self.include_gifs,
-                         self.max_video_mb, self.scan_mode, self.limited):
+                         self.max_video_mb, self.scan_mode, self.limited, self.gif_format, self.gif_size):
             variable.trace_add("write", lambda *_: self._update_option_summary())
         self._auth_changed()
         self._preview_location()
@@ -316,12 +323,25 @@ class App:
         layout = {"flat": "한 폴더", "author": "작성자별 폴더", "date": "날짜별 폴더"}[FOLDER_MODES[self.folder_mode.get()]]
         if self.separate_accounts.get():
             layout += "(아이디 폴더 안)"
-        media = ["사진"] + (["동영상"] if self.include_videos.get() else []) + (["GIF"] if self.include_gifs.get() else [])
+        gif = "GIF"
+        if GIF_FORMATS[self.gif_format.get()] == "mp4":
+            gif = "GIF(MP4 그대로)"
+        elif GIF_SIZES[self.gif_size.get()] != "original":
+            gif = f"GIF {GIF_SIZES[self.gif_size.get()]}px"
+        media = ["사진"] + (["동영상"] if self.include_videos.get() else []) + ([gif] if self.include_gifs.get() else [])
         size = self.max_video_mb.get().strip()
         limit = "" if len(media) == 1 else (" (영상 크기 제한 없음)" if size == "0" else f" (영상 {size}MB까지)")
         scan = "새 Like만" if SCAN_MODES[self.scan_mode.get()] == "quick" else "전체 확인"
         test = " · 시험 20개" if self.limited.get() else ""
         self.option_summary.set(f"{layout} · {'·'.join(media)}{limit} · {scan}{test}")
+
+    def _gif_options(self):
+        """GIF size preset and media size limit for converting saved MP4 GIFs."""
+        try:
+            size = max(0, int(self.max_video_mb.get().strip()))
+        except ValueError:
+            size = 200
+        return GIF_SIZES[self.gif_size.get()], size
 
     def _history_location(self):
         if self.relocating:
@@ -350,7 +370,8 @@ class App:
             self.history_window.lift()
             self.history_window.refresh()
         else:
-            self.history_window = HistoryWindow(self.root, self._history_location, lambda: self.running)
+            self.history_window = HistoryWindow(self.root, self._history_location, lambda: self.running,
+                                                self._gif_options)
         try:
             account, paths = self._history_location()
             self.record_locations[account] = str(paths.output_dir)
@@ -528,10 +549,10 @@ class App:
         try:
             save_auth_token(self.token.get())
         except ValueError as exc:
-            messagebox.showerror("연결 저장 실패", str(exc), parent=self.connect_window or self.root)
+            dialogs.showerror("연결 저장 실패", str(exc), parent=self.connect_window or self.root)
             return False
         except OSError:
-            messagebox.showerror("연결 저장 실패", "연결 정보를 저장하지 못했습니다. Windows 계정과 저장 권한을 확인해 주세요.", parent=self.connect_window or self.root)
+            dialogs.showerror("연결 저장 실패", "연결 정보를 저장하지 못했습니다. Windows 계정과 저장 권한을 확인해 주세요.", parent=self.connect_window or self.root)
             return False
         finally:
             self.token.set("")
@@ -547,7 +568,7 @@ class App:
         try:
             clear_session()
         except OSError:
-            messagebox.showerror("연결 지우기 실패", "로그인 정보를 지우지 못했습니다. 잠시 후 다시 시도해 주세요.", parent=self.root)
+            dialogs.showerror("연결 지우기 실패", "로그인 정보를 지우지 못했습니다. 잠시 후 다시 시도해 주세요.", parent=self.root)
             return
         self.token.set("")
         self._auth_changed()
@@ -603,6 +624,18 @@ class App:
         ttk.Label(size, text="MB", style="Card.TLabel").pack(side="left")
         self._wrapping_label(body, text="0은 제한 없음 · 원본 MP4와 변환된 GIF 모두 적용합니다.", style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
 
+        heading("움직이는 GIF 저장 형식")
+        for key, value in GIF_FORMATS.items():
+            ttk.Radiobutton(body, text=key, value=key, variable=self.gif_format).pack(anchor="w")
+            self._wrapping_label(body, text=GIF_FORMAT_HINTS[value], style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(32, 0), pady=(0, 8))
+        size_row = ttk.Frame(body, style="Plain.TFrame")
+        size_row.pack(anchor="w", pady=(4, 0))
+        ttk.Label(size_row, text="GIF 크기", style="Card.TLabel").pack(side="left")
+        ttk.Combobox(size_row, textvariable=self.gif_size, values=tuple(GIF_SIZES), state="readonly",
+                     width=30, font=theme.BODY).pack(side="left", padx=8)
+        self._wrapping_label(body, text="GIF로 바꿀 때만 적용합니다. 작게 하면 용량이 크게 줄고, 큰 화면에서는 조금 흐려 보일 수 있습니다. 이미 저장한 파일은 바뀌지 않습니다.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+
         heading("확인 범위")
         for key, value in SCAN_MODES.items():
             label = "새 Like만 확인 (권장)" if value == "quick" else key
@@ -642,6 +675,7 @@ class App:
                 "folder_mode": FOLDER_MODES[self.folder_mode.get()], "scan_mode": SCAN_MODES[self.scan_mode.get()],
                 "include_videos": self.include_videos.get(), "include_gifs": self.include_gifs.get(),
                 "max_video_mb": size, "separate_accounts": self.separate_accounts.get(),
+                "gif_format": GIF_FORMATS[self.gif_format.get()], "gif_size": GIF_SIZES[self.gif_size.get()],
                 "detailed_progress": self.detailed_progress.get(),
                 "appearance": self.appearance.get(),
                 "record_locations": self.record_locations}
@@ -692,10 +726,10 @@ class App:
         window = self.history_window
         if window is not None and window.winfo_exists() and window.metadata_active:
             self.folder.set(str(source.output_dir))
-            messagebox.showinfo("메타데이터 기록 중", "출처·작성자 기록이 끝난 뒤 저장 폴더를 바꿔 주세요.", parent=self.root)
+            dialogs.showinfo("기록 화면 작업 중", "기록 화면의 출처·작성자 기록이나 GIF 변환이 끝난 뒤 저장 폴더를 바꿔 주세요.", parent=self.root)
             return False
         fresh = not source.output_dir.is_dir()
-        if fresh and not messagebox.askyesno(
+        if fresh and not dialogs.askyesno(
                 "이전 저장 폴더 연결 확인",
                 "이전 폴더를 찾을 수 없습니다.\n새 폴더에서 저장을 시작할까요?\n\n"
                 "이전 기록을 가져오지 못해 중복 저장될 수 있습니다.\n"
@@ -779,7 +813,7 @@ class App:
             self._log(self.status.get())
             if not self.closing:
                 detail = event.get("message") or "이전·새 폴더의 연결과 권한을 확인하고 다른 저장 작업을 닫아 주세요. 기존 기록은 보존했습니다."
-                messagebox.showerror("기록 이전 실패", detail, parent=self.root)
+                dialogs.showerror("기록 이전 실패", detail, parent=self.root)
         if self.closing:
             self.root.destroy()
         elif success and action == "start":
@@ -799,7 +833,7 @@ class App:
             folder.mkdir(parents=True, exist_ok=True)
             os.startfile(str(folder))
         except (OSError, ValueError):
-            messagebox.showerror("폴더 열기 실패", "저장 위치와 폴더 권한을 확인해 주세요.", parent=self.root)
+            dialogs.showerror("폴더 열기 실패", "저장 위치와 폴더 권한을 확인해 주세요.", parent=self.root)
 
     # -------------------------------------------------------------------- help
     HELP_SECTIONS = (
@@ -894,7 +928,7 @@ class App:
             directory.mkdir(parents=True, exist_ok=True)
             os.startfile(str(directory))
         except OSError:
-            messagebox.showerror("폴더 열기 실패", "예약 실행 기록 폴더를 열지 못했습니다.", parent=self.root)
+            dialogs.showerror("폴더 열기 실패", "예약 실행 기록 폴더를 열지 못했습니다.", parent=self.root)
 
     # ------------------------------------------------------------------ saving
     def start(self):
@@ -904,7 +938,7 @@ class App:
         if self.running:
             return
         if self.history_window is not None and self.history_window.winfo_exists() and self.history_window.metadata_active:
-            messagebox.showinfo("메타데이터 기록 중", "기존 파일의 출처·작성자 기록을 완료하거나 중단한 뒤 저장을 시작해 주세요.", parent=self.root)
+            dialogs.showinfo("기록 화면 작업 중", "기록 화면의 출처·작성자 기록이나 GIF 변환을 마치거나 중단한 뒤 저장을 시작해 주세요.", parent=self.root)
             return
         if AUTH_MODES[self.auth.get()] == "managed" and self.token.get():
             if not self.connect_token():
@@ -919,9 +953,9 @@ class App:
                 size_limit = int(self.max_video_mb.get().strip())
             except ValueError:
                 raise ValueError("영상 최대 크기는 0 이상의 정수(MB)로 입력해 주세요. 0은 제한 없음입니다.") from None
-            options = JobOptions(account=self.account.get(), output_dir=self.folder.get(), auth_mode=AUTH_MODES[self.auth.get()], cookies_file=self.cookies.get(), photo_limit=20 if self.limited.get() else 0, folder_mode=FOLDER_MODES[self.folder_mode.get()], scan_mode=SCAN_MODES[self.scan_mode.get()], include_videos=self.include_videos.get(), include_gifs=self.include_gifs.get(), max_video_mb=size_limit, separate_accounts=self.separate_accounts.get()).validate()
+            options = JobOptions(account=self.account.get(), output_dir=self.folder.get(), auth_mode=AUTH_MODES[self.auth.get()], cookies_file=self.cookies.get(), photo_limit=20 if self.limited.get() else 0, folder_mode=FOLDER_MODES[self.folder_mode.get()], scan_mode=SCAN_MODES[self.scan_mode.get()], include_videos=self.include_videos.get(), include_gifs=self.include_gifs.get(), max_video_mb=size_limit, separate_accounts=self.separate_accounts.get(), gif_format=GIF_FORMATS[self.gif_format.get()], gif_size=GIF_SIZES[self.gif_size.get()]).validate()
         except (ValueError, OSError) as exc:
-            messagebox.showerror("입력 확인", str(exc), parent=self.root)
+            dialogs.showerror("입력 확인", str(exc), parent=self.root)
             return
         if not self._ensure_storage("start"):
             return
@@ -929,7 +963,6 @@ class App:
         self.account.set(options.account)
         self.folder.set(options.output_dir)
         self.saved = self.skipped = self.size_skipped = 0
-        self.skip_batch = []
         self.received_final = False
         self.final_status = None
         self.running = True
@@ -1048,12 +1081,8 @@ class App:
                     self.saved += 1
                     self._log("저장 · " + _file_label(event), event)
                 elif kind == "skipped":
-                    # A quick scan alone ends with 100 known files. One line per
-                    # file would bury the new saves, so report them in batches.
                     self.skipped += 1
-                    self.skip_batch.append(str(event.get("posted_at") or ""))
-                    if len(self.skip_batch) >= SKIP_LOG_BATCH:
-                        self._flush_skips()
+                    self._log("이미 저장 · " + _file_label(event), event)
                 else:
                     self.size_skipped += 1
                     self._log("용량 초과로 건너뜀 · " + _file_label(event), event)
@@ -1105,28 +1134,13 @@ class App:
                     return
         self.root.after(120, self._poll)
 
-    def _flush_skips(self):
-        if not self.skip_batch:
-            return
-        from .history_gui import format_short
-        days = sorted(format_short(value)[:10] for value in self.skip_batch if format_short(value) != "–")
-        count, self.skip_batch = len(self.skip_batch), []
-        span = ""
-        if days:
-            span = f" · 게시 {days[0]}" if days[0] == days[-1] else f" · 게시 {days[0]} ~ {days[-1]}"
-        self._write_log(f"이미 저장된 파일 {count:,}개 건너뜀{span}")
-
     def _log(self, text, event=None):
-        self._flush_skips()
         if event and any(event.get(key) for key in ("tweet_id", "author", "posted_at")):
             from .history_gui import format_short
             author = str(event.get("author") or "").lstrip("@")
             author = "@" + author if re.fullmatch(r"[A-Za-z0-9_]{1,15}", author) else "작성자 미확인"
             posted = format_short(event.get("posted_at"))
             text = f"{text} · {author} · 게시 {posted if posted != '–' else '미확인'}"
-        self._write_log(text)
-
-    def _write_log(self, text):
         self.log.configure(state="normal")
         self.log.insert("end", time.strftime("%H:%M:%S") + "  " + text + "\n")
         if int(self.log.index("end-1c").split(".")[0]) > 1000:

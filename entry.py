@@ -92,6 +92,23 @@ def main() -> int:
                 assert metadata.read_source(animated) == "https://x.com/i/web/status/102"
                 assert metadata.read_author(animated) == author
                 assert thumbnail(video).image is not None and thumbnail(animated).image is not None
+                # Smaller GIF preset: fitted size and an exact capped frame count.
+                wide = Path(folder) / "GIF 크기 확인.mp4"
+                generated = subprocess.run(
+                    [str(executable), "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                     "testsrc2=size=640x360:rate=30", "-t", "1", "-an", "-c:v", "mpeg4", "-q:v", "2", str(wide)],
+                    capture_output=True, timeout=15,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                assert generated.returncode == 0
+                smaller = convert_mp4_to_gif(wide, size="480")
+                with Image.open(smaller) as decoded:
+                    assert decoded.size == (480, 270) and decoded.n_frames == 12
+                from xlikesaver import dialogs
+                from xlikesaver.media import can_recycle
+                assert isinstance(can_recycle(folder), bool)
+                dialog = dialogs.Dialog(root, "확인", "자체 점검", buttons=(("예", True), ("아니요", False)), cancel=False)
+                dialog.buttons[0].invoke()
+                assert dialog.result is True
                 resident = Path(folder) / "상주 출처 확인.png"
                 resident.write_bytes(target.read_bytes())
                 with metadata.persistent():
@@ -146,7 +163,8 @@ def main() -> int:
             report = {"ok": True, "version": __version__, "gallery_dl": version.__version__,
                       "font": actual_font, "record_pagination": "queried-and-clamped",
                       "appearance": "light-dark-live-switch", "local_previews": "photo-video-gif",
-                      "gif_conversion": "animated-with-source-author-metadata", "progress": "rounded-borderless",
+                      "gif_conversion": "animated-with-source-author-metadata", "gif_size_presets": "fitted-exact-frames",
+                      "dialogs": "themed", "progress": "rounded-borderless",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",

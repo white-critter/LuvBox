@@ -92,8 +92,14 @@ HTTP 429와 계정 정지는 별개입니다. 잠금·보안 확인이 뜨면 X�
 
 `preview.py`는 Pillow로 사진/GIF 첫 프레임, 번들 FFmpeg로 동영상 첫 프레임을 읽습니다. 소형 메모리 캐시와 단일 디코더가 최신 선택만 처리하며 창을 닫으면 결과를 버립니다. 기록이 허용하는 로컬 경로만 읽고 네트워크 프로토콜을 사용하지 않습니다.
 
-`media.py`는 MP4 다운로드 완료 후 두 번의 palettegen/paletteuse 처리로 원본 크기의 GIF를 만들고, 최종 GIF와 archive 기록이 확정된 뒤 원본 임시 파일을 정리합니다. GIF는 256색으로 제한되며 10ms 시간 단위를 사용합니다. 중단 시 `.mp4.part`와 크기/수정시각을 담은 완료 표식으로 로컬 재시도합니다. 변환 실패나 GIF 용량 초과가 실행 전체를 막지 않도록, 그 파일은 원본 MP4 경로로 확정해 archive에 기록하고 경고만 남깁니다. 완료 표식이 있는 MP4가 낮아진 용량 제한을 넘으면 일반 용량 초과처럼 건너뛰고 임시 파일을 지웁니다. 기존 저장된 MP4의 미디어 ID와 archive 키는 유지합니다.
+`media.py`는 MP4 다운로드 완료 후 두 번의 palettegen/paletteuse 처리로 원본 크기의 GIF를 만들고, 최종 GIF와 archive 기록이 확정된 뒤 원본 임시 파일을 정리합니다. GIF는 256색으로 제한되며 10ms 시간 단위를 사용합니다. 중단 시 `.mp4.part`와 크기/수정시각을 담은 완료 표식으로 로컬 재시도합니다. 변환 실패나 GIF 용량 초과가 실행 전체를 막지 않도록, 그 파일은 원본 MP4 경로로 확정해 archive에 기록하고 경고만 남깁니다. 완료 표식이 있는 MP4가 낮아진 용량 제한을 넘으면 일반 용량 초과처럼 건너뛰고 임시 파일을 지웁니다. 기존 저장된 MP4의 미디어 ID와 archive 키는 유지합니다. `gif_format="mp4"`이면 변환하지 않고 원본 MP4로 확정합니다.
 
-`theme.apply(root, mode="light"|"dark")`는 같은 Tk 인터프리터의 기존·새 창을 함께 바꿉니다. 둥근 컨트롤 이미지는 재사용하고, `theme.Progressbar`는 실제 값과 시각 보간 값을 분리하므로 완료율을 만들어내지 않습니다. 테마 선택은 settings.json의 appearance에 보관하며 worker 옵션에는 보내지 않습니다.
+`GIF_SIZES`의 `720`/`480` 프리셋은 `scale`로 긴 변을 상자 안에 맞추고(확대 없음) `-fpsmax`로 초당 장면 수를 제한합니다. 번들 FFmpeg에는 `fps` 필터가 없고, 출력 정속 모드는 끝에 최대 2장을 더 남겨 루프마다 멈칫하므로 첫 패스의 `Duration`을 읽어 `-t`로 원본 길이에 맞춥니다. 원본 크기 프리셋은 기존처럼 `-fps_mode passthrough`로 시각을 그대로 씁니다.
+
+기록 화면의 **MP4 GIF를 GIF로**(`HistoryWindow._convert_worker`)는 출처·작성자 기록과 같은 계정/출력 폴더 잠금을 잡고 한 파일씩 처리합니다. 임시 GIF에 출처·작성자를 기록하고 원본 수정 시각을 복사한 뒤 같은 이름의 `.gif`로 덮어쓰기 없이 옮깁니다. 이어 원본 MP4를 `SHFileOperationW`(`FOF_ALLOWUNDO`)로 휴지통에 보내고, 성공했을 때만 `replace_media_file`로 기록 경로를 바꿉니다. 휴지통으로 보내지 못하면 새 GIF를 지우고 MP4를 그대로 둡니다. `SHQueryRecycleBinW`가 실패하는 드라이브(네트워크 경로 등)는 변환하지 않습니다. 기록 갱신 전에 멈춰도 다음 새로고침의 파일 확인이 GIF 경로로 바로잡습니다.
+
+`theme.apply(root, mode="light"|"dark")`는 같은 Tk 인터프리터의 기존·새 창을 함께 바꿉니다. 둥근 컨트롤 이미지는 재사용하고, `theme.Progressbar`는 실제 값과 시각 보간 값을 분리하므로 완료율을 만들어내지 않습니다. 테마 선택은 settings.json의 appearance에 보관하며 worker 옵션에는 보내지 않습니다. `theme.title_bar`는 창이 처음 표시될 때와 테마를 바꿀 때 `DwmSetWindowAttribute`(20, 이전 Windows 10은 19)로 제목 표시줄을 맞춥니다. 확인·안내 창은 `dialogs.py`의 테마 창으로, `tkinter.messagebox`와 같은 호출과 반환값을 씁니다. 파일·폴더 선택 창은 Windows 기본 창입니다.
+
+Git에서는 Pretendard 글꼴(`*.ttf`)과 `tools/ffmpeg/runtime/ffmpeg.exe`를 Git LFS로 보관합니다(1.7.0부터, `.gitattributes`). 새로 받을 때는 Git for Windows에 포함된 Git LFS가 실제 파일을 받습니다. LFS 없이 받으면 작은 포인터 파일만 생기고 `build.py --check`와 글꼴 확인이 실패합니다. 이전 커밋의 파일은 기록에 그대로 남아 있습니다.
 
 GIF 변환/동영상 섬네일에 쓰는 `tools/ffmpeg/runtime/ffmpeg.exe`는 필요한 로컬 코덱만 포함한 FFmpeg 7.1 빌드입니다. 실행 파일에 함께 들어가므로 사용자는 따로 설치할 필요가 없습니다. `tools/ffmpeg/build.py --check`로 바이너리·소스·빌드 설정의 SHA256을 확인합니다. 직접 다시 빌드하려면 `tools/ffmpeg/README.md`의 portable w64devkit 빌드 절차를 사용하세요. 배포 ZIP은 해당 버전의 원본 소스와 재현용 빌드 설정, 라이선스를 포함합니다.

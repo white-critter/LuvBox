@@ -26,7 +26,8 @@ from urllib.parse import urlsplit
 from .protection import API_INTERVAL, MEDIA_INTERVAL, AccountGuard, ProtectionError
 from .history import HistoryError, HistoryStore, _author_fields
 from .storage import OutputGuard, resolve_storage
-from .media import ConversionError, ConversionSizeLimit, convert_mp4_to_gif
+from .media import GIF_SIZES, ConversionError, ConversionSizeLimit, convert_mp4_to_gif
+from .media import move_without_overwrite as _move_without_overwrite
 
 
 EventSink = Callable[[dict], None]
@@ -57,25 +58,6 @@ _LOCAL_WRITE_ERROR = ("미디어 파일을 쓰지 못해 중단했습니다. 저
 def _save_day() -> date:
     """The download's local saving day, independent of tweet publication."""
     return datetime.now(_KOREA).date()
-
-
-def _move_without_overwrite(source: Path, destination: Path) -> None:
-    """Move within the account filesystem without replacing another file."""
-    if os.name == "nt":
-        # Windows rename is atomic and fails if the destination already exists.
-        source.rename(destination)
-    else:
-        # POSIX rename replaces existing files. Linking is an exclusive create
-        # and keeps the original intact until the second operation succeeds.
-        os.link(source, destination)
-        try:
-            source.unlink()
-        except OSError:
-            try:
-                destination.unlink()
-            except OSError:
-                pass
-            raise
 
 
 def _gif_source_complete(source: Path) -> bool:
@@ -255,6 +237,9 @@ class JobOptions:
     include_gifs: bool = True
     max_video_mb: int = 200
     separate_accounts: bool = False
+    # Animated GIF tweets: convert to .gif, or keep X's original MP4.
+    gif_format: str = "gif"
+    gif_size: str = "original"
 
     @property
     def media_signature(self) -> str:
@@ -276,6 +261,9 @@ class JobOptions:
             raise ValueError("동영상과 GIF 저장 여부를 확인해 주세요.")
         if type(self.separate_accounts) is not bool:
             raise ValueError("계정별 폴더 설정을 확인해 주세요.")
+        if (not isinstance(self.gif_format, str) or self.gif_format not in {"gif", "mp4"} or
+                not isinstance(self.gif_size, str) or self.gif_size not in GIF_SIZES):
+            raise ValueError("움직이는 GIF 저장 형식과 GIF 크기를 다시 선택해 주세요.")
         if isinstance(self.max_video_mb, bool) or not isinstance(self.max_video_mb, int) or self.max_video_mb < 0:
             raise ValueError("동영상·GIF 크기 한도는 0 이상의 정수 MB로 입력해 주세요. 0은 제한 없음입니다.")
         if isinstance(self.photo_limit, bool) or not isinstance(self.photo_limit, int) or self.photo_limit < 0:
@@ -904,6 +892,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             if result and is_gif and self.pathfmt.temppath:
                 source = Path(self.pathfmt.temppath)
                 self.gif_source = source
+                if normalized.gif_format == "mp4":
+                    # Keep X's original MP4; the normal finalize saves it and
+                    # handle_url removes a marker left by an earlier GIF run.
+                    return result
                 if not locally_complete:
                     _mark_gif_source_complete(source)
                 # Completion describes the MP4 transfer. Conversion can make
@@ -916,7 +908,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                       **_media_details(self.current_media)})
                 try:
                     converted = convert_mp4_to_gif(source, check_stop=check_stop,
-                                                  max_bytes=normalized.max_video_mb * 1024 * 1024)
+                                                  max_bytes=normalized.max_video_mb * 1024 * 1024,
+                                                  size=normalized.gif_size)
                 except ConversionError as exc:
                     # One unconvertible GIF must not block every later Like.
                     # Keep the original MP4 path; the normal finalize saves and

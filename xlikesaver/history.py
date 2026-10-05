@@ -492,6 +492,35 @@ class HistoryStore:
                 self._db.execute("UPDATE media SET author_metadata_status=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
                                  (author_status, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
 
+    @_safe
+    def mp4_gif_records(self) -> list[dict]:
+        """Animated GIF tweets that are still stored as MP4 files."""
+        return [dict(row) for row in self._db.execute(
+            "SELECT * FROM media WHERE media_type='animated_gif' AND lower(path) LIKE '%.mp4' "
+            "ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num")]
+
+    @_safe
+    def replace_media_file(self, row: dict, path: Path | str, status: str, *, author_status: str) -> bool:
+        """Point one record at its converted file, keeping its save time.
+
+        Only a record still at its old path changes, so a concurrent refresh
+        or download that moved it meanwhile is never overwritten.
+        """
+        if status not in {"embedded", "failed", "unsupported", "pending"}:
+            raise HistoryError(_HISTORY_HELP)
+        if author_status not in {"embedded", "unknown", "error", "pending"}:
+            raise HistoryError(_HISTORY_HELP)
+        actual, size, filename = self._file(path)
+        if not actual:
+            raise HistoryError(_HISTORY_HELP)
+        with self._db:
+            changed = self._db.execute(
+                "UPDATE media SET path=?,filename=?,filesize=?,metadata_status=?,author_metadata_status=?,updated_at=? "
+                "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
+                (actual, filename, size, status, author_status, _now(),
+                 row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row["path"]))
+        return changed.rowcount == 1
+
     def _legacy_row(self, mode: str, tweet_id: str, number: int, *, path="", filesize=None,
                     filename="", media_type="photo", author="", source="archive") -> dict:
         posted = _estimated_posted(tweet_id)
@@ -648,6 +677,8 @@ class HistoryStore:
         result["counts"] = counts
         result["embedded_sources"] = self._db.execute("SELECT COUNT(*) FROM media WHERE metadata_status='embedded'").fetchone()[0]
         result["embedded_authors"] = self._db.execute("SELECT COUNT(*) FROM media WHERE author_metadata_status='embedded'").fetchone()[0]
+        result["mp4_gifs"] = self._db.execute(
+            "SELECT COUNT(*) FROM media WHERE media_type='animated_gif' AND lower(path) LIKE '%.mp4'").fetchone()[0]
         result["last_run"] = next(iter(self.runs(limit=1)), None)
         result["archivepaths"] = [str(self.account_dir / name) for name in _ARCHIVES.values()
                                   if (self.account_dir / name).is_file() and not (self.account_dir / name).is_symlink()]
