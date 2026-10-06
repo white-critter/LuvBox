@@ -56,6 +56,10 @@ class MigrationError(ValueError):
     """A local relocation failed; existing records remain authoritative."""
 
 
+class _DamagedDatabase(MigrationError):
+    """An integrity check positively identified a damaged database."""
+
+
 @dataclass(frozen=True)
 class MigrationResult:
     source_dir: Path
@@ -209,14 +213,17 @@ def _write_snapshot_state(paths: StoragePaths, files: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _merge_changed_snapshot(paths: StoragePaths) -> None:
+def _merge_changed_snapshot(paths: StoragePaths) -> set[str]:
     """Merge a snapshot that another PC wrote since this PC last saw it.
 
     Download records are combined; file records keep the better version.
-    A damaged or unreadable snapshot is skipped, never blocking a save.
+    A damaged snapshot is skipped, never blocking a save. An unreadable or
+    temporarily locked snapshot remains pending so publication cannot replace
+    records that have not yet been copied into this PC's database.
     """
     state = _snapshot_state(paths)
     changed = False
+    pending = set()
     for name in _DATABASES:
         if name == _LEGACY_SYNC:
             continue
@@ -228,16 +235,30 @@ def _merge_changed_snapshot(paths: StoragePaths) -> None:
             continue
         incoming = paths.record_dir.parent / (".incoming-" + uuid.uuid4().hex + ".sqlite3")
         try:
-            _backup_database(shared, incoming)
-            _merge_database(name, local, incoming)
-        except (MigrationError, OSError, sqlite3.Error, ValueError):
-            pass
+            try:
+                _backup_database(shared, incoming)
+            except (MigrationError, OSError, sqlite3.Error, ValueError) as error:
+                damaged = isinstance(error, _DamagedDatabase) or (
+                    isinstance(error, sqlite3.DatabaseError) and
+                    (getattr(error, "sqlite_errorcode", 0) or 0) & 0xFF in {11, 26})
+                if not damaged:
+                    pending.add(name)
+                    continue
+                # Only a confirmed corrupt source may be replaced without a
+                # merge. An access error says nothing about the source's data.
+            else:
+                try:
+                    _merge_database(name, local, incoming)
+                except (MigrationError, OSError, sqlite3.Error, ValueError):
+                    pending.add(name)
+                    continue
+            state[name] = current
+            changed = True
         finally:
             incoming.unlink(missing_ok=True)
-        state[name] = current
-        changed = True
     if changed:
         _write_snapshot_state(paths, state)
+    return pending
 
 
 def _replace(source: Path, target: Path) -> None:
@@ -260,6 +281,11 @@ def publish_snapshot(paths: StoragePaths) -> int:
     complete files. Returns how many databases were written.
     """
     checked = resolve_storage(paths.output_dir, paths.account, paths.separate_accounts)
+    # A snapshot can arrive during a download, or a previous import can have
+    # failed because another connection held a write lock. Merge it first; a
+    # still-unreadable valid copy must not be silently overwritten.
+    if _merge_changed_snapshot(checked):
+        raise MigrationError("저장 폴더의 기록 사본을 아직 합치지 못해 그대로 보존했습니다. 다음 저장 때 다시 시도합니다.")
     snapshot = checked.snapshot_dir
     snapshot.mkdir(parents=True, exist_ok=True)
     if _linked(snapshot) or not snapshot.resolve().is_relative_to(checked.output_dir):
@@ -386,7 +412,7 @@ def _available_databases(paths: StoragePaths) -> dict[str, Path]:
 
 def _integrity(db: sqlite3.Connection) -> None:
     if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
-        raise MigrationError("기록 파일이 손상되어 옮기지 못했습니다. 이전 파일은 보존했습니다.")
+        raise _DamagedDatabase("기록 파일이 손상되어 옮기지 못했습니다. 이전 파일은 보존했습니다.")
 
 
 def _backup_database(source: Path, destination: Path) -> None:

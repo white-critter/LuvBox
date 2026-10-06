@@ -355,7 +355,8 @@ class HistoryTests(unittest.TestCase):
         self.assertIsNone(records["100"]["posted_at"])
         self.assertEqual(archive.read_bytes(), before)
         summary = self.store.summary()
-        self.assertEqual((summary["files"], summary["unknown_bytes"], summary["estimated_dates"]), (2, 2, 1))
+        self.assertEqual((summary["files"], summary["record_count"], summary["unknown_bytes"], summary["estimated_dates"]),
+                         (0, 2, 2, 1))
         self.assertEqual(summary["archivepaths"], [str(archive)])
 
     def test_import_merges_archive_and_file_by_kind_layout_and_number(self):

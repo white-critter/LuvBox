@@ -2,6 +2,7 @@
 
 import queue
 import sqlite3
+import struct
 import tempfile
 import unittest
 from contextlib import closing
@@ -77,7 +78,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(tables["runs"]["method"], "sql")
         # A damaged file never replaces the last good backup.
         self.assertIsNone(recovery.backup_catalog(self.account, "myaccount"))
-        self.assertEqual(len(list((self.root / "app" / "backups" / "catalog" / "myaccount").glob("history-*"))), 1)
+        self.assertEqual(len(list(recovery._catalog_backups("myaccount", self.account).glob("history-*"))), 1)
 
     def test_repair_rebuilds_a_verified_database_and_keeps_the_damaged_one(self):
         damage_media_table(self.live)
@@ -111,7 +112,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual((kind, snapshot[1]["files"]), ("loaded", 600))
 
     def test_backups_are_daily_and_limited(self):
-        folder = self.root / "app" / "backups" / "catalog" / "myaccount"
+        folder = recovery._catalog_backups("myaccount", self.account)
         for day in range(1, 10):
             folder.mkdir(parents=True, exist_ok=True)
             (folder / f"history-202601{day:02d}.sqlite3").write_bytes(b"old")
@@ -120,7 +121,48 @@ class RecoveryTests(unittest.TestCase):
         backups = sorted(folder.glob("history-*.sqlite3"))
         self.assertEqual(len(backups), 7)
         self.assertEqual(backups[-1], target)
-        self.assertEqual(recovery.latest_backup("myaccount"), target)
+        self.assertEqual(recovery.latest_backup("myaccount", self.account), target)
+
+    def test_same_account_catalogs_have_separate_backups_and_repairs(self):
+        first = recovery.backup_catalog(self.account, "myaccount")
+        other = self.root / "other-output" / "myaccount"
+        with closing(HistoryStore(other)) as store:
+            path = other / "99999_1.jpg"
+            path.write_bytes(b"other media")
+            store.record_media("flat", {"tweet_id": "99999", "num": 1, "type": "photo"}, path)
+        second = recovery.backup_catalog(other, "myaccount")
+        self.assertNotEqual(first, second)
+        self.assertEqual(recovery.latest_backup("myaccount", self.account), first)
+        self.assertEqual(recovery.latest_backup("myaccount", other), second)
+        # Leave an old unscoped backup in place; it is not a proven fallback
+        # for either output folder, and must not be silently combined.
+        legacy = recovery._catalog_backups("myaccount") / "history-20990101.sqlite3"
+        legacy.write_bytes(second.read_bytes())
+        damage_media_table(self.live)
+        recovery.repair_history(self.account, "myaccount")
+        with closing(HistoryStore(self.account)) as store:
+            self.assertEqual({row["tweet_id"] for row in store.records(limit=1000)}, set(self.saved))
+        self.assertTrue(legacy.is_file())
+        with closing(HistoryStore(other)) as store:
+            self.assertEqual([row["tweet_id"] for row in store.records()], ["99999"])
+
+
+class RecoveryRecordTests(unittest.TestCase):
+    def test_truncated_numbers_are_rejected_instead_of_inventing_values(self):
+        for serial, size in enumerate((1, 2, 3, 4, 6, 8, 8), start=1):
+            with self.subTest(serial=serial):
+                with self.assertRaises(ValueError):
+                    recovery._record(bytes((2, serial)) + b"\x00" * (size - 1))
+
+    def test_invalid_headers_and_split_serial_types_are_rejected(self):
+        for payload in (b"\x08\x00", b"\x00", b"\x02\x80\x00"):
+            with self.subTest(payload=payload.hex()):
+                with self.assertRaises(ValueError):
+                    recovery._record(payload)
+
+    def test_valid_numbers_and_text_still_decode(self):
+        payload = bytes((6, 1, 6, 7, 15, 12)) + b"\xff" + (123).to_bytes(8, "big") + struct.pack(">d", 2.5) + b"x"
+        self.assertEqual(recovery._record(payload), [-1, 123, 2.5, "x", b""])
 
 
 if __name__ == "__main__":

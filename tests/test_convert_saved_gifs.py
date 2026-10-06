@@ -125,6 +125,65 @@ class ConvertSavedGifTests(unittest.TestCase):
         self.assertEqual(self.row("100")["path"], str(first.resolve()))
         self.assertTrue((self.account / "101_gif_1.gif").is_file())
 
+    def test_source_edited_during_conversion_is_preserved_without_a_gif(self):
+        source = self.movie("100_gif_1.mp4")
+        self.record("100", source)
+        changed = source.read_bytes() + b"newer edit during conversion"
+        convert = media.convert_mp4_to_gif
+
+        def edit_after_conversion(path, **options):
+            result = convert(path, **options)
+            path.write_bytes(changed)
+            return result
+
+        with patch("xlikesaver.media.convert_mp4_to_gif", side_effect=edit_after_conversion):
+            messages, recycled = self.convert()
+        recycled.assert_not_called()
+        self.assertIn("실패 1개", messages[-1][2])
+        self.assertEqual(source.read_bytes(), changed)
+        self.assertEqual(self.row("100")["path"], str(source.resolve()))
+        self.assertFalse(source.with_suffix(".gif").exists())
+        self.assert_no_temporary_files()
+
+    def test_source_edited_after_catalog_update_is_preserved_and_record_restored(self):
+        source = self.movie("100_gif_1.mp4")
+        self.record("100", source)
+        changed = source.read_bytes() + b"newer edit before recycling"
+        replace_file = HistoryStore.replace_media_file
+
+        def edit_after_record(store, row, path, *args, **options):
+            updated = replace_file(store, row, path, *args, **options)
+            if Path(path).suffix == ".gif":
+                source.write_bytes(changed)
+            return updated
+
+        with patch.object(HistoryStore, "replace_media_file", edit_after_record):
+            messages, recycled = self.convert()
+        recycled.assert_not_called()
+        self.assertIn("실패 1개", messages[-1][2])
+        self.assertEqual(source.read_bytes(), changed)
+        self.assertEqual(self.row("100")["path"], str(source.resolve()))
+        self.assertFalse(source.with_suffix(".gif").exists())
+        self.assert_no_temporary_files()
+
+    def test_failed_catalog_rollback_keeps_both_files_and_the_referenced_gif(self):
+        source = self.movie("100_gif_1.mp4")
+        self.record("100", source)
+        replace_file = HistoryStore.replace_media_file
+
+        def refuse_rollback(store, row, path, *args, **options):
+            if Path(path) == source:
+                return False
+            return replace_file(store, row, path, *args, **options)
+
+        with patch.object(HistoryStore, "replace_media_file", refuse_rollback):
+            messages, _ = self.convert(recycle=lambda path: False)
+        destination = source.with_suffix(".gif")
+        self.assertEqual(messages[-1][1], "error")
+        self.assertTrue(source.is_file() and destination.is_file())
+        self.assertEqual(self.row("100")["path"], str(destination.resolve()))
+        self.assert_no_temporary_files()
+
     def test_no_recycle_bin_existing_gif_or_size_limit_keep_the_mp4_untouched(self):
         source = self.movie("100_gif_1.mp4")
         self.record("100", source)

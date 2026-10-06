@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import sqlite3
+import stat
 import tempfile
 import time
 from contextlib import nullcontext
@@ -525,13 +526,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             raise exception.AbortExtraction("history store unavailable") from None
         progress_fields.clear()
 
-    def record_source(kwdict, media_path, media_status):
+    def record_source(kwdict, media_path, media_status, previous):
         nonlocal metadata_failed, metadata_warned, author_deferred
-        try:
-            previous = (history.media_record(normalized.folder_mode, kwdict)
-                        if media_status == "existing" else None) or {}
-        except HistoryError:
-            raise exception.AbortExtraction("history store unavailable") from None
+        # handle_url already reads an archive hit's record to recover its path.
+        # Reuse that same snapshot for metadata decisions instead of querying
+        # the catalog twice for every already saved file.
+        previous = previous or {}
         previous_status = previous.get("metadata_status", "pending")
         previous_author_status = previous.get("author_metadata_status", "pending")
         author, author_id = _author_fields(kwdict.get("author"))
@@ -781,6 +781,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             else:
                 if self.last_output:
                     media_status, media_path = self.last_output
+                    previous = None
                     if media_status == "saved":
                         if self.gif_source is not None:
                             # The GIF is finalized and archived now. Until this
@@ -827,12 +828,19 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                     kwdict["extension"] = candidate.suffix.lstrip(".")
                     self.last_output = (media_status, media_path)
                     kwdict["_xlikesaver_path"] = media_path
-                    original_size = Path(media_path).stat().st_size if Path(media_path).is_file() else 0
-                    if Path(media_path).is_file():
-                        record_source(kwdict, media_path, media_status)
+                    media_stat = None
+                    if media_path:
+                        try:
+                            media_stat = Path(media_path).stat()
+                        except (FileNotFoundError, NotADirectoryError):
+                            pass
+                    media_exists = media_stat is not None and stat.S_ISREG(media_stat.st_mode)
+                    original_size = media_stat.st_size if media_exists else 0
+                    if media_exists:
+                        record_source(kwdict, media_path, media_status, previous)
                     emit({"type": "saved" if media_status == "saved" else "skipped", "path": media_path,
                           **_media_details(kwdict)})
-                    if Path(media_path).is_file():
+                    if media_exists:
                         try:
                             history.record_media(normalized.folder_mode, kwdict, media_path, status=media_status)
                         except HistoryError:

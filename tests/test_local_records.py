@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from tests import test_core
 from xlikesaver.history import HistoryStore
-from xlikesaver.storage import migrate_records, prepare_storage, publish_snapshot, resolve_storage
+from xlikesaver.storage import (MigrationError, migrate_records, prepare_storage,
+                               publish_snapshot, resolve_storage)
 
 HISTORY = ".xlikesaver-history.sqlite3"
 ARCHIVE = ".xlikesaver-archive.flat.sqlite3"
@@ -103,6 +104,68 @@ class LocalRecordTests(unittest.TestCase):
         (self.paths.snapshot_dir / ARCHIVE).write_bytes(b"not a database" * 100)
         prepare_storage(self.paths, protected=True)
         self.assertEqual(count(self.paths.record_dir / ARCHIVE, "archive"), 2)
+        publish_snapshot(self.paths)
+        self.assertEqual(count(self.paths.snapshot_dir / ARCHIVE, "archive"), 2)
+
+    def changed_archive_snapshot(self):
+        self.earlier_version_records(["100"])
+        prepare_storage(self.paths, protected=True)
+        publish_snapshot(self.paths)
+        with closing(sqlite3.connect(self.paths.snapshot_dir / ARCHIVE)) as db:
+            db.execute("INSERT INTO archive VALUES ('twitter200_1')")
+            db.commit()
+
+    def test_locked_merge_does_not_mark_snapshot_consumed_and_retries(self):
+        self.changed_archive_snapshot()
+        state_path = self.paths.record_dir / "snapshot.json"
+        state_before = json.loads(state_path.read_text(encoding="utf-8"))["files"][ARCHIVE]
+        with closing(sqlite3.connect(self.paths.record_dir / ARCHIVE)) as locker:
+            locker.execute("BEGIN IMMEDIATE")
+            prepare_storage(self.paths, protected=True)
+            state_after = json.loads(state_path.read_text(encoding="utf-8"))["files"][ARCHIVE]
+            self.assertEqual(state_after, state_before)
+            self.assertEqual(count(self.paths.record_dir / ARCHIVE, "archive"), 1)
+            locker.rollback()
+        prepare_storage(self.paths, protected=True)
+        self.assertEqual(count(self.paths.record_dir / ARCHIVE, "archive"), 2)
+        self.assertFalse(list(self.paths.record_dir.parent.glob(".incoming-*")))
+
+    def test_publish_preserves_unmerged_snapshot_then_retries_after_lock(self):
+        self.changed_archive_snapshot()
+        shared = self.paths.snapshot_dir / ARCHIVE
+        shared_before = shared.read_bytes()
+        with closing(sqlite3.connect(self.paths.record_dir / ARCHIVE)) as locker:
+            locker.execute("BEGIN IMMEDIATE")
+            with self.assertRaises(MigrationError):
+                publish_snapshot(self.paths)
+            self.assertEqual(shared.read_bytes(), shared_before)
+            self.assertEqual(count(shared, "archive"), 2)
+            locker.rollback()
+        publish_snapshot(self.paths)
+        self.assertEqual(count(self.paths.record_dir / ARCHIVE, "archive"), 2)
+        self.assertEqual(count(shared, "archive"), 2)
+        self.assertFalse(list(self.paths.record_dir.parent.glob(".incoming-*")))
+
+    def test_unreadable_snapshot_retries_without_being_assumed_corrupt(self):
+        self.changed_archive_snapshot()
+        shared = self.paths.snapshot_dir / ARCHIVE
+        before = shared.read_bytes()
+        with patch("xlikesaver.storage._backup_database", side_effect=PermissionError("sync file lock")):
+            prepare_storage(self.paths, protected=True)
+            with self.assertRaises(MigrationError):
+                publish_snapshot(self.paths)
+        self.assertEqual(shared.read_bytes(), before)
+        publish_snapshot(self.paths)
+        self.assertEqual(count(self.paths.record_dir / ARCHIVE, "archive"), 2)
+        self.assertEqual(count(shared, "archive"), 2)
+
+    def test_publish_merges_snapshot_that_arrived_after_storage_preparation(self):
+        self.changed_archive_snapshot()
+        # No further prepare call: a sync client can supply new data while a
+        # save is still running. Publication must include it in both copies.
+        publish_snapshot(self.paths)
+        self.assertEqual(count(self.paths.record_dir / ARCHIVE, "archive"), 2)
+        self.assertEqual(count(self.paths.snapshot_dir / ARCHIVE, "archive"), 2)
 
     def test_folder_change_carries_records_found_only_in_the_old_snapshot(self):
         self.earlier_version_records(["100"])

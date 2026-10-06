@@ -18,7 +18,7 @@ SOURCE_FILES = (
     "entry.py", "setup.ps1", "build.ps1", "run.bat", "requirements.txt",
     "requirements-dev.txt", "requirements-lock.txt", "README.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "XlikeSaver.code-workspace",
-    "tools/exiftool/download.py", "tools/package_release.py",
+    "tools/exiftool/download.py", "tools/package_release.py", "tools/ui_qa.py",
     "tools/ffmpeg/build.py", "tools/ffmpeg/README.md", "tools/ffmpeg/manifest.json",
     "tools/ffmpeg/configure-flags.json", "tools/ffmpeg/build-info.txt", "tools/ffmpeg/LICENSE.LGPLv2.1.txt",
     "tools/ffmpeg/COPYING.MinGW-w64-runtime.txt", "tools/ffmpeg/COPYING.GCC-runtime-exception.txt",

@@ -202,6 +202,63 @@ class ThemeTests(unittest.TestCase):
         self.assertEqual(first, bounds())
         self.assertEqual(first[0][3] - first[0][1], first[1][3] - first[1][1])
 
+    def test_card_notebook_has_rounded_client_and_inset_native_pages_in_both_themes(self):
+        self.root.geometry("600x320")
+        self.root.configure(background=theme.CARD)
+        notebook = ttk.Notebook(self.root, style="Card.TNotebook")
+        notebook.pack(fill="both", expand=True, padx=20, pady=12)
+        pages = []
+        for caption in ("저장 위치", "미디어"):
+            page = ttk.Frame(notebook, style="Plain.TFrame")
+            notebook.add(page, text=caption)
+            pages.append(page)
+        style = ttk.Style(self.root)
+        for appearance in ("dark", "light"):
+            theme.apply(self.root, appearance)
+            self.root.update()
+            palette = theme.DARK if appearance == "dark" else theme.LIGHT
+            self.assertEqual(style.lookup("Card.TNotebook", "background"), palette["CARD"])
+            self.assertEqual(style.layout("Card.TNotebook")[0][0], "Soft.Notebook.client")
+            self.assertEqual(style.layout("Card.TNotebook.Tab")[0][0], "Soft.Tab.card")
+            for state in ((), ("selected",), ("active",), ("focus",), ("disabled",)):
+                self.assertEqual(style.lookup("Card.TNotebook.Tab", "background", state), palette["CARD"])
+            image = self.root._xlikesaver_theme_images["notebook_card"]
+            color = lambda x, y: "#%02x%02x%02x" % tuple(image.get(x, y))
+            self.assertEqual(color(0, 0), palette["CARD"])
+            self.assertEqual(color(20, 0), palette["LINE"])
+            # Ttk locates the '.client' node to reserve its image padding. If
+            # that node is renamed incorrectly, the rectangular page starts
+            # at x=0 and paints over every rounded corner of the new frame.
+            for index, page in enumerate(pages):
+                notebook.select(index)
+                self.root.update()
+                self.assertGreaterEqual(page.winfo_x(), 12)
+                self.assertGreaterEqual(notebook.winfo_width() - page.winfo_x() - page.winfo_width(), 12)
+                self.assertGreaterEqual(notebook.winfo_height() - page.winfo_y() - page.winfo_height(), 12)
+            for name in ("tab_card", "tab_selected_card", "tab_active_card", "tab_focus_card"):
+                tab = self.root._xlikesaver_theme_images[name]
+                self.assertEqual("#%02x%02x%02x" % tuple(tab.get(0, 0)), palette["CARD"])
+
+    def test_library_notebook_removes_extra_gap_below_the_tab_buttons(self):
+        self.root.geometry("600x320")
+        notebook = ttk.Notebook(self.root)
+        notebook.pack(fill="both", expand=True)
+        page = ttk.Frame(notebook)
+        notebook.add(page, text="저장한 파일")
+        for appearance in ("dark", "light"):
+            theme.apply(self.root, appearance)
+            self.root.update()
+            tab_bottom = 0
+            for y in range(min(100, notebook.winfo_height())):
+                try:
+                    notebook.index(f"@20,{y}")
+                except tk.TclError:
+                    continue
+                tab_bottom = y + 1
+            self.assertGreater(tab_bottom, 0)
+            self.assertGreaterEqual(page.winfo_y() - tab_bottom, 0)
+            self.assertLessEqual(page.winfo_y() - tab_bottom, 4)
+
     def test_dark_theme_switch_updates_popups_plain_text_and_control_states(self):
         self.root.geometry("600x500")
         card = theme.card(self.root, fill="x")
@@ -354,6 +411,207 @@ class ThemeTests(unittest.TestCase):
         # A subsequent worker-side value update must not call a dead canvas.
         value.set(80)
         self.root.update()
+
+    def test_navigation_controls_keep_native_focus_and_match_both_surfaces(self):
+        self.root.geometry("640x600")
+        sidebar = ttk.Frame(self.root, style="Sidebar.TFrame", padding=12)
+        sidebar.pack(fill="x")
+        calls = []
+        controls = []
+        for parent in (self.root, sidebar):
+            for name in ("Ghost.TButton", "Nav.TButton", "NavSelected.TButton",
+                         "Segment.TButton", "SegmentSelected.TButton"):
+                button = ttk.Button(parent, text="저장한 파일", style=name,
+                                    command=lambda: calls.append("selected"))
+                button.pack()
+                controls.append(button)
+        self.root.update()
+        controls[0].focus_force()
+        self.root.update()
+        controls[0].event_generate("<KeyPress-space>")
+        controls[0].event_generate("<KeyRelease-space>")
+        self.root.update()
+        self.assertEqual(calls, ["selected"])
+        controls[0].state(["disabled"])
+        controls[0].invoke()
+        self.assertEqual(calls, ["selected"])
+        style = ttk.Style(self.root)
+        for appearance in ("dark", "light"):
+            theme.apply(self.root, appearance)
+            self.root.update()
+            palette = theme.DARK if appearance == "dark" else theme.LIGHT
+            for button in controls:
+                surface = palette["CARD"] if button.master is sidebar else palette["BG"]
+                for state in ((), ("active",), ("pressed",), ("focus",), ("disabled",)):
+                    self.assertEqual(style.lookup(button.cget("style"), "background", state), surface)
+            for name, surface in (("ghost", palette["BG"]), ("ghost_card", palette["CARD"]),
+                                  ("selected", palette["BG"]), ("selected_card", palette["CARD"])):
+                image = self.root._xlikesaver_theme_images[name]
+                self.assertEqual("#%02x%02x%02x" % tuple(image.get(0, 0)), surface)
+
+    def test_progress_caps_use_their_window_theme_when_another_interpreter_switches(self):
+        other = tk.Tk()
+        other.attributes("-alpha", 0)
+        try:
+            theme.apply_style(other, mode="dark")
+            card = theme.card(self.root, fill="x")
+            button = ttk.Button(card, text="저장한 파일", style="NavSelected.TButton")
+            button.pack()
+            bar = theme.Progressbar(card, length=300, value=50)
+            bar.pack()
+            self.root.update()
+            expected = theme.LIGHT
+            self.assertEqual(ttk.Style(self.root).lookup(button.cget("style"), "background"), expected["CARD"])
+            self.assertEqual(bar.itemcget(bar._fill, "fill"), expected["BLUE"])
+            color = "#%02x%02x%02x" % tuple(bar._cap_images["fill"].get(7, 7))
+            self.assertEqual(color, expected["BLUE"])
+            self.assertEqual(theme.mode(self.root), "light")
+        finally:
+            other.update_idletasks()
+            other.destroy()
+            theme.apply(self.root, "light")
+
+    def test_dark_fields_select_text_with_a_readable_foreground(self):
+        theme.apply(self.root, "dark")
+        style = ttk.Style(self.root)
+        for name in ("TEntry", "TSpinbox", "TCombobox"):
+            self.assertEqual(style.lookup(name, "selectforeground"), theme.DARK["PRIMARY_INK"])
+            self.assertEqual(style.lookup(name, "selectbackground"), theme.DARK["BLUE"])
+        theme.apply(self.root, "light")
+
+    def test_progress_rejects_nonfinite_initial_values_without_leaving_a_canvas(self):
+        existing = self.root.winfo_children()
+        for value in (float("nan"), float("inf"), "invalid"):
+            with self.subTest(value=value), self.assertRaises(tk.TclError):
+                theme.Progressbar(self.root, value=value)
+        self.assertEqual(existing, self.root.winfo_children())
+
+    def _nested_scroll_views(self):
+        self.root.geometry("720x360")
+        outside = ttk.Button(self.root, text="사이드바 버튼")
+        outside.pack(side="bottom", fill="x")
+        workspace = ttk.Frame(self.root)
+        workspace.pack(fill="both", expand=True)
+        workspace.rowconfigure(0, weight=1)
+        views, buttons = [], []
+        for column in range(2):
+            workspace.columnconfigure(column, weight=1, uniform="pane")
+            pane = ttk.Frame(workspace)
+            pane.grid(row=0, column=column, sticky="nsew")
+            view = theme.ScrollableContent(pane)
+            view.pack(fill="both", expand=True)
+            items = []
+            for number in range(30):
+                button = ttk.Button(view.content, text=f"설정 {number + 1}")
+                button.pack(fill="x", pady=3)
+                items.append(button)
+            views.append(view)
+            buttons.append(items)
+        self.root.update()
+        self.assertTrue(all(view.scrollbar.winfo_manager() for view in views))
+        return views, buttons, outside
+
+    def test_nested_scroll_view_routes_wheel_and_focus_to_its_own_content(self):
+        (left, right), buttons, outside = self._nested_scroll_views()
+        start_left, start_right = left.canvas.yview(), right.canvas.yview()
+        buttons[0][0].event_generate("<MouseWheel>", delta=-120)
+        self.root.update()
+        self.assertGreater(left.canvas.yview()[0], start_left[0])
+        self.assertEqual(right.canvas.yview(), start_right)
+        current_left = left.canvas.yview()
+        outside.event_generate("<MouseWheel>", delta=-120)
+        self.root.update()
+        self.assertEqual(left.canvas.yview(), current_left)
+        self.assertEqual(right.canvas.yview(), start_right)
+
+        buttons[1][0].event_generate("<MouseWheel>", delta=-120)
+        self.root.update()
+        self.assertGreater(right.canvas.yview()[0], start_right[0])
+        self.assertEqual(left.canvas.yview(), current_left)
+
+        left.canvas.yview_moveto(0)
+        right_position = right.canvas.yview()
+        buttons[0][-1].focus_force()
+        self.root.update()
+        self.assertGreater(left.canvas.yview()[0], 0)
+        top = buttons[0][-1].winfo_rooty() - left.canvas.winfo_rooty()
+        self.assertGreaterEqual(top, 0)
+        self.assertLessEqual(top + buttons[0][-1].winfo_height(), left.canvas.winfo_height())
+        self.assertEqual(right.canvas.yview(), right_position)
+        left_position = left.canvas.yview()
+        outside.focus_force()
+        self.root.update()
+        self.assertEqual(left.canvas.yview(), left_position)
+        self.assertEqual(right.canvas.yview(), right_position)
+
+    def test_nested_scroll_view_preserves_text_and_table_wheel_behavior(self):
+        (view, other), buttons, outside = self._nested_scroll_views()
+        text = tk.Text(view.content, height=3)
+        text.insert("1.0", "\n".join(str(number) for number in range(60)))
+        text.pack(before=buttons[0][0], fill="x")
+        tree = ttk.Treeview(view.content, height=3)
+        for number in range(40):
+            tree.insert("", "end", text=str(number))
+        tree.pack(before=buttons[0][0], fill="x")
+        self.root.update()
+        view.canvas.yview_moveto(0)
+        positions = (view.canvas.yview(), other.canvas.yview())
+        for widget in (text, tree):
+            previous = widget.yview()
+            widget.event_generate("<MouseWheel>", delta=-120)
+            self.root.update()
+            self.assertGreater(widget.yview()[0], previous[0])
+            self.assertEqual((view.canvas.yview(), other.canvas.yview()), positions)
+        view.scrollbar.event_generate("<MouseWheel>", delta=-120)
+        self.root.update()
+        # The native scrollbar is supposed to scroll the canvas it controls.
+        # It must keep that behavior without also moving the other view.
+        self.assertGreater(view.canvas.yview()[0], positions[0][0])
+        self.assertEqual(other.canvas.yview(), positions[1])
+
+    def test_scroll_view_destroy_releases_only_its_own_toplevel_callbacks(self):
+        (view, survivor), buttons, outside = self._nested_scroll_views()
+        received = []
+        external = self.root.bind("<MouseWheel>", lambda event: received.append(event.widget), add="+")
+        self.addCleanup(self.root.unbind, "<MouseWheel>", external)
+        own_bindings = list(view._view_bindings)
+        surviving_bindings = list(survivor._view_bindings)
+        buttons[0][-1].event_generate("<FocusIn>")
+        view._schedule_layout()
+        timers = set(view._focus_timers) | {view._layout_timer}
+        self.assertTrue(view._focus_timers)
+        self.assertEqual(view._event_owner, self.root)
+        view.destroy()
+        pending = set(self.root.tk.call("after", "info"))
+        self.assertTrue(timers.isdisjoint(pending))
+        self.assertFalse(view._focus_timers)
+        self.assertIsNone(view._event_owner)
+        for event, callback in own_bindings:
+            self.assertNotIn(callback, self.root.bind(event))
+        for event, callback in surviving_bindings:
+            self.assertIn(callback, self.root.bind(event))
+        self.assertIn(external, self.root.bind("<MouseWheel>"))
+        outside.event_generate("<MouseWheel>", delta=-120)
+        self.root.update()
+        self.assertEqual(received, [outside])
+        previous = survivor.canvas.yview()
+        buttons[1][0].event_generate("<MouseWheel>", delta=-120)
+        self.root.update()
+        self.assertGreater(survivor.canvas.yview()[0], previous[0])
+
+    def test_main_text_and_selected_actions_have_readable_contrast_in_each_theme(self):
+        def luminance(color):
+            channels = [int(color[index:index + 2], 16) / 255 for index in (1, 3, 5)]
+            linear = [value / 12.92 if value <= .04045 else ((value + .055) / 1.055) ** 2.4
+                      for value in channels]
+            return sum(value * weight for value, weight in zip(linear, (.2126, .7152, .0722)))
+
+        for palette in (theme.LIGHT, theme.DARK):
+            for text, surface in (("INK", "BG"), ("MUTED", "BG"), ("MUTED", "CARD"),
+                                  ("PRIMARY_INK", "BLUE"), ("BLUE_ACTIVE", "ACCENT_SOFT")):
+                low, high = sorted((luminance(palette[text]), luminance(palette[surface])))
+                with self.subTest(text=text, surface=surface, palette=palette["BG"]):
+                    self.assertGreaterEqual((high + .05) / (low + .05), 4.5)
 
     @unittest.skipUnless(os.name == "nt", "Windows private font registration")
     def test_bundled_pretendard_renders_normal_and_bold_korean_text(self):

@@ -10,6 +10,7 @@ https://www.sqlite.org/fileformat2.html
 from __future__ import annotations
 
 import os
+import hashlib
 import shutil
 import sqlite3
 import struct
@@ -42,9 +43,13 @@ def _signed(value: int, bits: int) -> int:
 
 def _record(payload: bytes) -> list:
     header_size, offset = _varint(payload, 0)
+    if not offset <= header_size <= len(payload):
+        raise ValueError("invalid record header")
     types = []
     while offset < header_size:
         serial, offset = _varint(payload, offset)
+        if offset > header_size:
+            raise ValueError("truncated serial type")
         types.append(serial)
     values, position = [], header_size
     for serial in types:
@@ -52,9 +57,13 @@ def _record(payload: bytes) -> list:
             values.append(None if serial == 0 else serial - 8)
         elif 1 <= serial <= 6:
             size = (1, 2, 3, 4, 6, 8)[serial - 1]
+            if position + size > len(payload):
+                raise ValueError("truncated integer")
             values.append(_signed(int.from_bytes(payload[position:position + size], "big"), size * 8))
             position += size
         elif serial == 7:
+            if position + 8 > len(payload):
+                raise ValueError("truncated float")
             values.append(struct.unpack(">d", payload[position:position + 8])[0])
             position += 8
         elif serial >= 12:
@@ -262,12 +271,17 @@ def backup_directory() -> Path:
     return state_directory().parent / "backups"
 
 
-def _catalog_backups(account: str) -> Path:
-    return backup_directory() / "catalog" / account
+def _catalog_backups(account: str, record_dir: Path | str | None = None) -> Path:
+    folder = backup_directory() / "catalog" / account
+    if record_dir is None:
+        return folder  # Retain access to old, unscoped backups.
+    identity = os.path.normcase(str(Path(record_dir).expanduser().resolve()))
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+    return folder / ("catalog-" + digest)
 
 
-def latest_backup(account: str) -> Path | None:
-    found = sorted(_catalog_backups(account).glob("history-*.sqlite3"))
+def latest_backup(account: str, record_dir: Path | str | None = None) -> Path | None:
+    found = sorted(_catalog_backups(account, record_dir).glob("history-*.sqlite3"))
     return found[-1] if found else None
 
 
@@ -279,7 +293,7 @@ def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
     live = Path(record_dir) / HISTORY_NAME
     if not live.is_file():
         return None
-    folder = _catalog_backups(account)
+    folder = _catalog_backups(account, record_dir)
     folder.mkdir(parents=True, exist_ok=True)
     day = datetime.now().strftime("%Y%m%d")
     target, temporary = folder / f"history-{day}.sqlite3", folder / f".history-{day}.partial"
@@ -324,7 +338,9 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
         except sqlite3.Error:
             pass
         rebuilt = record_dir / f".xlikesaver-history.repaired-{stamp}.sqlite3"
-        result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account))
+        # Old account-only backups cannot identify their output folder. Keep
+        # them intact, but never mix an unrelated catalog into this repair.
+        result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir))
         for suffix in ("-wal", "-shm"):
             (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
         os.replace(rebuilt, record_dir / HISTORY_NAME)

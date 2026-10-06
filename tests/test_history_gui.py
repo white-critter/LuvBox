@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import tkinter as tk
+from tkinter import ttk
 import threading
 import unittest
 import weakref
@@ -59,6 +60,81 @@ class HistoryGuiTests(unittest.TestCase):
             store.record_media("flat", {"tweet_id": str(100 + index), "num": 1, "type": "photo", "author": {"name": "alice"}}, path)
         return store
 
+    def test_library_default_size_is_larger_and_stays_within_small_screens(self):
+        for screen, expected in (((2560, 1440), (1500, 1100)),
+                                 ((1920, 1080), (1500, 980)),
+                                 ((1280, 720), (1200, 620))):
+            with self.subTest(screen=screen):
+                window = None
+                try:
+                    with patch.object(HistoryWindow, "winfo_screenwidth", return_value=screen[0]), \
+                            patch.object(HistoryWindow, "winfo_screenheight", return_value=screen[1]), \
+                            patch("xlikesaver.history_gui.threading.Thread"):
+                        window = HistoryWindow(self.root, lambda: ("offline", self.account))
+                    window.attributes("-alpha", 0)
+                    window.update_idletasks()
+                    self.assertEqual((window.winfo_width(), window.winfo_height()), expected)
+                    self.assertEqual(window.minsize(), (min(760, expected[0]), min(640, expected[1])))
+                    self.assertEqual(str(window.transient()), "")
+                    self.assertEqual(tuple(map(bool, window.resizable())), (True, True))
+                finally:
+                    if window is not None:
+                        window.destroy()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows native window controls")
+    def test_library_has_native_maximize_controls_and_can_be_maximized(self):
+        import ctypes
+        get_style = ctypes.windll.user32.GetWindowLongW
+        get_style.argtypes = (ctypes.c_void_p, ctypes.c_int)
+        get_style.restype = ctypes.c_long
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        self.window.deiconify()
+        self.root.update()
+
+        def native_style():
+            return get_style(ctypes.c_void_p(int(self.window.wm_frame(), 16)), -16)
+
+        self.assertTrue(native_style() & 0x00010000)  # WS_MAXIMIZEBOX
+        self.assertTrue(native_style() & 0x00040000)  # WS_THICKFRAME
+        self.window.state("zoomed")
+        self.root.update()
+        self.assertEqual(self.window.state(), "zoomed")
+        self.window.state("normal")
+        self.root.update()
+        # This reproduces the previous dialog ownership: Tk removes the
+        # native maximize button when the library becomes transient.
+        self.window.transient(self.root)
+        self.root.update()
+        self.assertFalse(native_style() & 0x00010000)
+        self.window.transient("")
+        self.root.update()
+        self.assertTrue(native_style() & 0x00010000)
+
+    def test_library_pages_start_directly_below_visible_tab_buttons(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        self.window.deiconify()
+        self.root.update()
+        tabs = self.window.tabs
+        tab_pixels = []
+        for y in range(80):
+            try:
+                tabs.index(f"@20,{y}")
+            except tk.TclError:
+                continue
+            tab_pixels.append(y)
+        self.assertTrue(tab_pixels)
+        for name in tabs.tabs():
+            tabs.select(name)
+            self.root.update_idletasks()
+            page = tabs.nametowidget(name)
+            gap = page.winfo_y() - (max(tab_pixels) + 1)
+            self.assertGreaterEqual(gap, 0)
+            self.assertLessEqual(gap, 4)
+
     def test_window_loads_statistics_search_and_pagination_locally(self):
         self.records(105)
         with patch("requests.Session.request") as network:
@@ -72,6 +148,50 @@ class HistoryGuiTests(unittest.TestCase):
             self.load(query="104")
             self.assertEqual(len(self.window.tree.get_children()), 1)
         network.assert_not_called()
+
+    def test_file_totals_are_unique_but_history_pages_keep_all_layout_records(self):
+        store = self.records(2)
+        path = self.account / "100_1.jpg"
+        store.record_media("author", {"tweet_id": "100", "num": 1, "type": "photo",
+                                       "author": {"name": "alice"}}, path)
+        (self.account / "101_1.jpg").unlink()
+
+        self.load()
+
+        self.assertEqual(self.window.tile_values["files"].get(), "1")
+        self.assertEqual(self.window.tile_values["posts"].get(), "2")
+        self.assertEqual(self.window.tile_values["photo"].get(), "1")
+        self.assertEqual(self.window.current_summary["record_count"], 3)
+        self.assertEqual(self.window.current_summary["duplicate_records"], 1)
+        self.assertEqual(len(self.window.tree.get_children()), 3)
+        self.assertEqual(self.window.page_text.get(), "기록 3개 · 1 / 1페이지")
+        self.assertEqual(self.window.author_tree.item("0", "values")[1:3], ("@alice", "1"))
+        self.assertEqual(sum(count for _, count in self.window.month_chart.data), 1)
+
+        path.unlink()
+        self.load()
+
+        self.assertEqual(self.window.tile_values["files"].get(), "0")
+        self.assertEqual(self.window.tile_values["posts"].get(), "2")
+        self.assertEqual(self.window.current_summary["record_count"], 3)
+        self.assertEqual(len(self.window.tree.get_children()), 3)
+        self.assertEqual(self.window.author_tree.get_children(), ())
+        self.assertEqual(self.window.month_chart.data, [])
+
+    def test_changing_history_page_does_not_recheck_every_media_file(self):
+        self.records(105)
+        self.load()
+
+        with patch.object(HistoryStore, "_file", side_effect=AssertionError("Paging rescanned the library")) as checked:
+            self.window.page = 1
+            self.window._load(self.window.generation, self.account, "all", "", 1, False)
+            self.window._poll()
+
+        checked.assert_not_called()
+        self.assertEqual(len(self.window.tree.get_children()), 5)
+        self.assertEqual(self.window.page_text.get(), "기록 105개 · 2 / 2페이지")
+        self.assertEqual(self.window.tile_values["files"].get(), "105")
+        self.assertEqual(sum(count for _, count in self.window.month_chart.data), 105)
 
     def test_selected_record_displays_source_and_open_requires_user_action(self):
         self.records()
@@ -193,7 +313,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.next_button.cget("state")), "disabled")
         self.window._load(*arguments)
         self.window._poll()
-        self.assertEqual(self.window.page_text.get(), "총 105개 · 2 / 2페이지")
+        self.assertEqual(self.window.page_text.get(), "기록 105개 · 2 / 2페이지")
         self.assertEqual(str(self.window.previous_button.cget("state")), "normal")
         self.assertEqual(str(self.window.next_button.cget("state")), "disabled")
 
@@ -210,14 +330,14 @@ class HistoryGuiTests(unittest.TestCase):
             pending_arguments = thread.call_args.kwargs["args"]
         # The older page response must not replace the visible snapshot once
         # a newer search is pending, even briefly while its worker starts.
-        self.assertEqual(self.window.page_text.get(), "총 105개 · 1 / 2페이지")
+        self.assertEqual(self.window.page_text.get(), "기록 105개 · 1 / 2페이지")
         self.assertEqual(self.window.page, 0)
         self.assertEqual(self.window.displayed_page, 0)
         self.assertEqual(pending_arguments[4], 0)
         self.assertEqual(str(self.window.previous_button.cget("state")), "disabled")
         self.window._load(*pending_arguments)
         self.window._poll()
-        self.assertEqual(self.window.page_text.get(), "총 1개 · 1 / 1페이지")
+        self.assertEqual(self.window.page_text.get(), "기록 1개 · 1 / 1페이지")
         self.assertEqual(len(self.window.rows), 1)
 
     def test_page_size_last_first_jump_and_empty_filtered_count(self):
@@ -229,7 +349,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual(len(self.window.rows), 50)
-        self.assertEqual(self.window.page_text.get(), "총 105개 · 1 / 3페이지")
+        self.assertEqual(self.window.page_text.get(), "기록 105개 · 1 / 3페이지")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.last_button.invoke()
         self.window._load(*thread.call_args.kwargs["args"])
@@ -262,7 +382,7 @@ class HistoryGuiTests(unittest.TestCase):
             self.window.search()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
-        self.assertEqual(self.window.page_text.get(), "총 0개 · 0 / 0페이지")
+        self.assertEqual(self.window.page_text.get(), "기록 0개 · 0 / 0페이지")
         for button in (self.window.first_button, self.window.previous_button, self.window.next_button,
                        self.window.last_button, self.window.jump_button):
             self.assertEqual(str(button.cget("state")), "disabled")
@@ -426,7 +546,9 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.geometry("860x720")
         self.root.update()
         self.assertFalse(self.window._preview_side)
-        self.assertEqual(int(self.window.preview_card.grid_info()["row"]), 1)
+        self.assertEqual(int(self.window.preview_card.grid_info()["row"]), 2)
+        self.assertEqual(str(self.window._pagers[0][0].grid_info()["in"]), str(self.window.file_browser))
+        self.assertLess(self.window._pagers[0][0].winfo_rooty(), self.window.preview_card.winfo_rooty())
         self.assertGreaterEqual(self.window.tree.winfo_height(), self.window.tree.winfo_reqheight())
         self.assertLessEqual(self.window.preview_box.winfo_rootx() + self.window.preview_box.winfo_width(),
                              self.window.file_browser.winfo_rootx() + self.window.file_browser.winfo_width())
@@ -451,17 +573,183 @@ class HistoryGuiTests(unittest.TestCase):
         store = self.records(1)
         self.load()
         need = self.window._column_need("filename")
-        for size, hidden in (("1600x900", ()), ("1120x860", ("saved",)), ("860x720", ("saved",))):
+        for size in ("1600x900", "1120x860", "860x720"):
             with self.subTest(size=size):
                 self.window.geometry(size)
                 self.root.update()
                 shown = self.window._shown_columns
-                self.assertEqual(tuple(key for key in self.window._file_columns if key not in shown), hidden)
+                hidden = tuple(key for key in self.window._file_columns if key not in shown)
+                if size == "1600x900":
+                    self.assertEqual(hidden, ())
+                else:
+                    self.assertIn("saved", hidden)
+                    self.assertTrue(set(hidden).issubset(self.window.OPTIONAL_COLUMNS))
                 self.assertGreaterEqual(int(self.window.tree.column("filename", "width")), need - 24)
+                for key in shown:
+                    self.assertGreaterEqual(int(self.window.tree.column(key, "width")), self.window._column_need(key))
         # The hidden save time is still shown for the selected file.
         self.window.tree.selection_set(self.window.tree.get_children()[0])
         self.window.select_record()
         self.assertIn("저장한 때 " + store.records()[0]["saved_at"][:10], self.window.selection_text.get())
+
+    def test_large_font_columns_fit_dates_handles_and_move_preview_below_the_table(self):
+        root = tk.Tk()
+        root.attributes("-alpha", 0)
+        previous_scaling = root.tk.call("tk", "scaling")
+        window = None
+        try:
+            root.tk.call("tk", "scaling", 2.0)
+            with patch("xlikesaver.history_gui.threading.Thread"):
+                window = HistoryWindow(root, lambda: ("offline", self.account))
+            window.attributes("-alpha", 0)
+            window.geometry("1200x860")
+            row = dict(self.records().records()[0], author="WWWWWWWWWWWWWWW",
+                       posted_at="2026-10-06T22:15:00+09:00", posted_source="id_estimate",
+                       saved_at="2026-10-06T22:15:00+09:00", media_type="video")
+            window._display({"files": 1}, [row], [])
+            root.update()
+            self.assertFalse(window._preview_side)
+            self.assertEqual(int(window.preview_card.grid_info()["row"]), 2)
+            style = ttk.Style(root)
+            font = style.lookup("Treeview", "font")
+            heading_font = style.lookup("Treeview.Heading", "font")
+            values = dict(zip(window._file_columns, window.tree.item("0", "values")))
+            for key in window._shown_columns:
+                width = int(window.tree.column(key, "width"))
+                self.assertGreaterEqual(width, int(root.tk.call("font", "measure", font, values[key])) + 24)
+                self.assertGreaterEqual(width, int(root.tk.call("font", "measure", heading_font,
+                                                               window.tree.heading(key, "text"))) + 24)
+            window.geometry("1600x900")
+            root.update()
+            self.assertTrue(window._preview_side)
+            original_need = window._column_need("posted")
+            style.configure("Treeview", font=(theme.FONT, 20))
+            window._layout_pagers()
+            window._layout_columns()
+            root.update()
+            self.assertGreater(window._column_need("posted"), original_need)
+            self.assertFalse(window._preview_side)
+            window.geometry("760x640")
+            root.update()
+            self.assertLess(window.tree.xview()[1], 1)
+            self.assertEqual(set(window._shown_columns), set(window._file_columns) - set(window.OPTIONAL_COLUMNS))
+        finally:
+            root.tk.call("tk", "scaling", previous_scaling)
+            if window is not None:
+                window.destroy()
+            destroy_tk(root)
+
+    def test_period_filter_is_optional_and_keyboard_search_returns_to_files(self):
+        self.assertFalse(self.window.filter_panel.winfo_manager())
+        self.window.toggle_filters()
+        self.assertEqual(self.window.filter_panel.winfo_manager(), "pack")
+        self.window.period_from.set("2026-10-01")
+        self.window.period_to.set("2026-10-06")
+        with patch("xlikesaver.history_gui.threading.Thread"):
+            self.window.search()
+        self.assertEqual(self.window.applied_period, ("posted", "2026-10-01", "2026-10-06"))
+        self.assertEqual(self.window._escape(), "break")
+        self.assertFalse(self.window.filter_panel.winfo_manager())
+        self.assertIn("적용 중", self.window.filter_button.cget("text"))
+        self.window.tabs.select(2)
+        with patch.object(self.window.search_entry, "focus_set") as focused:
+            self.assertEqual(self.window.focus_search(), "break")
+        focused.assert_called_once()
+        self.assertEqual(self.window.tabs.index("current"), 0)
+        self.assertTrue(self.window.bind("<Control-f>"))
+
+    def test_file_management_is_separate_and_selected_actions_have_clear_states(self):
+        self.assertFalse(self.window._tools_window.winfo_viewable())
+        self.assertEqual(str(self.window.backfill_button.winfo_toplevel()), str(self.window._tools_window))
+        self.window._display({}, [], [])
+        self.assertEqual(str(self.window.open_file_button.cget("state")), "disabled")
+        self.assertEqual(str(self.window.open_tweet_button.cget("state")), "disabled")
+        self.records()
+        self.load()
+        self.window.tree.selection_set("0")
+        self.window.select_record()
+        self.assertEqual(str(self.window.open_file_button.cget("state")), "normal")
+        self.assertEqual(str(self.window.open_tweet_button.cget("state")), "normal")
+        with patch.object(self.window._tools_window, "withdraw") as hidden:
+            callback = unittest.mock.Mock()
+            self.window._run_tool(callback)
+        hidden.assert_called_once()
+        callback.assert_called_once()
+        self.assertTrue(self.window.tree.bind("<Return>"))
+
+    def test_preview_note_wraps_to_inspector_instead_of_the_window(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        self.window.deiconify()
+        self.window.geometry("1200x860")
+        self.window.preview_note.set("파일을 확인하지 못했습니다. " * 12)
+        self.root.update()
+        label = next(widget for widget in self.window.preview_info.winfo_children()
+                     if str(widget.cget("textvariable")) == str(self.window.preview_note))
+        self.assertLessEqual(int(label.cget("wraplength")), self.window.preview_info.winfo_width())
+        self.assertLessEqual(self.window.preview_card.winfo_width(), 330)
+        self.assertNotIn(label, self.window.wrapping_labels)
+        self.assertLessEqual(int(label.cget("wraplength")),
+                             max(self.window.preview_box.winfo_reqwidth(), self.window.preview_actions.winfo_reqwidth()))
+        for size in ("860x720", "1200x860"):
+            self.window.geometry(size)
+            self.root.update()
+            stable = (self.window.preview_card.winfo_width(), self.window.preview_info.winfo_width(),
+                      label.cget("wraplength"), self.window._preview_side, self.window.content_view.canvas.yview())
+            self.root.update()
+            self.assertEqual(stable, (self.window.preview_card.winfo_width(), self.window.preview_info.winfo_width(),
+                                     label.cget("wraplength"), self.window._preview_side,
+                                     self.window.content_view.canvas.yview()))
+        with patch.object(label, "configure") as configured:
+            self.window._wrap_preview_note(SimpleNamespace(width=self.window.preview_info.winfo_width()))
+        configured.assert_not_called()
+
+    def test_changing_tabs_returns_outer_scroll_to_the_header(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        self.window.deiconify()
+        self.window.geometry("760x640")
+        self.root.update()
+        self.window.content_view.canvas.yview_moveto(1)
+        self.root.update()
+        self.window.tabs.select(1)
+        self.root.update()
+        self.assertEqual(self.window.content_view.canvas.yview()[0], 0)
+
+    def test_filters_and_insights_reflow_with_large_font(self):
+        root = tk.Tk()
+        root.attributes("-alpha", 0)
+        previous_scaling = root.tk.call("tk", "scaling")
+        window = None
+        try:
+            root.tk.call("tk", "scaling", 2.0)
+            with patch("xlikesaver.history_gui.threading.Thread"):
+                window = HistoryWindow(root, lambda: ("offline", self.account))
+            window.attributes("-alpha", 0)
+            window.geometry("760x640")
+            window.toggle_filters()
+            root.update()
+            for frame in (window.filter_panel, window.library_toolbar):
+                for child in frame.winfo_children():
+                    if child.winfo_ismapped():
+                        self.assertGreaterEqual(child.winfo_width(), child.winfo_reqwidth())
+                        self.assertLessEqual(child.winfo_x() + child.winfo_width(), frame.winfo_width())
+            window.tabs.select(2)
+            root.update()
+            self.assertTrue(window._stats_stacked)
+            self.assertEqual(int(window.months_card.grid_info()["row"]), 1)
+            self.assertGreaterEqual(window.author_tree.winfo_width(), window._ranking_need - 48)
+            window.geometry("1600x900")
+            root.update()
+            self.assertFalse(window._stats_stacked)
+            self.assertEqual(int(window.months_card.grid_info()["row"]), 0)
+        finally:
+            root.tk.call("tk", "scaling", previous_scaling)
+            if window is not None:
+                window.destroy()
+            destroy_tk(root)
 
     def test_refresh_clamps_page_after_catalog_is_reduced(self):
         store = self.records(105)
@@ -474,7 +762,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._poll()
         self.assertEqual((self.window.page, self.window.displayed_page), (0, 0))
         self.assertEqual([row["tweet_id"] for row in self.window.rows.values()], ["100"])
-        self.assertEqual(self.window.page_text.get(), "총 1개 · 1 / 1페이지")
+        self.assertEqual(self.window.page_text.get(), "기록 1개 · 1 / 1페이지")
 
     def test_large_totals_and_large_fonts_keep_both_pagers_and_tables_usable(self):
         # Scaling must be set before the interpreter creates its fonts; changing
@@ -541,7 +829,7 @@ class HistoryGuiTests(unittest.TestCase):
                         window.destroy()
                     destroy_tk(root)
 
-    def test_large_statistics_tiles_reflow_without_clipping_and_restore_six_columns(self):
+    def test_compact_overview_tiles_reflow_without_clipping_and_restore_three_columns(self):
         for scaling in (4 / 3, 2.0):
             with self.subTest(scaling=scaling):
                 root = tk.Tk()
@@ -560,15 +848,15 @@ class HistoryGuiTests(unittest.TestCase):
                                      "oldest_posted_at": "2022-01-01T00:00:00+09:00",
                                      "newest_posted_at": "2026-10-05T00:00:00+09:00"}, [], [], 0, paging, paging)
                     root.update()
-                    self.assertEqual(window._tile_columns, 3)
-                    for key, tile in zip(window.tile_values, window._tiles):
+                    self.assertIn(window._tile_columns, (2, 3))
+                    for key, tile in zip(window._tile_keys, window._tiles):
                         self.assertGreaterEqual(tile.winfo_width(), tile.winfo_reqwidth())
                         self.assertEqual(str(tile.winfo_children()[0].cget("text")), window.tile_values[key].get())
                         for label in tile.winfo_children():
                             self.assertGreaterEqual(label.winfo_width(), label.winfo_reqwidth())
                             self.assertLessEqual(label.winfo_rootx() + label.winfo_width(),
                                                  tile.winfo_rootx() + tile.winfo_width())
-                    for column in range(3, 6):
+                    for column in range(window._tile_columns, 3):
                         self.assertEqual(window._tile_frame.grid_columnconfigure(column)["weight"], 0)
                         self.assertFalse(window._tile_frame.grid_columnconfigure(column)["uniform"])
                     for tab in (0, 1):
@@ -586,7 +874,7 @@ class HistoryGuiTests(unittest.TestCase):
                     # including a large font and all of the large numbers.
                     window.geometry("1400x900")
                     root.update()
-                    self.assertEqual(window._tile_columns, 6)
+                    self.assertEqual(window._tile_columns, 3)
                     self.assertEqual({int(tile.grid_info()["row"]) for tile in window._tiles}, {0})
                     for tile in window._tiles:
                         for label in tile.winfo_children():

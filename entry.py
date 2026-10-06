@@ -67,6 +67,12 @@ def main() -> int:
             theme.apply(root, original_mode)
             assert int(app.progress.cget("highlightthickness")) == 0
             assert app.auth.get()
+            assert app.content_view.winfo_manager() == "grid"
+            app.show_options()
+            assert len(app.option_tabs.tabs()) == 3
+            assert app.options_window.footer.winfo_manager() == "pack"
+            app._close_options(save=False, restore=True)
+            assert app.options_window is None
             assert metadata.available()
             # This also verifies the extracted Perl runtime and Unicode paths.
             with tempfile.TemporaryDirectory(prefix="xlikesaver-check-") as folder:
@@ -112,7 +118,9 @@ def main() -> int:
                 from xlikesaver import dialogs
                 from xlikesaver.media import can_recycle
                 assert isinstance(can_recycle(folder), bool)
-                dialog = dialogs.Dialog(root, "확인", "자체 점검", buttons=(("예", True), ("아니요", False)), cancel=False)
+                dialog = dialogs.Dialog(root, "확인", "자체 점검", buttons=(("예", True), ("아니요", False)),
+                                        default=1, cancel=False)
+                assert dialog.default_button is dialog.buttons[1]
                 dialog.buttons[0].invoke()
                 assert dialog.result is True
                 resident = Path(folder) / "상주 출처 확인.png"
@@ -165,11 +173,18 @@ def main() -> int:
                     assert store.record_page(query="#점검")["total"] == 1
                     assert store.record_page(author="Example_Author")["total"] == 1
                     assert store.statistics()["authors"][0]["files"] == 1
+                    store.record_media("author", {"tweet_id": "100", "num": 1, "type": "photo",
+                                                   "author": {"name": author["author"], "id": author["author_id"]}},
+                                       target, status="existing")
+                    totals = store.overview()
+                    assert totals["files"] == 1 and totals["record_count"] == 2
+                    assert totals["photo"] == 1 and totals["bytes"] == target.stat().st_size
+                    assert totals["stats"]["authors"][0]["files"] == 1
                     assert charts.bins([("2026-01", 1), ("2026-03", 2)])[0][1] == ("2026-02", 0)
                     assert gallery.TILE == (150, 112)
                     # Damaged-database salvage reads the catalog page by page.
                     from xlikesaver.recovery import salvage
-                    assert len(salvage(store.path)["media"]["rows"]) == 1
+                    assert len(salvage(store.path)["media"]["rows"]) == 2
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -193,6 +208,7 @@ def main() -> int:
                       "dialogs": "themed", "like_order": "recorded-and-sorted", "tweet_text": "searchable",
                       "statistics": "authors-and-months", "catalog_recovery": "salvage-verified",
                       "records": "local-with-folder-snapshot", "progress": "rounded-borderless",
+                      "workspace": "sidebar-scrollable-dashboard-three-settings-tabs",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",

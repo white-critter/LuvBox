@@ -28,6 +28,101 @@ _SELECTED = "#e3eaff"           # theme maps this to the dark selection color
 _SELECTED_INK = "#314fbb"
 
 
+class _GridDecoder:
+    """One UI-free worker; a newer page replaces any pending page."""
+
+    def __init__(self, results, *, decoder=thumbnail):
+        self.results = results
+        self.decoder = decoder
+        self.cache = OrderedDict()
+        self.condition = threading.Condition()
+        self.pending = None
+        self.stop = threading.Event()
+        self.closed = False
+        self.thread = None
+
+    def request(self, token, jobs, permitted):
+        with self.condition:
+            if self.closed:
+                return
+            self.stop.set()
+            self.stop = threading.Event()
+            self.pending = (token, self.stop, jobs, permitted) if jobs else None
+            self._clear_results()
+            if jobs and self.thread is None:
+                self.thread = threading.Thread(target=self._work, daemon=True, name="local-gallery-thumbnails")
+                self.thread.start()
+            self.condition.notify()
+
+    def close(self):
+        with self.condition:
+            self.closed = True
+            self.stop.set()
+            self.pending = None
+            self.cache.clear()
+            self._clear_results()
+            self.condition.notify()
+
+    def _clear_results(self):
+        while True:
+            try:
+                self.results.get_nowait()
+            except queue.Empty:
+                return
+
+    def _work(self):
+        while True:
+            with self.condition:
+                self.condition.wait_for(lambda: self.closed or self.pending is not None)
+                if self.closed:
+                    return
+                token, stop, jobs, permitted = self.pending
+                self.pending = None
+            try:
+                allowed = set(permitted([path for _, path in jobs]))
+            except Exception:
+                allowed = set()
+            for key, path in jobs:
+                if stop.is_set():
+                    break
+                image = None
+                if path in allowed:
+                    try:
+                        status = os.stat(path)
+                        stamp = (path, status.st_mtime_ns, status.st_size)
+                    except OSError:
+                        stamp = None
+                    with self.condition:
+                        hit = stamp is not None and stamp in self.cache
+                        if hit:
+                            self.cache.move_to_end(stamp)
+                            image = self.cache[stamp]
+                    if not hit:
+                        try:
+                            image = self.decoder(Path(path), TILE).image
+                        except Exception:
+                            image = None
+                        with self.condition:
+                            if self.closed:
+                                return
+                            if stamp is not None:
+                                self.cache[stamp] = image
+                                while len(self.cache) > _CACHE_SIZE:
+                                    self.cache.popitem(last=False)
+                with self.condition:
+                    if self.closed:
+                        return
+                    if stop.is_set():
+                        break
+                    # Only a page is retained if the UI is temporarily busy.
+                    if self.results.full():
+                        try:
+                            self.results.get_nowait()
+                        except queue.Empty:
+                            pass
+                    self.results.put_nowait((token, key, image))
+
+
 class ThumbnailGrid(ttk.Frame):
     def __init__(self, parent, *, on_select, on_open):
         super().__init__(parent, style="Card.TFrame", padding=8)
@@ -44,15 +139,18 @@ class ThumbnailGrid(ttk.Frame):
         self.empty = tk.Label(self.inner, text="", background=theme.CARD, foreground=theme.MUTED, font=theme.BODY)
         self.tiles: dict[str, tk.Label] = {}
         self.images: dict[str, ImageTk.PhotoImage] = {}
+        self._paths = {}
+        self._captions = {}
+        self._source_images = {}
         self.order: list[str] = []
         self.selected = None
         self.columns = 0
+        self._weighted_columns = 0
         self.placeholder = tk.PhotoImage(master=self, width=TILE[0], height=TILE[1])
-        self._cache: OrderedDict = OrderedDict()
-        self._cache_lock = threading.Lock()
-        self._results = queue.Queue()
+        self._results = queue.Queue(maxsize=_CACHE_SIZE)
+        self._decoder = _GridDecoder(self._results)
         self._token = 0
-        self._stop = threading.Event()
+        self._released = False
         self.canvas.bind("<Configure>", lambda _: self._layout())
         for widget in (self.canvas, self.inner, self.empty):
             widget.bind("<MouseWheel>", self._wheel)
@@ -61,66 +159,53 @@ class ThumbnailGrid(ttk.Frame):
     def show(self, rows, permitted, *, empty_text="표시할 파일이 없습니다."):
         """rows: [(key, record)] in display order. permitted(paths) runs on
         the decoding thread and returns the subset that may be read."""
+        if self._released:
+            return
         self._token += 1
-        self._stop.set()
-        self._stop = threading.Event()
-        for tile in self.tiles.values():
-            tile.destroy()
-        self.tiles.clear()
-        self.images.clear()
-        self.order = [key for key, _ in rows]
-        self.selected = None
-        self.columns = 0
+        order = [key for key, _ in rows]
+        paths = {key: row.get("path") for key, row in rows}
+        for key in list(self.tiles):
+            if key not in paths or self._paths[key] != paths[key]:
+                self.tiles.pop(key).destroy()
+                self.images.pop(key, None)
+                self._source_images.pop(key, None)
+                self._captions.pop(key, None)
+                if self.selected == key:
+                    self.selected = None
+        relayout = order != self.order or len(self.tiles) != len(rows)
+        self.order = order
+        self._paths = paths
+        if relayout:
+            self.columns = 0
         jobs = []
         for key, row in rows:
             author = "@" + row["author"] if row.get("author") else "작성자 미확인"
             day = str(row.get("posted_at") or "")[:10] or "게시일 미확인"
-            tile = tk.Label(self.inner, image=self.placeholder, text=f"{author}\n{day}", compound="top",
-                            background=theme.CARD, foreground=theme.INK, font=theme.SMALL, justify="center",
-                            wraplength=TILE[0], padx=4, pady=4, cursor="hand2")
-            tile.bind("<Button-1>", lambda _, key=key: self.on_select(key))
-            tile.bind("<Double-1>", lambda _, key=key: self.on_open(key))
-            tile.bind("<MouseWheel>", self._wheel)
-            self.tiles[key] = tile
+            caption = f"{author}\n{day}"
+            if key not in self.tiles:
+                tile = tk.Label(self.inner, image=self.placeholder, text=caption, compound="top",
+                                background=theme.CARD, foreground=theme.INK, font=theme.SMALL, justify="center",
+                                wraplength=TILE[0], padx=4, pady=4, cursor="hand2")
+                tile.bind("<Button-1>", lambda _, key=key: self.on_select(key))
+                tile.bind("<Double-1>", lambda _, key=key: self.on_open(key))
+                tile.bind("<MouseWheel>", self._wheel)
+                self.tiles[key] = tile
+            elif caption != self._captions[key]:
+                unavailable = key in self._source_images and self._source_images[key] is None
+                self.tiles[key].configure(text=f"{author}\n미리보기 없음" if unavailable else caption)
+            self._captions[key] = caption
             if row.get("path"):
                 jobs.append((key, row["path"]))
         self.empty.configure(text="" if rows else empty_text)
         self._layout()
-        self.canvas.yview_moveto(0)
-        if jobs:
-            threading.Thread(target=self._decode, args=(self._token, self._stop, jobs, permitted), daemon=True).start()
-
-    def _decode(self, token, stop, jobs, permitted):
-        try:
-            allowed = set(permitted([path for _, path in jobs]))
-        except Exception:
-            allowed = set()
-        for key, path in jobs:
-            if stop.is_set():
-                return
-            image = None
-            if path in allowed:
-                try:
-                    status = os.stat(path)
-                    stamp = (path, status.st_mtime_ns, status.st_size)
-                except OSError:
-                    stamp = None
-                with self._cache_lock:
-                    hit = stamp is not None and stamp in self._cache
-                    if hit:
-                        self._cache.move_to_end(stamp)
-                        image = self._cache[stamp]
-                if not hit:
-                    image = thumbnail(Path(path), TILE).image
-                    if stamp is not None:
-                        with self._cache_lock:
-                            self._cache[stamp] = image
-                            while len(self._cache) > _CACHE_SIZE:
-                                self._cache.popitem(last=False)
-            self._results.put((token, key, image))
+        if relayout:
+            self.canvas.yview_moveto(0)
+        self._decoder.request(self._token, jobs, permitted)
 
     def poll(self, limit=24):
         """Attach decoded thumbnails; called from the window's UI loop."""
+        if self._released:
+            return
         for _ in range(limit):
             try:
                 token, key, image = self._results.get_nowait()
@@ -129,11 +214,15 @@ class ThumbnailGrid(ttk.Frame):
             tile = self.tiles.get(key)
             if token != self._token or tile is None:
                 continue
+            if key in self._source_images and self._source_images[key] is image:
+                continue
+            self._source_images[key] = image
             if image is None:
-                tile.configure(image=self.placeholder, text=tile.cget("text").split("\n")[0] + "\n미리보기 없음")
+                tile.configure(image=self.placeholder, text=self._captions[key].split("\n")[0] + "\n미리보기 없음")
+                self.images.pop(key, None)
                 continue
             self.images[key] = ImageTk.PhotoImage(image, master=self)
-            tile.configure(image=self.images[key])
+            tile.configure(image=self.images[key], text=self._captions[key])
 
     # ------------------------------------------------------------- selection
     def select(self, key):
@@ -163,8 +252,11 @@ class ThumbnailGrid(ttk.Frame):
         self.canvas.itemconfigure(self.window, width=width)
         if columns != self.columns:
             self.columns = columns
+            for column in range(columns, self._weighted_columns):
+                self.inner.columnconfigure(column, weight=0, uniform="", minsize=0)
             for column in range(columns):
                 self.inner.columnconfigure(column, weight=1, uniform="tile")
+            self._weighted_columns = columns
             for index, key in enumerate(self.order):
                 self.tiles[key].grid(row=index // columns, column=index % columns, padx=_GAP // 2, pady=_GAP // 2, sticky="n")
             if not self.order:
@@ -181,10 +273,28 @@ class ThumbnailGrid(ttk.Frame):
 
     def release(self):
         """Stop decoding and drop Tk images; call on the UI thread."""
+        if self._released:
+            return
+        self._released = True
         self._token += 1
-        self._stop.set()
+        self._decoder.close()
         self.images.clear()
+        self._source_images.clear()
+        self._captions.clear()
+        self._paths.clear()
         for tile in self.tiles.values():
             tile.destroy()
         self.tiles.clear()
         self.placeholder = None
+        self.on_select = self.on_open = None
+
+    def destroy(self):
+        self.release()
+        super().destroy()
+        # The decoder owns no Tk references. Drop dead child-parent cycles on
+        # the UI thread too, so later worker allocations cannot finalize Tk.
+        for name in ("canvas", "scrollbar", "inner", "empty"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                widget.master = None
+                setattr(self, name, None)

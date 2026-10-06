@@ -29,20 +29,19 @@ MEDIA_LABELS = {"all": "전체", "photo": "사진", "video": "동영상", "anima
 STATUS_LABELS = {"running": "진행 중", "finished": "완료", "stopped": "직접 중단", "error": "오류", "interrupted": "비정상 종료", "limited": "시험 저장 완료", "partial": "일부만 완료", "cancelled": "취소됨"}
 METADATA_LABELS = {"embedded": "파일에 출처 기록됨", "pending": "출처 기록 전", "failed": "파일 출처 기록 실패", "unsupported": "메타데이터 미지원 형식"}
 AUTHOR_METADATA_LABELS = {"embedded": "작성자 기록됨", "pending": "작성자 기록 전", "error": "작성자 기록 실패", "unknown": "작성자 정보 없음"}
-TILES = {"files": "저장한 파일", "posts": "트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "확인된 용량"}
+TILES = {"files": "현재 파일", "posts": "기록된 트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "확인된 용량"}
 PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
 ORDER_LABELS = {"saved": "저장한 순", "liked": "Like한 순", "posted": "게시일 최신순", "posted_oldest": "게시일 오래된 순"}
 PERIOD_LABELS = {"posted": "게시일", "saved": "저장일"}
 MONTH_FIELDS = {"saved": "저장한 달", "posted": "게시된 달", "liked": "Like한 달"}
 MONTH_NOTES = {
-    "saved": "이 앱이 파일을 저장한 달마다 센 파일 수입니다. 처음 저장한 달은 그동안의 Like가 한꺼번에 들어가 높게 나옵니다.",
-    "posted": "트윗이 올라온 달마다 센 파일 수입니다. 3년이 넘으면 해마다 묶어 보여 줍니다.",
-    "liked": "새로 누른 Like 수입니다(앱이 처음 발견한 달 기준). 자동 저장을 켜 둔 뒤의 새 Like만 들어갑니다.",
+    "saved": "현재 파일의 저장월입니다. 중복 기록은 한 번만 셉니다.",
+    "posted": "현재 파일의 트윗 게시월입니다. 3년이 넘으면 연도별로 보여 드립니다.",
+    "liked": "새로 누른 Like를 앱이 발견한 달입니다. 실제 Like 시각과 다를 수 있습니다.",
 }
 GIF_SIZE_LABELS = {"original": "원본 크기", "720": "최대 720px · 초당 15장", "480": "최대 480px · 초당 12장"}
-NO_SELECTION = ("표에서 파일을 고르면 미리보기와 출처를 볼 수 있습니다. 두 번 누르면 파일이 열립니다.\n"
-                "위 검색칸에서 작성자 아이디, 파일명, 트윗 번호로 찾을 수 있습니다.")
+NO_SELECTION = "파일을 선택하면 미리보기와 출처를 보여 드립니다."
 NO_RUN_SELECTION = "실행을 고르면 어떻게 끝났는지 볼 수 있습니다."
 
 
@@ -117,13 +116,15 @@ class HistoryWindow(tk.Toplevel):
                  get_gif_options=lambda: ("original", 200)):
         super().__init__(parent)
         theme.apply_style(self)
-        self.title("XlikeSaver · 기록과 통계")
-        width = min(1120, max(860, self.winfo_screenwidth() - 80))
-        height = min(860, max(640, self.winfo_screenheight() - 100))
+        self.title("XlikeSaver · 라이브러리")
+        width = min(1500, max(1, self.winfo_screenwidth() - 80))
+        height = min(1100, max(1, self.winfo_screenheight() - 100))
         self.geometry(f"{width}x{height}")
-        self.minsize(min(860, width), min(720, height))
+        self.minsize(min(760, width), min(640, height))
         self.configure(bg=theme.BG)
-        self.transient(parent)
+        # Keep the library a normal window: on Windows a transient window
+        # loses its minimize/maximize controls even when it is resizable.
+        self.resizable(True, True)
         self.get_location = get_location
         self.is_downloading = is_downloading
         # (GIF size preset, media size limit in MB) chosen in save options.
@@ -153,6 +154,10 @@ class HistoryWindow(tk.Toplevel):
         self._preview_results = queue.Queue(maxsize=2)
         self._preview_loader = PreviewLoader(self._preview_results)
         self._preview_side = None
+        self._filter_open = False
+        self._stats_stacked = None
+        self._toolbar_layout = None
+        self._tools_window = None
         self.loaded_locations = set()
         self.results = queue.Queue()
         self.rows = {}
@@ -187,222 +192,323 @@ class HistoryWindow(tk.Toplevel):
         self.page_input = tk.StringVar(self, value="1")
         self.run_page_input = tk.StringVar(self, value="1")
         self.preview_note = tk.StringVar(self, value="파일을 고르면 미리보기가 나옵니다.")
+        self.media_counts = tk.StringVar(self)
         self._build()
         self.wrapping_labels = []
 
         widgets = list(self.winfo_children())
         while widgets:
             widget = widgets.pop()
-            if isinstance(widget, ttk.Label) and int(widget.cget("wraplength") or 0):
+            if (isinstance(widget, ttk.Label) and int(widget.cget("wraplength") or 0)
+                    and not str(widget).startswith(str(self.preview_card) + ".")):
                 self.wrapping_labels.append(widget)
             widgets.extend(widget.winfo_children())
         self.bind("<Configure>", self._resize_text, add="+")
         for key in ("Prior", "Next", "Home", "End"):
             self.bind("<" + key + ">", self._page_key, add="+")
+        self.bind("<Control-f>", self.focus_search, add="+")
+        self.bind("<Escape>", self._escape, add="+")
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._poll_timer = self.after(100, self._poll)
         self.refresh(import_legacy=True)
 
     def _build(self):
-        self.content_view = theme.ScrollableContent(self, padding=(22, 16))
+        self.content_view = theme.ScrollableContent(self, padding=(24, 20))
         self.content_view.pack(fill="both", expand=True)
         body = self.content_view.content
         body.columnconfigure(0, weight=1)
         body.rowconfigure(4, weight=1)
         heading = ttk.Frame(body)
         heading.grid(row=0, column=0, sticky="ew")
-        ttk.Label(heading, text="기록 · 통계", style="Title.TLabel").pack(side="left")
-        ttk.Button(heading, text="새로고침", command=lambda: self.refresh(import_legacy=True)).pack(side="right")
-        ttk.Button(heading, text="기록 위치", command=self.show_locations).pack(side="right", padx=8)
+        ttk.Label(heading, text="라이브러리", style="PageTitle.TLabel").pack(side="left")
+        self.refresh_button = ttk.Button(heading, text="새로고침", command=lambda: self.refresh(import_legacy=True))
+        self.refresh_button.pack(side="right")
+        ttk.Button(heading, text="기록 위치", style="Ghost.TButton", command=self.show_locations).pack(side="right", padx=8)
         self.source_stop_button = ttk.Button(heading, text="출처·작성자 기록 중단", command=self.stop_metadata, state="disabled")
         self.repair_button = ttk.Button(heading, text="기록 복구", style="Primary.TButton", command=self.repair_records)
-        ttk.Label(body, textvariable=self.location_text, style="Muted.TLabel", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(2, 10))
+        ttk.Label(body, textvariable=self.location_text, style="Muted.TLabel", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(4, 16))
 
-        tiles = ttk.Frame(body)
-        tiles.grid(row=2, column=0, sticky="ew")
-        self._tile_frame = tiles
+        overview = ttk.Frame(body)
+        overview.grid(row=2, column=0, sticky="ew")
+        self._tile_frame = overview
         self._tiles = []
-        self._tile_columns = 6
-        for column, (key, caption) in enumerate(TILES.items()):
-            tile = theme.tile(tiles, self.tile_values[key], caption)
-            tile.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 8, 0))
+        self._tile_keys = ("files", "posts", "bytes")
+        self._tile_columns = 3
+        for column, key in enumerate(self._tile_keys):
+            tile = theme.tile(overview, self.tile_values[key], TILES[key])
+            tile.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 10, 0))
             self._tiles.append(tile)
             tile.bind("<Configure>", self._queue_pager_layout)
             for label in tile.winfo_children():
                 label.bind("<Configure>", self._queue_pager_layout)
-            tiles.columnconfigure(column, weight=1, uniform="tile")
-        tiles.bind("<Configure>", self._queue_pager_layout)
-        ttk.Label(body, textvariable=self.date_text, style="Muted.TLabel", wraplength=1000, justify="left").grid(row=3, column=0, sticky="w", pady=(8, 10))
+            overview.columnconfigure(column, weight=1, uniform="tile")
+        overview.bind("<Configure>", self._queue_pager_layout)
+        overview_notes = ttk.Frame(body)
+        overview_notes.grid(row=3, column=0, sticky="ew", pady=(10, 16))
+        ttk.Label(overview_notes, textvariable=self.media_counts, style="Muted.TLabel", wraplength=1000,
+                  justify="left").pack(anchor="w")
 
         tabs = self.tabs = ttk.Notebook(body)
         tabs.grid(row=4, column=0, sticky="nsew")
-        files = ttk.Frame(tabs, padding=(10, 12))
-        runs = ttk.Frame(tabs, padding=(10, 12))
-        tabs.add(files, text="저장한 파일")
+        files = ttk.Frame(tabs)
+        runs = ttk.Frame(tabs)
+        stats = self.stats_view = ttk.Frame(tabs)
+        tabs.add(files, text="파일")
         tabs.add(runs, text="실행 기록")
+        tabs.add(stats, text="통계")
+        tabs.bind("<<NotebookTabChanged>>", self._reset_scroll, add="+")
+        self._file_page_parent = files
         files.columnconfigure(0, weight=1)
         files.rowconfigure(1, weight=1)
         runs.columnconfigure(0, weight=1)
         runs.rowconfigure(0, weight=1)
 
         filters = ttk.Frame(files)
-        filters.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        filters.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         search = ttk.Frame(filters)
         search.pack(fill="x")
-        refine = ttk.Frame(filters)
-        refine.pack(fill="x", pady=(8, 0))
-        ttk.Label(refine, text="정렬", style="Muted.TLabel").pack(side="left")
-        order = ttk.Combobox(refine, textvariable=self.order, values=list(ORDER_LABELS.values()),
-                             state="readonly", width=13, font=theme.BODY)
-        order.pack(side="left", padx=(6, 18))
+        combo = ttk.Combobox(search, textvariable=self.media_filter, values=list(MEDIA_LABELS.values()),
+                             state="readonly", width=9, font=theme.BODY)
+        combo.pack(side="left")
+        combo.bind("<<ComboboxSelected>>", lambda _: self.search())
+        entry = ttk.Entry(search, textvariable=self.query, font=theme.BODY)
+        entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        entry.bind("<Return>", lambda _: self.search())
+        self.search_entry = entry
+        # The chip lives in this row so keyboard focus and clearing stay obvious.
+        self.author_chip = ttk.Button(search, text="", style="CompactPrimary.TButton", command=self.clear_author)
+        ttk.Button(search, text="검색", command=self.search).pack(side="left")
+        views = ttk.Frame(search)
+        views.pack(side="right", padx=(10, 0))
+        self.view_buttons = {}
+        for mode, label in (("table", "목록"), ("grid", "갤러리")):
+            button = ttk.Button(views, text=label, style="Segment.TButton", command=lambda mode=mode: self.set_view(mode))
+            button.pack(side="left", padx=(0 if mode == "table" else 4, 0))
+            self.view_buttons[mode] = button
+        self._update_view_buttons()
+        toolbar = self.library_toolbar = ttk.Frame(filters)
+        toolbar.pack(fill="x", pady=(8, 0))
+        toolbar.columnconfigure(0, weight=1)
+        self.sort_controls = ttk.Frame(toolbar)
+        self.sort_controls.grid(row=0, column=0, sticky="w")
+        self.tool_controls = ttk.Frame(toolbar)
+        self.tool_controls.grid(row=0, column=2, sticky="e")
+        ttk.Label(self.sort_controls, text="정렬", style="Muted.TLabel").pack(side="left")
+        order = ttk.Combobox(self.sort_controls, textvariable=self.order, values=list(ORDER_LABELS.values()),
+                             state="readonly", width=16, font=theme.SMALL)
+        order.pack(side="left", padx=(6, 10))
         order.bind("<<ComboboxSelected>>", lambda _: self.search())
-        ttk.Label(refine, text="기간", style="Muted.TLabel").pack(side="left")
-        field = ttk.Combobox(refine, textvariable=self.period_field, values=list(PERIOD_LABELS.values()),
-                             state="readonly", width=7, font=theme.BODY)
+        self.filter_button = ttk.Button(self.sort_controls, text="기간 필터", style="Compact.TButton", command=self.toggle_filters)
+        self.filter_button.pack(side="left")
+        self.tools_button = ttk.Button(self.tool_controls, text="파일 관리", style="Compact.TButton", command=self.show_tools)
+        self.tools_button.pack(side="right")
+        self.export_button = ttk.Button(self.tool_controls, text="CSV 내보내기", style="Compact.TButton", command=self.export)
+        self.export_button.pack(side="right", padx=(0, 8))
+        self.search_hint = ttk.Label(toolbar, text="작성자 · 파일명 · 본문 검색", style="Muted.TLabel")
+        self.search_hint.grid(row=0, column=1, padx=12)
+        toolbar.bind("<Configure>", self._queue_pager_layout)
+
+        refine = self.filter_panel = ttk.Frame(filters, style="Card.TFrame", padding=(12, 10))
+        date_inputs = ttk.Frame(refine, style="Plain.TFrame")
+        date_inputs.pack(fill="x")
+        date_actions = ttk.Frame(refine, style="Plain.TFrame")
+        date_actions.pack(fill="x", pady=(8, 0))
+        ttk.Label(date_inputs, text="기간", style="CardMuted.TLabel").pack(side="left")
+        field = ttk.Combobox(date_inputs, textvariable=self.period_field, values=list(PERIOD_LABELS.values()),
+                             state="readonly", width=7, font=theme.SMALL)
         field.pack(side="left", padx=6)
         field.bind("<<ComboboxSelected>>", lambda _: self.search() if self.applied_period else None)
         self.period_boxes = []
         for variable in (self.period_from, self.period_to):
-            box = ttk.Entry(refine, textvariable=variable, width=11, font=theme.BODY)
+            box = ttk.Entry(date_inputs, textvariable=variable, width=11, font=theme.SMALL)
             box.pack(side="left")
             box.bind("<Return>", lambda _: self.search())
             self.period_boxes.append(box)
             if variable is self.period_from:
-                ttk.Label(refine, text="~", style="Muted.TLabel").pack(side="left", padx=4)
-        ttk.Button(refine, text="기간 지우기", style="Compact.TButton", command=self.clear_period).pack(side="left", padx=(8, 0))
-        combo = ttk.Combobox(search, textvariable=self.media_filter, values=list(MEDIA_LABELS.values()), state="readonly", width=12, font=theme.BODY)
-        combo.pack(side="left")
-        combo.bind("<<ComboboxSelected>>", lambda _: self.search())
-        entry = ttk.Entry(search, textvariable=self.query, font=theme.BODY)
-        entry.pack(side="left", fill="x", expand=True, padx=8)
-        entry.bind("<Return>", lambda _: self.search())
-        self.search_entry = entry
-        # Shown while only one author's files are listed; click to show all.
-        self.author_chip = ttk.Button(search, text="", style="CompactPrimary.TButton", command=self.clear_author)
-        ttk.Button(search, text="찾기", command=self.search).pack(side="left")
-        self.export_button = ttk.Button(search, text="CSV로 저장", command=self.export)
-        self.export_button.pack(side="right", padx=(8, 0))
-        views = ttk.Frame(search)
-        views.pack(side="right", padx=(8, 0))
-        self.view_buttons = {}
-        for mode, label in (("table", "표"), ("grid", "모아보기")):
-            button = ttk.Button(views, text=label, style="Compact.TButton", command=lambda mode=mode: self.set_view(mode))
-            button.pack(side="left", padx=(0 if mode == "table" else 4, 0))
-            self.view_buttons[mode] = button
-        self._update_view_buttons()
+                ttk.Label(date_inputs, text="→", style="CardMuted.TLabel").pack(side="left", padx=5)
+        ttk.Label(date_actions, text="예: 2026-10-06", style="CardMuted.TLabel").pack(side="left")
+        ttk.Button(date_actions, text="적용", style="CompactPrimary.TButton", command=self.search).pack(side="right", padx=(8, 0))
+        ttk.Button(date_actions, text="초기화", style="Compact.TButton", command=self.clear_period).pack(side="right")
 
         columns = ("posted", "kind", "author", "filename", "size", "saved")
         self.file_browser = ttk.Frame(files)
         self.file_browser.grid(row=1, column=0, sticky="nsew")
         self.file_browser.columnconfigure(0, weight=1)
         self.file_browser.rowconfigure(0, weight=1)
-        table = self._table(self.file_browser, columns, row=0)
-        self.tree = table
+        self.tree = self._table(self.file_browser, columns, row=0)
         for key, title, width in zip(columns, ("트윗 게시일", "종류", "작성자", "파일명", "크기", "저장한 때"),
-                                     (150, 90, 140, 280, 90, 150)):
+                                     (145, 85, 120, 260, 85, 145)):
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=60, stretch=key == "filename")
         self.tree.bind("<<TreeviewSelect>>", self.select_record)
         self.tree.bind("<Double-1>", lambda _: self.open_file())
+        self.tree.bind("<Return>", lambda _: self.open_file())
         self._file_columns = columns
         self._shown_columns = columns
         self.tree.bind("<Configure>", lambda _: self._layout_columns(), add="+")
         self.table_message = ttk.Label(self.tree.master, textvariable=self.table_note, style="CardMuted.TLabel",
                                        justify="center", font=theme.BODY)
-        self.preview_card = ttk.Frame(self.file_browser, style="Card.TFrame", padding=12)
+        self.preview_card = ttk.Frame(self.file_browser, style="Card.TFrame", padding=14)
         self.preview_box = ttk.Frame(self.preview_card, style="Plain.TFrame", width=220, height=168)
         self.preview_box.grid_propagate(False)
         self.preview_box.columnconfigure(0, weight=1)
         self.preview_box.rowconfigure(0, weight=1)
         self.preview_label = ttk.Label(self.preview_box, style="CardMuted.TLabel", anchor="center",
-                                       text="미리보기", font=theme.BODY)
+                                       text="파일을 선택하세요", font=theme.BODY)
         self.preview_label.grid(row=0, column=0, sticky="nsew")
         self.preview_info = ttk.Frame(self.preview_card, style="Plain.TFrame")
-        ttk.Label(self.preview_info, text="파일 미리보기", style="CardHeading.TLabel").pack(anchor="w")
-        ttk.Label(self.preview_info, textvariable=self.preview_note, style="CardMuted.TLabel",
-                  wraplength=205, justify="left").pack(anchor="w", pady=(6, 0))
-        ttk.Button(self.preview_info, text="크게 열기", command=self.open_file,
-                   style="Compact.TButton").pack(anchor="w", pady=(8, 0))
-        self.file_browser.bind("<Configure>", self._queue_pager_layout)
-        self.grid_view = ThumbnailGrid(self.file_browser, on_select=self._select_key,
-                                       on_open=lambda key: (self._select_key(key), self.open_file()))
-
-        actions = ttk.Frame(files)
-        actions.grid(row=3, column=0, sticky="ew", pady=(8, 6))
-        ttk.Button(actions, text="파일 열기", command=self.open_file).pack(side="left")
-        ttk.Button(actions, text="트윗 열기", command=self.open_tweet).pack(side="left", padx=8)
-        self.backfill_button = ttk.Button(actions, text="출처·작성자 기록", command=self.backfill)
-        self.backfill_button.pack(side="left")
-        self.convert_button = ttk.Button(actions, text="MP4 GIF를 GIF로", command=self.convert_gifs)
-        self.convert_button.pack(side="left", padx=(8, 0))
-        self.author_button = ttk.Button(actions, text="이 작성자만 보기", command=self.filter_selected_author)
-        self.author_button.pack(side="left", padx=(8, 0))
-        self._pagination(files, row=2)
-        details = ttk.Frame(files, style="Card.TFrame", padding=(14, 8))
-        details.grid(row=4, column=0, sticky="ew")
-        details.columnconfigure(0, weight=1)
-        self.selection_detail = tk.Text(details, height=5, width=1, wrap="word", font=theme.BODY,
-                                        background=theme.CARD, foreground=theme.INK,
-                                        borderwidth=0, highlightthickness=0, state="disabled")
-        self.selection_detail.grid(row=0, column=0, sticky="ew")
-        detail_scroll = ttk.Scrollbar(details, command=self.selection_detail.yview)
+        self.preview_note_label = ttk.Label(self.preview_info, textvariable=self.preview_note, style="CardMuted.TLabel",
+                                            wraplength=220, justify="left")
+        self.preview_note_label.pack(anchor="w", pady=(5, 0))
+        self.preview_info.bind("<Configure>", self._wrap_preview_note, add="+")
+        self.preview_actions = ttk.Frame(self.preview_card, style="Plain.TFrame")
+        self.open_file_button = ttk.Button(self.preview_actions, text="파일 열기", command=self.open_file, style="Compact.TButton")
+        self.open_file_button.grid(row=0, column=0, sticky="ew")
+        self.open_tweet_button = ttk.Button(self.preview_actions, text="트윗 열기", command=self.open_tweet, style="Compact.TButton")
+        self.open_tweet_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.author_button = ttk.Button(self.preview_actions, text="이 작성자 파일", command=self.filter_selected_author,
+                                       style="Compact.TButton")
+        self.author_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        for column in (0, 1):
+            self.preview_actions.columnconfigure(column, weight=1)
+        self.preview_details = ttk.Frame(self.preview_card, style="Plain.TFrame")
+        self.preview_details.columnconfigure(0, weight=1)
+        self.preview_details.rowconfigure(0, weight=1)
+        self.selection_detail = tk.Text(self.preview_details, height=5, width=1, wrap="word", font=theme.SMALL,
+                                        background=theme.CARD, foreground=theme.INK, borderwidth=0,
+                                        highlightthickness=0, state="disabled")
+        self.selection_detail.grid(row=0, column=0, sticky="nsew")
+        detail_scroll = ttk.Scrollbar(self.preview_details, command=self.selection_detail.yview)
         detail_scroll.grid(row=0, column=1, sticky="ns")
         self.selection_detail.configure(yscrollcommand=detail_scroll.set)
         self._selection_trace = self.selection_text.trace_add("write", self._update_selection_detail)
         self._update_selection_detail()
+        self.file_browser.bind("<Configure>", self._queue_pager_layout)
+        self.grid_view = ThumbnailGrid(self.file_browser, on_select=self._select_key,
+                                       on_open=lambda key: (self._select_key(key), self.open_file()))
+        self._pagination(files, row=2)
+
+        # Batch operations have their own quiet dialog, separate from browsing.
+        self._tools_window = tk.Toplevel(self)
+        self._tools_window.withdraw()
+        self._tools_window.title("라이브러리 · 파일 관리")
+        self._tools_window.transient(self)
+        self._tools_window.configure(background=theme.BG)
+        self._tools_window.protocol("WM_DELETE_WINDOW", self._tools_window.withdraw)
+        self._tools_window.bind("<Escape>", lambda _: self._tools_window.withdraw())
+        tools = theme.card(self._tools_window, fill="both", expand=True, padx=18, pady=18)
+        ttk.Label(tools, text="파일 관리", style="CardHeading.TLabel").pack(anchor="w", pady=(0, 10))
+        self.backfill_button = ttk.Button(tools, text="파일에 출처·작성자 기록", command=lambda: self._run_tool(self.backfill))
+        self.backfill_button.pack(fill="x")
+        ttk.Label(tools, text="예전에 받은 파일에도 출처를 남깁니다.", style="CardMuted.TLabel").pack(anchor="w", pady=(6, 18))
+        self.convert_button = ttk.Button(tools, text="MP4 GIF를 GIF로", command=lambda: self._run_tool(self.convert_gifs))
+        self.convert_button.pack(fill="x")
+        ttk.Label(tools, text="기존 MP4 애니메이션을 GIF로 바꿉니다.", style="CardMuted.TLabel").pack(anchor="w", pady=(6, 18))
+        ttk.Label(tools, text="X에 요청하지 않는 작업입니다.", style="CardMuted.TLabel").pack(anchor="w")
+        ttk.Button(tools, text="닫기", command=self._tools_window.withdraw, style="Compact.TButton").pack(anchor="e", pady=(14, 0))
 
         run_columns = ("started", "ended", "status", "saved", "skipped", "size", "visited", "last")
         self.run_tree = self._table(runs, run_columns, row=0)
         for key, title, width in zip(run_columns,
-                ("시작", "끝", "결과", "새로 저장", "이미 있음", "용량 초과", "확인한 트윗", "마지막으로 확인한 트윗 게시일"),
-                (160, 160, 110, 90, 90, 90, 100, 220)):
+                ("시작", "끝", "결과", "새로 저장", "이미 있음", "용량 초과", "확인한 트윗", "마지막 트윗 게시일"),
+                (150, 150, 100, 85, 85, 85, 100, 160)):
             self.run_tree.heading(key, text=title)
             self.run_tree.column(key, width=width, minwidth=60, stretch=key == "last")
         self.run_text = tk.StringVar(self, value=NO_RUN_SELECTION)
         self.run_tree.bind("<<TreeviewSelect>>", self.select_run)
         run_details = theme.card(runs)
         self._pagination(runs, row=1, runs=True)
-        run_details.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        run_details.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(run_details, textvariable=self.run_text, style="Card.TLabel", wraplength=1000, justify="left").pack(anchor="w")
 
-        stats = ttk.Frame(tabs, padding=(10, 12))
-        tabs.add(stats, text="통계")
-        stats.columnconfigure(0, weight=2, uniform="stats")
-        stats.columnconfigure(1, weight=3, uniform="stats")
+        stats.columnconfigure(0, weight=1, uniform="stats")
+        stats.columnconfigure(1, weight=1, uniform="stats")
         stats.rowconfigure(0, weight=1)
-        ranking = ttk.Frame(stats, style="Card.TFrame", padding=(14, 12))
-        ranking.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        ranking = self.ranking_card = ttk.Frame(stats, style="Card.TFrame", padding=(16, 14))
+        ranking.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         ranking.columnconfigure(0, weight=1)
         ranking.rowconfigure(1, weight=1)
         ttk.Label(ranking, text="많이 저장한 작성자", style="CardHeading.TLabel").grid(row=0, column=0, sticky="w")
         author_columns = ("rank", "author", "files", "posts", "latest")
-        self.author_tree = ttk.Treeview(ranking, columns=author_columns, show="headings", height=8, selectmode="browse")
-        for key, title, width in zip(author_columns, ("순위", "작성자", "파일", "트윗", "최근 게시일"), (44, 130, 56, 56, 100)):
+        self.author_tree = ttk.Treeview(ranking, columns=author_columns, show="headings", height=6, selectmode="browse")
+        for key, title, width in zip(author_columns, ("순위", "작성자", "파일", "트윗", "최근 게시일"), (42, 120, 52, 52, 90)):
             self.author_tree.heading(key, text=title)
+            sample = {"rank": "20", "author": "@daylight_art", "files": "100,000", "posts": "100,000", "latest": "2026-10-06"}[key]
+            width = max(width, int(self.tk.call("font", "measure", theme.SMALL, sample)) + 20)
             self.author_tree.column(key, width=width, minwidth=40, stretch=key == "author",
                                     anchor="w" if key == "author" else "center")
-        self.author_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
+        self.author_tree.grid(row=1, column=0, sticky="nsew", pady=(12, 10))
+        self._ranking_need = sum(int(self.author_tree.column(key, "width")) for key in author_columns) + 48
+        ranking_scroll = ttk.Scrollbar(ranking, command=self.author_tree.yview)
+        ranking_scroll.grid(row=1, column=1, sticky="ns", pady=(12, 10))
+        self.author_tree.configure(yscrollcommand=ranking_scroll.set)
         self.author_tree.bind("<Double-1>", lambda _: self.show_ranked_author())
+        self.author_tree.bind("<Return>", lambda _: self.show_ranked_author())
         ttk.Button(ranking, text="이 작성자 파일 보기", style="Compact.TButton",
                    command=self.show_ranked_author).grid(row=2, column=0, sticky="w")
-        months = ttk.Frame(stats, style="Card.TFrame", padding=(14, 12))
+        months = self.months_card = ttk.Frame(stats, style="Card.TFrame", padding=(16, 14))
         months.grid(row=0, column=1, sticky="nsew")
         months.columnconfigure(0, weight=1)
         months.rowconfigure(2, weight=1)
         header = ttk.Frame(months, style="Plain.TFrame")
         header.grid(row=0, column=0, sticky="ew")
-        ttk.Label(header, text="달마다 몇 개?", style="CardHeading.TLabel").pack(side="left")
+        ttk.Label(header, text="월별 흐름", style="CardHeading.TLabel").pack(side="left")
         field = ttk.Combobox(header, textvariable=self.month_field, values=list(MONTH_FIELDS.values()),
-                             state="readonly", width=10, font=theme.BODY)
+                             state="readonly", width=10, font=theme.SMALL)
         field.pack(side="right")
         field.bind("<<ComboboxSelected>>", lambda _: self._draw_months())
-        # Wrapped to this card, not to the window like other notes.
         note = ttk.Label(months, textvariable=self.month_note, style="CardMuted.TLabel", justify="left")
-        note.grid(row=1, column=0, sticky="ew", pady=(6, 8))
-        months.bind("<Configure>", lambda event: note.configure(wraplength=max(200, event.width - 30)), add="+")
+        note.grid(row=1, column=0, sticky="ew", pady=(8, 12))
+        months.bind("<Configure>", lambda event: note.configure(wraplength=max(200, event.width - 32)), add="+")
         self.month_chart = MonthlyBars(months)
         self.month_chart.grid(row=2, column=0, sticky="nsew")
-        ttk.Label(body, textvariable=self.status_text, style="Muted.TLabel", wraplength=1000, justify="left").grid(row=5, column=0, sticky="w", pady=(10, 0))
+        self.stats_note = ttk.Label(stats, textvariable=self.date_text, style="Muted.TLabel", wraplength=1000,
+                                    justify="left")
+        self.stats_note.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        stats.bind("<Configure>", self._queue_pager_layout)
+        ttk.Label(body, textvariable=self.status_text, style="Muted.TLabel", wraplength=1000,
+                  justify="left").grid(row=5, column=0, sticky="w", pady=(12, 0))
+
+    def toggle_filters(self):
+        self._filter_open = not self._filter_open
+        if self._filter_open:
+            self.filter_panel.pack(fill="x", pady=(8, 0))
+            self.period_boxes[0].focus_set()
+        else:
+            self.filter_panel.pack_forget()
+        self.filter_button.configure(text="기간 필터 닫기" if self._filter_open else
+                                     "기간 필터 · 적용 중" if self.applied_period else "기간 필터")
+
+    def _reset_scroll(self, _=None):
+        self.content_view.canvas.yview_moveto(0)
+
+    def focus_search(self, _=None):
+        self.tabs.select(0)
+        self.search_entry.focus_set()
+        self.search_entry.selection_range(0, "end")
+        return "break"
+
+    def _escape(self, _=None):
+        if self._filter_open:
+            self.toggle_filters()
+            self.filter_button.focus_set()
+            return "break"
+
+    def show_tools(self):
+        if self._tools_window is None:
+            return
+        self._tools_window.update_idletasks()
+        width, height = max(420, self._tools_window.winfo_reqwidth()), self._tools_window.winfo_reqheight()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - width) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - height) // 2)
+        self._tools_window.geometry(f"{width}x{height}+{x}+{y}")
+        self._tools_window.deiconify()
+        self._tools_window.lift()
+        self.backfill_button.focus_set()
+
+    def _run_tool(self, callback):
+        self._tools_window.withdraw()
+        callback()
 
     def _pagination(self, parent, *, row, runs=False):
         bar = ttk.Frame(parent)
@@ -466,6 +572,21 @@ class HistoryWindow(tk.Toplevel):
         self._pager_layout_timer = None
         self._layout_tiles()
         self._layout_preview()
+        self._layout_stats()
+        toolbar = self.library_toolbar
+        width = toolbar.winfo_width()
+        if width > 1:
+            core = self.sort_controls.winfo_reqwidth() + self.tool_controls.winfo_reqwidth() + 12
+            folded = core > width
+            hint = not folded and core + self.search_hint.winfo_reqwidth() + 24 <= width
+            if (folded, hint) != self._toolbar_layout:
+                self._toolbar_layout = folded, hint
+                self.tool_controls.grid_configure(row=1 if folded else 0, column=0 if folded else 2,
+                                                   columnspan=3 if folded else 1, pady=(8 if folded else 0, 0))
+                if hint:
+                    self.search_hint.grid()
+                else:
+                    self.search_hint.grid_remove()
         for bar, info, navigation in self._pagers:
             if bar.winfo_width() <= 1:
                 continue
@@ -485,28 +606,81 @@ class HistoryWindow(tk.Toplevel):
         width = self.file_browser.winfo_width()
         if width <= 1:
             return
-        side = width >= max(self.preview_box.winfo_reqwidth(), self.preview_info.winfo_reqwidth()) + 674
+        core = sum(self._column_need(key) for key in self._file_columns if key not in self.OPTIONAL_COLUMNS)
+        scroll = next(child.winfo_reqwidth() for child in self.tree.master.winfo_children()
+                      if isinstance(child, ttk.Scrollbar) and str(child.cget("orient")) == "vertical")
+        preview = max(self.preview_box.winfo_reqwidth(), self.preview_actions.winfo_reqwidth()) + 28
+        side = width >= core + scroll + preview + 16
         if side == self._preview_side:
             return
         self._preview_side = side
-        self.preview_card.grid(row=0 if side else 1, column=1 if side else 0,
-                               sticky="ns" if side else "ew",
+        self.preview_card.grid(row=0 if side else 2, column=1 if side else 0,
+                               sticky="nsew" if side else "ew",
                                padx=(12 if side else 0, 0), pady=(0 if side else 8, 0))
-        self.preview_card.columnconfigure(0, weight=0)
+        self.preview_card.columnconfigure(0, weight=1 if side else 0)
         self.preview_card.columnconfigure(1, weight=0 if side else 1)
-        self.preview_box.grid(row=0, column=0, sticky="n")
-        self.preview_info.grid(row=1 if side else 0, column=0 if side else 1, sticky="nw",
+        self.preview_card.rowconfigure(2, weight=1 if side else 0)
+        self.preview_box.grid(row=0, column=0, rowspan=1 if side else 3, sticky="n")
+        self.preview_info.grid(row=1 if side else 0, column=0 if side else 1, sticky="ew",
                                padx=(0 if side else 16, 0), pady=(10 if side else 0, 0))
+        self.preview_details.grid(row=2 if side else 1, column=0 if side else 1, sticky="nsew",
+                                  padx=(0 if side else 16, 0), pady=(10, 10))
+        self.preview_actions.grid(row=3 if side else 2, column=0 if side else 1, sticky="ew",
+                                  padx=(0 if side else 16, 0))
+        self.selection_detail.configure(height=3)
+        # Narrow windows put page navigation before the inspector. The next
+        # page stays reachable even when the selected file's details scroll.
+        if self._pagers:
+            bar = self._pagers[0][0]
+            bar.grid(in_=self._file_page_parent if side else self.file_browser,
+                     row=2 if side else 1, column=0, sticky="ew", pady=(8, 0))
+
+    def _wrap_preview_note(self, event):
+        # A label requests a little more than its wrap width. Using its
+        # parent's full width fed that request back into the inspector and
+        # could make a long note alternate between two layouts forever.
+        width = max(120, event.width - 4)
+        if self._preview_side is not False:
+            width = min(width, max(self.preview_box.winfo_reqwidth(), self.preview_actions.winfo_reqwidth()))
+        if int(self.preview_note_label.cget("wraplength")) != width:
+            self.preview_note_label.configure(wraplength=width)
+
+    def _layout_stats(self):
+        width = self.stats_view.winfo_width()
+        if width <= 1:
+            return
+        stacked = width * 0.5 < self._ranking_need + 12
+        if stacked == self._stats_stacked:
+            return
+        self._stats_stacked = stacked
+        self.stats_view.columnconfigure(0, weight=1, uniform="" if stacked else "stats")
+        self.stats_view.columnconfigure(1, weight=0 if stacked else 1, uniform="" if stacked else "stats")
+        self.stats_view.rowconfigure(1, weight=1 if stacked else 0)
+        self.ranking_card.grid_configure(row=0, column=0, padx=(0, 0 if stacked else 12))
+        self.months_card.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
+                                        pady=(12 if stacked else 0, 0))
+        self.stats_note.grid_configure(row=2 if stacked else 1, columnspan=1 if stacked else 2)
 
     # Columns hidden first when the table is narrower than its contents; the
     # selected file's details still show them. A cut-off file name is worse.
     OPTIONAL_COLUMNS = ("saved", "size")
+    COLUMN_SAMPLES = {
+        "posted": "2026-10-06 22:15 *",
+        "kind": "동영상",
+        "author": "@WWWWWWWWWWWWWWW",
+        "filename": "1840025000000000000_video_1.mp4",
+        "size": "1,023.9 GiB",
+        "saved": "2026-10-06 22:15",
+    }
 
     def _column_need(self, key):
-        if key == "filename":
-            sample = "1840025000000000000_gif_1.gif"
-            return int(self.tk.call("font", "measure", theme.SMALL, sample)) + 24
-        return int(self.tree.column(key, "width"))
+        style = ttk.Style(self)
+        name = str(self.tree.cget("style") or "Treeview")
+        body_font = style.lookup(name, "font") or theme.SMALL
+        heading_font = style.lookup(name + ".Heading", "font") or theme.BOLD
+        value = int(self.tk.call("font", "measure", body_font, self.COLUMN_SAMPLES[key]))
+        heading = int(self.tk.call("font", "measure", heading_font, self.tree.heading(key, "text")))
+        return max(value, heading) + 24
 
     def _layout_columns(self):
         # Until the window is laid out, its content takes the table's own
@@ -515,9 +689,19 @@ class HistoryWindow(tk.Toplevel):
         available = self.tree.winfo_width()
         if available <= 1 or not self.winfo_viewable() or self.content_view.canvas.winfo_width() <= 1:
             return
+        needs = {key: self._column_need(key) for key in self._file_columns}
+        for key, needed in needs.items():
+            options = {}
+            if int(self.tree.column(key, "minwidth")) != needed:
+                options["minwidth"] = needed
+            width = int(self.tree.column(key, "width"))
+            if width < needed or (key != "filename" and width != needed):
+                options["width"] = needed
+            if options:
+                self.tree.column(key, **options)
         shown = list(self._file_columns)
         for key in self.OPTIONAL_COLUMNS:
-            if sum(self._column_need(column) for column in shown) <= available:
+            if sum(needs[column] for column in shown) + 2 <= available:
                 break
             shown.remove(key)
         if tuple(shown) != self._shown_columns:
@@ -529,19 +713,19 @@ class HistoryWindow(tk.Toplevel):
         if available <= 1:
             return
         largest = max(tile.winfo_reqwidth() for tile in self._tiles)
-        columns = next((count for count in (6, 3, 2) if count * largest + (count - 1) * 8 <= available), 1)
+        columns = next((count for count in (3, 2) if count * largest + (count - 1) * 10 <= available), 1)
         if columns == self._tile_columns:
             return
         self._tile_columns = columns
         # Empty columns retain their weight after re-gridding unless explicitly
         # reset; that would steal width from the visible statistics cards.
-        for column in range(6):
+        for column in range(len(self._tiles)):
             self._tile_frame.columnconfigure(column, weight=1 if column < columns else 0,
                                               uniform="tile" if column < columns else "", minsize=0)
         for index, tile in enumerate(self._tiles):
             row, column = divmod(index, columns)
             tile.grid_configure(row=row, column=column,
-                                padx=(8 if column else 0, 0), pady=(8 if row else 0, 0))
+                                padx=(10 if column else 0, 0), pady=(10 if row else 0, 0))
 
     def _resize_text(self, event):
         if event.widget is self:
@@ -585,6 +769,8 @@ class HistoryWindow(tk.Toplevel):
 
     def _update_controls(self):
         ready = not self.busy and self.current_storage is not None
+        self.refresh_button.configure(state="disabled" if self.busy else "normal")
+        self.tools_button.configure(state="normal" if ready else "disabled")
         for runs in (False, True):
             prefix = "run_" if runs else ""
             page = self.run_page if runs else self.page
@@ -649,12 +835,15 @@ class HistoryWindow(tk.Toplevel):
         except ValueError:
             self.status_text.set("기간은 2026-10-01처럼 연-월-일로 입력해 주세요. 한쪽만 입력해도 됩니다.")
             return
+        self.filter_button.configure(text="기간 필터 닫기" if self._filter_open else
+                                     "기간 필터 · 적용 중" if self.applied_period else "기간 필터")
         self.page = 0
         self.refresh()
 
     def clear_period(self):
         self.period_from.set("")
         self.period_to.set("")
+        self.filter_button.configure(text="기간 필터 닫기" if self._filter_open else "기간 필터")
         if self.applied_period is not None:
             self.applied_period = None
             self.page = 0
@@ -780,9 +969,11 @@ class HistoryWindow(tk.Toplevel):
             store = HistoryWindow._store(directory)
 
             def snapshot(warnings):
-                summary = store.summary()
+                # Use one deduplicated catalog snapshot for all totals/charts.
+                # The rescan below verifies files in the background; paging
+                # must not trigger another whole-library filesystem scan.
+                summary = store.overview(verify_files=False)
                 summary["warnings"] = warnings
-                summary["stats"] = store.statistics()
                 files = store.record_page(page, page_size, kind, query, order=order, period=period, author=author)
                 runs = store.run_page(run_page, page_size)
                 return store.account_dir, summary, files["rows"], runs["rows"], files["page"], files, runs
@@ -880,17 +1071,20 @@ class HistoryWindow(tk.Toplevel):
             self.tile_values[key].set(f"{value:,}")
         self.tile_values["bytes"].set(format_bytes(summary.get("bytes", 0)))
         self.summary_text.set(
-            f"파일 기록 {files:,}개 · 트윗 {values['posts']:,}개 · 사진 {values['photo']:,}개 / 동영상 {values['video']:,}개 / "
+            f"현재 파일 {files:,}개 · 기록된 트윗 {values['posts']:,}개 · 사진 {values['photo']:,}개 / 동영상 {values['video']:,}개 / "
             f"움직이는 GIF {values['animated_gif']:,}개 · 확인된 용량 {format_bytes(summary.get('bytes', 0))}")
+        self.media_counts.set(f"사진 {values['photo']:,} · 동영상 {values['video']:,} · GIF {values['animated_gif']:,}")
         oldest, newest = summary.get("oldest_posted_at"), summary.get("newest_posted_at")
         notes = []
         if summary.get("estimated_dates", 0):
             notes.append("* 표시는 트윗 번호로 추정한 날짜")
-        if summary.get("unknown_bytes", 0):
-            notes.append(f"크기를 모르는 파일 {summary['unknown_bytes']:,}개")
-        range_text = (f"저장한 트윗의 게시일: {format_day(oldest)} ~ {format_day(newest)} (이 기간의 Like를 모두 저장했다는 뜻은 아닙니다)"
-                      if oldest else "저장한 트윗의 게시일: 아직 없음")
+        if summary.get("missing_files", 0):
+            notes.append(f"현재 파일을 찾지 못한 기록 {summary['missing_files']:,}개")
+        range_text = (f"트윗 게시일 {format_day(oldest)} → {format_day(newest)} · 기록에 남아 있는 범위"
+                      if oldest else "기록된 트윗의 게시일: 아직 없음")
         self.date_text.set(range_text + ("  ·  " + " · ".join(notes) if notes else ""))
+        if oldest:
+            self.media_counts.set(self.media_counts.get() + f"    ·    게시일 {format_day(oldest)} → {format_day(newest)}")
         selected = self.selected()
         selected_identity = self._record_identity(selected) if selected else None
         self.tree.delete(*self.tree.get_children())
@@ -904,7 +1098,8 @@ class HistoryWindow(tk.Toplevel):
                 posted += " *"
             filename = row.get("filename") or (Path(row["path"]).name if row.get("path") else f"{row['tweet_id']}_{row['num']} (위치 없음)")
             author = "@" + row["author"] if row.get("author") else "–"
-            self.tree.insert("", "end", iid=key, values=(posted, MEDIA_LABELS.get(row.get("media_type"), "알 수 없음"), author, filename,
+            media_label = "GIF" if row.get("media_type") == "animated_gif" else MEDIA_LABELS.get(row.get("media_type"), "알 수 없음")
+            self.tree.insert("", "end", iid=key, values=(posted, media_label, author, filename,
                                                          format_bytes(row.get("filesize")), format_short(row.get("saved_at"))))
         for key, row in self.rows.items():
             if selected_identity is not None and self._record_identity(row) == selected_identity:
@@ -916,7 +1111,7 @@ class HistoryWindow(tk.Toplevel):
             self._show_table_note("")
         elif scanning:
             self._show_table_note("폴더의 파일을 확인하는 중입니다…\n확인이 끝나면 저장한 기록을 보여 드립니다.")
-        elif files:
+        elif summary.get("record_count", files):
             self._show_table_note("찾는 조건에 맞는 파일이 없습니다.")
         else:
             self._show_table_note("아직 저장한 파일이 없습니다.\n메인 화면에서 ‘저장 시작’을 누르면 여기에 쌓입니다.")
@@ -926,7 +1121,7 @@ class HistoryWindow(tk.Toplevel):
         self.total_pages = file_paging["pages"] if file_paging else (total + page_size - 1) // page_size
         self.page = self.displayed_page
         self.has_next_page = self.displayed_page + 1 < self.total_pages
-        self.page_text.set(f"총 {total:,}개 · {self.displayed_page + 1 if total else 0} / {self.total_pages:,}페이지")
+        self.page_text.set(f"기록 {total:,}개 · {self.displayed_page + 1 if total else 0} / {self.total_pages:,}페이지")
         self.page_input.set(str(self.displayed_page + 1))
         run_selection = self.run_tree.selection()
         selected_run = self.run_rows.get(run_selection[0]) if run_selection else None
@@ -954,7 +1149,7 @@ class HistoryWindow(tk.Toplevel):
         self._update_controls()
         warning = " ".join(summary.get("warnings", []))
         self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") +
-                             f"파일 안에 출처가 기록된 파일 {summary.get('embedded_sources', 0):,}개 · 작성자까지 기록된 파일 {summary.get('embedded_authors', 0):,}개")
+                             f"출처 기록 {summary.get('embedded_sources', 0):,}개 · 작성자 기록 {summary.get('embedded_authors', 0):,}개")
         self._show_stats(summary.get("stats") or {})
         if self.view_mode == "grid":
             self._show_grid()
@@ -971,6 +1166,8 @@ class HistoryWindow(tk.Toplevel):
 
     def select_record(self, _=None, *, force=False):
         row = self.selected()
+        self.open_file_button.configure(state="normal" if row and row.get("path") else "disabled")
+        self.open_tweet_button.configure(state="normal" if row and str(row.get("tweet_id", "")).isdigit() else "disabled")
         self._start_preview(row, force=force)
         if self.view_mode == "grid":
             selection = self.tree.selection()
@@ -989,11 +1186,13 @@ class HistoryWindow(tk.Toplevel):
         if row.get("author_id"):
             author += " (ID " + row["author_id"] + ")"
         self.selection_text.set(
-            f"작성자  {author}   ·   Like한 시기  {liked_period(row)}\n"
+            f"작성자  {author}\n"
             f"내용     {tweet_text(row)}\n"
             f"트윗     {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n"
+            f"저장한 때 {saved if saved != '–' else '알 수 없음'} · 게시일 {format_short(row.get('posted_at'))}\n"
+            f"Like한 시기  {liked_period(row)}\n"
             f"파일     {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}\n"
-            f"저장한 때 {saved if saved != '–' else '알 수 없음'} · 파일 안 기록: {metadata} · {author_status} · 게시일 출처: {source}")
+            f"파일 안 기록: {metadata} · {author_status} · 게시일 출처: {source}")
 
     def _start_preview(self, row, *, force=False):
         key = (str(self.current_account_dir), row.get("path")) if row else None
@@ -1075,7 +1274,8 @@ class HistoryWindow(tk.Toplevel):
         archive_text = "\n".join(map(str, archives)) or "아직 다운로드 기록 파일이 없습니다."
         snapshot = (str(self.current_storage.snapshot_dir) if isinstance(self.current_storage, StoragePaths)
                     else "저장 폴더의 .xlikesaver")
-        dialogs.showinfo("기록 저장 위치", f"이 PC의 기록·통계:\n{self.current_account_dir / '.xlikesaver-history.sqlite3'}\n\n"
+        media_dir = self.current_storage.media_dir if isinstance(self.current_storage, StoragePaths) else self.current_account_dir
+        dialogs.showinfo("기록 저장 위치", f"저장 폴더:\n{media_dir}\n\n이 PC의 기록·통계:\n{self.current_account_dir / '.xlikesaver-history.sqlite3'}\n\n"
                          f"이 PC의 중복 방지 기록:\n{archive_text}\n\n저장 폴더에 두는 사본:\n{snapshot}\n\n"
                          "기록은 계정과 저장 폴더마다 이 PC에 따로 둡니다. 저장할 때마다 저장 폴더의 .xlikesaver에 "
                          "검사를 통과한 사본을 통째로 바꿔 두므로, 다른 PC나 다시 설치한 앱은 이 사본에서 기록을 가져옵니다. "
@@ -1216,6 +1416,17 @@ class HistoryWindow(tk.Toplevel):
             if stop.is_set():
                 raise Stopped()
 
+        def source_unchanged(path, original):
+            """Never recycle an MP4 that an editor or sync changed meanwhile."""
+            try:
+                current = path.stat()
+                if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+                    return False
+                return all(getattr(current, field) == getattr(original, field)
+                           for field in ("st_dev", "st_ino", "st_size", "st_mtime_ns"))
+            except OSError:
+                return False
+
         store = account_guard = None
         output_guards = []
         converted = kept = failed = missing = 0
@@ -1256,6 +1467,7 @@ class HistoryWindow(tk.Toplevel):
                         kept += 1
                         continue
                     try:
+                        original = source.stat()
                         temporary = convert_mp4_to_gif(source, check_stop=check_stop,
                                                        max_bytes=max_mb * 1024 * 1024, size=size)
                     except Stopped:
@@ -1266,8 +1478,13 @@ class HistoryWindow(tk.Toplevel):
                     except ConversionError:
                         failed += 1
                         continue
+                    except OSError:
+                        failed += 1
+                        continue
                     status = author_status = "pending"
                     try:
+                        if not source_unchanged(source, original):
+                            raise OSError("GIF source changed")
                         if tagging:
                             identity = author_identity(row.get("author", ""), row.get("author_id", ""))
                             tagged = embed_source(temporary, row["tweet_id"], author=identity["author"],
@@ -1275,23 +1492,28 @@ class HistoryWindow(tk.Toplevel):
                             status = tagged["status"]
                             author_status = tagged.get("author_status", "error" if identity["author"] or identity["author_id"] else "unknown")
                         # Keep the original file time, which sorts by tweet date.
-                        times = source.stat()
-                        os.utime(temporary, ns=(times.st_atime_ns, times.st_mtime_ns))
+                        if not source_unchanged(source, original):
+                            raise OSError("GIF source changed")
+                        os.utime(temporary, ns=(original.st_atime_ns, original.st_mtime_ns))
                         move_without_overwrite(temporary, destination)
                     except OSError:
                         failed += 1
                         continue
                     finally:
                         temporary.unlink(missing_ok=True)
-                    # Record first, then recycle: either step failing leaves the
-                    # MP4 and its record exactly as before, without the new GIF.
+                    # Record first, then recycle. A late input change or a
+                    # refused recycle restores the MP4 record before cleanup.
                     try:
                         recorded = store.replace_media_file(row, destination, status, author_status=author_status)
                     except HistoryError:
                         recorded = False
-                    if recorded and not recycle(source):
-                        store.replace_media_file(dict(row, path=str(destination.resolve())), source,
-                                                 row["metadata_status"], author_status=row["author_metadata_status"])
+                    if recorded and (not source_unchanged(source, original) or not recycle(source)):
+                        restored = store.replace_media_file(dict(row, path=str(destination.resolve())), source,
+                                                            row["metadata_status"], author_status=row["author_metadata_status"])
+                        if not restored:
+                            # Keep both files if the catalog changed again: a
+                            # referenced GIF must not be deleted by a rollback.
+                            raise HistoryError("GIF catalog changed during rollback")
                         recorded = False
                     if not recorded:
                         destination.unlink(missing_ok=True)
@@ -1471,7 +1693,7 @@ class HistoryWindow(tk.Toplevel):
 
     def _update_view_buttons(self):
         for mode, button in self.view_buttons.items():
-            button.configure(style="CompactPrimary.TButton" if mode == self.view_mode else "Compact.TButton")
+            button.configure(style="SegmentSelected.TButton" if mode == self.view_mode else "Segment.TButton")
 
     def _show_grid(self):
         location = self.current_storage

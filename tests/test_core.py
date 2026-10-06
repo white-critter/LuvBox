@@ -585,6 +585,27 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 1)
         self.assertEqual(events[-1]["skipped"], 2)
 
+    def test_existing_files_reuse_one_catalog_read_and_keep_metadata_retry_author(self):
+        from xlikesaver.history import HistoryStore
+
+        rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "bob")]
+        self.assertEqual(self.worker(rows)[0], 0)
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as database:
+            database.execute("UPDATE media SET metadata_status='failed' WHERE tweet_id='100'")
+            database.commit()
+        self.embed_source.reset_mock()
+        # The current result omits the author. Retrying its missing source must
+        # keep the author's identity from the same row used to find the file.
+        changed = [("100", 1, "photo", ""), rows[1]]
+        with patch.object(HistoryStore, "media_record", autospec=True,
+                          side_effect=HistoryStore.media_record) as lookup:
+            code, events = self.worker(changed)
+        self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 0, 2))
+        self.assertEqual(lookup.call_count, len(rows))
+        self.embed_source.assert_called_once()
+        self.assertEqual(self.embed_source.call_args.kwargs["author"], "alice")
+        self.assertEqual(len(FakeHttpDownloader.downloaded), len(rows))
+
     def test_ordinary_post_warnings_never_claim_an_expired_login(self):
         def warn(extractor, row):
             extractor.log.warning("%s: Missing 'author' data", row[0])

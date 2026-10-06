@@ -75,10 +75,13 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title(f"XlikeSaver {__version__}")
-        width = min(960, max(760, root.winfo_screenwidth() - 60))
-        height = min(880, max(680, root.winfo_screenheight() - 80))
-        root.geometry(f"{width}x{height}")
-        root.minsize(min(780, width), min(760, height))
+        width = min(1440, max(760, root.winfo_screenwidth() - 80))
+        height = min(1320, max(360, root.winfo_screenheight() - 100))
+        x = max(0, (root.winfo_screenwidth() - width) // 2)
+        # Leave room for the title bar and taskbar when opening a tall window.
+        y = max(0, (root.winfo_screenheight() - height - 80) // 2)
+        root.geometry(f"{width}x{height}+{x}+{y}")
+        root.minsize(min(780, width), min(620, height))
         root.configure(bg=theme.BG)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.events: queue.Queue = queue.Queue()
@@ -150,7 +153,7 @@ class App:
             schedule_time = "09:00"
         self.schedule_time = tk.StringVar(value=schedule_time)
         self.schedule_prompted = str(settings.get("schedule_prompted", ""))
-        self.schedule_text = tk.StringVar(value="‘예약 설정’에서 매일 정한 시각에 새 Like를 자동으로 저장할 수 있습니다.")
+        self.schedule_text = tk.StringVar(value="자동 저장을 아직 설정하지 않았습니다.")
         self.schedule_state = tk.StringVar()
         self.schedule_last = tk.StringVar()
         self.progress_summary = tk.StringVar(value="")
@@ -165,6 +168,7 @@ class App:
         self.saved_text, self.skipped_text, self.size_text = tk.StringVar(), tk.StringVar(), tk.StringVar()
         self.login_text = tk.StringVar()
         self.option_summary = tk.StringVar()
+        self.scheduled_option_summary = tk.StringVar()
         theme.apply(self.root, mode=self.appearance.get())
         self._update_theme_caption()
         self._build()
@@ -180,7 +184,7 @@ class App:
         self._preview_location()
         self._update_option_summary()
         # Short screens can scroll without shrinking the readable type.
-        root.minsize(min(780, width), min(760, root.winfo_screenheight() - 80))
+        root.minsize(min(780, width), min(620, height))
         self.root.after(120, self._poll)
         self.root.bind("<Destroy>", self._release_ui, add="+")
         # The installed app checks its daily task and the last scheduled run.
@@ -195,123 +199,177 @@ class App:
 
     # ------------------------------------------------------------------ layout
     def _build(self):
-        self.content_view = theme.ScrollableContent(self.root)
-        self.content_view.pack(fill="both", expand=True)
+        self.workspace = ttk.Frame(self.root)
+        self.workspace.pack(fill="both", expand=True)
+        self.workspace.columnconfigure(1, weight=1)
+        self.workspace.rowconfigure(0, weight=1)
+
+        self.sidebar = ttk.Frame(self.workspace, style="Sidebar.TFrame", padding=(22, 28))
+        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        self.sidebar.columnconfigure(0, weight=1)
+        self.sidebar.rowconfigure(5, weight=1)
+        ttk.Label(self.sidebar, text="XlikeSaver", style="SidebarTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(self.sidebar, text="나만의 미디어 보관함", style="SidebarMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 32))
+        ttk.Label(self.sidebar, text="작업 공간", style="SidebarEyebrow.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 10))
+        navigation = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
+        navigation.grid(row=3, column=0, sticky="ew")
+        for caption, command, style in (
+                ("저장하기", self._focus_dashboard, "NavSelected.TButton"),
+                ("기록 · 통계", self.show_history, "Nav.TButton"),
+                ("저장 설정", self.show_options, "Nav.TButton"),
+                ("자동 저장", self.show_schedule, "Nav.TButton")):
+            ttk.Button(navigation, text=caption, command=command, style=style, width=16).pack(fill="x", pady=(0, 5))
+        self.schedule_sidebar = ttk.Label(self.sidebar, textvariable=self.schedule_text,
+                                           style="SidebarMuted.TLabel", wraplength=170, justify="left")
+        self.schedule_sidebar.grid(row=4, column=0, sticky="new", pady=(18, 0))
+        footer = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
+        footer.grid(row=6, column=0, sticky="sew", pady=(22, 0))
+        self.theme_button = ttk.Button(footer, textvariable=self.theme_button_text, command=self.toggle_theme,
+                                       style="Nav.TButton")
+        self.theme_button.pack(fill="x")
+        ttk.Button(footer, text="사용 방법", command=self.help, style="Nav.TButton").pack(fill="x", pady=(4, 18))
+        ttk.Label(footer, text=f"VERSION {__version__}", style="SidebarEyebrow.TLabel").pack(anchor="w")
+        ttk.Label(footer, text="Ctrl+Enter · 저장 시작", style="SidebarMuted.TLabel").pack(anchor="w", pady=(6, 0))
+
+        self.content_view = theme.ScrollableContent(self.workspace, padding=(30, 24))
+        self.content_view.grid(row=0, column=1, sticky="nsew")
         shell = self.content_view.content
         header = ttk.Frame(shell)
-        header.pack(fill="x")
-        header.columnconfigure(0, weight=1)
-        titles = ttk.Frame(header)
-        titles.grid(row=0, column=0, sticky="ew", padx=(0, 18))
-        title = ttk.Label(titles, text="XlikeSaver", style="Title.TLabel")
-        title.pack(anchor="w")
-        self._wrapping_label(titles, text="내가 좋아요한 사진·동영상을 PC에 저장합니다", style="Subtitle.TLabel", wraplength=560).pack(fill="x", pady=(4, 0))
-        navigation = ttk.Frame(header)
-        navigation.grid(row=0, column=1, sticky="ne", pady=(6, 0))
-        ttk.Button(navigation, text="기록 · 통계", width=11, command=self.show_history).pack(side="left", padx=(0, 8))
-        ttk.Button(navigation, text="사용 방법", width=9, command=self.help).pack(side="left")
-        self.theme_button = ttk.Button(navigation, textvariable=self.theme_button_text, width=10,
-                                       command=self.toggle_theme)
-        self.theme_button.pack(side="left", padx=(8, 0))
-        def fit_header(event):
-            stacked = event.width < title.winfo_reqwidth() + navigation.winfo_reqwidth() + 18
-            row = 1 if stacked else 0
-            if int(navigation.grid_info()["row"]) != row:
-                titles.grid_configure(padx=(0, 0 if stacked else 18))
-                navigation.grid_configure(row=row, column=0 if stacked else 1,
-                                          sticky="w" if stacked else "ne", pady=(12 if stacked else 6, 0))
-                self.content_view._schedule_layout()
-        header.bind("<Configure>", fit_header)
+        header.pack(fill="x", pady=(0, 20))
+        ttk.Label(header, text="저장하기", style="PageTitle.TLabel").pack(anchor="w")
+        self._wrapping_label(header, text="좋아요한 사진과 영상을 내 폴더에 차곡차곡.",
+                             style="Subtitle.TLabel", wraplength=700).pack(fill="x", pady=(5, 0))
+        self.compact_navigation = ttk.Frame(header)
+        for caption, command in (("기록 · 통계", self.show_history), ("자동 저장", self.show_schedule), ("사용 방법", self.help)):
+            ttk.Button(self.compact_navigation, text=caption, command=command,
+                       style="Ghost.TButton").pack(side="left", padx=(0, 6))
+        ttk.Button(self.compact_navigation, textvariable=self.theme_button_text,
+                   command=self.toggle_theme, style="Ghost.TButton").pack(side="right")
 
-        form = theme.card(shell, fill="x", pady=(18, 0))
-        form.columnconfigure(0, weight=3, uniform="account")
-        form.columnconfigure(1, weight=2, uniform="account")
-        ttk.Label(form, text="내 X 아이디", style="CardBold.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 8))
-        ttk.Label(form, text="로그인", style="CardBold.TLabel").grid(row=0, column=1, sticky="w", padx=(24, 0), pady=(0, 8))
+        form = self.setup_card = theme.card(shell, fill="x", pady=(0, 16))
+        form.columnconfigure(0, weight=1, uniform="account")
+        form.columnconfigure(1, weight=1, uniform="account")
+        ttk.Label(form, text="저장 준비", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 16))
+        ttk.Label(form, text="내 X 아이디", style="CardMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 7))
+        ttk.Label(form, text="로그인 연결", style="CardMuted.TLabel").grid(row=1, column=1, sticky="w", padx=(24, 0), pady=(0, 7))
         account = self.account_entry = ttk.Entry(form, textvariable=self.account, width=1, font=theme.BODY)
-        account.grid(row=1, column=0, sticky="ew")
-        self._wrapping_label(form, text="예: my_account 또는 x.com/my_account", style="CardMuted.TLabel", wraplength=470).grid(row=2, column=0, sticky="new", pady=(6, 0))
+        account.grid(row=2, column=0, sticky="ew")
+        self._wrapping_label(form, text="@아이디 또는 x.com/아이디", style="CardMuted.TLabel",
+                             wraplength=470).grid(row=3, column=0, sticky="new", pady=(6, 0))
         self.inputs.append(account)
-
-        self.login_label = self._wrapping_label(form, textvariable=self.login_text, style="Disconnected.TLabel", wraplength=470)
-        self.login_label.grid(row=1, column=1, sticky="w", padx=(24, 0))
-        self.login_button = ttk.Button(form, text="로그인 연결", width=12, command=self.show_connect)
-        self.login_button.grid(row=2, column=1, sticky="w", padx=(24, 0), pady=(6, 0))
+        self.login_label = self._wrapping_label(form, textvariable=self.login_text,
+                                                style="Disconnected.TLabel", wraplength=400, anchor="w")
+        self.login_label.grid(row=2, column=1, sticky="ew", padx=(24, 0))
+        self.login_button = ttk.Button(form, text="로그인 연결", command=self.show_connect, style="Ghost.TButton")
+        self.login_button.grid(row=3, column=1, sticky="w", padx=(24, 0), pady=(3, 0))
         self.inputs.append(self.login_button)
-
-        ttk.Label(form, text="저장 폴더", style="CardBold.TLabel").grid(row=3, column=0, columnspan=2, sticky="w", pady=(20, 8))
+        ttk.Label(form, text="저장 폴더", style="CardMuted.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(16, 7))
         folder_row = ttk.Frame(form, style="Plain.TFrame")
-        folder_row.grid(row=4, column=0, columnspan=2, sticky="ew")
+        folder_row.grid(row=5, column=0, columnspan=2, sticky="ew")
         folder_row.columnconfigure(0, weight=1)
         folder = self.folder_entry = ttk.Entry(folder_row, textvariable=self.folder, width=1, font=theme.BODY)
         folder.grid(row=0, column=0, sticky="ew")
         folder.bind("<Return>", lambda _: self._ensure_storage())
-        browse = ttk.Button(folder_row, text="찾아보기", width=9, command=self.choose_folder)
-        browse.grid(row=0, column=1, padx=(10, 0))
-        ttk.Button(folder_row, text="열기", width=6, command=self.open_folder).grid(row=0, column=2, padx=(8, 0))
+        browse = ttk.Button(folder_row, text="찾아보기", command=self.choose_folder, style="Ghost.TButton", width=8)
+        browse.grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(folder_row, text="열기", command=self.open_folder, style="Ghost.TButton", width=5).grid(row=0, column=2, padx=(6, 0))
         self.inputs.extend((folder, browse))
-        preview = ttk.Frame(form, style="Plain.TFrame")
-        preview.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        ttk.Label(preview, text="저장 위치", style="CardMuted.TLabel").pack(side="left", anchor="n")
-        self.preview_label = self._wrapping_label(preview, textvariable=self.destination_preview, style="CardMuted.TLabel", wraplength=600)
-        self.preview_label.pack(side="left", fill="x", expand=True, padx=(8, 0))
-
-        ttk.Separator(form).grid(row=6, column=0, columnspan=2, sticky="ew", pady=(18, 14))
+        self.preview_label = self._wrapping_label(form, textvariable=self.destination_preview,
+                                                  style="CardMuted.TLabel", wraplength=700)
+        self.preview_label.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 14))
         summary = ttk.Frame(form, style="Plain.TFrame")
         summary.grid(row=7, column=0, columnspan=2, sticky="ew")
         summary.columnconfigure(0, weight=1)
-        ttk.Label(summary, text="저장 방식", style="CardBold.TLabel").grid(row=0, column=0, sticky="w")
-        self.option_summary_label = self._wrapping_label(summary, textvariable=self.option_summary, style="CardMuted.TLabel", wraplength=650)
-        self.option_summary_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        self.options_button = ttk.Button(summary, text="옵션 변경", width=11, command=self.show_options)
-        self.options_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
+        self.option_summary_label = self._wrapping_label(summary, textvariable=self.option_summary,
+                                                         style="CardMuted.TLabel", wraplength=600)
+        self.option_summary_label.grid(row=0, column=0, sticky="ew")
+        self.options_button = ttk.Button(summary, text="저장 설정", command=self.show_options, style="Ghost.TButton")
+        self.options_button.grid(row=0, column=1, sticky="e", padx=(16, 0))
         self.inputs.append(self.options_button)
-        schedule_row = ttk.Frame(form, style="Plain.TFrame")
-        schedule_row.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(14, 0))
-        schedule_row.columnconfigure(0, weight=1)
-        ttk.Label(schedule_row, text="자동 저장", style="CardBold.TLabel").grid(row=0, column=0, sticky="w")
-        self._wrapping_label(schedule_row, textvariable=self.schedule_text, style="CardMuted.TLabel",
-                             wraplength=650).grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        ttk.Button(schedule_row, text="예약 설정", width=11, command=self.show_schedule).grid(
-            row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
 
-        actions = ttk.Frame(shell)
-        actions.pack(fill="x", pady=(18, 14))
-        self.start_button = ttk.Button(actions, text="저장 시작", style="Primary.TButton", command=self.start)
+        hero = self.work_card = theme.card(shell, fill="x", pady=(0, 16))
+        head = ttk.Frame(hero, style="Plain.TFrame")
+        head.pack(fill="x", pady=(0, 12))
+        ttk.Label(head, text="이번 저장", style="CardEyebrow.TLabel").pack(side="left")
+        self.work_actions = ttk.Frame(head, style="Plain.TFrame")
+        self.work_actions.pack(side="right")
+        self.start_button = ttk.Button(self.work_actions, text="저장 시작", style="Primary.TButton", command=self.start)
         self.start_button.pack(side="left")
-        self.stop_button = ttk.Button(actions, text="중단", style="Big.TButton", command=self.stop, state="disabled")
-        self.stop_button.pack(side="left", padx=10)
-
-        self._wrapping_label(shell, text="X 공식 API가 아닌 방식이라 계정이 제한될 수 있습니다. 너무 자주 반복 실행하지 마세요.",
-                             style="Warn.TLabel", wraplength=880).pack(side="bottom", fill="x", pady=(8, 0))
-        self._wrapping_label(shell, textvariable=self.status, style="Status.TLabel", wraplength=880).pack(fill="x")
-        self._wrapping_label(shell, textvariable=self.status_detail, style="Muted.TLabel", wraplength=880).pack(fill="x", pady=(2, 8))
-        tiles = ttk.Frame(shell)
-        tiles.pack(fill="x")
-        for column, (variable, caption) in enumerate(((self.saved_text, "이번에 새로 저장"), (self.skipped_text, "이미 저장돼 있음"),
-                                                       (self.size_text, "용량 초과로 건너뜀"))):
-            theme.tile(tiles, variable, caption).grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 10, 0))
-            tiles.columnconfigure(column, weight=1, uniform="tile")
-        self.progress = theme.Progressbar(shell, mode="determinate", value=0)
-        self.progress.pack(fill="x", pady=(10, 4))
-        self.progress_heading = ttk.Frame(shell)
+        self.stop_button = ttk.Button(self.work_actions, text="중단", style="Ghost.TButton", command=self.stop, state="disabled")
+        self._wrapping_label(hero, textvariable=self.status, style="CardStatus.TLabel", wraplength=800).pack(fill="x")
+        self._wrapping_label(hero, textvariable=self.status_detail, style="CardMuted.TLabel", wraplength=800).pack(fill="x", pady=(4, 16))
+        tiles = ttk.Frame(hero, style="Plain.TFrame")
+        tiles.pack(fill="x", pady=(0, 16))
+        for column, (variable, caption) in enumerate(((self.saved_text, "새로 저장"), (self.skipped_text, "이미 저장된 파일"),
+                                                       (self.size_text, "용량 초과"))):
+            metric = ttk.Frame(tiles, style="Plain.TFrame")
+            metric.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 20, 0))
+            ttk.Label(metric, textvariable=variable, style="HeroNumber.TLabel").pack(anchor="w")
+            ttk.Label(metric, text=caption, style="CardMuted.TLabel").pack(anchor="w", pady=(4, 0))
+            tiles.columnconfigure(column, weight=1, uniform="metric")
+        self.progress = theme.Progressbar(hero, mode="determinate", value=0)
+        self.progress.pack(fill="x", pady=(0, 6))
+        self.progress_heading = ttk.Frame(hero, style="Plain.TFrame")
         self.progress_heading.pack(fill="x")
-        self._wrapping_label(self.progress_heading, textvariable=self.progress_summary, style="Muted.TLabel", wraplength=720).pack(side="left", fill="x", expand=True)
+        self._wrapping_label(self.progress_heading, textvariable=self.progress_summary,
+                             style="CardMuted.TLabel", wraplength=700).pack(side="left", fill="x", expand=True)
         ttk.Checkbutton(self.progress_heading, text="자세히", variable=self.detailed_progress, command=self._toggle_progress,
-                        style="Plain.TCheckbutton").pack(side="right")
-        self.progress_detail_label = self._wrapping_label(shell, textvariable=self.progress_details, style="Muted.TLabel", wraplength=880)
-        self.log_title = ttk.Label(shell, text="작업 기록", style="Muted.TLabel")
-        self.log_title.pack(anchor="w", pady=(6, 2))
-        self.log_frame = ttk.Frame(shell, style="Card.TFrame", padding=(10, 8))
-        self.log_frame.pack(fill="both", expand=True)
-        self.log = tk.Text(self.log_frame, height=3, wrap="word", bg=theme.CARD, fg=theme.INK, relief="flat", borderwidth=0,
-                           highlightthickness=0, padx=4, pady=4, state="disabled", font=theme.SMALL)
-        scroll = ttk.Scrollbar(self.log_frame, command=self.log.yview)
+                        style="Plain.TCheckbutton").pack(side="right", padx=(12, 0))
+        self.progress_detail_label = self._wrapping_label(hero, textvariable=self.progress_details,
+                                                         style="CardMuted.TLabel", wraplength=800)
+        self.log_frame = theme.card(shell, fill="both", expand=True, pady=(0, 12))
+        log_heading = ttk.Frame(self.log_frame, style="Plain.TFrame")
+        log_heading.pack(fill="x", pady=(0, 8))
+        self.log_title = ttk.Label(log_heading, text="최근 작업", style="CardBold.TLabel")
+        self.log_title.pack(side="left")
+        ttk.Button(log_heading, text="화면 비우기", command=self._clear_log,
+                   style="Ghost.TButton").pack(side="right")
+        log_body = ttk.Frame(self.log_frame, style="Plain.TFrame")
+        log_body.pack(fill="both", expand=True)
+        self.log = tk.Text(log_body, height=5, wrap="word", bg=theme.CARD, fg=theme.INK, relief="flat", borderwidth=0,
+                           highlightthickness=0, padx=2, pady=4, state="disabled", font=theme.SMALL)
+        scroll = ttk.Scrollbar(log_body, command=self.log.yview)
         self.log.configure(yscrollcommand=scroll.set)
         self.log.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
+        self.log_placeholder = ttk.Label(log_body, text="저장을 시작하면 진행 내역이 여기에 표시됩니다.",
+                                          style="CardMuted.TLabel", wraplength=550, justify="center")
+        self.log_placeholder.place(relx=.5, rely=.5, anchor="center")
+        self.log.tag_configure("time", foreground=theme.MUTED)
+        self.log.tag_configure("error", foreground=theme.RED)
+        self.log.tag_configure("warning", foreground=theme.ORANGE)
+        self._wrapping_label(shell, text="X 요청 제한 안내가 나오면 기다린 뒤 다시 저장하세요. 계정 제한 위험을 완전히 없앨 수는 없습니다.",
+                             style="Muted.TLabel", wraplength=800).pack(fill="x", pady=(0, 4))
         if self.detailed_progress.get():
             self._toggle_progress()
+        self.root.bind("<Configure>", self._layout_dashboard, add="+")
+        self.root.bind("<Control-Return>", lambda _: self.start())
+        self.root.bind("<F6>", lambda _: self.show_history())
+        self.root.bind("<Control-comma>", lambda _: self.show_options())
+        self._layout_dashboard()
+
+    def _layout_dashboard(self, event=None):
+        if event is not None and event.widget is not self.root:
+            return
+        compact = self.root.winfo_width() < 1020
+        if compact:
+            self.sidebar.grid_remove()
+            if not self.compact_navigation.winfo_manager():
+                self.compact_navigation.pack(fill="x", pady=(14, 0))
+        else:
+            self.sidebar.grid()
+            self.compact_navigation.pack_forget()
+
+    def _focus_dashboard(self):
+        self.root.lift()
+        self.content_view.canvas.yview_moveto(0)
+        self.account_entry.focus_set()
+
+    def _clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+        self.log_placeholder.place(relx=.5, rely=.5, anchor="center")
 
     def _wrapping_label(self, parent, **kwargs):
         label = ttk.Label(parent, justify="left", **kwargs)
@@ -359,7 +417,10 @@ class App:
         limit = "" if len(media) == 1 else (" (영상 크기 제한 없음)" if size == "0" else f" (영상 {size}MB까지)")
         scan = "새 Like만" if SCAN_MODES[self.scan_mode.get()] == "quick" else "전체 확인"
         test = " · 시험 20개" if self.limited.get() else ""
-        self.option_summary.set(f"{layout} · {'·'.join(media)}{limit} · {scan}{test}")
+        self._sync_option_controls()
+        description = f"{layout} · {'·'.join(media)}{limit}"
+        self.option_summary.set(f"{description} · {scan}{test}")
+        self.scheduled_option_summary.set(f"{description} · 새 Like만")
 
     def _gif_options(self):
         """GIF size preset and media size limit for converting saved MP4 GIFs."""
@@ -472,6 +533,7 @@ class App:
             connected = bool(self.cookies.get().strip())
             self.login_text.set("● cookies.txt 파일 사용" if connected else "● cookies.txt 파일을 골라 주세요")
         self.login_label.configure(style="Connected.TLabel" if connected else "Disconnected.TLabel")
+        self.login_button.configure(text="연결 변경" if connected else "로그인 연결")
         window = self.connect_window
         if window is not None and window.winfo_exists():
             if mode == "managed":
@@ -494,8 +556,12 @@ class App:
         window.configure(bg=theme.CARD)
         window.transient(self.root)
         window.resizable(True, True)
-        body = self._popup_content(window, padding=(28, 24))
-        ttk.Label(body, text="X 로그인 연결", style="CardHeading.TLabel").pack(anchor="w")
+        heading = ttk.Frame(window, style="Plain.TFrame", padding=(28, 24, 28, 8))
+        heading.pack(fill="x")
+        ttk.Label(heading, text="X 로그인 연결", style="CardTitle.TLabel").pack(anchor="w")
+        self._wrapping_label(heading, text="로그인된 브라우저의 연결 정보를 이 PC에 저장합니다.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+        body = self._popup_content(window, padding=(28, 12, 28, 8))
         if notice:
             self._wrapping_label(body, text=notice, style="CardMuted.TLabel", foreground=theme.ORANGE, wraplength=640).pack(fill="x", pady=(6, 0))
         modes = ttk.Frame(body, style="Plain.TFrame")
@@ -529,11 +595,12 @@ class App:
         self._wrapping_label(self.cookie_controls, text="파일 위치는 기억하지 않아 앱을 다시 열면 다시 골라야 합니다. 예약 실행에는 쓸 수 없습니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x")
 
-        footer = ttk.Frame(body, style="Plain.TFrame")
-        footer.pack(side="bottom", fill="x", pady=(24, 0))
+        footer = window.footer = ttk.Frame(window, style="Plain.TFrame", padding=(28, 14, 28, 20))
+        footer.pack(side="bottom", fill="x", before=window.content_view)
         ttk.Button(footer, text="쿠키 확인 방법", command=lambda: webbrowser.open("https://developer.chrome.com/docs/devtools/application/cookies/")).pack(side="left")
         ttk.Button(footer, text="닫기", width=9, command=self._close_connect).pack(side="right")
         window.protocol("WM_DELETE_WINDOW", self._close_connect)
+        window.bind("<Escape>", lambda _: self._close_connect())
         self._auth_changed()
         self._fit_popup(window)
         (self.token_entry if AUTH_MODES[self.auth.get()] == "managed" else self.cookie_entry).focus_set()
@@ -555,7 +622,9 @@ class App:
         window.geometry(f"{width}x{max_height}")
         window.update_idletasks()
         body = window.content_view.content
-        height = min(body.winfo_reqheight(), max_height)
+        extra = sum(child.winfo_reqheight() for child in window.winfo_children()
+                    if child is not window.content_view and child.winfo_manager() == "pack")
+        height = min(body.winfo_reqheight() + extra, max_height)
         window.minsize(min(600, width), min(360, height))
         window.geometry(f"{width}x{height}")
 
@@ -609,81 +678,166 @@ class App:
 
     # ----------------------------------------------------------------- options
     def show_options(self):
-        """Open the save options; choices apply as soon as they are changed."""
+        if self.running or self.relocating:
+            return
         window = self.options_window
         if window is not None and window.winfo_exists():
             window.lift()
             return
         window = self.options_window = tk.Toplevel(self.root)
-        window.title("저장 옵션")
+        window.title("저장 설정")
         window.configure(bg=theme.CARD)
         window.transient(self.root)
         window.resizable(True, True)
-        body = self._popup_content(window, padding=(28, 24))
-
-        ttk.Label(body, text="저장 옵션", style="CardHeading.TLabel").pack(anchor="w")
-        self._wrapping_label(body, text="바꾼 옵션은 다음 저장에 적용됩니다.", style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
-
-        def heading(text):
-            ttk.Separator(body).pack(fill="x", pady=(20, 16))
-            ttk.Label(body, text=text, style="CardBold.TLabel").pack(anchor="w", pady=(0, 8))
-
-        heading("폴더 정리")
-        for key, (_, example) in FOLDER_CHOICES.items():
-            row = ttk.Frame(body, style="Plain.TFrame")
-            row.pack(fill="x", pady=(0, 6))
-            ttk.Radiobutton(row, text=key, value=key, variable=self.folder_mode).pack(anchor="w")
-            self._wrapping_label(row, text="예) " + example, style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(32, 0))
-        ttk.Checkbutton(body, text="계정별 폴더로 구분", variable=self.separate_accounts).pack(anchor="w", pady=(4, 0))
-        self._wrapping_label(body, text="여러 계정을 쓸 때 내 아이디 폴더 안에 저장합니다.", style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(56, 0))
-
-        heading("저장할 미디어")
-        ttk.Label(body, text="사진은 항상 저장합니다.", style="CardMuted.TLabel").pack(anchor="w")
-        media = ttk.Frame(body, style="Plain.TFrame")
-        media.pack(anchor="w", pady=(4, 0))
-        ttk.Checkbutton(media, text="동영상", variable=self.include_videos).pack(side="left")
-        ttk.Checkbutton(media, text="움직이는 GIF", variable=self.include_gifs).pack(side="left", padx=(18, 0))
-        size = ttk.Frame(body, style="Plain.TFrame")
-        size.pack(anchor="w", pady=(8, 0))
-        ttk.Label(size, text="영상·GIF 1개 최대", style="Card.TLabel").pack(side="left")
-        ttk.Spinbox(size, from_=0, to=100000, increment=50, width=7, textvariable=self.max_video_mb, font=theme.BODY).pack(side="left", padx=8)
-        ttk.Label(size, text="MB", style="Card.TLabel").pack(side="left")
-        self._wrapping_label(body, text="0은 제한 없음 · 원본 MP4와 변환된 GIF 모두 적용합니다.", style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
-
-        heading("움직이는 GIF 저장 형식")
-        for key, value in GIF_FORMATS.items():
-            ttk.Radiobutton(body, text=key, value=key, variable=self.gif_format).pack(anchor="w")
-            self._wrapping_label(body, text=GIF_FORMAT_HINTS[value], style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(32, 0), pady=(0, 8))
-        size_row = ttk.Frame(body, style="Plain.TFrame")
-        size_row.pack(anchor="w", pady=(4, 0))
-        ttk.Label(size_row, text="GIF 크기", style="Card.TLabel").pack(side="left")
-        ttk.Combobox(size_row, textvariable=self.gif_size, values=tuple(GIF_SIZES), state="readonly",
-                     width=30, font=theme.BODY).pack(side="left", padx=8)
-        self._wrapping_label(body, text="GIF로 바꿀 때만 적용합니다. 작게 하면 용량이 크게 줄고, 큰 화면에서는 조금 흐려 보일 수 있습니다. 이미 저장한 파일은 바뀌지 않습니다.",
+        self._option_snapshot = {name: getattr(self, name).get() for name in (
+            "folder_mode", "separate_accounts", "include_videos", "include_gifs", "max_video_mb",
+            "gif_format", "gif_size", "scan_mode", "limited")}
+        heading = ttk.Frame(window, style="Plain.TFrame", padding=(28, 24, 28, 8))
+        heading.pack(fill="x")
+        ttk.Label(heading, text="저장 설정", style="CardTitle.TLabel").pack(anchor="w")
+        self._wrapping_label(heading, text="변경한 설정은 다음 저장부터 적용됩니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+        footer = window.footer = ttk.Frame(window, style="Plain.TFrame", padding=(28, 14, 28, 20))
+        footer.pack(side="bottom", fill="x")
+        ttk.Button(footer, text="설정 저장", command=self._close_options,
+                   style="DialogPrimary.TButton").pack(side="right")
+        ttk.Button(footer, text="취소", command=lambda: self._close_options(save=False, restore=True),
+                   style="Ghost.TButton").pack(side="right", padx=(0, 8))
+        body = self._popup_content(window, padding=(28, 8, 28, 8))
+        self.option_tabs = ttk.Notebook(body, style="Card.TNotebook")
+        self.option_tabs.pack(fill="both", expand=True)
+        pages = []
+        for title in ("저장 위치", "미디어", "확인 방식"):
+            page = ttk.Frame(self.option_tabs, style="Plain.TFrame", padding=(14, 18))
+            self.option_tabs.add(page, text=title)
+            pages.append(page)
+        folders, media, advanced = pages
 
-        heading("확인 범위")
+        def section(parent, title, note=""):
+            ttk.Label(parent, text=title, style="CardBold.TLabel").pack(anchor="w", pady=(0, 8))
+            if note:
+                self._wrapping_label(parent, text=note, style="CardMuted.TLabel", wraplength=580).pack(fill="x", pady=(0, 12))
+
+        section(folders, "폴더 정리", "기본값은 선택한 저장 폴더에 바로 저장입니다.")
+        for key, (_, example) in FOLDER_CHOICES.items():
+            row = ttk.Frame(folders, style="Plain.TFrame", padding=(0, 4))
+            row.pack(fill="x", pady=(0, 8))
+            ttk.Radiobutton(row, text=key, value=key, variable=self.folder_mode).pack(anchor="w")
+            self._wrapping_label(row, text=example, style="CardMuted.TLabel", wraplength=560).pack(fill="x", padx=(32, 0), pady=(2, 0))
+        ttk.Separator(folders).pack(fill="x", pady=(10, 18))
+        ttk.Checkbutton(folders, text="계정별 폴더도 만들기", variable=self.separate_accounts).pack(anchor="w")
+        self._wrapping_label(folders, text="여러 계정을 사용할 때 내 아이디 폴더 안에 저장합니다.",
+                             style="CardMuted.TLabel", wraplength=560).pack(fill="x", padx=(56, 0), pady=(4, 0))
+
+        section(media, "저장할 미디어", "사진은 원본 크기로 항상 저장합니다.")
+        ttk.Checkbutton(media, text="동영상 · 최고 화질 MP4", variable=self.include_videos).pack(anchor="w", pady=(0, 8))
+        ttk.Checkbutton(media, text="움직이는 GIF", variable=self.include_gifs).pack(anchor="w")
+        limit = ttk.Frame(media, style="Plain.TFrame")
+        limit.pack(fill="x", pady=(14, 0))
+        ttk.Label(limit, text="영상·GIF 1개 최대", style="Card.TLabel").pack(side="left")
+        self.video_limit_entry = ttk.Spinbox(limit, from_=0, to=100000, increment=50, width=7,
+                                            textvariable=self.max_video_mb, font=theme.BODY)
+        self.video_limit_entry.pack(side="left", padx=8)
+        ttk.Label(limit, text="MB", style="CardMuted.TLabel").pack(side="left")
+        self._wrapping_label(media, text="0은 제한 없음 · 원본 영상과 변환된 GIF에 적용합니다.",
+                             style="CardMuted.TLabel", wraplength=580).pack(fill="x", pady=(6, 0))
+        ttk.Separator(media).pack(fill="x", pady=(18, 16))
+        section(media, "GIF 저장 형식")
+        self.gif_format_controls = []
+        for key, value in GIF_FORMATS.items():
+            button = ttk.Radiobutton(media, text=key, value=key, variable=self.gif_format)
+            button.pack(anchor="w", pady=(0, 4))
+            self.gif_format_controls.append(button)
+        self.gif_hint_label = self._wrapping_label(media, text="", style="CardMuted.TLabel", wraplength=580)
+        self.gif_hint_label.pack(fill="x", pady=(4, 12))
+        gif_row = ttk.Frame(media, style="Plain.TFrame")
+        gif_row.pack(fill="x")
+        ttk.Label(gif_row, text="GIF 크기", style="Card.TLabel").pack(side="left")
+        self.gif_size_combo = ttk.Combobox(gif_row, textvariable=self.gif_size, values=tuple(GIF_SIZES),
+                                            state="readonly", width=27, font=theme.BODY)
+        self.gif_size_combo.pack(side="left", padx=8, fill="x", expand=True)
+        self._wrapping_label(media, text="작게 저장하면 용량이 줄어듭니다. 기존 파일은 바뀌지 않습니다.",
+                             style="CardMuted.TLabel", wraplength=580).pack(fill="x", pady=(6, 0))
+
+        section(advanced, "어디까지 확인할까요?")
         for key, value in SCAN_MODES.items():
-            label = "새 Like만 확인 (권장)" if value == "quick" else key
-            ttk.Radiobutton(body, text=label, value=key, variable=self.scan_mode).pack(anchor="w")
-            self._wrapping_label(body, text=SCAN_HINTS[value], style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(32, 0), pady=(0, 8))
-        self._wrapping_label(body, text="직전 실행이 중단됐거나 미디어 옵션을 바꾸면, 다음 한 번은 자동으로 전체를 확인합니다.",
-                             style="CardMuted.TLabel", wraplength=640).pack(fill="x")
-
-        heading("시험")
-        ttk.Checkbutton(body, text="시험 저장", variable=self.limited).pack(anchor="w")
-        self._wrapping_label(body, text="새 파일 20개만 저장하고 멈춥니다. 이번 실행에만 적용됩니다.", style="CardMuted.TLabel", wraplength=600).pack(fill="x", padx=(56, 0))
-        ttk.Button(body, text="닫기", width=9, command=self._close_options).pack(anchor="e", pady=(24, 0))
-        window.protocol("WM_DELETE_WINDOW", self._close_options)
+            caption = "새 Like만 확인 · 권장" if value == "quick" else "전체 목록 다시 확인"
+            ttk.Radiobutton(advanced, text=caption, value=key, variable=self.scan_mode).pack(anchor="w")
+            self._wrapping_label(advanced, text=SCAN_HINTS[value], style="CardMuted.TLabel",
+                                 wraplength=560).pack(fill="x", padx=(32, 0), pady=(4, 16))
+        self._wrapping_label(advanced, text="직전 실행이 중단되거나 미디어 설정을 바꾸면 다음 한 번은 전체를 확인합니다.",
+                             style="CardMuted.TLabel", wraplength=580).pack(fill="x")
+        ttk.Separator(advanced).pack(fill="x", pady=(20, 18))
+        ttk.Checkbutton(advanced, text="이번에는 20개만 시험 저장", variable=self.limited).pack(anchor="w")
+        self._wrapping_label(advanced, text="새 파일 20개를 저장한 뒤 멈춥니다. 이번 실행에만 적용됩니다.",
+                             style="CardMuted.TLabel", wraplength=560).pack(fill="x", padx=(56, 0), pady=(4, 0))
+        window.protocol("WM_DELETE_WINDOW", lambda: self._close_options(save=False, restore=True))
+        window.bind("<Escape>", lambda _: self._close_options(save=False, restore=True))
+        self._sync_option_controls()
         self._fit_popup(window)
+        window.grab_set()
+        window.focus_set()
 
-    def _close_options(self):
-        window, self.options_window = self.options_window, None
+    def _options_editing(self):
+        """Finish saving or cancelling draft options before another action."""
+        window = self.options_window
         if window is not None and window.winfo_exists():
-            window.destroy()
+            window.lift()
+            window.focus_set()
+            return True
+        return False
+
+    def _sync_option_controls(self):
+        if self.options_window is None or not self.options_window.winfo_exists() or not hasattr(self, "gif_size_combo"):
+            return
+        enabled = self.include_gifs.get()
+        for control in self.gif_format_controls:
+            control.configure(state="normal" if enabled else "disabled")
+        self.gif_size_combo.configure(state="readonly" if enabled and GIF_FORMATS[self.gif_format.get()] == "gif" else "disabled")
+        self.video_limit_entry.configure(state="normal" if enabled or self.include_videos.get() else "disabled")
+        self.gif_hint_label.configure(text=GIF_FORMAT_HINTS[GIF_FORMATS[self.gif_format.get()]] if enabled else "GIF 저장을 켜면 형식을 선택할 수 있습니다.")
+
+    def _video_limit(self):
+        try:
+            value = int(self.max_video_mb.get().strip())
+        except ValueError:
+            raise ValueError("영상 최대 크기는 0 이상의 정수(MB)로 입력해 주세요. 0은 제한 없음입니다.") from None
+        if value < 0:
+            raise ValueError("영상 최대 크기는 0 이상으로 입력해 주세요. 0은 제한 없음입니다.")
+        return value
+
+    def _save_option_preferences(self):
+        data = load_settings()
+        data.update({"folder_mode": FOLDER_MODES[self.folder_mode.get()], "scan_mode": SCAN_MODES[self.scan_mode.get()],
+                     "separate_accounts": self.separate_accounts.get(), "include_videos": self.include_videos.get(),
+                     "include_gifs": self.include_gifs.get(), "max_video_mb": self._video_limit(),
+                     "gif_format": GIF_FORMATS[self.gif_format.get()], "gif_size": GIF_SIZES[self.gif_size.get()]})
+        self._write_settings(data)
+
+    def _close_options(self, *, save=True, restore=False):
+        window = self.options_window
+        if window is None or not window.winfo_exists():
+            self.options_window = None
+            return
+        if restore:
+            for name, value in self._option_snapshot.items():
+                getattr(self, name).set(value)
+        elif save:
+            try:
+                self._save_option_preferences()
+            except (ValueError, OSError) as exc:
+                message = str(exc) if isinstance(exc, ValueError) else "설정을 저장하지 못했습니다. 다시 시도해 주세요."
+                dialogs.showerror("설정 확인", message, parent=window)
+                self.option_tabs.select(1)
+                self.video_limit_entry.focus_set()
+                return
+        self.options_window = None
+        window.destroy()
 
     # ------------------------------------------------------------------ folder
     def choose_folder(self):
+        if self._options_editing():
+            return
         value = filedialog.askdirectory(title="미디어 저장 폴더 선택", mustexist=False)
         if value:
             self.folder.set(value)
@@ -726,6 +880,8 @@ class App:
 
     def _ensure_storage(self, action=None):
         """Carry the account's records when a completed path edit is committed."""
+        if self._options_editing():
+            return False
         if self.relocating:
             if action is not None:
                 self._storage_action = action
@@ -847,6 +1003,8 @@ class App:
             self.start()
         elif success and action == "history":
             self.show_history()
+        elif success and action == "schedule":
+            self.register_schedule()
 
     def open_folder(self):
         try:
@@ -872,24 +1030,24 @@ class App:
         ("로그인 연결 방법", TOKEN_STEPS.replace("아래 칸에", "‘로그인 연결’ 창의 칸에").splitlines(),
          "토큰은 이 PC에 암호화해 저장합니다. 비밀번호처럼 다루세요. 토큰이 만료되면 같은 방법으로 다시 연결합니다. "
          "cookies.txt 파일로도 연결할 수 있습니다."),
-        ("저장 방식", (
+        ("저장 설정", (
             f"새 Like만 빠르게: 이미 저장한 파일이 {QUICK_STOP_AFTER}개 연속으로 나오면 멈춥니다. 평소에는 이것을 쓰세요.",
             "전체 다시 확인: 오래된 Like까지 처음부터 확인합니다. 오래 걸립니다.",
             "직전 실행이 중단됐거나 옵션을 바꾸면 다음 한 번은 자동으로 전체를 확인합니다.",
-        ), "폴더 정리 방식, 동영상·GIF 포함 여부, 영상 최대 크기는 ‘옵션 변경’에서 바꿉니다."),
+        ), "폴더 정리 방식, 동영상·GIF 포함 여부, 영상 최대 크기는 ‘저장 설정’에서 바꿉니다."),
         ("저장되는 파일", (
             "사진은 원본 크기로, 동영상은 최고 화질의 MP4로 저장합니다. 움직이는 GIF는 GIF로 변환해 저장합니다.",
             "영상이 최대 크기(기본 200MB)보다 크면 건너뜁니다. 크기를 늘리면 다음에 받습니다.",
             "새로 받은 파일 안에는 트윗 주소와 작성자 아이디가 기록됩니다.",
         ), None),
         ("기록 · 통계", (
-            "지금까지 저장한 모든 파일과 실행 기록을 봅니다.",
+            "현재 파일 수와 과거 저장 기록·실행 기록을 봅니다.",
             "파일을 고르면 썸네일이 보입니다. ‘파일 열기’나 ‘트윗 열기’로 원본을 확인하세요.",
             "예전 파일에 출처·작성자를 넣으려면 ‘출처·작성자 기록’을 누르세요.",
         ), "이 작업은 파일을 다시 쓰므로 Google Drive·OneDrive 폴더라면 파일이 다시 올라갈 수 있습니다."),
         ("매일 자동 저장", (
-            "메인 화면 ‘자동 저장’의 ‘예약 설정’에서 시각을 고르고 ‘예약 켜기’를 누릅니다.",
-            "매일 그 시각에 마지막으로 저장을 시작할 때의 설정으로 새 Like만 저장합니다.",
+            "메뉴에서 ‘자동 저장’을 열어 시각을 고르고 ‘예약 켜기’를 누릅니다.",
+            "매일 그 시각에 저장된 계정과 설정으로 새 Like만 저장합니다.",
             "PC가 꺼져 있었으면 다음에 켰을 때 바로 실행하고, 배터리로 쓰는 중에도 실행합니다.",
             "실패하면 알림 창이 뜨고, 다음에 앱을 열 때도 알려 줍니다. 결과는 ‘실행 기록’에 남습니다.",
         ), "인증 토큰 연결에서만 동작하며 Windows에 로그인해 있을 때 실행됩니다. 새 버전을 처음 열면 예약을 그 버전으로 바꿀지 묻습니다."),
@@ -954,11 +1112,21 @@ class App:
         window.title("자동 저장")
         window.configure(bg=theme.CARD)
         window.transient(self.root)
-        body = self._popup_content(window, padding=(28, 24))
-        ttk.Label(body, text="매일 자동 저장", style="CardHeading.TLabel").pack(anchor="w")
-        self._wrapping_label(body, text="매일 정한 시각에, 마지막으로 저장을 시작할 때의 설정으로 새 Like만 저장합니다. "
-                                        "창 없이 실행되며 인증 토큰 연결에서만 동작합니다.",
+        heading = ttk.Frame(window, style="Plain.TFrame", padding=(28, 24, 28, 8))
+        heading.pack(fill="x")
+        ttk.Label(heading, text="매일 자동 저장", style="CardTitle.TLabel").pack(anchor="w")
+        self._wrapping_label(heading, text="정한 시각에 새 Like를 저장합니다. 로그인 연결이 필요합니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+        footer = window.footer = ttk.Frame(window, style="Plain.TFrame", padding=(28, 14, 28, 20))
+        footer.pack(side="bottom", fill="x")
+        ttk.Button(footer, text="닫기", command=self._close_schedule, style="Ghost.TButton").pack(side="right")
+        body = self._popup_content(window, padding=(28, 12, 28, 8))
+        target = ttk.Frame(body, style="Plain.TFrame")
+        target.pack(fill="x", pady=(0, 4))
+        ttk.Label(target, text="이 계정과 폴더로 저장합니다", style="CardBold.TLabel").pack(anchor="w")
+        self._wrapping_label(target, textvariable=self.account, style="Card.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+        self._wrapping_label(target, textvariable=self.folder, style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(4, 0))
+        self._wrapping_label(target, textvariable=self.scheduled_option_summary, style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(4, 0))
         ttk.Separator(body).pack(fill="x", pady=(18, 14))
         ttk.Label(body, text="지금 상태", style="CardBold.TLabel").pack(anchor="w")
         self._wrapping_label(body, textvariable=self.schedule_state, style="Card.TLabel", wraplength=640).pack(fill="x", pady=(4, 0))
@@ -971,7 +1139,7 @@ class App:
         ttk.Label(row, text="(24시간 형식)", style="CardMuted.TLabel").pack(side="left")
         buttons = ttk.Frame(body, style="Plain.TFrame")
         buttons.pack(fill="x", pady=(16, 0))
-        self.schedule_on_button = ttk.Button(buttons, text="예약 켜기", style="CompactPrimary.TButton", command=self.register_schedule)
+        self.schedule_on_button = ttk.Button(buttons, text="예약 켜기", style="DialogPrimary.TButton", command=self.register_schedule)
         self.schedule_on_button.pack(side="left")
         self.schedule_off_button = ttk.Button(buttons, text="예약 끄기", command=self.unregister_schedule)
         self.schedule_off_button.pack(side="left", padx=8)
@@ -980,8 +1148,8 @@ class App:
                                         "Windows에 로그인해 있을 때만 실행됩니다. 실패하면 알림 창이 뜹니다. "
                                         "Windows 작업 스케줄러에 ‘XlikeSaver 자동 저장’으로 등록됩니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(16, 0))
-        ttk.Button(body, text="닫기", width=9, command=self._close_schedule).pack(anchor="e", pady=(20, 0))
         window.protocol("WM_DELETE_WINDOW", self._close_schedule)
+        window.bind("<Escape>", lambda _: self._close_schedule())
         self._show_schedule_info()
         self._fit_popup(window)
         self.refresh_schedule()
@@ -999,6 +1167,7 @@ class App:
         self._update_schedule_buttons()
         if action != "status":
             self.schedule_state.set("Windows 작업 스케줄러에 반영하는 중…")
+        events = self.events
 
         def run():
             from .scheduled import ScheduleError, task_status
@@ -1007,7 +1176,9 @@ class App:
                 event = {"type": "schedule", "action": action, "result": task_status(), **details}
             except (ScheduleError, ValueError) as exc:
                 event = {"type": "schedule", "action": action, "error": str(exc), **details}
-            self.events.put(event)
+            # Scheduler queries can finish after the window has closed. The
+            # worker owns only the event queue, never the App/Tk interpreter.
+            events.put(event)
 
         threading.Thread(target=run, daemon=True).start()
         return True
@@ -1017,20 +1188,41 @@ class App:
 
     def register_schedule(self):
         from .scheduled import normal_time
+        if self._options_editing():
+            return
+        if self.schedule_busy or self.running:
+            return
+        if self.relocating:
+            self._storage_action = "schedule"
+            return
         if AUTH_MODES[self.auth.get()] != "managed":
             dialogs.showinfo("자동 저장", "자동 저장은 ‘인증 토큰’ 연결에서만 사용할 수 있습니다. 로그인 연결 방식을 바꿔 주세요.",
                              parent=self.schedule_window or self.root)
             return
         try:
             when = normal_time(self.schedule_time.get())
-            if not self.account.get().strip() or not self.folder.get().strip():
-                raise ValueError("내 X 아이디와 저장 폴더를 먼저 입력해 주세요.")
-            self.schedule_time.set(when)
-            # The scheduled run uses the saved settings; save the current ones.
-            self._save_settings()
+            options = self._validated_options(scheduled=True)
         except (ValueError, OSError) as exc:
             message = str(exc) if isinstance(exc, ValueError) else "설정을 저장하지 못했습니다. 폴더 권한을 확인해 주세요."
             dialogs.showerror("자동 저장", message, parent=self.schedule_window or self.root)
+            return
+        if self.token.get() and not self.connect_token():
+            return
+        if not has_session():
+            self.status.set("먼저 X 로그인을 연결해 주세요")
+            self.show_connect("자동 저장을 켜려면 먼저 로그인 연결이 필요합니다.")
+            return
+        if not self._ensure_storage("schedule"):
+            return
+        try:
+            self.schedule_time.set(when)
+            self.account.set(options.account)
+            self.folder.set(options.output_dir)
+            self.record_locations[options.account] = options.output_dir
+            self._save_settings(options)
+        except OSError:
+            dialogs.showerror("자동 저장", "설정을 저장하지 못했습니다. 폴더 권한을 확인해 주세요.",
+                              parent=self.schedule_window or self.root)
             return
         from .scheduled import register_task
         self._schedule_job("register", lambda: register_task(when), time=when)
@@ -1046,7 +1238,7 @@ class App:
         if self.schedule_window is None or not self.schedule_window.winfo_exists():
             return
         info = self.schedule_info or {}
-        busy = "disabled" if self.schedule_busy else "normal"
+        busy = "disabled" if self.schedule_busy or self.running or self.relocating else "normal"
         self.schedule_on_button.configure(state=busy, text="예약 갱신" if info.get("registered") else "예약 켜기")
         self.schedule_off_button.configure(state=busy if info.get("registered") else "disabled")
 
@@ -1056,23 +1248,23 @@ class App:
         info = self.schedule_info
         if error:
             state = error
-            summary = "자동 저장 상태를 확인하지 못했습니다. ‘예약 설정’에서 다시 확인해 주세요."
+            summary = "자동 저장 상태를 확인하지 못했습니다. ‘자동 저장’에서 다시 확인해 주세요."
         elif info is None:
             state = summary = "자동 저장 상태를 확인하는 중…"
         elif not info.get("registered"):
             state = "꺼져 있습니다. 실행 시각을 고르고 ‘예약 켜기’를 누르세요."
-            summary = "꺼짐 · ‘예약 설정’에서 매일 정한 시각에 새 Like를 자동으로 저장할 수 있습니다."
+            summary = "꺼짐 · ‘자동 저장’에서 매일 정한 시각에 새 Like를 자동으로 저장할 수 있습니다."
         else:
             when = info.get("time") or "시각 미확인"
             upcoming = f" · 다음 실행 {format_short(info['next_run'])}" if info.get("next_run") else ""
             if not info.get("current"):
                 state = (f"매일 {when}에 다른 실행 파일({Path(info.get('program') or '').name or '알 수 없음'})로 등록돼 있습니다. "
                          "‘예약 갱신’을 누르면 이 버전으로 바꿉니다.")
-                summary = f"매일 {when} · 다른 실행 파일로 등록됨 · ‘예약 설정’에서 갱신하세요."
+                summary = f"매일 {when} · 다른 실행 파일로 등록됨 · ‘자동 저장’에서 갱신하세요."
             elif not (info.get("catch_up") and info.get("on_battery")):
                 state = (f"매일 {when}에 켜져 있지만, 예전 방식으로 등록돼 PC가 꺼져 있었거나 배터리일 때는 건너뜁니다. "
                          "‘예약 갱신’을 누르면 고쳐집니다.")
-                summary = f"매일 {when} · 켜짐 · 놓친 실행을 건너뛰는 예전 설정입니다. ‘예약 설정’에서 갱신하세요."
+                summary = f"매일 {when} · 켜짐 · 놓친 실행을 건너뛰는 예전 설정입니다. ‘자동 저장’에서 갱신하세요."
             elif not info.get("enabled"):
                 state = f"매일 {when}로 등록돼 있지만 Windows 작업 스케줄러에서 꺼져 있습니다. ‘예약 갱신’을 누르면 다시 켜집니다."
                 summary = f"매일 {when} · 작업 스케줄러에서 꺼져 있음"
@@ -1166,7 +1358,18 @@ class App:
             dialogs.showerror("폴더 열기 실패", "예약 실행 기록 폴더를 열지 못했습니다.", parent=self.root)
 
     # ------------------------------------------------------------------ saving
+    def _validated_options(self, *, scheduled=False):
+        return JobOptions(account=self.account.get(), output_dir=self.folder.get(), auth_mode=AUTH_MODES[self.auth.get()],
+                          cookies_file=self.cookies.get(), photo_limit=0 if scheduled else 20 if self.limited.get() else 0,
+                          folder_mode=FOLDER_MODES[self.folder_mode.get()],
+                          scan_mode="quick" if scheduled else SCAN_MODES[self.scan_mode.get()],
+                          include_videos=self.include_videos.get(), include_gifs=self.include_gifs.get(),
+                          max_video_mb=self._video_limit(), separate_accounts=self.separate_accounts.get(),
+                          gif_format=GIF_FORMATS[self.gif_format.get()], gif_size=GIF_SIZES[self.gif_size.get()]).validate()
+
     def start(self):
+        if self._options_editing():
+            return
         if self.relocating:
             self._storage_action = "start"
             return
@@ -1184,11 +1387,7 @@ class App:
             self.show_connect("저장하려면 먼저 X 로그인을 연결해야 합니다.")
             return
         try:
-            try:
-                size_limit = int(self.max_video_mb.get().strip())
-            except ValueError:
-                raise ValueError("영상 최대 크기는 0 이상의 정수(MB)로 입력해 주세요. 0은 제한 없음입니다.") from None
-            options = JobOptions(account=self.account.get(), output_dir=self.folder.get(), auth_mode=AUTH_MODES[self.auth.get()], cookies_file=self.cookies.get(), photo_limit=20 if self.limited.get() else 0, folder_mode=FOLDER_MODES[self.folder_mode.get()], scan_mode=SCAN_MODES[self.scan_mode.get()], include_videos=self.include_videos.get(), include_gifs=self.include_gifs.get(), max_video_mb=size_limit, separate_accounts=self.separate_accounts.get(), gif_format=GIF_FORMATS[self.gif_format.get()], gif_size=GIF_SIZES[self.gif_size.get()]).validate()
+            options = self._validated_options()
         except (ValueError, OSError) as exc:
             dialogs.showerror("입력 확인", str(exc), parent=self.root)
             return
@@ -1220,13 +1419,18 @@ class App:
     def _set_running(self, value):
         if value:
             self._close_connect()
-            self._close_options()
+            self._close_options(save=False)
         self.start_button.configure(state="disabled" if value else "normal")
         self.stop_button.configure(state="normal" if value else "disabled")
+        if value and self.running:
+            self.stop_button.pack(side="left", padx=(8, 0))
+        else:
+            self.stop_button.pack_forget()
         for widget in self.inputs:
             widget.configure(state="disabled" if value else "normal")
         if not value:
             self._auth_changed()
+        self._update_schedule_buttons()
 
     def _run_process(self, options):
         return_code = 1
@@ -1280,7 +1484,7 @@ class App:
             self.events.put({"type": "process_exit", "code": return_code})
 
     def stop(self):
-        if not self.running or self.stopping:
+        if not self.running or self.stopping or self.received_final:
             return
         self.stopping = True
         self.status.set("중단하는 중입니다…")
@@ -1336,6 +1540,7 @@ class App:
             elif kind == "finished":
                 self.received_final = True
                 self.final_status = event.get("status")
+                self.stop_button.configure(state="disabled")
                 self.saved = int(event.get("saved", self.saved))
                 self.skipped = int(event.get("skipped", self.skipped))
                 self.size_skipped = int(event.get("size_skipped", self.size_skipped))
@@ -1348,20 +1553,21 @@ class App:
                 self.status_detail.set(message if headline != message else "")
                 self._log(message)
                 if event.get("metadata_failed"):
-                    self._log(f"파일 내부 출처·작성자 기록 실패 {int(event['metadata_failed']):,}개 · 미디어는 보존했습니다. ‘기록 · 통계’에서 ‘출처·작성자 기록’으로 다시 시도할 수 있습니다.")
+                    self._log(f"파일 내부 출처·작성자 기록 실패 {int(event['metadata_failed']):,}개 · 미디어는 보존했습니다. ‘기록 · 통계 → 파일 관리’에서 다시 시도할 수 있습니다.")
                 if event.get("retry_at"):
                     self._log("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))
             elif kind == "process_exit":
                 self.running = False
                 self.limited.set(False)
                 self.progress.stop()
-                self.progress.configure(mode="determinate", value=100 if self.final_status == "finished" else 0)
+                completed = self.received_final and self.final_status == "finished" and event.get("code", 0) == 0
+                self.progress.configure(mode="determinate", value=100 if completed else 0)
                 self._set_running(False)
                 if not self.received_final:
                     self.status.set("중단되었습니다. 저장된 파일은 유지됩니다." if self.stopping else "작업이 종료되었습니다. 오류 로그와 입력을 확인해 주세요.")
                     self.status_detail.set("")
                     self._log(self.status.get())
-                elif self.final_status == "finished" and event.get("code", 0) != 0 and not self.stopping:
+                elif self.final_status == "finished" and event.get("code", 0) != 0:
                     self.status.set("작업 프로세스가 오류로 종료되었습니다. 저장된 파일과 로그를 확인해 주세요.")
                     self.status_detail.set("")
                     self._log(self.status.get())
@@ -1378,11 +1584,16 @@ class App:
             author = "@" + author if re.fullmatch(r"[A-Za-z0-9_]{1,15}", author) else "작성자 미확인"
             posted = format_short(event.get("posted_at"))
             text = f"{text} · {author} · 게시 {posted if posted != '–' else '미확인'}"
+        following = self.log.yview()[1] >= .995
+        self.log_placeholder.place_forget()
         self.log.configure(state="normal")
-        self.log.insert("end", time.strftime("%H:%M:%S") + "  " + text + "\n")
+        self.log.insert("end", time.strftime("%H:%M:%S") + "  ", "time")
+        level = event.get("level", "") if event else ""
+        self.log.insert("end", text + "\n", level if level in {"error", "warning"} else ())
         if int(self.log.index("end-1c").split(".")[0]) > 1000:
             self.log.delete("1.0", "201.0")
-        self.log.see("end")
+        if following:
+            self.log.see("end")
         self.log.configure(state="disabled")
 
     def close(self):

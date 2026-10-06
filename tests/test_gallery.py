@@ -1,0 +1,217 @@
+"""Local thumbnail paging, resize and shutdown without catalog or X access."""
+
+import gc
+from pathlib import Path
+import queue
+import tempfile
+import threading
+import tkinter as tk
+import unittest
+import weakref
+from unittest.mock import patch
+
+from PIL import Image
+
+from xlikesaver import theme
+from xlikesaver.gallery import TILE, ThumbnailGrid, _GridDecoder
+from xlikesaver.preview import Thumbnail
+
+
+class GalleryDecoderTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.results = queue.Queue(maxsize=240)
+        self.directory = Path(self.temporary.name)
+
+    def path(self, name):
+        path = self.directory / name
+        path.write_bytes(b"local fixture")
+        return str(path)
+
+    def stop(self, decoder):
+        decoder.close()
+        if decoder.thread is not None:
+            decoder.thread.join(3)
+            self.assertFalse(decoder.thread.is_alive())
+
+    def test_new_pages_replace_pending_work_and_keep_only_one_decoder(self):
+        started, resume = threading.Event(), threading.Event()
+        paths = [self.path(f"{index}.jpg") for index in range(4)]
+        decoded = []
+
+        def decode(path, size):
+            decoded.append(str(path))
+            if len(decoded) == 1:
+                started.set()
+                resume.wait(3)
+            return Thumbnail(Image.new("RGB", (2, 2)), "ready")
+
+        decoder = _GridDecoder(self.results, decoder=decode)
+        self.addCleanup(self.stop, decoder)
+        self.addCleanup(resume.set)
+        decoder.request(1, [("old", paths[0]), ("old-tail", paths[1])], set)
+        self.assertTrue(started.wait(2))
+        worker = decoder.thread
+        decoder.request(2, [("superseded", paths[2])], set)
+        decoder.request(3, [("latest", paths[3])], set)
+        self.assertIs(decoder.thread, worker)
+        resume.set()
+        token, key, image = self.results.get(timeout=3)
+        self.assertEqual((token, key), (3, "latest"))
+        self.assertIsNotNone(image)
+        self.assertEqual(decoded, [paths[0], paths[3]])
+
+    def test_close_discards_an_inflight_result_and_cache(self):
+        started, resume = threading.Event(), threading.Event()
+        path = self.path("one.jpg")
+
+        def decode(path, size):
+            started.set()
+            resume.wait(3)
+            return Thumbnail(Image.new("RGB", (2, 2)), "ready")
+
+        decoder = _GridDecoder(self.results, decoder=decode)
+        self.addCleanup(self.stop, decoder)
+        self.addCleanup(resume.set)
+        decoder.request(1, [("one", path)], set)
+        self.assertTrue(started.wait(2))
+        decoder.close()
+        resume.set()
+        decoder.thread.join(3)
+        self.assertFalse(decoder.thread.is_alive())
+        self.assertTrue(self.results.empty())
+        self.assertEqual(decoder.cache, {})
+
+    def test_cached_file_still_requires_current_page_permission(self):
+        path = self.path("one.jpg")
+        calls = []
+
+        def decode(path, size):
+            calls.append(path)
+            return Thumbnail(Image.new("RGB", (2, 2)), "ready")
+
+        decoder = _GridDecoder(self.results, decoder=decode)
+        self.addCleanup(self.stop, decoder)
+        decoder.request(1, [("one", path)], set)
+        self.assertIsNotNone(self.results.get(timeout=3)[2])
+        decoder.request(2, [("one", path)], lambda paths: set())
+        self.assertIsNone(self.results.get(timeout=3)[2])
+        self.assertEqual(len(calls), 1)
+        decoder.request(3, [("one", path)], set)
+        self.assertIsNotNone(self.results.get(timeout=3)[2])
+        self.assertEqual(len(calls), 1)
+
+    def test_one_bad_decode_does_not_stop_the_rest_of_the_page(self):
+        paths = [self.path(f"{index}.jpg") for index in range(2)]
+
+        def decode(path, size):
+            if str(path) == paths[0]:
+                raise OSError("unreadable local fixture")
+            return Thumbnail(Image.new("RGB", (2, 2)), "ready")
+
+        decoder = _GridDecoder(self.results, decoder=decode)
+        self.addCleanup(self.stop, decoder)
+        decoder.request(1, list(enumerate(paths)), set)
+        self.assertIsNone(self.results.get(timeout=3)[2])
+        self.assertIsNotNone(self.results.get(timeout=3)[2])
+
+
+class GalleryLayoutTests(unittest.TestCase):
+    def setUp(self):
+        self.root = tk.Tk()
+        self.root.attributes("-alpha", 0)
+        self.root.geometry("1050x400")
+        theme.apply(self.root)
+        self.grid = ThumbnailGrid(self.root, on_select=lambda key: None, on_open=lambda key: None)
+        self.grid.pack(fill="both", expand=True)
+        self.addCleanup(self.release)
+
+    def release(self):
+        if self.root is not None:
+            self.root.destroy()
+        self.root = self.grid = None
+        gc.collect()
+
+    def test_shrinking_and_expanding_does_not_keep_invisible_columns(self):
+        rows = [(str(index), {"author": "offline", "posted_at": "2026-10-01"}) for index in range(20)]
+        self.grid.show(rows, set)
+        self.root.update()
+        wide_columns = self.grid.columns
+        self.assertGreater(wide_columns, 2)
+        self.root.geometry("390x400")
+        self.root.update()
+        self.assertEqual(self.grid.columns, 2)
+        for index in range(2, wide_columns):
+            self.assertEqual(self.grid.inner.grid_columnconfigure(index)["weight"], 0)
+            self.assertFalse(self.grid.inner.grid_columnconfigure(index)["uniform"])
+        self.assertGreaterEqual(self.grid.tiles["0"].winfo_width(), TILE[0])
+        self.assertGreaterEqual(self.grid.tiles["1"].winfo_width(), TILE[0])
+        self.root.geometry("1050x400")
+        self.root.update()
+        self.assertEqual(self.grid.columns, wide_columns)
+        for index in range(wide_columns):
+            self.assertEqual(self.grid.inner.grid_columnconfigure(index)["weight"], 1)
+
+    def test_destroyed_grid_dies_while_decode_remains_inflight(self):
+        started, resume = threading.Event(), threading.Event()
+
+        def permitted(paths):
+            started.set()
+            resume.wait(3)
+            return set()
+
+        self.grid.show([("one", {"path": "local-fixture.jpg"})], permitted)
+        self.assertTrue(started.wait(2))
+        decoder = self.grid._decoder
+        self.addCleanup(resume.set)
+        reference = weakref.ref(self.grid)
+        self.grid.destroy()
+        self.grid = None
+        # No cyclic collection, and no need to wait for a slow MP4 preview.
+        self.assertIsNone(reference())
+        resume.set()
+        decoder.thread.join(3)
+        self.assertFalse(decoder.thread.is_alive())
+
+    def test_unchanged_refresh_keeps_tiles_images_and_updates_changed_captions(self):
+        row = {"path": "offline-fixture.jpg", "author": "offline", "posted_at": "2026-10-01"}
+        with patch.object(self.grid._decoder, "request"):
+            self.grid.show([("one", row)], set)
+            source = Image.new("RGB", (2, 2), "red")
+            self.grid._results.put((self.grid._token, "one", source))
+            self.grid.poll()
+            tile, image = self.grid.tiles["one"], self.grid.images["one"]
+            self.grid.show([("one", dict(row))], set)
+            self.grid._results.put((self.grid._token, "one", source))
+            self.grid.poll()
+            self.assertIs(self.grid.tiles["one"], tile)
+            self.assertIs(self.grid.images["one"], image)
+            self.grid.show([("one", dict(row, author="updated", posted_at="2026-10-02"))], set)
+            self.assertEqual(tile.cget("text"), "@updated\n2026-10-02")
+            self.assertIs(self.grid.images["one"], image)
+            self.grid.show([("one", dict(row, path="different-fixture.jpg"))], set)
+            self.assertIsNot(self.grid.tiles["one"], tile)
+            self.assertNotIn("one", self.grid.images)
+
+    def test_refreshed_permission_revokes_an_already_displayed_thumbnail(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "one.jpg"
+            Image.new("RGB", (4, 4), "red").save(path)
+            row = {"path": str(path), "author": "offline", "posted_at": "2026-10-01"}
+            self.grid.show([("one", row)], set)
+            self.grid._results.put(self.grid._results.get(timeout=3))
+            self.grid.poll()
+            self.assertIn("one", self.grid.images)
+            tile = self.grid.tiles["one"]
+            self.grid.show([("one", row)], lambda paths: set())
+            self.grid._results.put(self.grid._results.get(timeout=3))
+            self.grid.poll()
+            self.assertIs(self.grid.tiles["one"], tile)
+            self.assertNotIn("one", self.grid.images)
+            self.assertIsNone(self.grid._source_images["one"])
+            self.assertIn("미리보기 없음", tile.cget("text"))
+
+
+if __name__ == "__main__":
+    unittest.main()

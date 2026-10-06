@@ -2,10 +2,12 @@
 
 import gc
 import json
+import os
 from pathlib import Path
 import tempfile
 import tkinter as tk
 import unittest
+import weakref
 from unittest.mock import patch
 
 from xlikesaver.gui import App, AUTH_MODES, worker_command
@@ -34,6 +36,9 @@ class GuiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        app_data = patch.dict(os.environ, {"LOCALAPPDATA": self.temp.name})
+        app_data.start()
+        self.addCleanup(app_data.stop)
         self.guards = patch("xlikesaver.protection.state_directory", return_value=Path(self.temp.name) / "locks")
         self.guards.start()
         self.addCleanup(self.guards.stop)
@@ -47,6 +52,9 @@ class GuiTests(unittest.TestCase):
         self.settings = patch("xlikesaver.gui.load_settings", return_value={})
         self.settings.start()
         self.addCleanup(self.settings.stop)
+        preferences = patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json")
+        preferences.start()
+        self.addCleanup(preferences.stop)
         self.app = App(self.root)
 
     def test_unconnected_token_mode_requests_connection_before_download(self):
@@ -58,6 +66,22 @@ class GuiTests(unittest.TestCase):
         thread.assert_not_called()
         self.assertFalse(self.app.running)
         self.assertIn("연결 필요", self.app.login_text.get())
+
+    def test_connection_status_can_grow_after_a_short_disconnected_label(self):
+        import tkinter.font as tkfont
+        from xlikesaver import theme
+        self.root.geometry("1180x880")
+        self.root.deiconify()
+        self.root.update()
+        self.assertIn("연결 필요", self.app.login_text.get())
+        self.session_mock.return_value = True
+        self.app._auth_changed()
+        theme.apply(self.root, "dark")
+        self.root.update()
+        label = self.app.login_label
+        measured = tkfont.Font(root=self.root, font=theme.SMALL).measure(self.app.login_text.get())
+        self.assertGreaterEqual(int(label.cget("wraplength")), measured)
+        self.assertEqual(str(label.cget("anchor")), "w")
 
     def relocation_source(self):
         from contextlib import closing
@@ -307,6 +331,7 @@ class GuiTests(unittest.TestCase):
                 patch("xlikesaver.scheduled.last_run", return_value=last))
 
     def test_schedule_window_turns_the_daily_save_on_and_off(self):
+        self.session_mock.return_value = True
         status = {"registered": False}
         target = Path(self.temp.name) / "settings.json"
         patches = self.schedule_patches(status)
@@ -357,7 +382,44 @@ class GuiTests(unittest.TestCase):
         self.assertIn("24시간", error.call_args.args[1])
         scheduled.register_task.assert_not_called()
 
+    def test_schedule_actions_keep_the_same_height_when_enabled_and_disabled(self):
+        with patch.object(self.app, "refresh_schedule"):
+            self.app.show_schedule()
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        window = self.app.schedule_window
+        window.deiconify()
+        self.root.update()
+        buttons = self.app.schedule_on_button.master.winfo_children()
+        for registered in (False, True):
+            self.app.schedule_info = {"registered": registered, "current": True}
+            self.app._update_schedule_buttons()
+            self.root.update_idletasks()
+            heights = [button.winfo_height() for button in buttons]
+            self.assertLessEqual(max(heights) - min(heights), 2)
+            self.assertGreaterEqual(min(heights), 32)
+            self.assertEqual(len({button.winfo_y() for button in buttons}), 1)
+        self.app._close_schedule()
+
+    def test_initial_height_is_taller_and_fits_short_screens(self):
+        for screen_height, expected_height in ((1440, 1320), (768, 668), (600, 500)):
+            with self.subTest(screen_height=screen_height):
+                window = tk.Toplevel(self.root)
+                window.withdraw()
+                try:
+                    with patch.object(window, "winfo_screenheight", return_value=screen_height):
+                        other = App(window)
+                        self.root.update_idletasks()
+                    width, height = map(int, window.geometry().split("+", 1)[0].split("x"))
+                    self.assertEqual(height, expected_height)
+                    self.assertLessEqual(height, screen_height - 100)
+                    self.assertLessEqual(window.minsize()[1], height)
+                finally:
+                    destroy_tk(window)
+                    other = None
+
     def test_new_version_offers_to_move_the_task_once_and_failures_are_shown(self):
+        self.session_mock.return_value = True
         old = {"registered": True, "current": False, "program": r"C:\old\XlikeSaver-1.7.1.exe", "time": "08:00",
                "enabled": True, "catch_up": False, "on_battery": False, "next_run": ""}
         patches = self.schedule_patches(dict(old))
@@ -621,6 +683,172 @@ class GuiTests(unittest.TestCase):
         self.app._close_options()
         self.assertIsNone(self.app.options_window)
 
+    def test_saved_options_persist_without_replacing_draft_account_or_folder(self):
+        active = {"account": "saved_account", "output_dir": "C:/active-folder",
+                  "record_locations": {"saved_account": "C:/active-folder"}, "appearance": "dark"}
+        self.app.account.set("draft_account")
+        self.app.folder.set(str(Path(self.temp.name) / "uncommitted-folder"))
+        self.app.show_options()
+        self.app.include_videos.set(False)
+        self.app.max_video_mb.set("350")
+        with patch("xlikesaver.gui.load_settings", return_value=active):
+            self.app._close_options()
+        saved = json.loads((Path(self.temp.name) / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual((saved["account"], saved["output_dir"], saved["record_locations"]),
+                         ("saved_account", "C:/active-folder", {"saved_account": "C:/active-folder"}))
+        self.assertEqual((saved["include_videos"], saved["max_video_mb"], saved["appearance"]), (False, 350, "dark"))
+        self.assertFalse((Path(self.temp.name) / "uncommitted-folder").exists())
+
+    def test_cancel_options_restores_choices_and_does_not_persist(self):
+        self.app.show_options()
+        self.app.include_gifs.set(False)
+        self.app.folder_mode.set("작성자별 폴더")
+        self.app.max_video_mb.set("-1")
+        self.app._close_options(save=False, restore=True)
+        self.assertIsNone(self.app.options_window)
+        self.assertTrue(self.app.include_gifs.get())
+        self.assertEqual((self.app.folder_mode.get(), self.app.max_video_mb.get()), ("구분 없이 저장", "200"))
+        self.assertFalse((Path(self.temp.name) / "settings.json").exists())
+
+    def test_invalid_options_stay_open_and_irrelevant_gif_fields_are_disabled(self):
+        self.app.show_options()
+        self.app.max_video_mb.set("-1")
+        with patch("xlikesaver.gui.dialogs.showerror") as error:
+            self.app._close_options()
+        error.assert_called_once()
+        self.assertTrue(self.app.options_window.winfo_exists())
+        self.assertEqual(self.app.option_tabs.index("current"), 1)
+        self.assertFalse((Path(self.temp.name) / "settings.json").exists())
+        self.app.include_gifs.set(False)
+        self.assertEqual(str(self.app.gif_size_combo.cget("state")), "disabled")
+        self.app.include_gifs.set(True)
+        self.app.gif_format.set("원본 MP4 그대로 저장")
+        self.assertEqual(str(self.app.gif_size_combo.cget("state")), "disabled")
+        self.app.gif_format.set("GIF로 바꿔 저장")
+        self.assertEqual(str(self.app.gif_size_combo.cget("state")), "readonly")
+
+    def test_options_window_close_cancels_without_saving(self):
+        self.app.show_options()
+        window = self.app.options_window
+        self.app.include_gifs.set(False)
+        self.root.tk.call(window.protocol("WM_DELETE_WINDOW"))
+        self.assertIsNone(self.app.options_window)
+        self.assertTrue(self.app.include_gifs.get())
+        self.assertFalse((Path(self.temp.name) / "settings.json").exists())
+
+    def test_draft_options_block_other_actions_until_saved_or_cancelled(self):
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        self.session_mock.return_value = True
+        self.app.show_options()
+        self.app.include_gifs.set(False)
+        self.assertIs(self.app.options_window.grab_current(), self.app.options_window)
+        with patch("xlikesaver.gui.filedialog.askdirectory") as folder, \
+                patch("xlikesaver.gui.threading.Thread") as worker, \
+                patch.object(self.app, "_save_settings") as save:
+            self.app.show_history()
+            self.app.choose_folder()
+            self.app.start()
+            self.app.register_schedule()
+            self.assertIsNone(self.app.history_window)
+            self.assertFalse(self.app.running)
+            self.assertFalse(self.app.relocating)
+            folder.assert_not_called()
+            worker.assert_not_called()
+            save.assert_not_called()
+        self.app._close_options(save=False, restore=True)
+        self.assertTrue(self.app.include_gifs.get())
+        self.assertIsNone(self.root.grab_current())
+        self.assertFalse((Path(self.temp.name) / "settings.json").exists())
+
+    def test_history_shortcut_does_not_change_account_text(self):
+        self.app.account.set("offline_test")
+        self.root.deiconify()
+        self.root.update()
+        self.app.account_entry.focus_force()
+        self.root.update()
+        self.app.account_entry.icursor("end")
+        with patch.object(self.app, "show_history") as history:
+            self.app.account_entry.event_generate("<F6>")
+            self.root.update()
+        history.assert_called_once()
+        self.assertEqual(self.app.account.get(), "offline_test")
+
+    def test_stop_after_final_result_does_not_replace_completion(self):
+        self.app.running = True
+        self.app._set_running(True)
+        self.app.events.put({"type": "finished", "status": "finished", "saved": 3})
+        self.app._poll()
+        self.app.stop()
+        self.assertFalse(self.app.stopping)
+        self.app.events.put({"type": "process_exit", "code": 0})
+        self.app._poll()
+        self.assertFalse(self.app.running)
+        self.assertIn("완료", self.app.status.get())
+        self.assertEqual(self.app.progress.cget("value"), 100)
+
+    def test_final_worker_result_wins_over_a_late_stop_request(self):
+        self.app.running = True
+        self.app.stop()
+        self.app.events.put({"type": "finished", "status": "finished", "saved": 3})
+        self.app.events.put({"type": "process_exit", "code": 0})
+        self.app._poll()
+        self.assertIn("완료", self.app.status.get())
+        self.assertEqual(self.app.progress.cget("value"), 100)
+
+    def test_schedule_requires_saved_connection_and_valid_media_limit(self):
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        self.app.scan_mode.set("전체 목록 다시 확인")
+        self.app.limited.set(True)
+        self.assertIn("전체 확인", self.app.option_summary.get())
+        self.assertIn("시험 20개", self.app.option_summary.get())
+        self.assertIn("새 Like만", self.app.scheduled_option_summary.get())
+        self.assertNotIn("전체 확인", self.app.scheduled_option_summary.get())
+        self.assertNotIn("시험", self.app.scheduled_option_summary.get())
+        with patch("xlikesaver.scheduled.register_task") as register, patch.object(self.app, "_schedule_job") as job:
+            self.app.register_schedule()
+            self.assertTrue(self.app.connect_window.winfo_exists())
+            self.assertIn("로그인", self.app.status.get())
+            job.assert_not_called()
+            register.assert_not_called()
+            self.app._close_connect()
+            self.session_mock.return_value = True
+            self.app.max_video_mb.set("-1")
+            with patch("xlikesaver.gui.dialogs.showerror") as error:
+                self.app.register_schedule()
+            error.assert_called_once()
+            job.assert_not_called()
+        self.assertFalse((Path(self.temp.name) / "settings.json").exists())
+
+    def test_failed_worker_exit_never_displays_completed_progress(self):
+        self.app.running = True
+        self.app.events.put({"type": "finished", "status": "finished", "saved": 2})
+        self.app.events.put({"type": "process_exit", "code": 1})
+        self.app._poll()
+        self.assertIn("오류", self.app.status.get())
+        self.assertEqual(self.app.progress.cget("value"), 0)
+        self.assertFalse(self.app.stop_button.winfo_manager())
+
+    def test_reading_older_log_entries_does_not_jump_to_the_latest(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.root.update()
+        for number in range(80):
+            self.app._log(f"작업 {number}")
+        self.app.content_view.canvas.yview_moveto(1)
+        self.root.update()
+        self.app.log.yview_moveto(0)
+        self.root.update()
+        self.app._log("새 작업")
+        self.root.update()
+        self.assertEqual(self.app.log.yview()[0], 0)
+        self.assertIn("새 작업", self.app.log.get("1.0", "end"))
+        self.app._clear_log()
+        self.assertEqual(self.app.log.get("1.0", "end").strip(), "")
+        self.assertEqual(str(self.app.log.cget("state")), "disabled")
+        self.assertTrue(self.app.log_placeholder.winfo_manager())
+
     def test_options_fit_short_screen_and_close_stays_reachable(self):
         self.root.attributes("-alpha", 0)
         with patch.object(self.root, "winfo_screenheight", return_value=768):
@@ -634,8 +862,8 @@ class GuiTests(unittest.TestCase):
         self.assertLess(view.canvas.yview()[1], 1)
         view.canvas.yview_moveto(1)
         window.update()
-        close = next(widget for widget in view.content.winfo_children()
-                     if widget.winfo_class() == "TButton" and widget.cget("text") == "닫기")
+        close = next(widget for widget in window.footer.winfo_children()
+                     if widget.winfo_class() == "TButton" and widget.cget("text") == "설정 저장")
         top = close.winfo_rooty() - window.winfo_rooty()
         self.assertGreaterEqual(top, 0)
         self.assertLessEqual(top + close.winfo_height(), window.winfo_height())
@@ -894,6 +1122,38 @@ class GuiTests(unittest.TestCase):
             worker.assert_not_called()
             window.destroy()
         theme.apply(self.root, "light")
+
+
+class ScheduleWorkerLifetimeTests(unittest.TestCase):
+    def test_delayed_schedule_result_does_not_retain_closed_app_or_tk(self):
+        root = app = None
+        enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with patch("xlikesaver.gui.load_settings", return_value={}), \
+                    patch("xlikesaver.gui.has_session", return_value=False):
+                root = tk.Tk()
+                root.withdraw()
+                app = App(root)
+            events = app.events
+            refs = [weakref.ref(value) for value in (app, root, app.status)]
+            with patch("xlikesaver.gui.threading.Thread") as worker:
+                app._schedule_job("status", lambda: None, prompt=False)
+                target = worker.call_args.kwargs["target"]
+            destroy_tk(root)
+            root = app = None
+            self.assertTrue(all(ref() is None for ref in refs), "Scheduler worker retained closed Tk resources")
+            with patch("xlikesaver.scheduled.task_status", return_value={"registered": False}):
+                target()
+            self.assertEqual(events.get_nowait(), {"type": "schedule", "action": "status",
+                                                   "result": {"registered": False}, "prompt": False})
+        finally:
+            if root is not None:
+                destroy_tk(root)
+            root = app = None
+            if enabled:
+                gc.enable()
+            gc.collect()
 
 
 if __name__ == "__main__":

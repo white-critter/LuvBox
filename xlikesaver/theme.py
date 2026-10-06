@@ -20,16 +20,22 @@ from .fonts import load_family
 FONT = load_family()
 # Stable roles make existing and newly opened windows switch together.
 LIGHT = {
-    "BG": "#f4f6fb", "CARD": "#ffffff", "LINE": "#e0e6f0", "INK": "#243047",
-    "MUTED": "#66748b", "BLUE": "#526fe8", "BLUE_ACTIVE": "#435ed0",
-    "GREEN": "#23845c", "ORANGE": "#9b621a", "RED": "#b6424e", "LOG_BG": "#f8faff",
-    "KNOB": "#ffffff", "PRIMARY_INK": "#ffffff",
+    "BG": "#f6f7fb", "CARD": "#ffffff", "LINE": "#e4e7ef", "INK": "#1c2434",
+    "MUTED": "#667083", "BLUE": "#5954e8", "BLUE_ACTIVE": "#4641ce",
+    "GREEN": "#24785b", "ORANGE": "#996321", "RED": "#b44454", "LOG_BG": "#f9fafc",
+    "KNOB": "#ffffff", "PRIMARY_INK": "#ffffff", "BUTTON": "#f0f2f7",
+    "BUTTON_HOVER": "#e8ebf3", "BUTTON_PRESSED": "#dfe3ef", "DISABLED": "#9ca4b5",
+    "ACCENT_SOFT": "#eeedff", "ACCENT_LINE": "#d8d5fb", "TRACK": "#e8eaf2",
+    "FIELD_DISABLED": "#f3f4f8", "HEADER": "#f8f9fc",
 }
 DARK = {
-    "BG": "#171c28", "CARD": "#232b3b", "LINE": "#354158", "INK": "#e8edf8",
-    "MUTED": "#a8b5cc", "BLUE": "#839bff", "BLUE_ACTIVE": "#9aafff",
-    "GREEN": "#79d7ad", "ORANGE": "#edbc77", "RED": "#ef949e", "LOG_BG": "#202838",
-    "KNOB": "#f3f6ff", "PRIMARY_INK": "#18243d",
+    "BG": "#111827", "CARD": "#1c2535", "LINE": "#303b50", "INK": "#f0f3fa",
+    "MUTED": "#a5b0c3", "BLUE": "#aaa2ff", "BLUE_ACTIVE": "#bcb6ff",
+    "GREEN": "#80d5b4", "ORANGE": "#efc184", "RED": "#f2a1ad", "LOG_BG": "#182131",
+    "KNOB": "#f7f8ff", "PRIMARY_INK": "#151327", "BUTTON": "#293447",
+    "BUTTON_HOVER": "#33415a", "BUTTON_PRESSED": "#3d4a63", "DISABLED": "#738097",
+    "ACCENT_SOFT": "#302e50", "ACCENT_LINE": "#4b456b", "TRACK": "#313c51",
+    "FIELD_DISABLED": "#202b3e", "HEADER": "#222d40",
 }
 # Legacy image/style shades have a corresponding dark shade. Keeping these
 # explicit also recolors native Text tags and popups which specify a color.
@@ -46,14 +52,16 @@ _DARK_SHADES = {
     "#e8edf5": "#354158", "#e8eef9": "#384762", "#e9eef9": "#303d55",
     "#edf1f8": "#303d55", "#f0f3f8": "#293345", "#f1f5fc": "#2b374d",
     "#f5f7fc": "#293345",
+    "#bac2d1": "#65738b",
 }
 _DARK_SHADES.update({LIGHT[key]: value for key, value in DARK.items() if key not in {"KNOB", "PRIMARY_INK"}})
 globals().update(LIGHT)
 _active_mode = "light"
 
 
-def _tone(value):
-    return _DARK_SHADES.get(value.lower(), value) if _active_mode == "dark" and isinstance(value, str) else value
+def _tone(value, appearance=None):
+    selected = appearance if appearance is not None else _active_mode
+    return _DARK_SHADES.get(value.lower(), value) if selected == "dark" and isinstance(value, str) else value
 
 
 def _recolor(value, target):
@@ -99,17 +107,18 @@ def release_variables(owner):
             pass
 
 
-TITLE = (FONT, 22, "bold")
-HEADING = (FONT, 14, "bold")
-STATUS = (FONT, 15, "bold")
+TITLE = (FONT, 24, "bold")
+HEADING = (FONT, 15, "bold")
+STATUS = (FONT, 17, "bold")
 BODY = (FONT, 12)
 BOLD = (FONT, 12, "bold")
 SMALL = (FONT, 11)
-NUMBER = (FONT, 17, "bold")
+NUMBER = (FONT, 24, "bold")
+EYEBROW = (FONT, 10, "bold")
 
 
-def _rgb(color):
-    color = _tone(color)
+def _rgb(color, appearance=None):
+    color = _tone(color, appearance)
     return tuple(int(color[index:index + 2], 16) for index in (1, 3, 5))
 
 
@@ -123,13 +132,13 @@ def _png(width, height, pixels):
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b"")
 
 
-def _round_rect(pixels, canvas_width, canvas_height, bounds, radius, fill, outline=None, stroke=1):
+def _round_rect(pixels, canvas_width, canvas_height, bounds, radius, fill, outline=None, stroke=1, *, appearance=None):
     """Paint an antialiased rounded shape with transparent outside pixels."""
     left, top, right, bottom = bounds
     center_x, center_y = (left + right) / 2, (top + bottom) / 2
     half_x, half_y = (right - left) / 2, (bottom - top) / 2
     radius = min(radius, half_x, half_y)
-    fill_rgb, line_rgb = _rgb(fill), _rgb(outline or fill)
+    fill_rgb, line_rgb = _rgb(fill, appearance), _rgb(outline or fill, appearance)
     border = stroke if outline else 0
     for y in range(max(0, math.floor(top)), min(canvas_height, math.ceil(bottom))):
         for x in range(max(0, math.floor(left)), min(canvas_width, math.ceil(right))):
@@ -151,14 +160,14 @@ def _round_rect(pixels, canvas_width, canvas_height, bounds, radius, fill, outli
             pixels[index:index + 4] = bytes((*color, alpha))
 
 
-def _flatten(pixels, surface):
+def _flatten(pixels, surface, appearance=None):
     """Blend antialiased edges onto the surface color and make every pixel opaque.
 
     Tk on Windows composites images with partial transparency in software on
     every redraw, which made resizing a window slow. Each control therefore
     gets images pre-blended onto the surface it sits on (window or card).
     """
-    background = _rgb(surface)
+    background = _rgb(surface, appearance)
     for index in range(0, len(pixels), 4):
         alpha = pixels[index + 3]
         if alpha != 255:
@@ -184,11 +193,11 @@ def _stretch(pixels, width, height, size):
     return bytearray(b"".join(rows)), new_width, new_height
 
 
-def _panel_png(fill, outline, *, radius=12, stroke=1, width=40, height=40, surface=None, size=None):
+def _panel_png(fill, outline, *, radius=12, stroke=1, width=40, height=40, surface=None, size=None, appearance=None):
     pixels = bytearray(width * height * 4)
-    _round_rect(pixels, width, height, (0, 0, width, height), radius, fill, outline, stroke)
+    _round_rect(pixels, width, height, (0, 0, width, height), radius, fill, outline, stroke, appearance=appearance)
     if surface is not None:
-        _flatten(pixels, surface)
+        _flatten(pixels, surface, appearance)
     if size is not None:
         pixels, width, height = _stretch(pixels, width, height, size)
     return _png(width, height, pixels)
@@ -198,11 +207,11 @@ def _switch_png(*, selected=False, disabled=False, active=False, focus=False, su
     width, height = 56, 30
     pixels = bytearray(width * height * 4)
     if focus:
-        _round_rect(pixels, width, height, (0, 0, 48, 30), 15, "#dfe6ff", "#93a7f5", 1)
-    track = "#bbc8eb" if selected and disabled else BLUE_ACTIVE if selected and active else BLUE if selected else "#e5eaf2" if disabled else "#becbdf" if active else "#cdd7e6"
+        _round_rect(pixels, width, height, (0, 0, 48, 30), 15, ACCENT_SOFT, BLUE, 1)
+    track = ACCENT_LINE if selected and disabled else BLUE_ACTIVE if selected and active else BLUE if selected else LINE if disabled else DISABLED if active else "#bac2d1"
     _round_rect(pixels, width, height, (2, 3, 46, 27), 12, track)
     start = 25 if selected else 5
-    _round_rect(pixels, width, height, (start, 6, start + 18, 24), 9, "#f5f7fc" if disabled else KNOB)
+    _round_rect(pixels, width, height, (start, 6, start + 18, 24), 9, FIELD_DISABLED if disabled else KNOB)
     if surface is not None:
         _flatten(pixels, surface)
     return _png(width, height, pixels)
@@ -212,11 +221,11 @@ def _radio_png(*, selected=False, disabled=False, active=False, focus=False, sur
     width, height = 32, 28
     pixels = bytearray(width * height * 4)
     if focus:
-        _round_rect(pixels, width, height, (0, 0, 28, 28), 14, "#e2e8ff", "#93a7f5", 1)
-    border = "#d5ddeb" if disabled else BLUE_ACTIVE if active else BLUE if selected else "#b8c5d9"
-    _round_rect(pixels, width, height, (3, 3, 25, 25), 11, "#f5f7fc" if disabled else CARD, border, 1.5)
+        _round_rect(pixels, width, height, (0, 0, 28, 28), 14, ACCENT_SOFT, BLUE, 1)
+    border = LINE if disabled else BLUE_ACTIVE if active else BLUE if selected else "#bac2d1"
+    _round_rect(pixels, width, height, (3, 3, 25, 25), 11, FIELD_DISABLED if disabled else CARD, border, 1.5)
     if selected:
-        _round_rect(pixels, width, height, (8, 8, 20, 20), 6, "#a9b8e3" if disabled else BLUE_ACTIVE if active else BLUE)
+        _round_rect(pixels, width, height, (8, 8, 20, 20), 6, ACCENT_LINE if disabled else BLUE_ACTIVE if active else BLUE)
     if surface is not None:
         _flatten(pixels, surface)
     return _png(width, height, pixels)
@@ -241,11 +250,11 @@ def _card_layout(spec):
     return result
 
 
-def _image_element(style, name, images, *, border=0, minimum=(0, 0)):
+def _image_element(style, name, images, *, border=0, minimum=(0, 0), padding=0):
     if name in style.element_names():
         return
     default, *states = images
-    style.element_create(name, "image", default, *states, border=border, padding=0,
+    style.element_create(name, "image", default, *states, border=border, padding=padding,
                          width=minimum[0], height=minimum[1], sticky="nsew")
 
 
@@ -266,30 +275,54 @@ def _control_images(root, style):
 
     # Opaque, generously sized images: a card or button is a few fast tiles.
     card, button, field, tab = (640, 400), (320, 64), (480, 56), (240, 56)
-    panel("card", CARD, LINE, radius=15, width=48, height=48, size=card)
-    panel("button", "#edf1f8", "#e2e8f2", size=button)
-    panel("button_active", "#e4ebf7", "#d3def2", size=button)
-    panel("button_pressed", "#d8e2f3", "#c7d5ed", size=button)
-    panel("button_focus", "#edf1f8", "#859ded", stroke=2, size=button)
-    panel("button_focus_active", "#e4ebf7", "#859ded", stroke=2, size=button)
-    panel("button_disabled", "#f0f3f8", "#e8edf5", size=button)
+    panel("card", CARD, LINE, radius=18, width=48, height=48, size=card)
+    panel("button", BUTTON, BUTTON, size=button)
+    panel("button_active", BUTTON_HOVER, BUTTON_HOVER, size=button)
+    panel("button_pressed", BUTTON_PRESSED, BUTTON_PRESSED, size=button)
+    panel("button_focus", BUTTON, BLUE, stroke=2, size=button)
+    panel("button_focus_active", BUTTON_HOVER, BLUE, stroke=2, size=button)
+    panel("button_disabled", FIELD_DISABLED, FIELD_DISABLED, size=button)
     panel("primary", BLUE, BLUE, size=button)
     panel("primary_active", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
-    panel("primary_pressed", "#354fb9", "#354fb9", size=button)
-    panel("primary_focus", BLUE, "#b8c7ff", stroke=2, size=button)
-    panel("primary_focus_active", BLUE_ACTIVE, "#b8c7ff", stroke=2, size=button)
-    panel("primary_disabled", "#c6d1ee", "#c6d1ee", size=button)
-    panel("entry", CARD, "#d6dfed", radius=10, size=field)
-    panel("entry_focus", CARD, "#8299ef", radius=10, stroke=2, size=field)
-    panel("entry_disabled", "#f0f3f8", "#e2e8f2", radius=10, size=field)
-    panel("entry_readonly", "#f8faff", "#d6dfed", radius=10, size=field)
+    panel("primary_pressed", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
+    panel("primary_focus", BLUE, ACCENT_LINE, stroke=2, size=button)
+    panel("primary_focus_active", BLUE_ACTIVE, ACCENT_LINE, stroke=2, size=button)
+    panel("primary_disabled", ACCENT_LINE, ACCENT_LINE, size=button)
+    panel("entry", CARD, LINE, radius=11, size=field)
+    panel("entry_focus", CARD, BLUE, radius=11, stroke=2, size=field)
+    panel("entry_disabled", FIELD_DISABLED, LINE, radius=11, size=field)
+    panel("entry_readonly", CARD, LINE, radius=11, size=field)
     panel("tab", BG, BG, radius=11, size=tab)
-    panel("tab_active", "#e9eef9", "#e9eef9", radius=11, size=tab)
-    panel("tab_selected", CARD, "#d6dff6", radius=11, size=tab)
-    panel("tab_focus", BG, "#91a7f3", radius=11, stroke=2, size=tab)
-    panel("tab_selected_focus", CARD, "#91a7f3", radius=11, stroke=2, size=tab)
-    panel("tab_disabled", "#f0f3f8", "#f0f3f8", radius=10, size=tab)
-    asset("progress_trough", _panel_png("#e6ecf7", "#e6ecf7", radius=7, width=28, height=14))
+    panel("tab_active", BUTTON, BUTTON, radius=11, size=tab)
+    panel("tab_selected", ACCENT_SOFT, ACCENT_SOFT, radius=11, size=tab)
+    panel("tab_focus", BG, BLUE, radius=11, stroke=2, size=tab)
+    panel("tab_selected_focus", ACCENT_SOFT, BLUE, radius=11, stroke=2, size=tab)
+    panel("tab_disabled", FIELD_DISABLED, FIELD_DISABLED, radius=11, size=tab)
+    # A popup notebook sits on CARD, while the library sits on BG. Its
+    # inactive tabs should merge into that surface rather than paint a dark
+    # window-colored rectangle over the popup.
+    for name, fill, outline, stroke in (("tab", CARD, CARD, 1), ("tab_focus", CARD, BLUE, 2)):
+        asset(name + "_card", _panel_png(fill, outline, radius=11, surface=CARD, stroke=stroke, size=tab))
+    asset("notebook_card", _panel_png(CARD, LINE, radius=12, surface=CARD, size=card))
+    panel("selected", ACCENT_SOFT, ACCENT_SOFT, size=button)
+    panel("selected_active", ACCENT_LINE, ACCENT_LINE, size=button)
+    panel("selected_pressed", ACCENT_LINE, ACCENT_LINE, size=button)
+    panel("selected_focus", ACCENT_SOFT, BLUE, stroke=2, size=button)
+    panel("selected_focus_active", ACCENT_LINE, BLUE, stroke=2, size=button)
+    panel("selected_disabled", FIELD_DISABLED, FIELD_DISABLED, size=button)
+    for suffix, surface in surfaces:
+        # Quiet navigation has no resting button fill, including on white
+        # sidebars. Its entire image, not just its corners, follows the parent.
+        for name, fill, outline, stroke in (
+                ("ghost", surface, surface, 1),
+                ("ghost_active", BUTTON, BUTTON, 1),
+                ("ghost_pressed", BUTTON_HOVER, BUTTON_HOVER, 1),
+                ("ghost_focus", surface, BLUE, 2),
+                ("ghost_focus_active", BUTTON, BLUE, 2),
+                ("ghost_disabled", surface, surface, 1)):
+            asset(name + suffix, _panel_png(fill, outline, surface=surface,
+                                          stroke=stroke, size=button))
+    asset("progress_trough", _panel_png(TRACK, TRACK, radius=7, width=28, height=14))
     asset("progress_bar", _panel_png(BLUE, BLUE, radius=7, width=28, height=14))
     for kind, generator in (("switch", _switch_png), ("radio", _radio_png)):
         for name, states in (("off", {}), ("on", {"selected": True}),
@@ -301,14 +334,15 @@ def _control_images(root, style):
 
     for suffix, _ in surfaces:
         element = CARD_ELEMENT if suffix else ""
-        for name, prefix in (("Soft.Button", "button"), ("Soft.Primary", "primary")):
+        for name, prefix in (("Soft.Button", "button"), ("Soft.Primary", "primary"),
+                             ("Soft.Ghost", "ghost"), ("Soft.Selected", "selected")):
             _image_element(style, name + element, [images[prefix + suffix],
                            ("disabled", images[prefix + "_disabled" + suffix]),
                            ("pressed", images[prefix + "_pressed" + suffix]),
                            ("active", "focus", images[prefix + "_focus_active" + suffix]),
                            ("focus", images[prefix + "_focus" + suffix]),
                            ("active", images[prefix + "_active" + suffix])], border=12)
-        _image_element(style, "Soft.Card" + element, [images["card" + suffix]], border=15)
+        _image_element(style, "Soft.Card" + element, [images["card" + suffix]], border=18)
         _image_element(style, "Soft.Entry" + element, [images["entry" + suffix], ("disabled", images["entry_disabled" + suffix]),
                        ("focus", images["entry_focus" + suffix]), ("readonly", images["entry_readonly" + suffix])], border=10)
         for name, prefix, size in (("Soft.Switch", "switch", (56, 30)), ("Soft.Radio", "radio", (32, 28))):
@@ -325,6 +359,9 @@ def _control_images(root, style):
                        ("selected", images["tab_selected" + suffix]), ("active", images["tab_active" + suffix])], border=10)
     _image_element(style, "Soft.Progress.trough", [images["progress_trough"]], border=6, minimum=(0, 14))
     _image_element(style, "Soft.Progress.pbar", [images["progress_bar"]], border=6, minimum=(0, 14))
+    # Inset the selected page so its rectangular native Frame cannot cover
+    # the rounded client border and its antialiased corners.
+    _image_element(style, "Soft.Notebook.client", [images["notebook_card"]], border=12, padding=12)
     # A PhotoImage is deleted by Tk when its Python object is collected.
     root._root()._xlikesaver_theme_images = images
     owner = root._root()
@@ -370,38 +407,64 @@ def apply_style(root: tk.Misc, mode=None) -> None:
     configure("Card.TFrame", background=BG)
     style.layout("Card.TFrame", [("Soft.Card", {"sticky": "nsew"})])
     configure("Plain.TFrame", background=CARD)
+    configure("Sidebar.TFrame", background=CARD)
     configure("TLabel", background=BG, foreground=INK, font=BODY)
     for name, values in {
         "Title.TLabel": {"font": TITLE}, "Subtitle.TLabel": {"foreground": MUTED, "font": BODY},
+        "Header.TLabel": {"font": TITLE}, "PageTitle.TLabel": {"font": TITLE},
+        "Section.TLabel": {"font": HEADING}, "Eyebrow.TLabel": {"font": EYEBROW, "foreground": MUTED},
+        "SidebarTitle.TLabel": {"font": (FONT, 17, "bold"), "background": CARD},
+        "SidebarMuted.TLabel": {"font": SMALL, "foreground": MUTED, "background": CARD},
+        "SidebarEyebrow.TLabel": {"font": EYEBROW, "foreground": MUTED, "background": CARD},
+        "Sidebar.TLabel": {"font": BODY, "background": CARD},
         "Muted.TLabel": {"foreground": MUTED, "font": SMALL}, "Status.TLabel": {"font": STATUS},
         "Warn.TLabel": {"foreground": ORANGE, "font": SMALL}, "Card.TLabel": {"background": CARD, "font": BODY},
         "CardBold.TLabel": {"background": CARD, "font": BOLD}, "CardHeading.TLabel": {"background": CARD, "font": HEADING},
+        "CardTitle.TLabel": {"background": CARD, "font": HEADING},
+        "CardEyebrow.TLabel": {"background": CARD, "foreground": MUTED, "font": EYEBROW},
+        "CardStatus.TLabel": {"background": CARD, "font": STATUS},
         "CardMuted.TLabel": {"background": CARD, "foreground": MUTED, "font": SMALL},
+        "Accent.TLabel": {"foreground": BLUE_ACTIVE, "font": BOLD},
+        "CardAccent.TLabel": {"background": CARD, "foreground": BLUE_ACTIVE, "font": BOLD},
         "Connected.TLabel": {"background": CARD, "foreground": GREEN, "font": BOLD},
         "Disconnected.TLabel": {"background": CARD, "foreground": ORANGE, "font": BOLD},
         "TileNumber.TLabel": {"background": CARD, "font": NUMBER},
+        "HeroNumber.TLabel": {"background": CARD, "font": (FONT, 30, "bold")},
         "TileCaption.TLabel": {"background": CARD, "foreground": MUTED, "font": SMALL},
     }.items():
         configure(name, **values)
 
-    for name, element in (("TButton", "Soft.Button"), ("Primary.TButton", "Soft.Primary")):
+    for name, element in (("TButton", "Soft.Button"), ("Primary.TButton", "Soft.Primary"),
+                          ("Ghost.TButton", "Soft.Ghost"), ("Nav.TButton", "Soft.Ghost"),
+                          ("NavSelected.TButton", "Soft.Selected"),
+                          ("Segment.TButton", "Soft.Ghost"), ("SegmentSelected.TButton", "Soft.Selected")):
         style.layout(name, [(element, {"sticky": "nsew", "children": [
             ("Button.padding", {"sticky": "nsew", "children": [("Button.label", {"sticky": "nsew"})]})]})])
     configure("TButton", font=BODY, padding=(14, 8), relief="flat", borderwidth=0, foreground=INK)
     # Clam's inherited pressed/active grey backgrounds remain rectangular even
     # when its border is replaced by our transparent rounded image element.
     mapping("TButton", background=[("disabled", BG), ("!disabled", BG)],
-              foreground=[("disabled", "#99a5b9"), ("!disabled", INK)])
+              foreground=[("disabled", DISABLED), ("!disabled", INK)])
     configure("Primary.TButton", font=(FONT, 14, "bold"), padding=(30, 11), foreground=PRIMARY_INK)
-    style.map("Primary.TButton", foreground=[("disabled", PRIMARY_INK), ("!disabled", PRIMARY_INK)])
+    style.map("Primary.TButton", foreground=[("disabled", MUTED), ("!disabled", PRIMARY_INK)])
     configure("Big.TButton", font=(FONT, 13), padding=(20, 10))
     configure("Compact.TButton", font=SMALL, padding=(8, 5))
+    configure("Ghost.TButton", font=BODY, padding=(12, 8), foreground=MUTED)
+    mapping("Ghost.TButton", foreground=[("disabled", DISABLED), ("active", INK), ("!disabled", MUTED)])
+    for name in ("Nav.TButton", "NavSelected.TButton"):
+        configure(name, font=BOLD, padding=(16, 12), anchor="w")
+    mapping("Nav.TButton", foreground=[("disabled", DISABLED), ("active", INK), ("!disabled", MUTED)])
+    mapping("NavSelected.TButton", foreground=[("disabled", DISABLED), ("!disabled", BLUE_ACTIVE)])
+    for name in ("Segment.TButton", "SegmentSelected.TButton"):
+        configure(name, font=SMALL, padding=(12, 7))
+    mapping("Segment.TButton", foreground=[("disabled", DISABLED), ("active", INK), ("!disabled", MUTED)])
+    mapping("SegmentSelected.TButton", foreground=[("disabled", DISABLED), ("!disabled", BLUE_ACTIVE)])
     configure("CompactPrimary.TButton", font=SMALL, padding=(8, 5))
     style.layout("CompactPrimary.TButton", style.layout("Primary.TButton"))
-    style.map("CompactPrimary.TButton", foreground=[("disabled", PRIMARY_INK), ("!disabled", PRIMARY_INK)])
+    style.map("CompactPrimary.TButton", foreground=[("disabled", MUTED), ("!disabled", PRIMARY_INK)])
     configure("DialogPrimary.TButton", font=BOLD, padding=(18, 8), foreground=PRIMARY_INK)
     style.layout("DialogPrimary.TButton", style.layout("Primary.TButton"))
-    style.map("DialogPrimary.TButton", foreground=[("disabled", PRIMARY_INK), ("!disabled", PRIMARY_INK)])
+    style.map("DialogPrimary.TButton", foreground=[("disabled", MUTED), ("!disabled", PRIMARY_INK)])
     style.layout("TEntry", [("Soft.Entry", {"sticky": "nsew", "children": [
         ("Entry.padding", {"sticky": "nsew", "children": [("Entry.textarea", {"sticky": "nsew"})]})]})])
     style.layout("TSpinbox", [("Soft.Entry", {"sticky": "nsew", "children": [
@@ -415,40 +478,47 @@ def apply_style(root: tk.Misc, mode=None) -> None:
     for name in ("TEntry", "TSpinbox", "TCombobox"):
         configure(name, padding=(10, 6), fieldbackground=CARD, foreground=INK,
                         borderwidth=0, relief="flat", arrowcolor=MUTED, arrowsize=13,
-                        selectbackground=BLUE, selectforeground="#ffffff")
+                        selectbackground=BLUE, selectforeground=PRIMARY_INK)
         mapping(name, background=[("disabled", BG), ("!disabled", BG)],
-                  foreground=[("disabled", "#99a5b9")], fieldbackground=[("disabled", "#f0f3f8"), ("readonly", "#f8faff")])
+                  foreground=[("disabled", DISABLED)], fieldbackground=[("disabled", FIELD_DISABLED), ("readonly", CARD)],
+                  selectbackground=[("!disabled", BLUE)], selectforeground=[("!disabled", PRIMARY_INK)])
     for name, prefix, element in (("TCheckbutton", "Checkbutton", "Soft.Switch"), ("TRadiobutton", "Radiobutton", "Soft.Radio")):
         style.layout(name, [(prefix + ".padding", {"sticky": "nsew", "children": [
             (element, {"side": "left"}), (prefix + ".label", {"side": "left", "sticky": "nsew"})]})])
         configure(name, background=CARD, foreground=INK, font=BODY, padding=(0, 1), focuscolor=BLUE)
-        mapping(name, foreground=[("disabled", "#99a5b9")])
+        mapping(name, foreground=[("disabled", DISABLED)])
     configure("Plain.TCheckbutton", background=BG, font=SMALL)
     style.layout("Horizontal.TProgressbar", [("Soft.Progress.trough", {"sticky": "nsew", "children": [
         ("Soft.Progress.pbar", {"side": "left", "sticky": "ns"})]})])
-    configure("Horizontal.TProgressbar", background=BG, troughcolor="#e6ecf7", borderwidth=0, thickness=14,
+    configure("Horizontal.TProgressbar", background=BG, troughcolor=TRACK, borderwidth=0, thickness=14,
               bordercolor=BG, lightcolor=BG, darkcolor=BG, relief="flat")
     mapping("Horizontal.TProgressbar", background=[("disabled", BG), ("!disabled", BG)])
-    configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 10),
+    configure("TNotebook", background=BG, borderwidth=0, tabmargins=(0, 0, 0, 0),
                     bordercolor=BG, lightcolor=BG, darkcolor=BG, relief="flat")
     style.layout("TNotebook.Tab", [("Soft.Tab", {"sticky": "nsew", "children": [
         ("Notebook.padding", {"sticky": "nsew", "children": [("Notebook.label", {"sticky": "nsew"})]})]})])
-    configure("TNotebook.Tab", font=BOLD, padding=(20, 9), foreground=MUTED, background=BG)
+    configure("TNotebook.Tab", font=BOLD, padding=(18, 10), foreground=MUTED, background=BG)
     # Selected tabs inherited a smaller padding from clam and visibly jumped
     # in size. Keep every tab's geometry and transparent backdrop identical.
     mapping("TNotebook.Tab", padding=[], expand=[],
               background=[("disabled", BG), ("!disabled", BG)],
-              foreground=[("disabled", "#99a5b9"), ("selected", BLUE_ACTIVE), ("!selected", MUTED)])
-    configure("Treeview", font=SMALL, rowheight=32, background=CARD, fieldbackground=CARD,
-                    foreground=INK, bordercolor=LINE, lightcolor=LINE, darkcolor=LINE, relief="flat", borderwidth=1)
-    mapping("Treeview", background=[("selected", "#e3eaff")], foreground=[("selected", "#314fbb")])
-    configure("Treeview.Heading", font=(FONT, 11, "bold"), padding=(8, 7), background="#f1f5fc",
-                    foreground=MUTED, borderwidth=0, relief="flat", bordercolor="#f1f5fc", lightcolor="#f1f5fc", darkcolor="#f1f5fc")
-    mapping("Treeview.Heading", background=[("active", "#e8eef9")], relief=[("pressed", "flat")])
-    configure("TScrollbar", background="#edf1f8", troughcolor=BG,
+              foreground=[("disabled", DISABLED), ("selected", BLUE_ACTIVE), ("!selected", MUTED)])
+    configure("Card.TNotebook", background=CARD, borderwidth=0, tabmargins=(0, 0, 0, 4),
+              bordercolor=CARD, lightcolor=CARD, darkcolor=CARD, relief="flat")
+    style.layout("Card.TNotebook", [("Soft.Notebook.client", {"sticky": "nsew"})])
+    style.layout("Card.TNotebook.Tab", _card_layout(style.layout("TNotebook.Tab")))
+    configure("Card.TNotebook.Tab", background=CARD)
+    mapping("Card.TNotebook.Tab", background=[("disabled", CARD), ("!disabled", CARD)])
+    configure("Treeview", font=SMALL, rowheight=38, background=CARD, fieldbackground=CARD,
+                    foreground=INK, bordercolor=LINE, lightcolor=LINE, darkcolor=LINE, relief="flat", borderwidth=0)
+    mapping("Treeview", background=[("selected", ACCENT_SOFT)], foreground=[("selected", BLUE_ACTIVE)])
+    configure("Treeview.Heading", font=(FONT, 11, "bold"), padding=(10, 10), background=HEADER,
+                    foreground=MUTED, borderwidth=0, relief="flat", bordercolor=HEADER, lightcolor=HEADER, darkcolor=HEADER)
+    mapping("Treeview.Heading", background=[("active", BUTTON)], relief=[("pressed", "flat")])
+    configure("TScrollbar", background=LINE, troughcolor=BG,
               bordercolor=BG, lightcolor=BG, darkcolor=BG, arrowcolor=MUTED,
               relief="flat", borderwidth=0)
-    mapping("TScrollbar", background=[("pressed", "#d8e2f3"), ("active", "#e4ebf7")])
+    mapping("TScrollbar", background=[("pressed", DISABLED), ("active", BUTTON_PRESSED)])
     _bind_surfaces(root, style)
     root.tk.call("set", "::xlikesaver_style", 1)
     _refresh_widgets(owner, selected)
@@ -467,16 +537,17 @@ def _bind_surfaces(root, style):
     card_layouts = set()
 
     def surface(parent):
+        palette = DARK if mode(owner) == "dark" else LIGHT
         if isinstance(parent, ttk.Widget):
             name = parent.cget("style") or parent.winfo_class()
             # Card.TFrame's exterior is BG; content lies on its white center.
             if str(name).endswith("Card.TFrame"):
-                return CARD
-            return style.lookup(name, "background") or BG
+                return palette["CARD"]
+            return style.lookup(name, "background") or palette["BG"]
         try:
             return parent.cget("background")
         except tk.TclError:
-            return BG
+            return palette["BG"]
 
     def mapped(event):
         widget = event.widget
@@ -497,13 +568,14 @@ def _bind_surfaces(root, style):
         if klass not in controls and not base.endswith("Card.TFrame"):
             return
         color = surface(widget.master)
+        palette = DARK if mode(owner) == "dark" else LIGHT
         # The application has two surfaces; don't reinterpret custom colors.
-        if color not in {CARD, BG}:
+        if color not in {palette["CARD"], palette["BG"]}:
             return
-        name = ("SurfaceCard." if color == CARD else "SurfaceBg.") + base
+        name = ("SurfaceCard." if color == palette["CARD"] else "SurfaceBg.") + base
         style.configure(name, background=color)
         style.map(name, background=[("disabled", color), ("!disabled", color)])
-        if color == CARD and name not in card_layouts:
+        if color == palette["CARD"] and name not in card_layouts:
             # Same layout, drawn with the images blended onto a card.
             try:
                 style.layout(name, _card_layout(style.layout(base)))
@@ -581,7 +653,9 @@ def _refresh_classic(widget, selected):
                 updated = _recolor(value, selected)
                 if updated != value:
                     widget.tag_configure(tag, **{key: updated})
-        widget.configure(insertbackground=INK, selectbackground=_tone("#e3eaff"), selectforeground=INK)
+        palette = DARK if selected == "dark" else LIGHT
+        widget.configure(insertbackground=palette["INK"], selectbackground=palette["ACCENT_SOFT"],
+                         selectforeground=palette["INK"])
     if isinstance(widget, Progressbar):
         widget._draw()
     # Canvas drawings (e.g. charts) repaint their items in the new colors.
@@ -614,19 +688,23 @@ class Progressbar(tk.Canvas):
 
     def __init__(self, parent, *, mode="determinate", value=0, maximum=100,
                  length=200, height=14, variable=None, **kwargs):
-        self._progress = {"mode": self._check_mode(mode), "value": float(value),
+        if variable is not None:
+            value = variable.get()
+        self._progress = {"mode": self._check_mode(mode), "value": self._check_value(value),
                           "maximum": self._check_maximum(maximum), "length": length}
-        self._display_value = max(0., min(float(value) / float(maximum), 1.))
+        self._display_value = self._target()
         self._timer = None
         self._running = False
         self._phase_start = time.monotonic()
         self._last_frame = self._phase_start
         self._variable = variable
         self._variable_trace = None
-        background = BG
+        selected = getattr(parent._root(), "_xlikesaver_theme_mode", "light")
+        palette = DARK if selected == "dark" else LIGHT
+        background = palette["BG"]
         if isinstance(parent, ttk.Widget):
             parent_style = parent.cget("style") or parent.winfo_class()
-            background = CARD if str(parent_style).endswith("Card.TFrame") else ttk.Style(parent).lookup(parent_style, "background") or BG
+            background = palette["CARD"] if str(parent_style).endswith("Card.TFrame") else ttk.Style(parent).lookup(parent_style, "background") or palette["BG"]
         else:
             try:
                 background = parent.cget("background")
@@ -646,8 +724,6 @@ class Progressbar(tk.Canvas):
         self.bind("<Configure>", lambda event: self._draw())
         self.bind("<Destroy>", self._destroyed, add="+")
         if variable is not None:
-            self._progress["value"] = float(variable.get())
-            self._display_value = self._target()
             self._variable_trace = variable.trace_add("write", self._variable_changed)
         self._draw()
 
@@ -662,6 +738,16 @@ class Progressbar(tk.Canvas):
         number = float(value)
         if not math.isfinite(number) or number <= 0:
             raise tk.TclError("maximum must be a positive finite number")
+        return number
+
+    @staticmethod
+    def _check_value(value):
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as error:
+            raise tk.TclError("value must be finite") from error
+        if not math.isfinite(number):
+            raise tk.TclError("value must be finite")
         return number
 
     def _target(self):
@@ -683,9 +769,7 @@ class Progressbar(tk.Canvas):
         if "maximum" in changes:
             changes["maximum"] = self._check_maximum(changes["maximum"])
         if "value" in changes:
-            changes["value"] = float(changes["value"])
-            if not math.isfinite(changes["value"]):
-                raise tk.TclError("value must be finite")
+            changes["value"] = self._check_value(changes["value"])
         self._progress.update(changes)
         if "length" in changes:
             values["width"] = changes["length"]
@@ -757,13 +841,14 @@ class Progressbar(tk.Canvas):
         palette = DARK if mode(self) == "dark" else LIGHT
         radius = min(height / 2, width / 2)
         center = height / 2
-        track_color = _DARK_SHADES["#e6ecf7"] if mode(self) == "dark" else "#e6ecf7"
+        track_color = palette["TRACK"]
         self.coords(self._track, radius, center, width - radius, center)
         self.itemconfigure(self._track, width=height, fill=track_color)
         signature = (height, track_color, palette["BLUE"])
         if self._cap_signature != signature:
             for name, color in (("track", track_color), ("fill", palette["BLUE"])):
-                data = _panel_png(color, color, radius=height / 2, width=height, height=height)
+                data = _panel_png(color, color, radius=height / 2, width=height, height=height,
+                                  appearance=mode(self))
                 if name in self._cap_images:
                     self._cap_images[name].configure(data=data)
                 else:
@@ -836,14 +921,27 @@ class ScrollableContent(ttk.Frame):
         self._focus_timers = set()
         self.canvas.bind("<Configure>", self._schedule_layout)
         self.content.bind("<Configure>", self._schedule_layout)
-        # Child height requests can change while the canvas keeps its frame's
-        # actual height fixed, so the parent alone would miss expanded text.
-        self._parent_bindings = [(event, parent.bind(event, callback, add="+")) for event, callback in (
+        # Tk routes a child's event through its own widget/class/toplevel
+        # bindtags, not through intervening Frames. This view can sit inside
+        # a dashboard panel, so receive child events on the owning toplevel
+        # and filter them to this content instead of binding to its parent.
+        self._event_owner = self.winfo_toplevel()
+        self._view_bindings = [(event, self._event_owner.bind(event, callback, add="+")) for event, callback in (
             ("<Configure>", self._child_configured), ("<MouseWheel>", self._mousewheel),
             ("<FocusIn>", self._focus_visible))]
 
+    def _owns_content(self, widget):
+        """Match content events without taking another scroll view's input."""
+        while widget is not None:
+            if widget is self.content or widget is self.canvas:
+                return True
+            if isinstance(widget, ScrollableContent):
+                return False
+            widget = getattr(widget, "master", None)
+        return False
+
     def _child_configured(self, event):
-        if str(event.widget).startswith(str(self.content) + "."):
+        if self._owns_content(event.widget):
             self._schedule_layout()
 
     def _schedule_layout(self, _event=None):
@@ -868,7 +966,9 @@ class ScrollableContent(ttk.Frame):
             self.canvas.yview_moveto(0)
 
     def _mousewheel(self, event):
-        if event.widget.winfo_class() in {"Text", "Treeview", "TScrollbar", "Scrollbar"}:
+        if not self._owns_content(event.widget):
+            return
+        if event.widget.winfo_class() in {"Text", "Treeview", "Listbox", "TScrollbar", "Scrollbar"}:
             return
         if self.scrollbar.winfo_manager() and event.delta:
             steps = -int(event.delta / 120) or (-1 if event.delta > 0 else 1)
@@ -877,7 +977,7 @@ class ScrollableContent(ttk.Frame):
 
     def _focus_visible(self, event):
         widget = event.widget
-        if str(widget).startswith(str(self.content) + "."):
+        if self._owns_content(widget) and widget not in (self.canvas, self.content):
             # Focus can follow a scroll before screen coordinates are updated.
             def reveal():
                 self._focus_timers.discard(timer)
@@ -905,9 +1005,11 @@ class ScrollableContent(ttk.Frame):
             child = pending.pop()
             children.append(child)
             pending.extend(child.winfo_children())
-        for event, callback in self._parent_bindings:
-            self.master.unbind(event, callback)
-        self._parent_bindings.clear()
+        for event, callback in self._view_bindings:
+            if callback:
+                self._event_owner.unbind(event, callback)
+        self._view_bindings.clear()
+        self._event_owner = None
         for timer in self._focus_timers | ({self._layout_timer} if self._layout_timer else set()):
             self.after_cancel(timer)
         self._focus_timers.clear()

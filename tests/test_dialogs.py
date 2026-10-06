@@ -1,6 +1,7 @@
 """Themed message dialogs keep tkinter.messagebox's calls and results."""
 
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -63,6 +64,110 @@ class DialogTests(unittest.TestCase):
         self.assertEqual(labels, [["확인"], ["확인"], ["예", "아니요"]])
         for call in run.call_args_list:
             call.args[0].destroy()
+
+    def test_requested_no_is_the_default_answer_for_enter(self):
+        observed = {}
+        def answer():
+            [dialog] = self.open_dialogs()
+            observed["label"] = dialog.default_button.cget("text")
+            observed["style"] = dialog.default_button.cget("style")
+            # Return outside the action buttons follows the requested default.
+            observed["return"] = dialog._return(SimpleNamespace(widget=dialog.message_label))
+        self.root.after(150, answer)
+        result = dialogs.askyesno("이전 폴더 없음", "새 폴더에서 시작할까요?",
+                                 parent=self.root, default="no")
+        self.assertIs(result, False)
+        self.assertEqual(observed["label"], "아니요")
+        self.assertTrue(str(observed["style"]).endswith("DialogPrimary.TButton"))
+        self.assertEqual(observed["return"], "break")
+
+    def test_return_activates_the_focused_action_only_once(self):
+        dialog = dialogs.Dialog(self.root, "확인", "계속할까요?",
+                                buttons=(("예", True), ("아니요", False)), cancel=False)
+        invoked = []
+        dialog.buttons[1].configure(command=lambda: invoked.append(False))
+        self.assertEqual(dialog._return(SimpleNamespace(widget=dialog.buttons[1])), "break")
+        self.assertEqual(invoked, [False])
+        dialog.destroy()
+
+    def test_long_message_scrolls_and_actions_fit_a_short_screen(self):
+        message = "\n".join(f"파일 {index}: 기록 확인 결과" for index in range(100))
+        with patch.object(tk.Toplevel, "winfo_screenheight", return_value=768), \
+                patch.object(tk.Toplevel, "winfo_screenwidth", return_value=1024):
+            dialog = dialogs.Dialog(self.root, "기록 확인 결과", message)
+            self.addCleanup(lambda: dialog.winfo_exists() and dialog.destroy())
+            dialog.attributes("-alpha", 0)
+            dialog._place()
+            dialog.deiconify()
+            dialog.update()
+            self.assertLessEqual(dialog.winfo_height(), 668)
+            self.assertLess(dialog.message_view.canvas.yview()[1], 1)
+            self.assertTrue(dialog.message_view.scrollbar.winfo_ismapped())
+            self.assertGreater(dialog.message_view.scrollbar.winfo_width(), 1)
+            dialog.message_view.canvas.yview_moveto(1)
+            dialog.update()
+            self.assertEqual(dialog.message_label.cget("text"), message)
+            for button in dialog.buttons:
+                top = button.winfo_rooty() - dialog.winfo_rooty()
+                self.assertGreaterEqual(top, 0)
+                self.assertLessEqual(top + button.winfo_height(), dialog.winfo_height())
+
+    def test_nested_dialog_restores_parent_grab_and_focus(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        observed = {}
+        outer = dialogs.Dialog(self.root, "파일 처리", "파일을 처리할까요?",
+                               buttons=(("예", True), ("아니요", False)), cancel=False)
+        outer.attributes("-alpha", 0)
+        def nested():
+            outer.default_button.focus_force()
+            inner = dialogs.Dialog(outer, "다시 확인", "변경 내용을 확인하세요.")
+            inner.attributes("-alpha", 0)
+            self.root.after(100, inner.buttons[0].invoke)
+            observed["result"] = inner.run()
+            observed["grab"] = self.root.grab_current() is outer
+            # Windows delivers focus restoration with its activation event.
+            self.root.after(200, check_focus)
+        def check_focus():
+            observed["focus"] = self.root.focus_get() is outer.default_button
+            outer.cancel()
+        self.root.after(150, nested)
+        self.assertIs(outer.run(), False)
+        self.assertEqual(observed, {"result": "ok", "grab": True, "focus": True})
+        self.assertIsNone(self.root.grab_current())
+
+    def test_open_dialog_recolors_its_icon_when_appearance_changes(self):
+        dialog = dialogs.Dialog(self.root, "안내", "확인해 주세요.")
+        self.addCleanup(lambda: dialog.winfo_exists() and dialog.destroy())
+        badge = next(widget for widget in dialog.body.winfo_children()[0].winfo_children()
+                     if isinstance(widget, tk.Canvas))
+        theme.apply(self.root, "dark")
+        self.assertEqual(badge.cget("background"), theme.DARK["CARD"])
+        circle, _text = badge.find_all()
+        self.assertEqual(badge.itemcget(circle, "fill"), theme.DARK["BLUE"])
+
+    def test_large_type_short_screen_keeps_question_actions_inside(self):
+        scaling = self.root.tk.call("tk", "scaling")
+        self.addCleanup(self.root.tk.call, "tk", "scaling", scaling)
+        self.root.tk.call("tk", "scaling", 2.0)
+        with patch.object(tk.Toplevel, "winfo_screenheight", return_value=720), \
+                patch.object(tk.Toplevel, "winfo_screenwidth", return_value=800):
+            dialog = dialogs.Dialog(self.root, "기존 파일에 출처·작성자 기록", "상세 확인 내용\n" * 70,
+                                    buttons=(("예", True), ("아니요", False)), default=1, cancel=False)
+            self.addCleanup(lambda: dialog.winfo_exists() and dialog.destroy())
+            dialog.attributes("-alpha", 0)
+            dialog._place()
+            dialog.deiconify()
+            dialog.update()
+            self.assertLessEqual(dialog.winfo_height(), 620)
+            self.assertTrue(dialog.message_view.scrollbar.winfo_ismapped())
+            for button in dialog.buttons:
+                left = button.winfo_rootx() - dialog.winfo_rootx()
+                top = button.winfo_rooty() - dialog.winfo_rooty()
+                self.assertGreaterEqual(left, 0)
+                self.assertLessEqual(left + button.winfo_width(), dialog.winfo_width())
+                self.assertGreaterEqual(top, 0)
+                self.assertLessEqual(top + button.winfo_height(), dialog.winfo_height())
 
 
 if __name__ == "__main__":

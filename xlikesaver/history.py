@@ -13,6 +13,8 @@ import json
 import os
 import re
 import sqlite3
+import stat
+from collections import Counter
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -371,12 +373,12 @@ class HistoryStore:
             raise HistoryError(_HISTORY_HELP)
         candidate = resolved
         try:
-            stat = candidate.stat()
+            status = candidate.stat()
         except FileNotFoundError:
             return "", None, candidate.name
-        if not candidate.is_file():
+        if not stat.S_ISREG(status.st_mode):
             return "", None, candidate.name
-        return str(candidate), stat.st_size, candidate.name
+        return str(candidate), status.st_size, candidate.name
 
     def _upsert(self, row: dict, *, replace_path=True) -> None:
         row["source_url"] = "https://x.com/i/web/status/" + row["tweet_id"]
@@ -720,9 +722,12 @@ class HistoryStore:
         archived = [row for row in archived
                     if (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) not in dated]
         self._write_batches(archived, lambda row: self._upsert(row, replace_path=False))
-        known = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                 for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type FROM media")}
-        known_paths = {row["path"]: dict(row) for row in self._db.execute("SELECT * FROM media WHERE path!=''")}
+        known = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]): dict(row)
+                 for row in self._db.execute("SELECT * FROM media")}
+        known_media = {}
+        for mode, tweet, number, kind in known:
+            known_media.setdefault((tweet, number, kind), []).append(mode)
+        known_paths = {row["path"]: row for row in known.values() if row["path"]}
         scanned = []
         for path, scan_root, restricted in self._files():
             match = _FILENAME.fullmatch(path.name)
@@ -746,11 +751,16 @@ class HistoryStore:
                 # The recorded identity resolves that directory ambiguity.
                 mode, media_type = previous["folder_mode"], previous["media_type"]
                 parent = previous["author"] if mode == "author" else parent
-            elif self._isolated_records and scan_root == self.legacy_dir:
-                alternatives = [key[0] for key in known if key[1:] == (match[1], number, media_type)]
+            elif self._isolated_records and (scan_root == self.legacy_dir or restricted):
+                alternatives = known_media.get((match[1], number, media_type), [])
                 if mode not in alternatives and len(alternatives) == 1:
-                    mode = alternatives[0]
-            if restricted and (mode, match[1], number, media_type) not in known:
+                    old = known[(alternatives[0], match[1], number, media_type)]
+                    # A manual move may leave only the previous layout's row.
+                    # Reconnect it without losing author/save metadata. Keep
+                    # present copies and disconnected former-root paths intact.
+                    if scan_root == self.legacy_dir or not old["path"]:
+                        mode = alternatives[0]
+            if restricted and (match[1], number, media_type) not in known_media:
                 # Shared output folders contain no reliable account marker.
                 # Only this account's archive/catalog identities are valid.
                 continue
@@ -768,29 +778,112 @@ class HistoryStore:
         after = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
         return {"imported": True, "records": after - before, "warnings": warnings}
 
-    @_safe
-    def summary(self) -> dict:
-        totals = self._db.execute("""SELECT COUNT(*) AS files,COUNT(DISTINCT tweet_id) AS posts,
-                    COALESCE(SUM(filesize),0) AS bytes,SUM(filesize IS NULL) AS unknown_bytes,
-                    MIN(posted_at) AS oldest_posted_at,MAX(posted_at) AS newest_posted_at,
-                    SUM(posted_source='id_estimate') AS estimated_dates,
-                    SUM(path!='' AND filesize IS NOT NULL) AS known_files,
-                    SUM(path='') AS missing_files FROM media""").fetchone()
-        result = dict(totals)
-        for key in ("unknown_bytes", "estimated_dates", "known_files", "missing_files"):
-            result[key] = result[key] or 0
-        counts = {kind: 0 for kind in _TYPES}
-        for kind, count in self._db.execute("SELECT media_type,COUNT(*) FROM media GROUP BY media_type"):
-            counts[kind] = count
-        result.update(counts)
-        result["counts"] = counts
-        result["embedded_sources"] = self._db.execute("SELECT COUNT(*) FROM media WHERE metadata_status='embedded'").fetchone()[0]
-        result["embedded_authors"] = self._db.execute("SELECT COUNT(*) FROM media WHERE author_metadata_status='embedded'").fetchone()[0]
-        result["mp4_gifs"] = self._db.execute(
-            "SELECT COUNT(*) FROM media WHERE media_type='animated_gif' AND lower(path) LIKE '%.mp4'").fetchone()[0]
+    @staticmethod
+    def _file_key(path: str) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
+    def _unique_files(self, rows: list[dict], *, verify_files: bool) -> tuple[list[dict], int]:
+        """A file view, leaving all layout-specific download records intact.
+
+        The UI uses cached sizes while a background rescan checks the folder.
+        Other callers verify present regular files, once per distinct path.
+        Never deduplicate by tweet: two real copies are two files.
+        """
+        def priority(row):
+            return (row["record_source"] in {"saved", "existing"}, row["updated_at"],
+                    row["folder_mode"], row["tweet_id"], row["num"])
+
+        groups = {}
+        for row in rows:
+            if row["path"]:
+                groups.setdefault(self._file_key(row["path"]), []).append(row)
+        present = {}
+        previous_cache = self._folder_cache
+        if verify_files:
+            self._folder_cache = {}
+        try:
+            for key, group in groups.items():
+                # Prefer download metadata to guesses made from an archive or
+                # filename; newer metadata wins when an author changes names.
+                group.sort(key=priority, reverse=True)
+                if verify_files:
+                    try:
+                        path, size, _ = self._file(group[0]["path"])
+                    except (HistoryError, OSError):
+                        continue  # missing, inaccessible or outside authorized roots
+                    if not path or size is None:
+                        continue
+                    key = self._file_key(path)
+                else:
+                    size = next((row["filesize"] for row in group if row["filesize"] is not None), None)
+                    if size is None:
+                        continue
+                if key in present:
+                    present[key][1].extend(group)
+                else:
+                    present[key] = (size, group)
+        finally:
+            self._folder_cache = previous_cache
+        files = []
+        matched = 0
+        for size, group in present.values():
+            matched += len(group)
+            group.sort(key=priority, reverse=True)
+            row = dict(group[0])
+            row["filesize"] = size
+            author = next((item for item in group if item["author"]), None)
+            if author:
+                row["author"], row["author_id"] = author["author"], author["author_id"]
+            posted = next((item for item in group if item["posted_source"] == "metadata" and item["posted_at"]),
+                          next((item for item in group if item["posted_at"]), None))
+            if posted:
+                row["posted_at"], row["posted_source"] = posted["posted_at"], posted["posted_source"]
+            saved = [item["saved_at"] for item in group if item["saved_at"]]
+            row["saved_at"] = min(saved) if saved else None
+            for field in ("metadata_status", "author_metadata_status"):
+                if any(item[field] == "embedded" for item in group):
+                    row[field] = "embedded"
+            files.append(row)
+        return files, matched
+
+    def _file_snapshot(self, *, verify_files: bool) -> tuple[list[dict], list[dict], int]:
+        rows = [dict(row) for row in self._db.execute("SELECT * FROM media")]
+        files, matched = self._unique_files(rows, verify_files=verify_files)
+        return rows, files, matched
+
+    def _summary(self, rows: list[dict], files: list[dict], matched: int) -> dict:
+        dates = [row["posted_at"] for row in rows if row["posted_at"]]
+        counts = {kind: sum(row["media_type"] == kind for row in files) for kind in _TYPES}
+        result = {
+            "files": len(files), "posts": len({row["tweet_id"] for row in rows}),
+            "current_posts": len({row["tweet_id"] for row in files}), "record_count": len(rows),
+            "duplicate_records": matched - len(files), "missing_files": len(rows) - matched,
+            "known_files": len(files), "bytes": sum(row["filesize"] for row in files),
+            "unknown_bytes": sum(row["filesize"] is None for row in rows),
+            "oldest_posted_at": min(dates) if dates else None,
+            "newest_posted_at": max(dates) if dates else None,
+            "estimated_dates": sum(row["posted_source"] == "id_estimate" for row in rows),
+            "counts": counts, **counts,
+            "embedded_sources": sum(row["metadata_status"] == "embedded" for row in files),
+            "embedded_authors": sum(row["author_metadata_status"] == "embedded" for row in files),
+            "mp4_gifs": sum(row["media_type"] == "animated_gif" and row["path"].lower().endswith(".mp4")
+                            for row in files),
+        }
         result["last_run"] = next(iter(self.runs(limit=1)), None)
         result["archivepaths"] = [str(self.account_dir / name) for name in _ARCHIVES.values()
                                   if (self.account_dir / name).is_file() and not (self.account_dir / name).is_symlink()]
+        return result
+
+    @_safe
+    def summary(self, *, verify_files: bool = True) -> dict:
+        return self._summary(*self._file_snapshot(verify_files=verify_files))
+
+    @_safe
+    def overview(self, *, verify_files: bool = True, top: int = 20) -> dict:
+        """Summary and charts share one file snapshot, even during downloads."""
+        rows, files, matched = self._file_snapshot(verify_files=verify_files)
+        result = self._summary(rows, files, matched)
+        result["stats"] = self._statistics(files, top)
         return result
 
     @staticmethod
@@ -916,25 +1009,34 @@ class HistoryStore:
                 "updated_at=excluded.updated_at", rows)
 
     @_safe
-    def statistics(self, top: int = 20) -> dict:
-        """Most saved authors and counts per month for the statistics tab.
+    def statistics(self, top: int = 20, *, verify_files: bool = True) -> dict:
+        """Current files by author/month, plus independent historical Likes.
 
         Months are Korean-time YYYY-MM. 'liked' counts only Likes whose period
         is known (first seen after an earlier complete run), by month seen.
         """
-        authors = [dict(row) for row in self._db.execute(
-            "SELECT MAX(author) AS author,COUNT(*) AS files,COUNT(DISTINCT tweet_id) AS posts,"
-            "MAX(posted_at) AS latest FROM media WHERE author!='' GROUP BY lower(author) "
-            "ORDER BY files DESC,posts DESC,lower(author) LIMIT ?", (top,))]
-        months = {}
-        for name, query in (
-                ("posted", "SELECT substr(posted_at,1,7),COUNT(*) FROM media WHERE posted_at IS NOT NULL GROUP BY 1"),
-                ("saved", "SELECT substr(saved_at,1,7),COUNT(*) FROM media WHERE saved_at IS NOT NULL GROUP BY 1"),
-                ("liked", "SELECT substr(liked_before,1,7),COUNT(*) FROM likes WHERE liked_after IS NOT NULL GROUP BY 1")):
-            months[name] = [(month, count) for month, count in self._db.execute(query)
-                            if isinstance(month, str) and re.fullmatch(r"\d{4}-\d\d", month)]
-            months[name].sort()
-        return {"authors": authors, "months": months}
+        _, files, _ = self._file_snapshot(verify_files=verify_files)
+        return self._statistics(files, top)
+
+    def _statistics(self, files: list[dict], top: int) -> dict:
+        if isinstance(top, bool) or not isinstance(top, int) or top < 0:
+            raise HistoryError(_HISTORY_HELP)
+        grouped = {}
+        for row in files:
+            if row["author"]:
+                grouped.setdefault(row["author"].lower(), []).append(row)
+        authors = [{"author": max(row["author"] for row in group), "files": len(group),
+                    "posts": len({row["tweet_id"] for row in group}),
+                    "latest": max((row["posted_at"] for row in group if row["posted_at"]), default=None)}
+                   for group in grouped.values()]
+        authors.sort(key=lambda row: (-row["files"], -row["posts"], row["author"].lower()))
+        months = {name: sorted(Counter(row[field][:7] for row in files
+                                      if isinstance(row[field], str) and re.fullmatch(r"\d{4}-\d\d", row[field][:7])).items())
+                  for name, field in (("posted", "posted_at"), ("saved", "saved_at"))}
+        months["liked"] = sorted((month, count) for month, count in self._db.execute(
+            "SELECT substr(liked_before,1,7),COUNT(*) FROM likes WHERE liked_after IS NOT NULL GROUP BY 1")
+            if isinstance(month, str) and re.fullmatch(r"\d{4}-\d\d", month))
+        return {"authors": authors[:top], "months": months}
 
     @_safe
     def close(self) -> None:
