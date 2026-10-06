@@ -227,7 +227,7 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
         connection = sqlite3.connect(built)
         try:
             with connection:
-                for table in ("media", "runs", "catalog_meta", "likes", "tweets"):
+                for table in ("media", "runs", "catalog_meta", "likes", "tweets", "missing_choices"):
                     target = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
                     rows = []
                     for source in sources:

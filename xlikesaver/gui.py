@@ -4,7 +4,7 @@ Login and the less common save options open in their own small windows so the
 main screen stays short. Download work runs in a separate worker process.
 """
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import gc
 import json
 import os
@@ -458,7 +458,7 @@ class App:
             self.history_window.refresh()
         else:
             self.history_window = HistoryWindow(self.root, self._history_location, lambda: self.running,
-                                                self._gif_options)
+                                                self._gif_options, self.retry_missing)
         try:
             account, paths = self._history_location()
             self.record_locations[account] = str(paths.output_dir)
@@ -1367,32 +1367,42 @@ class App:
                           max_video_mb=self._video_limit(), separate_accounts=self.separate_accounts.get(),
                           gif_format=GIF_FORMATS[self.gif_format.get()], gif_size=GIF_SIZES[self.gif_size.get()]).validate()
 
-    def start(self):
+    def retry_missing(self, targets) -> bool:
+        """Download chosen missing files again (from the library window)."""
+        if self.relocating or self.running or not targets:
+            return False
+        return self.start(targets=tuple(targets))
+
+    def start(self, targets=()):
         if self._options_editing():
-            return
+            return False
         if self.relocating:
             self._storage_action = "start"
-            return
+            return False
         if self.running:
-            return
+            return False
         if self.history_window is not None and self.history_window.winfo_exists() and self.history_window.metadata_active:
             dialogs.showinfo("기록 화면 작업 중", "기록 화면의 출처·작성자 기록이나 GIF 변환을 마치거나 중단한 뒤 저장을 시작해 주세요.", parent=self.root)
-            return
+            return False
         if AUTH_MODES[self.auth.get()] == "managed" and self.token.get():
             if not self.connect_token():
-                return
+                return False
         if AUTH_MODES[self.auth.get()] == "managed" and not has_session():
             self.status.set("먼저 X 로그인을 연결해 주세요")
             self.status_detail.set("열린 창의 안내대로 auth_token을 붙여 넣으면 됩니다.")
             self.show_connect("저장하려면 먼저 X 로그인을 연결해야 합니다.")
-            return
+            return False
         try:
             options = self._validated_options()
+            if targets:
+                options = replace(options, targets=tuple(targets)).validate()
         except (ValueError, OSError) as exc:
             dialogs.showerror("입력 확인", str(exc), parent=self.root)
-            return
-        if not self._ensure_storage("start"):
-            return
+            return False
+        # After moving records to a changed folder only a normal save resumes
+        # by itself; chosen files are picked again from the refreshed list.
+        if not self._ensure_storage(None if targets else "start"):
+            return False
         self.record_locations[options.account] = options.output_dir
         self.account.set(options.account)
         self.folder.set(options.output_dir)
@@ -1402,19 +1412,27 @@ class App:
         self.running = True
         self.stopping = False
         self._update_counts()
-        self.status.set("좋아요 목록을 확인하고 있습니다…")
-        self.status_detail.set("목록은 10초에 한 번씩 천천히 요청합니다. 전체 Like 수와 완료율은 미리 알 수 없습니다.")
+        if targets:
+            self.status.set("사라진 파일을 다시 받고 있습니다…")
+            self.status_detail.set("트윗마다 X 요청을 1번씩 10초 간격으로 보냅니다.")
+        else:
+            self.status.set("좋아요 목록을 확인하고 있습니다…")
+            self.status_detail.set("목록은 10초에 한 번씩 천천히 요청합니다. 전체 Like 수와 완료율은 미리 알 수 없습니다.")
         self.progress_summary.set("")
         self.progress_details.set("")
         self.progress.configure(mode="indeterminate", value=0)
         self.progress.start(12)
         self._set_running(True)
-        self._log("새 작업 시작 · " + ("시험 저장(새 파일 20개)" if options.photo_limit else self.scan_mode.get()) + " · " + self.folder_mode.get())
+        if targets:
+            self._log(f"새 작업 시작 · 사라진 파일 다시 받기 {len(options.targets):,}개 · " + self.folder_mode.get())
+        else:
+            self._log("새 작업 시작 · " + ("시험 저장(새 파일 20개)" if options.photo_limit else self.scan_mode.get()) + " · " + self.folder_mode.get())
         try:
             self._save_settings(options)
         except OSError:
             self._log("설정을 기억하지 못했지만 다운로드는 계속 진행합니다.")
         threading.Thread(target=self._run_process, args=(options,), daemon=True).start()
+        return True
 
     def _set_running(self, value):
         if value:
@@ -1548,7 +1566,8 @@ class App:
                 message = str(event.get("message", "작업이 종료되었습니다."))
                 headline = self.FINISH_HEADLINES.get(self.final_status, message)
                 if self.final_status == "finished":
-                    headline += f" · 새로 저장 {self.saved:,}개"
+                    headline += (f" · 다시 받은 파일 {self.saved:,}개" if event.get("scan_mode") == "retry"
+                                 else f" · 새로 저장 {self.saved:,}개")
                 self.status.set(headline)
                 self.status_detail.set(message if headline != message else "")
                 self._log(message)

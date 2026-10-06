@@ -597,6 +597,15 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
         for row in _rows(source, "tweets"):
             target.execute("INSERT OR IGNORE INTO tweets(tweet_id,content,hashtags,updated_at) VALUES (?,?,?,?)",
                            (row["tweet_id"], row["content"], row["hashtags"], row["updated_at"]))
+    if "missing_choices" in source_tables:
+        # Keep or download again: the later choice wins across PCs.
+        _prepare_table(target, source, "missing_choices")
+        for row in _rows(source, "missing_choices"):
+            target.execute(
+                "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(tweet_id,num,media_type) DO UPDATE SET ignored=excluded.ignored,updated_at=excluded.updated_at "
+                "WHERE excluded.updated_at>missing_choices.updated_at",
+                (row["tweet_id"], row["num"], row["media_type"], row["ignored"], row["updated_at"]))
     if "catalog_meta" in source_tables:
         _prepare_table(target, source, "catalog_meta")
         for key, value in source.execute("SELECT key,value FROM catalog_meta WHERE key != 'allowed_media_roots'"):

@@ -100,6 +100,11 @@ def make_catalog(temporary, account="demo_account", count=168):
                 store._db.execute("INSERT INTO likes(tweet_id,like_key,liked_after,liked_before) VALUES (?,?,?,?)",
                                   (tweet, float(count - index), saved.replace("22:10", "21:10"), saved))
         store.record_tweets(texts)
+        # A few saved photos deleted afterwards; one was hidden on purpose.
+        gone = [index for index in range(count) if index % 9 != 4 and index % 13 != 5][3:10]
+        for index in gone:
+            (output / f"{2030000000000000000 + index}_1.jpg").unlink()
+        store.set_missing_ignored([(str(2030000000000000000 + gone[-1]), 1, "photo")], True)
         for index in range(112):
             run = store.start_run("flat", scan_mode="quick")
             status = "error" if index % 19 == 0 else "stopped" if index % 11 == 0 else "finished"
@@ -451,6 +456,16 @@ class CaptureSession:
         history.tabs.select(2)
         self.capture(history, f"library-stats-{selected}", "1200x860")
         self.capture(history, f"library-stats-compact-{selected}", "820x700")
+        history.tabs.select(3)
+        history.missing_tree.selection_set(history.missing_tree.get_children()[:2])
+        history._update_missing_actions()
+        self.capture(history, f"library-missing-{selected}", "1200x860")
+        self.capture(history, f"library-missing-compact-{selected}", "820x700")
+        history.show_ignored.set(True)
+        history._show_missing()
+        self.capture(history, f"library-missing-hidden-{selected}", "1200x860")
+        history.show_ignored.set(False)
+        history._show_missing()
         history.tabs.select(0)
         history.show_tools()
         self.capture(history._tools_window, f"library-tools-{selected}")

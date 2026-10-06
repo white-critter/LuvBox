@@ -159,3 +159,13 @@ GIF 변환/동영상 섬네일에 쓰는 `tools/ffmpeg/runtime/ffmpeg.exe`는 �
 `tools/ui_qa.py`는 임시 앱 데이터, 예시 미디어와 기록을 만들어 화면을 캡처합니다. X 요청·로그인 저장·스케줄러 변경·다운로드를 막고 Tk 콜백 오류와 요청 시도를 검사합니다. 실제 계정 정보는 사용하지 않습니다. 기본 실행은 라이트·다크와 작은 창을 캡처하고 contact sheet와 manifest를 남깁니다. `--scaling 2 --output .test-output/ui2/large`로 큰 글꼴 배치도 확인할 수 있습니다. 전체 회귀 검사와 배포본 자체 점검 결과는 [2.0.0 검증 기록](review-2.0.0.md)에 정리합니다.
 
 2.0.1부터 최초 창 크기와 기록 창의 실제 최대화 화면도 캡처합니다. `--screen-size 1366x768`은 QA fixture의 화면 크기만 모의하며 모니터 설정을 바꾸지 않습니다. [`2.0.1 검증 기록`](review-2.0.1.md)을 참고하세요.
+
+## 2.1.0 사라진 파일
+
+`HistoryStore._missing`은 미디어 식별자(트윗·번호·종류)마다 현재 파일이 하나도 없는 것을 모읍니다. 저장 방식이 달라 같은 미디어에 기록이 여럿이어도 한 번만 나오고, 한 기록이라도 파일이 있으면 사라진 것이 아닙니다. `summary()`의 `missing_files`도 이 기준이며 숨긴 것은 `ignored_missing`으로 따로 셉니다(기존 행 기준 값은 `unmatched_records`). `overview()`는 같은 스냅숏에서 `missing` 목록을 함께 돌려줍니다(최대 5,000개).
+
+`missing_choices(tweet_id, num, media_type, ignored, updated_at)`는 ‘다시 받지 않기’ 선택입니다. 숨김 해제도 행으로 남겨, 다른 PC 사본과 합칠 때(`storage._merge_history`) `updated_at`이 늦은 선택이 이깁니다. 기록 복구(`rebuild_history`)도 이 표를 살립니다. worker는 시작할 때 `ignored_media()`를 읽어 저장 방식과 관계없이 그 미디어를 건너뜁니다(중복 방지 기록이 없는 다른 방식의 archive에서도).
+
+다시 받기는 `JobOptions.targets`(history.`archive_key` 형식, 최대 2,000개)로 실행합니다. worker는 Like 목록 대신 트윗마다 `https://x.com/i/web/status/<id>`를 `tweet-endpoint: restid`(TweetResultByRestId 1회)로 엽니다. 트윗을 처리하기 직전에 그 트윗의 고른 키만 현재 방식 archive에서 지우고(예전 `gif_` 표기·접두어 없는 표기 포함), 끝나면 받지 못한 항목의 원래 항목을 다시 넣습니다. 중단·요청 한도·오류에도 같습니다. 고르지 않은 같은 트윗의 다른 미디어는 건드리지 않고, 동영상·GIF 저장을 꺼 두었어도 고른 것은 받습니다(용량 제한은 적용). 실행은 `scan_mode='retry'`로 기록하고 `quick_scan_readiness`와 `LikeOrder`의 이전 완료 실행 판단에서 제외하며, Like 순서도 기록하지 않습니다. 트윗을 볼 수 없거나(디렉터리 메타데이터 없음) 미디어를 받지 못한 경우는 오류 대신 트윗 주소와 함께 안내하고 다음 트윗으로 넘어갑니다. 요청 한도·인증·저장소·기록 오류(`_FATAL_TERMS`)는 전체를 멈춥니다. 숨겼던 파일을 다시 받으면 숨김을 풉니다.
+
+라이브러리 탭의 숨은 페이지는 마지막 너비를 유지하므로, 미리보기·통계 배치는 숨은 페이지일 때 노트북 너비(`_page_width`)로 정합니다. 좁은 창에서 쌓인 통계 페이지가 다른 탭을 길게 만들던 문제를 막습니다.

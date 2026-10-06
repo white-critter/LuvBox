@@ -16,7 +16,7 @@ import sqlite3
 import stat
 import tempfile
 import time
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from datetime import datetime as _Datetime
@@ -39,6 +39,10 @@ _ROUTES = {"i", "home", "explore", "search", "settings", "notifications",
 _AUTH_MODES = {"file", "managed"}
 _FOLDER_MODES = {"author", "date", "flat"}
 _SCAN_MODES = {"full", "quick"}
+# Missing files chosen for downloading again, per run. Each tweet costs one
+# paced X request, so a larger choice is better split across runs.
+RETRY_LIMIT = 2000
+_RETRY_KEY = re.compile(r"([0-9]{1,20})_(?:(video|animated_gif)_)?([0-9]{1,5})\Z")
 # A quick scan ends after this many already-saved files in a row. Likes are
 # listed newest-like first, so this is the point where the previous complete
 # run left off. Unsaved files never count toward the streak.
@@ -243,6 +247,9 @@ class JobOptions:
     # Animated GIF tweets: convert to .gif, or keep X's original MP4.
     gif_format: str = "gif"
     gif_size: str = "original"
+    # Archive keys (history.archive_key) of missing files to download again by
+    # tweet instead of walking the Like list. Empty for a normal save.
+    targets: tuple = ()
 
     @property
     def media_signature(self) -> str:
@@ -271,6 +278,12 @@ class JobOptions:
             raise ValueError("동영상·GIF 크기 한도는 0 이상의 정수 MB로 입력해 주세요. 0은 제한 없음입니다.")
         if isinstance(self.photo_limit, bool) or not isinstance(self.photo_limit, int) or self.photo_limit < 0:
             raise ValueError("파일 저장 한도는 0 이상의 정수여야 합니다.")
+        if not isinstance(self.targets, (list, tuple)):
+            raise ValueError("다시 받을 파일 목록을 확인해 주세요.")
+        targets = tuple(dict.fromkeys(self.targets))
+        if len(targets) > RETRY_LIMIT or not all(isinstance(key, str) and _RETRY_KEY.fullmatch(key) and
+                                                 1 <= int(_RETRY_KEY.fullmatch(key)[3]) <= 10000 for key in targets):
+            raise ValueError(f"다시 받을 파일은 한 번에 {RETRY_LIMIT:,}개까지 고를 수 있습니다.")
         if not self.output_dir.strip():
             raise ValueError("미디어를 저장할 폴더를 선택해 주세요.")
         try:
@@ -291,7 +304,8 @@ class JobOptions:
             cookie_path = str(path)
         return replace(self, account=account, output_dir=str(output),
                        auth_mode=auth_mode, cookies_file=cookie_path,
-                       folder_mode=folder_mode, scan_mode=scan_mode)
+                       folder_mode=folder_mode, scan_mode=scan_mode, targets=targets,
+                       photo_limit=0 if targets else self.photo_limit)
 
 
 def _auth_help(mode: str) -> str:
@@ -349,6 +363,10 @@ def _safe_diagnostic(message: str, mode: str) -> str:
     return "X 목록을 읽는 중 문제가 발생했습니다. 로그인 상태를 확인하고 다시 시도해 주세요."
 
 
+# Worker aborts that end a run regardless of which post was being handled.
+_FATAL_TERMS = ("history store unavailable", "unsafe", "download archive unavailable")
+
+
 class _GalleryLogHandler(logging.Handler):
     def __init__(self, emit: EventSink, mode: str):
         super().__init__(logging.INFO)
@@ -361,6 +379,10 @@ class _GalleryLogHandler(logging.Handler):
         # After the user's stop, gallery-dl reports the interrupted request or
         # download as a failure ("None" text). Those are not real problems.
         self.stopping = False
+        # Re-downloading by tweet reports each unavailable tweet itself; only
+        # problems that must end the whole run are logged then.
+        self.per_tweet = False
+        self.fatal = False
 
     def emit(self, record: logging.LogRecord) -> None:
         # INFO can contain URLs, arbitrary server text or other user metadata.
@@ -380,7 +402,12 @@ class _GalleryLogHandler(logging.Handler):
             level = "error" if record.levelno >= logging.ERROR else "warning"
             message = _safe_diagnostic(raw, self.mode)
             priority = (3 if _RATE_TERMS.search(text) or _STORAGE_TERMS.search(text) or _AUTH_TERMS.search(text)
+                        or any(term in text for term in _FATAL_TERMS)
                         else 1 if record.levelno >= logging.ERROR else 0)
+            if priority == 3:
+                self.fatal = True
+            elif self.per_tweet:
+                return
         if priority and priority >= self._error_priority:
             self.last_error = message
             self._error_priority = priority
@@ -390,6 +417,65 @@ class _GalleryLogHandler(logging.Handler):
             details = (_media_details(media) if record.name in {"download", "http"} and
                        isinstance(media, dict) and media.get("tweet_id") else {})
             self._emit({"type": "log", "level": level, "message": message, **details})
+
+
+def _retry_groups(keys) -> list[tuple[str, list[str]]]:
+    """Chosen archive keys grouped by tweet, in the order they were chosen."""
+    groups = {}
+    for key in keys:
+        groups.setdefault(_RETRY_KEY.fullmatch(key)[1], []).append(key)
+    return list(groups.items())
+
+
+def _key_identity(key: str) -> tuple[str, int, str]:
+    match = _RETRY_KEY.fullmatch(key)
+    return match[1], int(match[3]), match[2] or "photo"
+
+
+def _entry_key(entry: str) -> str:
+    """An archive entry's key in the current spelling (no prefix, 'animated_gif')."""
+    key = entry.removeprefix("twitter")
+    return key.replace("_gif_", "_animated_gif_") if "_animated_gif_" not in key else key
+
+
+def _archive_entries(archive: Path, keys) -> list[str]:
+    """The archive's entries for these media, in every spelling it has used."""
+    candidates = []
+    for key in keys:
+        spellings = [key] + ([key.replace("_animated_gif_", "_gif_")] if "_animated_gif_" in key else [])
+        candidates.extend(prefix + spelling for spelling in spellings for prefix in ("twitter", ""))
+    if not archive.is_file() or not candidates:
+        return []
+    with closing(sqlite3.connect(archive, timeout=5)) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='archive'").fetchone():
+            return []
+        marks = ",".join("?" for _ in candidates)
+        return [row[0] for row in db.execute("SELECT entry FROM archive WHERE entry IN (" + marks + ")", candidates)]
+
+
+def _set_archive_entries(archive: Path, entries, *, present: bool) -> None:
+    if not entries:
+        return
+    with closing(sqlite3.connect(archive, timeout=5)) as db, db:
+        statement = ("INSERT OR IGNORE INTO archive(entry) VALUES (?)" if present
+                     else "DELETE FROM archive WHERE entry=?")
+        db.executemany(statement, [(entry,) for entry in entries])
+
+
+def _retry_message(saved: int, found: int, unavailable: int, absent: int, limited: int = 0) -> str:
+    parts = [f"사라진 파일 다시 받기를 마쳤습니다 · 받은 파일 {saved:,}개"]
+    if found:
+        parts.append(f"제자리에 있던 파일 {found:,}개")
+    if unavailable:
+        parts.append(f"볼 수 없는 트윗 {unavailable:,}개(삭제·비공개·제한)")
+    if absent:
+        parts.append(f"받지 못한 미디어 {absent:,}개")
+    if limited:
+        parts.append(f"용량 제한으로 건너뛴 파일 {limited:,}개")
+    text = " · ".join(parts) + "."
+    if unavailable or absent or limited:
+        text += " 받지 못한 파일은 ‘사라진 파일’ 목록에 남아 있으며, 필요 없으면 ‘다시 받지 않기’로 숨길 수 있습니다."
+    return text
 
 
 def _configure_gallery(options: JobOptions, archive_path: Path, account_folder: str) -> None:
@@ -412,7 +498,11 @@ def _configure_gallery(options: JobOptions, archive_path: Path, account_folder: 
         "archive-event": ["file", "skip"],
         "archive-mode": "disk", "archive-reuse": False,
         "cookies-update": False, "netrc": False,
-        "videos": options.include_videos or options.include_gifs, "previews": False, "cards": False,
+        # Chosen missing videos are fetched even when new ones are not saved.
+        "videos": options.include_videos or options.include_gifs or bool(options.targets),
+        "previews": False, "cards": False,
+        # One TweetResultByRestId request per tweet, without its conversation.
+        "tweet-endpoint": "restid",
         "quoted": False, "quoted-expand": False, "expand": False,
         "articles": False, "twitpic": False, "ads": False,
         "retweets": True, "replies": True,
@@ -462,6 +552,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     history = None
     run_id = None
     likes = None
+    targets = frozenset()
+    ignored = set()
+    recovered = {}
+    size_limited = set()
+    unavailable_tweets = absent_files = 0
     tweet_texts = []
     visited_ids = set()
     last_tweet_id = last_posted_at = ""
@@ -720,8 +815,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             media_type = kwdict.get("type")
             if media_type not in {"photo", "video", "animated_gif"}:
                 return
-            if ((media_type == "video" and not normalized.include_videos) or
-                    (media_type == "animated_gif" and not normalized.include_gifs)):
+            if not targets and ((media_type == "video" and not normalized.include_videos) or
+                                (media_type == "animated_gif" and not normalized.include_gifs)):
                 return
             if media_type != "photo" and not urlsplit(url).path.lower().endswith(".mp4"):
                 return
@@ -742,6 +837,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 kwdict["extension"] = "mp4"
                 kwdict["_xlikesaver_filename_part"] = f"{kind}_{kwdict['num']}"
                 kwdict["_xlikesaver_archive_key"] = f"{tweet_id}_{media_type}_{kwdict['num']}"
+            if targets:
+                # Only the chosen files; the tweet's other media are untouched.
+                if kwdict["_xlikesaver_archive_key"] not in targets:
+                    return
+            elif (tweet_id, kwdict["num"], media_type) in ignored:
+                # The user deleted this file on purpose, in whichever layout.
+                return
             self.current_media = kwdict
             self.last_output = None
             self.progress_started = self.progress_last = None
@@ -773,6 +875,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 super().handle_url(url, kwdict)
             except SizeLimit:
                 size_skipped += 1
+                if targets:
+                    size_limited.add(kwdict["_xlikesaver_archive_key"])
                 if self.pathfmt.temppath:
                     Path(self.pathfmt.temppath).unlink(missing_ok=True)
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
@@ -818,7 +922,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             previous = history.media_record(normalized.folder_mode, kwdict)
                         except HistoryError:
                             raise exception.AbortExtraction("history store unavailable") from None
-                        known_path = (previous.get("path") or "") if previous is not None else media_path
+                        # A chosen missing file may already be back at its
+                        # place; the existence check below still applies.
+                        known_path = ((previous.get("path") or (media_path if targets else ""))
+                                      if previous is not None else media_path)
                         media_path = ""
                         if known_path:
                             candidate = Path(known_path)
@@ -845,6 +952,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             history.record_media(normalized.folder_mode, kwdict, media_path, status=media_status)
                         except HistoryError:
                             raise exception.AbortExtraction("history store unavailable") from None
+                        if targets:
+                            recovered[kwdict["_xlikesaver_archive_key"]] = media_status
                     if media_status == "saved":
                         payload_size = self.progress_bytes if media_type == "animated_gif" else original_size
                         self.progress(payload_size, self.progress_total, force=True, final=True)
@@ -881,7 +990,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if isinstance(kwdict.get("content"), str):
                     tweet_texts.append((last_tweet_id, kwdict["content"], kwdict.get("hashtags") or ()))
                 try:
-                    likes.visit(last_tweet_id)
+                    if likes is not None:
+                        likes.visit(last_tweet_id)
                     if len(tweet_texts) >= 50:
                         flush_tweet_texts()
                 except HistoryError:
@@ -1148,8 +1258,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             previous_output_guards.append(previous_guard)
         history.import_legacy()
         history.recover_interrupted_runs()
+        targets = frozenset(normalized.targets)
+        ignored = history.ignored_media()
         scan_note = ""
-        if normalized.scan_mode == "quick":
+        if targets:
+            scan_note = (f"사라진 파일 {len(targets):,}개(트윗 {len(_retry_groups(normalized.targets)):,}개)를 다시 받습니다. "
+                         "Like 목록 대신 트윗마다 X 요청을 1번씩 보냅니다.")
+        elif normalized.scan_mode == "quick":
             readiness = history.quick_scan_readiness(normalized.folder_mode, normalized.media_signature)
             quick_scan = readiness == "ready"
             scan_note = {
@@ -1157,9 +1272,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 "settings-changed": "동영상·GIF·용량 제한 설정이 이전 확인 때와 달라 이번에는 전체 목록을 확인합니다. 다음 실행부터 다시 빠르게 확인합니다.",
             }.get(readiness, "이전 실행이 끝까지 확인되지 않았거나(첫 실행·중단·오류·시험 저장) 이번 방식의 기록이 없어 전체 목록을 확인합니다. "
                              "다음 실행부터 빠르게 확인합니다.")
-        run_id = history.start_run(normalized.folder_mode, scan_mode="quick" if quick_scan else "full",
+        run_id = history.start_run(normalized.folder_mode,
+                                   scan_mode="retry" if targets else "quick" if quick_scan else "full",
                                    media_signature=normalized.media_signature)
-        likes = history.like_order(run_id)
+        # Only walking the Like list tells where a Like belongs in its order.
+        likes = None if targets else history.like_order(run_id)
         metadata_available = available()
         # Preserve the original author archive so existing installations resume.
         # Other layouts need their own record, otherwise switching folders would
@@ -1174,10 +1291,51 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         emit({"type": "log", "level": "info", "message": f"X 목록 요청은 최소 {API_INTERVAL:g}초, 미디어 요청은 최소 {MEDIA_INTERVAL:g}초 간격으로 보냅니다. 남은 요청 한도가 5회 이하이거나 요청 한도·계정 인증 제한을 만나면 중단합니다."})
         if scan_note:
             emit({"type": "log", "level": "info", "message": scan_note})
-        active_job = PhotoJob(f"https://x.com/{normalized.account}/likes")
         # One resident ExifTool for the run; the availability check above stays the only one.
         with persistent() if metadata_available else nullcontext():
-            exit_code = active_job.run()
+            if targets:
+                handler.per_tweet = True
+                exit_code = 0
+                for tweet_id, keys in _retry_groups(normalized.targets):
+                    check_stop()
+                    # Release just this tweet's archive entries, so a stop or an
+                    # unavailable tweet leaves every other choice as it was.
+                    entries = _archive_entries(archive_path, keys)
+                    _set_archive_entries(archive_path, entries, present=False)
+                    active_job = PhotoJob(f"https://x.com/i/web/status/{tweet_id}")
+                    try:
+                        active_job.run()
+                    finally:
+                        _set_archive_entries(archive_path, [entry for entry in entries
+                                                            if _entry_key(entry) not in recovered], present=True)
+                        session = getattr(active_job.extractor, "session", None)
+                        if session is not None:
+                            session.cookies.clear()
+                            session.close()
+                    if guard.failure or handler.fatal or handler.rate_limited:
+                        exit_code = 1
+                        break
+                    # A stop while this tweet was handled is not its outcome.
+                    check_stop()
+                    # Files over the size limit are reported as size-skipped.
+                    left = [key for key in keys if key not in recovered and key not in size_limited]
+                    if not left:
+                        continue
+                    if tweet_id in visited_ids:
+                        absent_files += len(left)
+                        notice = "트윗에서 이 미디어를 찾지 못했거나 받지 못했습니다."
+                    else:
+                        unavailable_tweets += 1
+                        notice = "트윗을 볼 수 없어(삭제·비공개·제한) 다시 받지 못했습니다."
+                    # The address lets the user check the tweet in a browser.
+                    emit({"type": "log", "level": "info", "message": f"{notice} https://x.com/i/web/status/{tweet_id}"})
+                # A hidden file the user chose to download again is back.
+                restored = [identity for identity in map(_key_identity, recovered) if identity in ignored]
+                if restored:
+                    history.set_missing_ignored(restored, False)
+            else:
+                active_job = PhotoJob(f"https://x.com/{normalized.account}/likes")
+                exit_code = active_job.run()
         if handler.rate_limited and not guard.failure:
             guard.record_limit()
         if guard.failure:
@@ -1188,6 +1346,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             message = "저장을 중단했습니다. 다시 실행하면 저장한 파일은 건너뜁니다."
         elif exit_code:
             message = guard.failure or handler.last_error or "미디어를 모두 저장하지 못했습니다. 로그인과 저장 폴더를 확인한 뒤 다시 실행해 주세요."
+        elif targets:
+            status = "finished"
+            message = _retry_message(saved, sum(value == "existing" for value in recovered.values()),
+                                     unavailable_tweets, absent_files, size_skipped)
         elif stop_reason == "limit":
             status = "finished"
             message = (f"테스트 파일 {saved}개 저장을 마쳤습니다. 저장한 파일 기록은 유지됩니다. "
@@ -1293,5 +1455,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
           "size_skipped": size_skipped, "metadata_failed": metadata_failed, "author_deferred": author_deferred,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,
           "last_posted_at": last_posted_at,
-          "scan_mode": "quick" if quick_scan else "full", "retry_at": guard.retry_at if guard is not None else "", "message": message})
+          "scan_mode": "retry" if targets else "quick" if quick_scan else "full",
+          "recovered": len(recovered), "unavailable_tweets": unavailable_tweets, "absent_files": absent_files,
+          "retry_at": guard.retry_at if guard is not None else "", "message": message})
     return exit_code

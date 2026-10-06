@@ -186,11 +186,26 @@ def main() -> int:
                     assert totals["files"] == 1 and totals["record_count"] == 2
                     assert totals["photo"] == 1 and totals["bytes"] == target.stat().st_size
                     assert totals["stats"]["authors"][0]["files"] == 1
+                    # A deleted file is listed once, can stay deleted, and is
+                    # requested again only by its archive key.
+                    assert totals["missing_files"] == 0 and totals["missing"] == []
+                    gone = relocated.media_dir / "200_1.jpg"
+                    gone.write_bytes(b"deleted later")
+                    store.record_media("flat", {"tweet_id": "200", "num": 1, "type": "photo"}, gone)
+                    gone.unlink()
+                    store.import_legacy(refresh=True)
+                    [missing] = store.missing_media()
+                    assert missing["archive_key"] == "200_1" and store.summary()["missing_files"] == 1
+                    store.set_missing_ignored([("200", 1, "photo")], True)
+                    assert store.summary()["ignored_missing"] == 1 and store.ignored_media() == {("200", 1, "photo")}
+                    from xlikesaver.core import JobOptions
+                    retry = JobOptions("example", folder, targets=["200_1", "200_1"]).validate()
+                    assert retry.targets == ("200_1",)
                     assert charts.bins([("2026-01", 1), ("2026-03", 2)])[0][1] == ("2026-02", 0)
                     assert gallery.TILE == (150, 112)
                     # Damaged-database salvage reads the catalog page by page.
                     from xlikesaver.recovery import salvage
-                    assert len(salvage(store.path)["media"]["rows"]) == 2
+                    assert len(salvage(store.path)["media"]["rows"]) == 3
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -215,6 +230,7 @@ def main() -> int:
                       "dialogs": "themed", "like_order": "recorded-and-sorted", "tweet_text": "searchable",
                       "statistics": "authors-and-months", "catalog_recovery": "salvage-verified",
                       "records": "local-with-folder-snapshot", "progress": "rounded-borderless",
+                      "missing_files": "listed-keep-deleted-or-retry-by-tweet",
                       "workspace": "sidebar-scrollable-dashboard-three-settings-tabs",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),

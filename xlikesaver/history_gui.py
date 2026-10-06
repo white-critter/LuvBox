@@ -43,6 +43,10 @@ MONTH_NOTES = {
 GIF_SIZE_LABELS = {"original": "원본 크기", "720": "최대 720px · 초당 15장", "480": "최대 480px · 초당 12장"}
 NO_SELECTION = "파일을 선택하면 미리보기와 출처를 보여 드립니다."
 NO_RUN_SELECTION = "실행을 고르면 어떻게 끝났는지 볼 수 있습니다."
+SCAN_LABELS = {"quick": "새 Like만 빠르게 확인", "full": "전체 목록 확인", "retry": "사라진 파일 다시 받기"}
+MISSING_HELP = ("저장한 뒤 지워진 파일입니다. 일부러 지운 파일은 ‘다시 받지 않기’로 숨기면 앞으로 저장할 때도 받지 않습니다. "
+                "실수로 사라진 파일은 골라서 ‘다시 받기’를 누르세요. 트윗마다 X 요청을 1번씩 10초 간격으로 보냅니다. "
+                "폴더 밖으로 옮긴 파일도 여기에 나오니 확인한 뒤 고르세요.")
 
 
 def format_bytes(value: int | float | None) -> str:
@@ -113,7 +117,7 @@ def format_day(value: str | None) -> str:
 
 class HistoryWindow(tk.Toplevel):
     def __init__(self, parent, get_location, is_downloading=lambda: False,
-                 get_gif_options=lambda: ("original", 200)):
+                 get_gif_options=lambda: ("original", 200), retry_missing=None):
         super().__init__(parent)
         theme.apply_style(self)
         self.title("XlikeSaver · 라이브러리")
@@ -129,6 +133,8 @@ class HistoryWindow(tk.Toplevel):
         self.is_downloading = is_downloading
         # (GIF size preset, media size limit in MB) chosen in save options.
         self.get_gif_options = get_gif_options
+        # Starts the main window's download of chosen missing files.
+        self.retry_missing = retry_missing
         self.page = 0
         self.displayed_page = 0
         self.has_next_page = False
@@ -193,6 +199,11 @@ class HistoryWindow(tk.Toplevel):
         self.run_page_input = tk.StringVar(self, value="1")
         self.preview_note = tk.StringVar(self, value="파일을 고르면 미리보기가 나옵니다.")
         self.media_counts = tk.StringVar(self)
+        self.missing_items = []
+        self.missing_rows = {}
+        self.missing_text = tk.StringVar(self)
+        self.missing_note = tk.StringVar(self)
+        self.show_ignored = tk.BooleanVar(self, value=False)
         self._build()
         self.wrapping_labels = []
 
@@ -253,10 +264,13 @@ class HistoryWindow(tk.Toplevel):
         files = ttk.Frame(tabs)
         runs = ttk.Frame(tabs)
         stats = self.stats_view = ttk.Frame(tabs)
+        missing = self.missing_view = ttk.Frame(tabs)
         tabs.add(files, text="파일")
         tabs.add(runs, text="실행 기록")
         tabs.add(stats, text="통계")
+        tabs.add(missing, text="사라진 파일")
         tabs.bind("<<NotebookTabChanged>>", self._reset_scroll, add="+")
+        tabs.bind("<<NotebookTabChanged>>", self._queue_pager_layout, add="+")
         self._file_page_parent = files
         files.columnconfigure(0, weight=1)
         files.rowconfigure(1, weight=1)
@@ -466,8 +480,52 @@ class HistoryWindow(tk.Toplevel):
                                     justify="left")
         self.stats_note.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         stats.bind("<Configure>", self._queue_pager_layout)
+        self._build_missing(missing)
         ttk.Label(body, textvariable=self.status_text, style="Muted.TLabel", wraplength=1000,
                   justify="left").grid(row=5, column=0, sticky="w", pady=(12, 0))
+
+    def _build_missing(self, page):
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(2, weight=1)
+        ttk.Label(page, text=MISSING_HELP, style="Muted.TLabel", wraplength=1000,
+                  justify="left").grid(row=0, column=0, sticky="ew")
+        bar = ttk.Frame(page)
+        bar.grid(row=1, column=0, sticky="ew", pady=(10, 10))
+        ttk.Label(bar, textvariable=self.missing_text, style="Muted.TLabel").pack(side="left")
+        ttk.Checkbutton(bar, text="숨긴 파일도 보기", variable=self.show_ignored,
+                        command=self._show_missing).pack(side="right")
+        columns = ("posted", "kind", "author", "filename", "saved", "text")
+        self.missing_tree = tree = self._table(page, columns, row=2)
+        tree.configure(selectmode="extended")
+        for key, title, width in zip(columns, ("트윗 게시일", "종류", "작성자", "파일명", "저장한 때", "내용"),
+                                     (140, 90, 130, 210, 140, 320)):
+            tree.heading(key, text=title)
+            tree.column(key, width=width, minwidth=60, stretch=key == "text")
+        tree.bind("<<TreeviewSelect>>", lambda _: self._update_missing_actions())
+        tree.bind("<Double-1>", lambda _: self.open_missing_tweet())
+        tree.bind("<Return>", lambda _: self.open_missing_tweet())
+        tree.bind("<Control-a>", self.select_all_missing)
+        self.missing_message = ttk.Label(tree.master, textvariable=self.missing_note, style="CardMuted.TLabel",
+                                         justify="center", font=theme.BODY)
+        actions = ttk.Frame(page)
+        actions.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        self.missing_open_button = ttk.Button(actions, text="트윗 열기", style="Compact.TButton",
+                                              command=self.open_missing_tweet)
+        self.missing_open_button.pack(side="left")
+        self.missing_all_button = ttk.Button(actions, text="모두 선택", style="Compact.TButton",
+                                             command=self.select_all_missing)
+        self.missing_all_button.pack(side="left", padx=(8, 0))
+        self.retry_button = ttk.Button(actions, text="다시 받기", style="CompactPrimary.TButton",
+                                       command=self.retry_missing_files)
+        self.retry_button.pack(side="right")
+        self.ignore_button = ttk.Button(actions, text="다시 받지 않기", style="Compact.TButton",
+                                        command=lambda: self.choose_missing(True))
+        self.ignore_button.pack(side="right", padx=(0, 8))
+        self.unignore_button = ttk.Button(actions, text="숨김 해제", style="Compact.TButton",
+                                          command=lambda: self.choose_missing(False))
+        self.unignore_button.pack(side="right", padx=(0, 8))
+        page.bind("<Configure>", self._queue_pager_layout)
+        self._show_missing()
 
     def toggle_filters(self):
         self._filter_open = not self._filter_open
@@ -602,8 +660,17 @@ class HistoryWindow(tk.Toplevel):
                                 sticky="e", pady=(6 if jump_folded else 0, 0),
                                 padx=(0 if jump_folded else 12, 0))
 
+    def _page_width(self, widget):
+        """A widget's width, or the tabs' width while its page is hidden.
+
+        A hidden page keeps the width it last had, while the notebook asks
+        for its tallest page. Laying it out for the current width keeps a
+        narrow, stacked page from making every other tab scroll.
+        """
+        return widget.winfo_width() if widget.winfo_ismapped() else self.tabs.winfo_width()
+
     def _layout_preview(self):
-        width = self.file_browser.winfo_width()
+        width = self._page_width(self.file_browser)
         if width <= 1:
             return
         core = sum(self._column_need(key) for key in self._file_columns if key not in self.OPTIONAL_COLUMNS)
@@ -646,7 +713,7 @@ class HistoryWindow(tk.Toplevel):
             self.preview_note_label.configure(wraplength=width)
 
     def _layout_stats(self):
-        width = self.stats_view.winfo_width()
+        width = self._page_width(self.stats_view)
         if width <= 1:
             return
         stacked = width * 0.5 < self._ranking_need + 12
@@ -800,6 +867,7 @@ class HistoryWindow(tk.Toplevel):
         mp4_gifs = int(self.current_summary.get("mp4_gifs", 0) or 0)
         self.convert_button.configure(text=f"MP4 GIF {mp4_gifs:,}개를 GIF로" if mp4_gifs else "MP4 GIF를 GIF로",
                                       state="normal" if ready and mp4_gifs else "disabled")
+        self._update_missing_actions()
 
     def _page_size(self):
         try:
@@ -892,7 +960,7 @@ class HistoryWindow(tk.Toplevel):
             return
         if widget_class == "Treeview" and not getattr(event, "state", 0) & 0x4:
             return
-        if self.tabs.index("current") == 2:
+        if self.tabs.index("current") >= 2:
             return
         runs = self.tabs.index("current") == 1
         if event.keysym == "Prior":
@@ -1040,7 +1108,7 @@ class HistoryWindow(tk.Toplevel):
                         self._display(*snapshot)
                 else:
                     self.status_text.set(result)
-                    if kind in {"backfilled", "converted", "repaired"}:
+                    if kind in {"backfilled", "converted", "repaired", "missing-choice"}:
                         self.completion_text = result
                     elif kind == "error" and not self.tree.get_children():
                         self._show_table_note("기록을 읽지 못했습니다.\n아래 안내를 확인해 주세요.")
@@ -1049,7 +1117,7 @@ class HistoryWindow(tk.Toplevel):
                     self.pending = False
                     do_import, self.pending_import = self.pending_import, False
                     self.refresh(import_legacy=do_import)
-                elif kind in {"backfilled", "converted"}:
+                elif kind in {"backfilled", "converted", "missing-choice"}:
                     self.refresh()
                 elif kind == "repaired":
                     self.loaded_locations.discard(self.current_account_dir)
@@ -1079,7 +1147,7 @@ class HistoryWindow(tk.Toplevel):
         if summary.get("estimated_dates", 0):
             notes.append("* 표시는 트윗 번호로 추정한 날짜")
         if summary.get("missing_files", 0):
-            notes.append(f"현재 파일을 찾지 못한 기록 {summary['missing_files']:,}개")
+            notes.append(f"사라진 파일 {summary['missing_files']:,}개 (‘사라진 파일’ 탭)")
         range_text = (f"트윗 게시일 {format_day(oldest)} → {format_day(newest)} · 기록에 남아 있는 범위"
                       if oldest else "기록된 트윗의 게시일: 아직 없음")
         self.date_text.set(range_text + ("  ·  " + " · ".join(notes) if notes else ""))
@@ -1151,6 +1219,8 @@ class HistoryWindow(tk.Toplevel):
         self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") +
                              f"출처 기록 {summary.get('embedded_sources', 0):,}개 · 작성자 기록 {summary.get('embedded_authors', 0):,}개")
         self._show_stats(summary.get("stats") or {})
+        self.missing_items = summary.get("missing") or []
+        self._show_missing()
         if self.view_mode == "grid":
             self._show_grid()
         self.select_record(force=True)
@@ -1237,7 +1307,7 @@ class HistoryWindow(tk.Toplevel):
         selection = self.run_tree.selection()
         row = self.run_rows.get(selection[0]) if selection else None
         if row:
-            scan = "새 Like만 빠르게 확인" if row.get("scan_mode") == "quick" else "전체 목록 확인"
+            scan = SCAN_LABELS.get(row.get("scan_mode"), SCAN_LABELS["full"])
             self.run_text.set(f"{row.get('message') or '실행 중이거나 종료 설명이 없습니다.'}\n확인 방식: {scan} · 마지막으로 확인한 트윗: {row.get('last_tweet_id') or '기록 없음'}")
         else:
             self.run_text.set(NO_RUN_SELECTION)
@@ -1670,7 +1740,7 @@ class HistoryWindow(tk.Toplevel):
                 setattr(self, name, None)
             elif isinstance(value, list) and any(isinstance(child, tk.Misc) for child in value):
                 value.clear()
-        self.get_location = self.is_downloading = self.get_gif_options = None
+        self.get_location = self.is_downloading = self.get_gif_options = self.retry_missing = None
 
     # ----------------------------------------------------------- views/stats
     def set_view(self, mode):
@@ -1766,6 +1836,122 @@ class HistoryWindow(tk.Toplevel):
         self.month_note.set(MONTH_NOTES[field])
         empty = {"liked": "아직 기간을 아는 새 Like가 없습니다.\n자동 저장을 켜 두면 새 Like가 쌓입니다."}.get(field, "아직 기록이 없습니다.")
         self.month_chart.show(list(self.stats.get("months", {}).get(field, [])), empty_text=empty)
+
+    # --------------------------------------------------------- missing files
+    def _show_missing(self):
+        tree = self.missing_tree
+        selected = set(tree.selection())
+        tree.delete(*tree.get_children())
+        self.missing_rows.clear()
+        show_ignored = self.show_ignored.get()
+        for item in self.missing_items:
+            if item.get("ignored") and not show_ignored:
+                continue
+            key = item["archive_key"]
+            self.missing_rows[key] = item
+            kind = "GIF" if item.get("media_type") == "animated_gif" else MEDIA_LABELS.get(item.get("media_type"), "알 수 없음")
+            posted = format_short(item.get("posted_at")) + (" *" if item.get("posted_source") == "id_estimate" else "")
+            tree.insert("", "end", iid=key, values=(
+                posted, kind + (" · 숨김" if item.get("ignored") else ""),
+                "@" + item["author"] if item.get("author") else "–", item.get("filename") or key,
+                format_short(item.get("saved_at")), tweet_text(item)))
+        kept = [key for key in selected if key in self.missing_rows]
+        if kept:
+            tree.selection_set(kept)
+        visible = [item for item in self.missing_items if not item.get("ignored")]
+        hidden = len(self.missing_items) - len(visible)
+        text = (f"사라진 파일 {len(visible):,}개 · 트윗 {len({item['tweet_id'] for item in visible}):,}개"
+                if visible else "사라진 파일이 없습니다")
+        self.missing_text.set(text + (f" · 숨긴 파일 {hidden:,}개" if hidden else ""))
+        self.tabs.tab(self.missing_view, text=f"사라진 파일 {len(visible):,}" if visible else "사라진 파일")
+        if self.missing_rows:
+            self.missing_message.place_forget()
+        else:
+            self.missing_note.set("사라진 파일이 없습니다." if not hidden or show_ignored else
+                                  "사라진 파일이 없습니다.\n숨긴 파일은 ‘숨긴 파일도 보기’에서 볼 수 있습니다.")
+            self.missing_message.place(relx=0.5, rely=0.5, anchor="center")
+        self._update_missing_actions()
+
+    def _missing_selection(self):
+        return [self.missing_rows[key] for key in self.missing_tree.selection() if key in self.missing_rows]
+
+    def _update_missing_actions(self):
+        items = self._missing_selection()
+        ready = not self.busy and self.current_storage is not None
+        self.missing_open_button.configure(state="normal" if items else "disabled")
+        self.missing_all_button.configure(state="normal" if self.missing_rows else "disabled")
+        self.ignore_button.configure(state="normal" if ready and any(not item.get("ignored") for item in items) else "disabled")
+        self.unignore_button.configure(state="normal" if ready and any(item.get("ignored") for item in items) else "disabled")
+        downloading = bool(self.is_downloading()) if self.is_downloading else False
+        self.retry_button.configure(
+            text=f"다시 받기 ({len(items):,}개)" if items else "다시 받기",
+            state="normal" if ready and items and self.retry_missing is not None and not downloading else "disabled")
+
+    def select_all_missing(self, _=None):
+        self.missing_tree.selection_set(tuple(self.missing_rows))
+        return "break"
+
+    def open_missing_tweet(self):
+        items = self._missing_selection()
+        if items:
+            webbrowser.open(f"https://x.com/i/web/status/{items[0]['tweet_id']}")
+
+    def choose_missing(self, ignored):
+        items = [item for item in self._missing_selection() if bool(item.get("ignored")) != ignored]
+        if self.busy or self.current_storage is None or not items:
+            return
+        if ignored and not dialogs.askyesno(
+                "다시 받지 않기",
+                f"선택한 파일 {len(items):,}개를 목록에서 숨기고, 앞으로 저장할 때도 받지 않습니다.\n\n"
+                "· 다른 저장 방식(작성자별·날짜별)으로 바꿔도 받지 않습니다.\n"
+                "· 파일이나 기록을 지우지 않으며 X에 요청하지 않습니다.\n"
+                "· ‘숨긴 파일도 보기’에서 언제든 ‘숨김 해제’할 수 있습니다.\n\n계속할까요?", parent=self):
+            return
+        self.busy = True
+        self._update_controls()
+        self.generation += 1
+        self.status_text.set("선택을 기록하는 중…")
+        identities = [(item["tweet_id"], item["num"], item["media_type"]) for item in items]
+        threading.Thread(target=partial(HistoryWindow._choice_worker, self.results),
+                         args=(self.generation, self.current_storage, identities, ignored), daemon=True).start()
+
+    @staticmethod
+    def _choice_worker(results, generation, location, identities, ignored):
+        store = None
+        try:
+            store = HistoryWindow._store(location)
+            count = store.set_missing_ignored(identities, ignored)
+            results.put((generation, "missing-choice",
+                         f"사라진 파일 {count:,}개를 숨겼습니다. 앞으로 저장할 때도 받지 않습니다." if ignored else
+                         f"숨긴 파일 {count:,}개를 다시 목록에 표시합니다."))
+        except Exception:
+            results.put((generation, "error", "선택을 기록하지 못했습니다. 저장 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."))
+        finally:
+            if store is not None:
+                store.close()
+
+    def retry_missing_files(self):
+        items = self._missing_selection()
+        if self.busy or self.current_storage is None or not items or self.retry_missing is None:
+            return
+        if self.is_downloading():
+            dialogs.showinfo("저장 진행 중", "지금 저장 작업이 끝난 뒤 다시 받아 주세요.", parent=self)
+            return
+        tweets = len({item["tweet_id"] for item in items})
+        minutes = max(1, round(tweets * 10 / 60))
+        hidden = sum(bool(item.get("ignored")) for item in items)
+        if not dialogs.askyesno(
+                "사라진 파일 다시 받기",
+                f"선택한 파일 {len(items):,}개(트윗 {tweets:,}개)를 X에서 다시 받습니다.\n\n"
+                f"· 트윗마다 X 요청을 1번씩 10초 간격으로 보내 약 {minutes:,}분 걸립니다.\n"
+                "· 지금 저장 설정의 폴더 방식으로 저장합니다.\n"
+                "· 삭제·비공개된 트윗의 파일은 받을 수 없으며 목록에 남습니다.\n"
+                + (f"· 숨긴 파일 {hidden:,}개도 포함되어, 받으면 숨김이 풀립니다.\n" if hidden else "")
+                + "· 진행 상황은 메인 화면에서 보고 중단할 수 있습니다.\n\n계속할까요?", parent=self):
+            return
+        if self.retry_missing([item["archive_key"] for item in items]):
+            self.status_text.set("메인 화면에서 사라진 파일을 다시 받고 있습니다. 받은 파일은 목록에서 빠집니다.")
+            self._update_missing_actions()
 
     def _export(self, generation, directory, destination):
         return self._export_worker(self.results, generation, directory, destination)

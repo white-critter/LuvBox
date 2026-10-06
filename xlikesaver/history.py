@@ -56,6 +56,10 @@ _ORDERS = {
     "posted_oldest": "media.posted_at IS NULL,media.posted_at,media.tweet_id",
 }
 _PERIOD_FIELDS = {"posted": "media.posted_at", "saved": "media.saved_at"}
+# 'retry' runs download chosen missing files by tweet, not the Like list.
+_SCAN_MODES = {"full", "quick", "retry"}
+# A missing file is listed once per media, however many layouts recorded it.
+_MISSING_LIMIT = 5000
 
 
 class HistoryError(RuntimeError):
@@ -140,6 +144,15 @@ def _date_folder(name: str) -> bool:
         return False
 
 
+def _identity(row: dict) -> tuple[str, int, str]:
+    return row["tweet_id"], row["num"], row["media_type"]
+
+
+def archive_key(tweet_id: str, number: int, media_type: str) -> str:
+    """The worker's download-archive key for one media (without the prefix)."""
+    return f"{tweet_id}_{number}" if media_type == "photo" else f"{tweet_id}_{media_type}_{number}"
+
+
 def _csv_cell(value):
     if value is None:
         return ""
@@ -200,6 +213,11 @@ class HistoryStore:
                 CREATE TABLE IF NOT EXISTS tweets (
                     tweet_id TEXT PRIMARY KEY, content TEXT NOT NULL DEFAULT '',
                     hashtags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS missing_choices (
+                    tweet_id TEXT NOT NULL, num INTEGER NOT NULL, media_type TEXT NOT NULL,
+                    ignored INTEGER NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(tweet_id, num, media_type)
                 );
             """)
             primary = [row["name"] for row in sorted(self._db.execute("PRAGMA table_info(media)").fetchall(),
@@ -440,7 +458,7 @@ class HistoryStore:
 
     @_safe
     def start_run(self, folder_mode: str, *, scan_mode: str = "full", media_signature: str = "") -> int:
-        if scan_mode not in {"full", "quick"} or not isinstance(media_signature, str):
+        if scan_mode not in _SCAN_MODES or not isinstance(media_signature, str):
             raise HistoryError(_HISTORY_HELP)
         with self._db:
             row = self._db.execute(
@@ -458,9 +476,11 @@ class HistoryStore:
         induction, by the complete runs before it). Returns 'ready',
         'settings-changed' or 'incomplete'.
         """
+        # Re-downloading chosen files does not walk the Like list, so it never
+        # serves as a complete scan.
         row = self._db.execute(
             "SELECT status,media_signature FROM runs WHERE folder_mode=? AND status!='running' "
-            "ORDER BY started_at DESC,id DESC LIMIT 1", (self._mode(folder_mode),)).fetchone()
+            "AND scan_mode!='retry' ORDER BY started_at DESC,id DESC LIMIT 1", (self._mode(folder_mode),)).fetchone()
         if row is None or row["status"] != "finished":
             return "incomplete"
         return "ready" if row["media_signature"] == media_signature else "settings-changed"
@@ -782,7 +802,7 @@ class HistoryStore:
     def _file_key(path: str) -> str:
         return os.path.normcase(os.path.abspath(path))
 
-    def _unique_files(self, rows: list[dict], *, verify_files: bool) -> tuple[list[dict], int]:
+    def _unique_files(self, rows: list[dict], *, verify_files: bool) -> tuple[list[dict], int, set]:
         """A file view, leaving all layout-specific download records intact.
 
         The UI uses cached sizes while a background rescan checks the folder.
@@ -826,8 +846,10 @@ class HistoryStore:
             self._folder_cache = previous_cache
         files = []
         matched = 0
+        found = set()
         for size, group in present.values():
             matched += len(group)
+            found.update(_identity(item) for item in group)
             group.sort(key=priority, reverse=True)
             row = dict(group[0])
             row["filesize"] = size
@@ -844,20 +866,29 @@ class HistoryStore:
                 if any(item[field] == "embedded" for item in group):
                     row[field] = "embedded"
             files.append(row)
-        return files, matched
+        return files, matched, found
 
-    def _file_snapshot(self, *, verify_files: bool) -> tuple[list[dict], list[dict], int]:
+    def _file_snapshot(self, *, verify_files: bool) -> tuple[list[dict], list[dict], int, set]:
         rows = [dict(row) for row in self._db.execute("SELECT * FROM media")]
-        files, matched = self._unique_files(rows, verify_files=verify_files)
-        return rows, files, matched
+        files, matched, found = self._unique_files(rows, verify_files=verify_files)
+        return rows, files, matched, found
 
-    def _summary(self, rows: list[dict], files: list[dict], matched: int) -> dict:
+    def _ignored(self) -> set:
+        return {(row[0], row[1], row[2]) for row in self._db.execute(
+            "SELECT tweet_id,num,media_type FROM missing_choices WHERE ignored=1")}
+
+    def _summary(self, rows: list[dict], files: list[dict], matched: int, found: set) -> dict:
+        # A media is missing when no layout's record points at a present file;
+        # older layouts' records of a file that still exists elsewhere are not.
+        missing = {_identity(row) for row in rows} - found
+        ignored = self._ignored()
         dates = [row["posted_at"] for row in rows if row["posted_at"]]
         counts = {kind: sum(row["media_type"] == kind for row in files) for kind in _TYPES}
         result = {
             "files": len(files), "posts": len({row["tweet_id"] for row in rows}),
             "current_posts": len({row["tweet_id"] for row in files}), "record_count": len(rows),
-            "duplicate_records": matched - len(files), "missing_files": len(rows) - matched,
+            "duplicate_records": matched - len(files), "unmatched_records": len(rows) - matched,
+            "missing_files": len(missing - ignored), "ignored_missing": len(missing & ignored),
             "known_files": len(files), "bytes": sum(row["filesize"] for row in files),
             "unknown_bytes": sum(row["filesize"] is None for row in rows),
             "oldest_posted_at": min(dates) if dates else None,
@@ -880,11 +911,88 @@ class HistoryStore:
 
     @_safe
     def overview(self, *, verify_files: bool = True, top: int = 20) -> dict:
-        """Summary and charts share one file snapshot, even during downloads."""
-        rows, files, matched = self._file_snapshot(verify_files=verify_files)
-        result = self._summary(rows, files, matched)
+        """Summary, charts and missing files share one snapshot, even during downloads."""
+        rows, files, matched, found = self._file_snapshot(verify_files=verify_files)
+        result = self._summary(rows, files, matched, found)
         result["stats"] = self._statistics(files, top)
+        result["missing"] = self._missing(rows, found)
         return result
+
+    @_safe
+    def missing_media(self, *, verify_files: bool = True) -> list[dict]:
+        rows, _, _, found = self._file_snapshot(verify_files=verify_files)
+        return self._missing(rows, found)
+
+    def _missing(self, rows: list[dict], found: set) -> list[dict]:
+        """One entry per media without any present file, newest save first.
+
+        Each carries what is known across its layouts, whether the user chose
+        not to download it again, and the key that names it in an archive.
+        """
+        groups = {}
+        for row in rows:
+            identity = _identity(row)
+            if identity not in found:
+                groups.setdefault(identity, []).append(row)
+        ignored = self._ignored()
+        items = []
+        for identity, group in groups.items():
+            group.sort(key=lambda row: (row["record_source"] == "saved", row["updated_at"]), reverse=True)
+            item = {key: group[0][key] for key in ("tweet_id", "num", "media_type", "filename", "source_url")}
+            item["author"] = next((row["author"] for row in group if row["author"]), "")
+            item["author_id"] = next((row["author_id"] for row in group if row["author_id"]), "")
+            posted = next((row for row in group if row["posted_source"] == "metadata" and row["posted_at"]),
+                          next((row for row in group if row["posted_at"]), None))
+            item["posted_at"] = posted["posted_at"] if posted else None
+            item["posted_source"] = posted["posted_source"] if posted else ""
+            saved = [row["saved_at"] for row in group if row["saved_at"]]
+            item["saved_at"] = min(saved) if saved else None
+            item["folder_modes"] = sorted({row["folder_mode"] for row in group})
+            item["ignored"] = identity in ignored
+            item["archive_key"] = archive_key(*identity)
+            items.append(item)
+        items.sort(key=lambda item: (item["saved_at"] or item["posted_at"] or "", item["tweet_id"], item["num"]),
+                   reverse=True)
+        items = items[:_MISSING_LIMIT]
+        tweets = sorted({item["tweet_id"] for item in items})
+        details = {}
+        for start in range(0, len(tweets), 500):
+            chunk = tweets[start:start + 500]
+            marks = ",".join("?" for _ in chunk)
+            for row in self._db.execute("SELECT tweet_id,content,hashtags FROM tweets WHERE tweet_id IN (" + marks + ")",
+                                        chunk):
+                details[row[0]] = (row[1], row[2])
+        for item in items:
+            item["content"], item["hashtags"] = details.get(item["tweet_id"], ("", ""))
+        return items
+
+    @_safe
+    def set_missing_ignored(self, items, ignored: bool) -> int:
+        """Remember whether chosen missing media should stay deleted.
+
+        ``items`` holds (tweet_id, num, media_type). The newest choice wins
+        when records from another PC are merged.
+        """
+        if type(ignored) is not bool:
+            raise HistoryError(_HISTORY_HELP)
+        rows = []
+        for tweet_id, number, media_type in items:
+            tweet_id = str(tweet_id)
+            if (not re.fullmatch(r"[0-9]{1,20}", tweet_id) or isinstance(number, bool) or not isinstance(number, int)
+                    or not 1 <= number <= 10000 or media_type not in _TYPES):
+                raise HistoryError(_HISTORY_HELP)
+            rows.append((tweet_id, number, media_type, int(ignored), _now()))
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(tweet_id,num,media_type) DO UPDATE SET ignored=excluded.ignored,updated_at=excluded.updated_at",
+                rows)
+        return len(rows)
+
+    @_safe
+    def ignored_media(self) -> set:
+        """Media the user chose not to download again, in any layout."""
+        return self._ignored()
 
     @staticmethod
     def _record_filter(media_type, query, period=None, author=""):
@@ -1015,7 +1123,7 @@ class HistoryStore:
         Months are Korean-time YYYY-MM. 'liked' counts only Likes whose period
         is known (first seen after an earlier complete run), by month seen.
         """
-        _, files, _ = self._file_snapshot(verify_files=verify_files)
+        _, files, *_ = self._file_snapshot(verify_files=verify_files)
         return self._statistics(files, top)
 
     def _statistics(self, files: list[dict], top: int) -> dict:
@@ -1072,7 +1180,7 @@ class LikeOrder:
         # made before it started; a newer Like above it is from after then.
         previous = store._db.execute(
             "SELECT started_at FROM runs WHERE status='finished' AND id<? AND started_at>=? "
-            "ORDER BY started_at DESC,id DESC LIMIT 1", (run_id, since)).fetchone()
+            "AND scan_mode!='retry' ORDER BY started_at DESC,id DESC LIMIT 1", (run_id, since)).fetchone()
         self._after = previous[0] if previous else None
         self._upper = None      # key of the last known tweet seen in this run
         self._pending = []      # new tweets since then, newest first
