@@ -458,6 +458,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     previous_output_guards = []
     history = None
     run_id = None
+    likes = None
     visited_ids = set()
     last_tweet_id = last_posted_at = ""
     flag = Path(stop_file) if stop_file is not None else None
@@ -841,6 +842,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 last_tweet_id = str(kwdict["tweet_id"])
                 last_posted_at = _media_details(kwdict)["posted_at"]
                 visited_ids.add(last_tweet_id)
+                # Every liked tweet with media, saved or not, keeps Like order.
+                try:
+                    likes.visit(last_tweet_id)
+                except HistoryError:
+                    raise exception.AbortExtraction("history store unavailable") from None
                 history_update(visited=len(visited_ids), last_tweet_id=last_tweet_id,
                                last_posted_at=last_posted_at)
 
@@ -1114,6 +1120,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                              "다음 실행부터 빠르게 확인합니다.")
         run_id = history.start_run(normalized.folder_mode, scan_mode="quick" if quick_scan else "full",
                                    media_signature=normalized.media_signature)
+        likes = history.like_order(run_id)
         metadata_available = available()
         # Preserve the original author archive so existing installations resume.
         # Other layouts need their own record, otherwise switching folders would
@@ -1188,6 +1195,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     finally:
         if history is not None:
             try:
+                if likes is not None:
+                    likes.flush()
                 if run_id is not None:
                     run_status = "limited" if stop_reason == "limit" and status == "finished" else status
                     history.finish_run(run_id, run_status, saved=saved, skipped=skipped, size_skipped=size_skipped,

@@ -535,9 +535,9 @@ class HistoryTests(unittest.TestCase):
         self.addCleanup(other.close)
         original = self.store.records
 
-        def concurrent_insert(*args):
+        def concurrent_insert(*args, **kwargs):
             other.record_media("flat", self.metadata(2), self.file("100_2.jpg"))
-            return original(*args)
+            return original(*args, **kwargs)
 
         with patch.object(self.store, "records", side_effect=concurrent_insert):
             page = self.store.record_page()

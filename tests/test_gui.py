@@ -282,12 +282,109 @@ class GuiTests(unittest.TestCase):
             app = App(other_root)
         self.assertEqual(app.scan_mode.get(), "전체 목록 다시 확인")
 
-    def test_schedule_command_is_copied_for_the_running_application(self):
-        self.app.copy_schedule_command()
-        command = self.root.clipboard_get()
-        self.assertIn('schtasks /Create /TN "XlikeSaver 자동 저장" /SC DAILY', command)
-        self.assertIn("--run-saved", command)
-        self.assertIn("명령 프롬프트", self.app.status_detail.get())
+    def schedule_patches(self, status):
+        class Immediate:
+            def __init__(self, target, daemon=None):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        def register(when):
+            status.clear()
+            status.update(registered=True, current=True, time=when, enabled=True, catch_up=True,
+                          on_battery=True, next_run="2026-10-07T07:30:00", program="XlikeSaver.exe")
+
+        def unregister():
+            status.clear()
+            status.update(registered=False)
+
+        last = {"finished_at": "2026-10-06T09:00:05+09:00", "status": "finished", "saved": 3, "failed": False}
+        return (patch("xlikesaver.gui.threading.Thread", Immediate),
+                patch("xlikesaver.scheduled.task_status", side_effect=lambda: dict(status)),
+                patch("xlikesaver.scheduled.register_task", side_effect=register),
+                patch("xlikesaver.scheduled.unregister_task", side_effect=unregister),
+                patch("xlikesaver.scheduled.last_run", return_value=last))
+
+    def test_schedule_window_turns_the_daily_save_on_and_off(self):
+        status = {"registered": False}
+        target = Path(self.temp.name) / "settings.json"
+        patches = self.schedule_patches(status)
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        with patch("xlikesaver.gui.settings_path", return_value=target):
+            self.app.show_schedule()
+            self.addCleanup(self.app._close_schedule)
+            self.app._poll()
+            self.assertIn("꺼져", self.app.schedule_state.get())
+            self.assertIn("새로 저장 3개", self.app.schedule_last.get())
+            self.assertEqual(self.app.schedule_on_button.cget("text"), "예약 켜기")
+            self.app.schedule_time.set("7:30")
+            self.app.register_schedule()
+            self.app._poll()
+        from xlikesaver import scheduled
+        scheduled.register_task.assert_called_once_with("07:30")
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual((saved["account"], saved["schedule_time"]), ("offline_test", "07:30"))
+        self.assertIn("매일 07:30 · 켜짐", self.app.schedule_text.get())
+        self.assertEqual(self.app.schedule_on_button.cget("text"), "예약 갱신")
+        self.assertIn("자동 저장을 켰습니다", self.app.status.get())
+        with patch("xlikesaver.gui.dialogs.askyesno", return_value=True):
+            self.app.unregister_schedule()
+        self.app._poll()
+        self.assertIn("꺼짐", self.app.schedule_text.get())
+        self.assertEqual(str(self.app.schedule_off_button.cget("state")), "disabled")
+
+    def test_schedule_needs_token_connection_and_valid_time(self):
+        patches = self.schedule_patches({"registered": False})
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        from xlikesaver import scheduled
+        self.app.auth.set("cookies.txt 파일")
+        with patch("xlikesaver.gui.dialogs.showinfo") as notice:
+            self.app.register_schedule()
+        notice.assert_called_once()
+        self.app.auth.set("인증 토큰 (권장)")
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        self.app.schedule_time.set("25:00")
+        with patch("xlikesaver.gui.dialogs.showerror") as error:
+            self.app.register_schedule()
+        self.assertIn("24시간", error.call_args.args[1])
+        scheduled.register_task.assert_not_called()
+
+    def test_new_version_offers_to_move_the_task_once_and_failures_are_shown(self):
+        old = {"registered": True, "current": False, "program": r"C:\old\XlikeSaver-1.7.1.exe", "time": "08:00",
+               "enabled": True, "catch_up": False, "on_battery": False, "next_run": ""}
+        patches = self.schedule_patches(dict(old))
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+        from xlikesaver import scheduled
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        with patch("xlikesaver.gui.dialogs.askyesno", return_value=True) as ask, \
+                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"), \
+                patch("xlikesaver.gui.load_settings", return_value={}):
+            self.app._schedule_result({"type": "schedule", "action": "status", "prompt": True, "result": old})
+            self.app._poll()
+            self.assertIn("XlikeSaver-1.7.1.exe", ask.call_args.args[1])
+            scheduled.register_task.assert_called_once_with("08:00")
+            self.app._schedule_result({"type": "schedule", "action": "status", "prompt": True, "result": old})
+        ask.assert_called_once()
+        failed = {"finished_at": "2026-10-06T09:00:05+09:00", "status": "error", "saved": 0, "failed": True,
+                  "seen": False, "message": "로그인 연결을 다시 해 주세요."}
+        with patch("xlikesaver.scheduled.last_run", return_value=failed), \
+                patch("xlikesaver.scheduled.mark_last_run_seen") as seen, \
+                patch.object(self.app, "refresh_schedule"):
+            self.app._startup_schedule_check()
+        seen.assert_called_once()
+        self.assertIn("실패", self.app.status.get())
+        self.assertIn("로그인 연결을 다시", self.app.status_detail.get())
 
     def test_default_flat_media_options_and_user_video_cap_reach_worker(self):
         self.assertEqual(self.app.folder_mode.get(), "구분 없이 저장")

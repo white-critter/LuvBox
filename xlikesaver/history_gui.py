@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing, nullcontext
-from datetime import datetime
+from datetime import date, datetime
 from functools import partial
 import os
 from pathlib import Path
@@ -29,6 +29,8 @@ AUTHOR_METADATA_LABELS = {"embedded": "작성자 기록됨", "pending": "작성�
 TILES = {"files": "저장한 파일", "posts": "트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "확인된 용량"}
 PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
+ORDER_LABELS = {"saved": "저장한 순", "liked": "Like한 순", "posted": "게시일 최신순", "posted_oldest": "게시일 오래된 순"}
+PERIOD_LABELS = {"posted": "게시일", "saved": "저장일"}
 GIF_SIZE_LABELS = {"original": "원본 크기", "720": "최대 720px · 초당 15장", "480": "최대 480px · 초당 12장"}
 NO_SELECTION = ("표에서 파일을 고르면 미리보기와 출처를 볼 수 있습니다. 두 번 누르면 파일이 열립니다.\n"
                 "위 검색칸에서 작성자 아이디, 파일명, 트윗 번호로 찾을 수 있습니다.")
@@ -62,6 +64,20 @@ def format_short(value: str | None) -> str:
         return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
     except (ValueError, TypeError):
         return "–"
+
+
+def liked_period(row: dict) -> str:
+    """When the tweet was liked, as far as the app could tell.
+
+    X does not report Like times; runs record when a Like was first seen and,
+    for new Likes, the previous complete run before which it did not exist.
+    """
+    after, before = format_short(row.get("liked_after")), format_short(row.get("liked_before"))
+    if before == "–":
+        return "기록 전 (다음 저장 실행부터 기록)"
+    if after == "–":
+        return f"{before} 이전"
+    return f"{after} ~ {before} 사이"
 
 
 def format_day(value: str | None) -> str:
@@ -129,6 +145,11 @@ class HistoryWindow(tk.Toplevel):
         self.selection_text = tk.StringVar(self, value=NO_SELECTION)
         self.media_filter = tk.StringVar(self, value="전체")
         self.query = tk.StringVar(self)
+        self.order = tk.StringVar(self, value=ORDER_LABELS["saved"])
+        self.period_field = tk.StringVar(self, value=PERIOD_LABELS["posted"])
+        self.period_from = tk.StringVar(self)
+        self.period_to = tk.StringVar(self)
+        self.applied_period = None
         self.page_text = tk.StringVar(self)
         self.run_page_text = tk.StringVar(self)
         self.page_size = tk.StringVar(self, value=str(PAGE_SIZE))
@@ -192,8 +213,31 @@ class HistoryWindow(tk.Toplevel):
         runs.columnconfigure(0, weight=1)
         runs.rowconfigure(0, weight=1)
 
-        search = ttk.Frame(files)
-        search.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        filters = ttk.Frame(files)
+        filters.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        search = ttk.Frame(filters)
+        search.pack(fill="x")
+        refine = ttk.Frame(filters)
+        refine.pack(fill="x", pady=(8, 0))
+        ttk.Label(refine, text="정렬", style="Muted.TLabel").pack(side="left")
+        order = ttk.Combobox(refine, textvariable=self.order, values=list(ORDER_LABELS.values()),
+                             state="readonly", width=13, font=theme.BODY)
+        order.pack(side="left", padx=(6, 18))
+        order.bind("<<ComboboxSelected>>", lambda _: self.search())
+        ttk.Label(refine, text="기간", style="Muted.TLabel").pack(side="left")
+        field = ttk.Combobox(refine, textvariable=self.period_field, values=list(PERIOD_LABELS.values()),
+                             state="readonly", width=7, font=theme.BODY)
+        field.pack(side="left", padx=6)
+        field.bind("<<ComboboxSelected>>", lambda _: self.search() if self.applied_period else None)
+        self.period_boxes = []
+        for variable in (self.period_from, self.period_to):
+            box = ttk.Entry(refine, textvariable=variable, width=11, font=theme.BODY)
+            box.pack(side="left")
+            box.bind("<Return>", lambda _: self.search())
+            self.period_boxes.append(box)
+            if variable is self.period_from:
+                ttk.Label(refine, text="~", style="Muted.TLabel").pack(side="left", padx=4)
+        ttk.Button(refine, text="기간 지우기", style="Compact.TButton", command=self.clear_period).pack(side="left", padx=(8, 0))
         combo = ttk.Combobox(search, textvariable=self.media_filter, values=list(MEDIA_LABELS.values()), state="readonly", width=12, font=theme.BODY)
         combo.pack(side="left")
         combo.bind("<<ComboboxSelected>>", lambda _: self.search())
@@ -493,9 +537,43 @@ class HistoryWindow(tk.Toplevel):
             return PAGE_SIZE
         return size if size in PAGE_SIZES else PAGE_SIZE
 
+    def _period(self):
+        """(field, first day, last day) from the date boxes, or None.
+
+        Accepts 2026-10-01, 2026.10.01 or 20261001; raises ValueError.
+        """
+        days = []
+        for variable in (self.period_from, self.period_to):
+            value = variable.get().strip()
+            match = re.fullmatch(r"(\d{4})[-./ ]?(\d{1,2})[-./ ]?(\d{1,2})\.?", value)
+            if value and not match:
+                raise ValueError(value)
+            days.append(date(int(match[1]), int(match[2]), int(match[3])) if match else None)
+        if not any(days):
+            return None
+        if all(days) and days[0] > days[1]:
+            days.reverse()
+        for variable, day in zip((self.period_from, self.period_to), days):
+            variable.set(day.isoformat() if day else "")
+        field = next(key for key, label in PERIOD_LABELS.items() if label == self.period_field.get())
+        return field, *(day.isoformat() if day else "" for day in days)
+
     def search(self):
+        try:
+            self.applied_period = self._period()
+        except ValueError:
+            self.status_text.set("기간은 2026-10-01처럼 연-월-일로 입력해 주세요. 한쪽만 입력해도 됩니다.")
+            return
         self.page = 0
         self.refresh()
+
+    def clear_period(self):
+        self.period_from.set("")
+        self.period_to.set("")
+        if self.applied_period is not None:
+            self.applied_period = None
+            self.page = 0
+            self.refresh()
 
     def change_page_size(self):
         self.page = self.run_page = 0
@@ -593,18 +671,22 @@ class HistoryWindow(tk.Toplevel):
         query = self.query.get().strip()
         if re.fullmatch(r"@[A-Za-z0-9_]{1,15}", query):
             query = query[1:]
+        order = next(key for key, label in ORDER_LABELS.items() if label == self.order.get())
         threading.Thread(target=partial(HistoryWindow._load_worker, self.results), args=(generation, location, kind, query, self.page, do_import,
-                                                 self._page_size(), self.run_page), daemon=True).start()
+                                                 self._page_size(), self.run_page, order, self.applied_period), daemon=True).start()
 
     @staticmethod
     def _store(location):
         return HistoryStore.for_storage(location) if isinstance(location, StoragePaths) else HistoryStore(location)
 
-    def _load(self, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0):
-        return self._load_worker(self.results, generation, directory, kind, query, page, do_import, page_size, run_page)
+    def _load(self, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0,
+              order="saved", period=None):
+        return self._load_worker(self.results, generation, directory, kind, query, page, do_import, page_size, run_page,
+                                 order, period)
 
     @staticmethod
-    def _load_worker(results, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0):
+    def _load_worker(results, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0,
+                     order="saved", period=None):
         store = None
         try:
             store = HistoryWindow._store(directory)
@@ -612,7 +694,7 @@ class HistoryWindow(tk.Toplevel):
             def snapshot(warnings):
                 summary = store.summary()
                 summary["warnings"] = warnings
-                files = store.record_page(page, page_size, kind, query)
+                files = store.record_page(page, page_size, kind, query, order=order, period=period)
                 runs = store.run_page(run_page, page_size)
                 return store.account_dir, summary, files["rows"], runs["rows"], files["page"], files, runs
 
@@ -796,7 +878,7 @@ class HistoryWindow(tk.Toplevel):
         if row.get("author_id"):
             author += " (ID " + row["author_id"] + ")"
         self.selection_text.set(
-            f"작성자  {author}\n"
+            f"작성자  {author}   ·   Like한 시기  {liked_period(row)}\n"
             f"트윗     {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n"
             f"파일     {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}\n"
             f"저장한 때 {saved if saved != '–' else '알 수 없음'} · 파일 안 기록: {metadata} · {author_status} · 게시일 출처: {source}")

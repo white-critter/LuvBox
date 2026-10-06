@@ -86,7 +86,17 @@ HTTP 429와 계정 정지는 별개입니다. 잠금·보안 확인이 뜨면 X�
 
 실행에는 `release/XlikeSaver-<버전>.exe` 하나면 됩니다. 이름에 버전이 붙어 있어 이전 exe를 실행 중이어도 새로 빌드할 수 있습니다. 재배포에는 `XlikeSaver-<버전>.zip`의 소스·라이선스도 함께 제공합니다. 사용자 세션이나 cookies.txt를 배포하지 마세요. ExifTool/Perl 전체 도구와 의존성 라이선스를 포함합니다. [의존성 안내](../THIRD_PARTY_NOTICES.md)
 
-`build/`는 PyInstaller 중간 파일이며 지워도 됩니다. 예약 실행은 등록한 exe 경로를 그대로 실행하므로, 새 버전으로 바꾸면 **예약 명령 복사**로 다시 등록하세요.
+`build/`는 PyInstaller 중간 파일이며 지워도 됩니다. 예약 실행은 등록한 exe 경로를 그대로 실행하므로, 새 버전을 처음 열면 앱이 예약을 그 버전으로 바꿀지 묻습니다.
+
+## 자동 저장 예약
+
+`scheduled.py`는 Windows PowerShell의 ScheduledTasks 모듈(`Register-ScheduledTask`)로 매일 작업을 등록·해제·조회합니다. 스크립트는 고정 문자열을 `-EncodedCommand`로 넘기고, exe 경로·시각 같은 값은 환경 변수(`XLS_*`)로만 전달합니다. 설정은 `StartWhenAvailable`(놓친 실행 즉시 실행), `AllowStartIfOnBatteries`·`DontStopIfGoingOnBatteries`, `MultipleInstances IgnoreNew`, 실행 제한 12시간이며, 현재 사용자로 로그인해 있을 때 실행됩니다. PowerShell 출력은 화면에 보이지 않고 고정 안내만 표시합니다.
+
+`run_saved`는 결과를 `%LOCALAPPDATA%/XlikeSaver/last-scheduled.json`에 남깁니다. 실패하면(같은 계정·폴더의 다른 저장이 실행 중이던 경우 제외) 테마를 따른 알림 창을 맨 위에 띄우고, 앱은 다음 실행 때 아직 보지 않은 실패를 상단에 알립니다. 설치본(exe)은 시작할 때 작업을 조회해 다른 exe로 등록돼 있으면 한 번 갱신을 묻습니다(설정의 `schedule_prompted`).
+
+## Like 순서와 시기
+
+X는 Like 시각을 주지 않습니다(gallery-dl의 `date_liked`도 X 변경으로 제거됨). 기록 DB의 `likes` 표는 트윗마다 `like_key`(클수록 최근 Like), `liked_before`(처음 발견한 실행의 시작 시각), `liked_after`(하한, 알 수 없으면 NULL)를 둡니다. 실행은 Like 목록을 최근 Like부터 훑으며(`core.handle_directory`), 이미 순서가 있는 트윗을 기준점으로 삼아 그 사이에 새로 발견한 트윗의 키를 보간합니다(`history.LikeOrder`). 목록 맨 위에서 기준점 전에 나온 새 트윗은 모든 키보다 위에 두고, Like를 기록하기 시작한 뒤 정상 종료된 직전 실행의 시작 시각을 하한으로 둡니다. 기준점 사이나 마지막 기준점 아래에서 새로 나온 트윗은 예전에 보이지 않던 오래된 Like일 수 있어 하한을 두지 않습니다. 기록 이전 시 `likes`는 대상에 없는 트윗만 합칩니다.
 
 ## 로컬 미디어와 테마
 

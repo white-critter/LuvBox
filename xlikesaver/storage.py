@@ -136,6 +136,7 @@ def prepare_storage(paths: StoragePaths, *, protected: bool = False) -> None:
             staged.unlink(missing_ok=True)
 
 
+OUTPUT_BUSY_HELP = "이 저장 경로에서 다른 작업이 실행 중입니다. 먼저 실행한 작업을 종료해 주세요."
 _MIGRATION_HELP = "기록을 옮기지 못했습니다. 이전 기록은 보존했습니다. 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."
 _HISTORY_DB = ".xlikesaver-history.sqlite3"
 
@@ -404,6 +405,13 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
             target.execute("DELETE FROM runs WHERE id=?", (old["id"],))
             _insert(target, "runs", merged)
             previous[identity] = merged
+    if "likes" in source_tables:
+        # Like order keys are only comparable within one catalog; an existing
+        # record at the destination keeps its own.
+        _prepare_table(target, source, "likes")
+        for row in _rows(source, "likes"):
+            target.execute("INSERT OR IGNORE INTO likes(tweet_id,like_key,liked_after,liked_before) VALUES (?,?,?,?)",
+                           (row["tweet_id"], row["like_key"], row["liked_after"], row["liked_before"]))
     if "catalog_meta" in source_tables:
         _prepare_table(target, source, "catalog_meta")
         for key, value in source.execute("SELECT key,value FROM catalog_meta WHERE key != 'allowed_media_roots'"):
@@ -599,7 +607,7 @@ class OutputGuard:
             if file is not None:
                 file.close()
             if file is not None and error.errno in {11, 13, 35}:
-                raise ProtectionError("이 저장 경로에서 다른 작업이 실행 중입니다. 먼저 실행한 작업을 종료해 주세요.") from None
+                raise ProtectionError(OUTPUT_BUSY_HELP) from None
             raise ProtectionError("저장 경로의 작업 보호 기록을 만들지 못했습니다. Windows 사용자 폴더 권한을 확인해 주세요.") from None
         self._file = file
 

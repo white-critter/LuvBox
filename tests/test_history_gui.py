@@ -684,6 +684,47 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertFalse(self.window.metadata_active)
         self.assertIn("GIF 변환 끝", self.window.completion_text)
 
+    def test_sort_and_period_reach_the_loader_and_details_show_when_liked(self):
+        store = self.records(3)
+        run = store.start_run("flat")
+        order = store.like_order(run)
+        for tweet in ("101", "100", "102"):
+            order.visit(tweet)
+        order.flush()
+        store.finish_run(run, "finished")
+        self.load()
+        self.window.order.set("Like한 순")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.search()
+        args = thread.call_args.kwargs["args"]
+        self.assertEqual(args[-2:], ("liked", None))
+        self.window._load(*args)
+        self.window._poll()
+        self.assertEqual([self.window.rows[key]["tweet_id"] for key in self.window.tree.get_children()], ["101", "100", "102"])
+        self.window.tree.selection_set(self.window.tree.get_children()[0])
+        self.window.select_record()
+        self.assertRegex(self.window.selection_text.get(), r"Like한 시기  \d{4}-\d\d-\d\d \d\d:\d\d 이전")
+        # Dates may be typed loosely, in either order; the field can change.
+        self.window.period_field.set("저장일")
+        self.window.period_from.set("2026.9.2")
+        self.window.period_to.set("20260901")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.search()
+        self.assertEqual(thread.call_args.kwargs["args"][-1], ("saved", "2026-09-01", "2026-09-02"))
+        self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("2026-09-01", "2026-09-02"))
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(self.window.tree.get_children(), ())
+        self.window.period_to.set("9월 2일")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.search()
+        thread.assert_not_called()
+        self.assertIn("연-월-일", self.window.status_text.get())
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.clear_period()
+        self.assertIsNone(thread.call_args.kwargs["args"][-1])
+        self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("", ""))
+
     def test_refresh_skips_whole_folder_rescan_while_downloading(self):
         # The worker records every file itself; a rescan would only compete
         # with it for the catalog's write lock.

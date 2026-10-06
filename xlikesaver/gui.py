@@ -45,6 +45,7 @@ FOLDER_CHOICES = {
     "저장일별 폴더": ("저장한 날짜별 폴더로 나누기", "2026-10-05\\게시물ID_1.jpg"),
 }
 SCAN_MODES = {"새 Like만 빠르게 확인 (권장)": "quick", "전체 목록 다시 확인": "full"}
+STATUS_TEXT = {"stopped": "중단됨", "limited": "시험 저장으로 끝남", "error": "실패"}
 GIF_FORMATS = {"GIF로 바꿔 저장": "gif", "원본 MP4 그대로 저장": "mp4"}
 GIF_FORMAT_HINTS = {
     "gif": "어디서나 바로 움직이는 .gif 파일입니다. 색이 256개로 줄고 용량이 MP4보다 몇 배 커질 수 있습니다.",
@@ -97,6 +98,9 @@ class App:
         self.connect_window = None
         self.options_window = None
         self.help_window = None
+        self.schedule_window = None
+        self.schedule_busy = False
+        self.schedule_info = None
         self.history_refresh_pending = False
         self.received_final = False
         self.final_status = None
@@ -139,6 +143,16 @@ class App:
         gif_size = settings.get("gif_size", "original")
         self.gif_size = tk.StringVar(value=next((k for k, v in GIF_SIZES.items() if v == gif_size), next(iter(GIF_SIZES))))
         self.detailed_progress = tk.BooleanVar(value=settings.get("detailed_progress", False) is True)
+        try:
+            from .scheduled import normal_time
+            schedule_time = normal_time(settings.get("schedule_time", "09:00"))
+        except ValueError:
+            schedule_time = "09:00"
+        self.schedule_time = tk.StringVar(value=schedule_time)
+        self.schedule_prompted = str(settings.get("schedule_prompted", ""))
+        self.schedule_text = tk.StringVar(value="‘예약 설정’에서 매일 정한 시각에 새 Like를 자동으로 저장할 수 있습니다.")
+        self.schedule_state = tk.StringVar()
+        self.schedule_last = tk.StringVar()
         self.progress_summary = tk.StringVar(value="")
         self.progress_details = tk.StringVar()
         # A short test is opt-in for one run and is never loaded from settings.
@@ -169,6 +183,10 @@ class App:
         root.minsize(min(780, width), min(760, root.winfo_screenheight() - 80))
         self.root.after(120, self._poll)
         self.root.bind("<Destroy>", self._release_ui, add="+")
+        # The installed app checks its daily task and the last scheduled run.
+        # (Running from source, this happens when the schedule window opens.)
+        if getattr(sys, "frozen", False):
+            self.root.after(1500, self._startup_schedule_check)
 
     def _release_ui(self, event):
         if event.widget is self.root:
@@ -248,6 +266,14 @@ class App:
         self.options_button = ttk.Button(summary, text="옵션 변경", width=11, command=self.show_options)
         self.options_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
         self.inputs.append(self.options_button)
+        schedule_row = ttk.Frame(form, style="Plain.TFrame")
+        schedule_row.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        schedule_row.columnconfigure(0, weight=1)
+        ttk.Label(schedule_row, text="자동 저장", style="CardBold.TLabel").grid(row=0, column=0, sticky="w")
+        self._wrapping_label(schedule_row, textvariable=self.schedule_text, style="CardMuted.TLabel",
+                             wraplength=650).grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        ttk.Button(schedule_row, text="예약 설정", width=11, command=self.show_schedule).grid(
+            row=0, column=1, rowspan=2, sticky="e", padx=(18, 0))
 
         actions = ttk.Frame(shell)
         actions.pack(fill="x", pady=(18, 14))
@@ -678,6 +704,7 @@ class App:
                 "gif_format": GIF_FORMATS[self.gif_format.get()], "gif_size": GIF_SIZES[self.gif_size.get()],
                 "detailed_progress": self.detailed_progress.get(),
                 "appearance": self.appearance.get(),
+                "schedule_time": self.schedule_time.get(), "schedule_prompted": self.schedule_prompted,
                 "record_locations": self.record_locations}
         self._write_settings(data)
 
@@ -861,10 +888,11 @@ class App:
             "예전 파일에 출처·작성자를 넣으려면 ‘출처·작성자 기록’을 누르세요.",
         ), "이 작업은 파일을 다시 쓰므로 Google Drive·OneDrive 폴더라면 파일이 다시 올라갈 수 있습니다."),
         ("매일 자동 저장", (
-            "아래 ‘예약 명령 복사’를 누르고, 명령 프롬프트(cmd)에 붙여 넣어 실행합니다.",
-            "매일 오전 9시에 마지막으로 쓴 설정으로 새 Like만 저장합니다. 결과는 ‘예약 실행 기록’에 남습니다.",
-            "해제: schtasks /Delete /TN \"XlikeSaver 자동 저장\" /F",
-        ), "인증 토큰 연결에서만 동작합니다. 실행 파일을 옮기거나 새 버전으로 바꾸면 다시 등록하세요."),
+            "메인 화면 ‘자동 저장’의 ‘예약 설정’에서 시각을 고르고 ‘예약 켜기’를 누릅니다.",
+            "매일 그 시각에 마지막으로 저장을 시작할 때의 설정으로 새 Like만 저장합니다.",
+            "PC가 꺼져 있었으면 다음에 켰을 때 바로 실행하고, 배터리로 쓰는 중에도 실행합니다.",
+            "실패하면 알림 창이 뜨고, 다음에 앱을 열 때도 알려 줍니다. 결과는 ‘실행 기록’에 남습니다.",
+        ), "인증 토큰 연결에서만 동작하며 Windows에 로그인해 있을 때 실행됩니다. 새 버전을 처음 열면 예약을 그 버전으로 바꿀지 묻습니다."),
         ("주의할 점", (
             "X 공식 API가 아닌 방식이라 천천히 요청해도 계정이 제한될 수 있습니다.",
             "‘요청 한도’ 안내가 나오면 알려 준 시각까지 기다렸다가 다시 시작하세요.",
@@ -893,8 +921,8 @@ class App:
         links.pack(side="bottom", fill="x")
         links.columnconfigure(0, weight=1)
         links.columnconfigure(1, weight=1)
-        ttk.Button(links, text="예약 명령 복사", command=self.copy_schedule_command).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 8))
-        ttk.Button(links, text="예약 실행 기록", command=self.open_schedule_logs).grid(row=0, column=1, sticky="ew", pady=(0, 8))
+        ttk.Button(links, text="자동 저장 예약", command=self.show_schedule).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 8))
+        ttk.Button(links, text="자동 저장 실행 기록", command=self.open_schedule_logs).grid(row=0, column=1, sticky="ew", pady=(0, 8))
         ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).grid(row=1, column=0, sticky="w")
         ttk.Button(links, text="닫기", width=9, command=popup.destroy).grid(row=1, column=1, sticky="e")
         body = theme.card(popup, fill="both", expand=True, padx=24, pady=(16, 0))
@@ -914,12 +942,219 @@ class App:
             content.insert("end", (note or "") + "\n", "note")
         content.configure(state="disabled")
 
-    def copy_schedule_command(self):
-        from .scheduled import schtasks_command
-        self.root.clipboard_clear()
-        self.root.clipboard_append(schtasks_command())
-        self.status.set("예약 등록 명령을 복사했습니다")
-        self.status_detail.set("명령 프롬프트(cmd)에 붙여 넣어 실행하세요.")
+    # ---------------------------------------------------------------- schedule
+    def show_schedule(self):
+        """Turn the daily automatic save on or off and see how it went."""
+        window = self.schedule_window
+        if window is not None and window.winfo_exists():
+            window.lift()
+            self.refresh_schedule()
+            return
+        window = self.schedule_window = tk.Toplevel(self.root)
+        window.title("자동 저장")
+        window.configure(bg=theme.CARD)
+        window.transient(self.root)
+        body = self._popup_content(window, padding=(28, 24))
+        ttk.Label(body, text="매일 자동 저장", style="CardHeading.TLabel").pack(anchor="w")
+        self._wrapping_label(body, text="매일 정한 시각에, 마지막으로 저장을 시작할 때의 설정으로 새 Like만 저장합니다. "
+                                        "창 없이 실행되며 인증 토큰 연결에서만 동작합니다.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+        ttk.Separator(body).pack(fill="x", pady=(18, 14))
+        ttk.Label(body, text="지금 상태", style="CardBold.TLabel").pack(anchor="w")
+        self._wrapping_label(body, textvariable=self.schedule_state, style="Card.TLabel", wraplength=640).pack(fill="x", pady=(4, 0))
+        self._wrapping_label(body, textvariable=self.schedule_last, style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+        row = ttk.Frame(body, style="Plain.TFrame")
+        row.pack(anchor="w", pady=(18, 0))
+        ttk.Label(row, text="실행 시각", style="Card.TLabel").pack(side="left")
+        times = [f"{hour:02d}:{minute:02d}" for hour in range(24) for minute in (0, 30)]
+        ttk.Combobox(row, textvariable=self.schedule_time, values=times, width=7, font=theme.BODY).pack(side="left", padx=8)
+        ttk.Label(row, text="(24시간 형식)", style="CardMuted.TLabel").pack(side="left")
+        buttons = ttk.Frame(body, style="Plain.TFrame")
+        buttons.pack(fill="x", pady=(16, 0))
+        self.schedule_on_button = ttk.Button(buttons, text="예약 켜기", style="CompactPrimary.TButton", command=self.register_schedule)
+        self.schedule_on_button.pack(side="left")
+        self.schedule_off_button = ttk.Button(buttons, text="예약 끄기", command=self.unregister_schedule)
+        self.schedule_off_button.pack(side="left", padx=8)
+        ttk.Button(buttons, text="실행 기록", command=self.open_schedule_logs).pack(side="left")
+        self._wrapping_label(body, text="PC가 꺼져 있거나 잠자기 상태였으면 다음에 켰을 때 바로 실행하고, 배터리로 쓰는 중에도 실행합니다. "
+                                        "Windows에 로그인해 있을 때만 실행됩니다. 실패하면 알림 창이 뜹니다. "
+                                        "Windows 작업 스케줄러에 ‘XlikeSaver 자동 저장’으로 등록됩니다.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(16, 0))
+        ttk.Button(body, text="닫기", width=9, command=self._close_schedule).pack(anchor="e", pady=(20, 0))
+        window.protocol("WM_DELETE_WINDOW", self._close_schedule)
+        self._show_schedule_info()
+        self._fit_popup(window)
+        self.refresh_schedule()
+
+    def _close_schedule(self):
+        window, self.schedule_window = self.schedule_window, None
+        if window is not None and window.winfo_exists():
+            window.destroy()
+
+    def _schedule_job(self, action, work, **details):
+        """Run a Task Scheduler call off the UI thread; the result is an event."""
+        if self.schedule_busy:
+            return False
+        self.schedule_busy = True
+        self._update_schedule_buttons()
+        if action != "status":
+            self.schedule_state.set("Windows 작업 스케줄러에 반영하는 중…")
+
+        def run():
+            from .scheduled import ScheduleError, task_status
+            try:
+                work()
+                event = {"type": "schedule", "action": action, "result": task_status(), **details}
+            except (ScheduleError, ValueError) as exc:
+                event = {"type": "schedule", "action": action, "error": str(exc), **details}
+            self.events.put(event)
+
+        threading.Thread(target=run, daemon=True).start()
+        return True
+
+    def refresh_schedule(self, *, prompt=False):
+        self._schedule_job("status", lambda: None, prompt=prompt)
+
+    def register_schedule(self):
+        from .scheduled import normal_time
+        if AUTH_MODES[self.auth.get()] != "managed":
+            dialogs.showinfo("자동 저장", "자동 저장은 ‘인증 토큰’ 연결에서만 사용할 수 있습니다. 로그인 연결 방식을 바꿔 주세요.",
+                             parent=self.schedule_window or self.root)
+            return
+        try:
+            when = normal_time(self.schedule_time.get())
+            if not self.account.get().strip() or not self.folder.get().strip():
+                raise ValueError("내 X 아이디와 저장 폴더를 먼저 입력해 주세요.")
+            self.schedule_time.set(when)
+            # The scheduled run uses the saved settings; save the current ones.
+            self._save_settings()
+        except (ValueError, OSError) as exc:
+            message = str(exc) if isinstance(exc, ValueError) else "설정을 저장하지 못했습니다. 폴더 권한을 확인해 주세요."
+            dialogs.showerror("자동 저장", message, parent=self.schedule_window or self.root)
+            return
+        from .scheduled import register_task
+        self._schedule_job("register", lambda: register_task(when), time=when)
+
+    def unregister_schedule(self):
+        if not dialogs.askyesno("자동 저장 끄기", "매일 자동 저장을 끌까요? 저장한 파일과 기록은 그대로 남습니다.",
+                                parent=self.schedule_window or self.root):
+            return
+        from .scheduled import unregister_task
+        self._schedule_job("unregister", unregister_task)
+
+    def _update_schedule_buttons(self):
+        if self.schedule_window is None or not self.schedule_window.winfo_exists():
+            return
+        info = self.schedule_info or {}
+        busy = "disabled" if self.schedule_busy else "normal"
+        self.schedule_on_button.configure(state=busy, text="예약 갱신" if info.get("registered") else "예약 켜기")
+        self.schedule_off_button.configure(state=busy if info.get("registered") else "disabled")
+
+    def _show_schedule_info(self, error=""):
+        from .history_gui import format_short
+        from .scheduled import last_run
+        info = self.schedule_info
+        if error:
+            state = error
+            summary = "자동 저장 상태를 확인하지 못했습니다. ‘예약 설정’에서 다시 확인해 주세요."
+        elif info is None:
+            state = summary = "자동 저장 상태를 확인하는 중…"
+        elif not info.get("registered"):
+            state = "꺼져 있습니다. 실행 시각을 고르고 ‘예약 켜기’를 누르세요."
+            summary = "꺼짐 · ‘예약 설정’에서 매일 정한 시각에 새 Like를 자동으로 저장할 수 있습니다."
+        else:
+            when = info.get("time") or "시각 미확인"
+            upcoming = f" · 다음 실행 {format_short(info['next_run'])}" if info.get("next_run") else ""
+            if not info.get("current"):
+                state = (f"매일 {when}에 다른 실행 파일({Path(info.get('program') or '').name or '알 수 없음'})로 등록돼 있습니다. "
+                         "‘예약 갱신’을 누르면 이 버전으로 바꿉니다.")
+                summary = f"매일 {when} · 다른 실행 파일로 등록됨 · ‘예약 설정’에서 갱신하세요."
+            elif not (info.get("catch_up") and info.get("on_battery")):
+                state = (f"매일 {when}에 켜져 있지만, 예전 방식으로 등록돼 PC가 꺼져 있었거나 배터리일 때는 건너뜁니다. "
+                         "‘예약 갱신’을 누르면 고쳐집니다.")
+                summary = f"매일 {when} · 켜짐 · 놓친 실행을 건너뛰는 예전 설정입니다. ‘예약 설정’에서 갱신하세요."
+            elif not info.get("enabled"):
+                state = f"매일 {when}로 등록돼 있지만 Windows 작업 스케줄러에서 꺼져 있습니다. ‘예약 갱신’을 누르면 다시 켜집니다."
+                summary = f"매일 {when} · 작업 스케줄러에서 꺼져 있음"
+            else:
+                state = f"켜져 있습니다 · 매일 {when}{upcoming}"
+                summary = f"매일 {when} · 켜짐{upcoming}"
+        last = last_run()
+        if last:
+            if last.get("busy"):
+                result = "다른 저장 작업이 실행 중이라 건너뜀"
+            elif last.get("failed"):
+                result = "실패 · " + str(last.get("message") or "실행 기록을 확인해 주세요.")
+            elif last.get("status") == "finished":
+                result = f"완료 · 새로 저장 {int(last.get('saved') or 0):,}개"
+            else:
+                result = STATUS_TEXT.get(last.get("status"), "끝남")
+            self.schedule_last.set(f"마지막 자동 저장: {format_short(last.get('finished_at'))} · {result}")
+        else:
+            self.schedule_last.set("마지막 자동 저장: 아직 없음")
+        self.schedule_state.set(state)
+        self.schedule_text.set(summary)
+        self._update_schedule_buttons()
+
+    def _schedule_result(self, event):
+        self.schedule_busy = False
+        action = event.get("action")
+        if "error" in event:
+            if action == "status":
+                self._show_schedule_info(event["error"])
+            else:
+                self._show_schedule_info()
+                dialogs.showerror("자동 저장", event["error"], parent=self.schedule_window or self.root)
+            return
+        self.schedule_info = event.get("result") or {"registered": False}
+        self._show_schedule_info()
+        if action == "register":
+            self.status.set(f"자동 저장을 켰습니다 · 매일 {event.get('time')}")
+            self.status_detail.set("PC가 꺼져 있었으면 다음에 켰을 때 실행합니다.")
+        elif action == "unregister":
+            self.status.set("자동 저장을 껐습니다")
+            self.status_detail.set("")
+        elif event.get("prompt"):
+            self._offer_schedule_update()
+
+    def _offer_schedule_update(self):
+        """After updating the app, move the daily task to this version once."""
+        info = self.schedule_info or {}
+        current = self._schedule_identity()
+        if not info.get("registered") or info.get("current") or self.schedule_prompted == current:
+            return
+        self.schedule_prompted = current
+        try:
+            data = load_settings()
+            data["schedule_prompted"] = current
+            self._write_settings(data)
+        except OSError:
+            pass
+        old = Path(info.get("program") or "").name or "다른 실행 파일"
+        if dialogs.askyesno("자동 저장 갱신", f"매일 자동 저장이 {old}로 등록돼 있습니다.\n\n"
+                                         "이 버전으로 바꿀까요? 시각은 그대로 둡니다.", parent=self.root):
+            if info.get("time"):
+                self.schedule_time.set(info["time"])
+            self.register_schedule()
+
+    @staticmethod
+    def _schedule_identity():
+        from .scheduled import launch_parts
+        return " ".join(launch_parts())
+
+    def _startup_schedule_check(self):
+        from .scheduled import last_run, mark_last_run_seen
+        last = last_run()
+        if last and last.get("failed") and not last.get("seen") and not self.running:
+            from .history_gui import format_short
+            self.status.set("지난 자동 저장이 실패했습니다")
+            self.status_detail.set(f"{format_short(last.get('finished_at'))} · {last.get('message') or '실행 기록을 확인해 주세요.'}")
+            self._log("지난 자동 저장 실패 · " + str(last.get("message") or "실행 기록을 확인해 주세요."))
+            try:
+                mark_last_run_seen()
+            except OSError:
+                pass
+        self.refresh_schedule(prompt=True)
 
     def open_schedule_logs(self):
         from .scheduled import log_directory
@@ -1091,6 +1326,8 @@ class App:
                 if not self.stopping:
                     self.status.set("파일을 저장하고 있습니다…")
                     self.status_detail.set("이미 저장한 파일은 건너뛰고 새 파일만 받습니다.")
+            elif kind == "schedule":
+                self._schedule_result(event)
             elif kind == "log":
                 message = str(event.get("message", ""))
                 if event.get("filename"):

@@ -6,6 +6,7 @@ read-only inputs. Legacy file modification times are never called save times.
 
 from __future__ import annotations
 
+import bisect
 import csv
 import functools
 import json
@@ -38,6 +39,16 @@ _COUNTERS = {"saved", "skipped", "size_skipped", "visited"}
 _CSV_FIELDS = ("folder_mode", "tweet_id", "num", "media_type", "author", "author_id", "filename",
                "posted_at", "posted_source", "saved_at", "path", "filesize", "status", "record_source",
                "source_url", "metadata_status", "author_metadata_status")
+_CSV_LIKE_FIELDS = ("liked_after", "liked_before")
+# Sort orders for the records list. Like order exists only for tweets a run
+# has walked since 1.8.0; the rest follow in tweet order.
+_ORDERS = {
+    "saved": "COALESCE(media.saved_at,media.posted_at,'') DESC,media.tweet_id DESC",
+    "liked": "likes.like_key IS NULL,likes.like_key DESC,media.tweet_id DESC",
+    "posted": "COALESCE(media.posted_at,'') DESC,media.tweet_id DESC",
+    "posted_oldest": "media.posted_at IS NULL,media.posted_at,media.tweet_id",
+}
+_PERIOD_FIELDS = {"posted": "media.posted_at", "saved": "media.saved_at"}
 
 
 class HistoryError(RuntimeError):
@@ -155,6 +166,11 @@ class HistoryStore:
                     message TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS catalog_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS likes (
+                    tweet_id TEXT PRIMARY KEY, like_key REAL NOT NULL,
+                    liked_after TEXT, liked_before TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS likes_order ON likes(like_key);
             """)
             primary = [row["name"] for row in sorted(self._db.execute("PRAGMA table_info(media)").fetchall(),
                                                      key=lambda row: row["pk"]) if row["pk"]]
@@ -698,28 +714,46 @@ class HistoryStore:
         return result
 
     @staticmethod
-    def _record_filter(media_type, query):
+    def _record_filter(media_type, query, period=None):
+        """WHERE clause on media; ``period`` is (field, first day, last day).
+
+        Days are inclusive YYYY-MM-DD dates in Korean time, either may be empty.
+        Stored times are Korean-time ISO strings, so they compare as text.
+        """
         if media_type not in _TYPES | {"all"} or not isinstance(query, str):
             raise HistoryError(_HISTORY_HELP)
         clauses, params = [], []
         if media_type != "all":
-            clauses.append("media_type=?")
+            clauses.append("media.media_type=?")
             params.append(media_type)
         if query:
-            clauses.append("(author LIKE ? ESCAPE '\\' OR tweet_id LIKE ? ESCAPE '\\' OR filename LIKE ? ESCAPE '\\')")
+            clauses.append("(media.author LIKE ? ESCAPE '\\' OR media.tweet_id LIKE ? ESCAPE '\\' OR media.filename LIKE ? ESCAPE '\\')")
             query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.extend(["%" + query + "%"] * 3)
+        if period is not None:
+            field, first, last = period
+            if field not in _PERIOD_FIELDS:
+                raise HistoryError(_HISTORY_HELP)
+            column = _PERIOD_FIELDS[field]
+            if first:
+                clauses.append(column + ">=?")
+                params.append(datetime.strptime(first, "%Y-%m-%d").date().isoformat())
+            if last:
+                following = datetime.strptime(last, "%Y-%m-%d").date() + timedelta(days=1)
+                clauses.append(column + "<?")
+                params.append(following.isoformat())
         return " WHERE " + " AND ".join(clauses) if clauses else "", params
 
     @_safe
-    def records(self, limit=100, offset=0, media_type="all", query="") -> list[dict]:
+    def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None) -> list[dict]:
         if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
                 isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
-                media_type not in _TYPES | {"all"} or not isinstance(query, str)):
+                media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS):
             raise HistoryError(_HISTORY_HELP)
-        where, params = self._record_filter(media_type, query)
-        rows = self._db.execute("SELECT * FROM media" + where +
-                                " ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num,folder_mode,media_type LIMIT ? OFFSET ?",
+        where, params = self._record_filter(media_type, query, period)
+        rows = self._db.execute("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before FROM media "
+                                "LEFT JOIN likes ON likes.tweet_id=media.tweet_id" + where +
+                                " ORDER BY " + _ORDERS[order] + ",media.num,media.folder_mode,media.media_type LIMIT ? OFFSET ?",
                                 (*params, limit, offset))
         return [dict(row) for row in rows]
 
@@ -731,10 +765,11 @@ class HistoryStore:
         return [dict(row) for row in self._db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))]
 
     @_safe
-    def record_page(self, page=0, page_size=100, media_type="all", query="") -> dict:
-        where, params = self._record_filter(media_type, query)
+    def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None) -> dict:
+        where, params = self._record_filter(media_type, query, period)
         return self._page("media" + where, params, page, page_size,
-                          lambda limit, offset: self.records(limit, offset, media_type, query))
+                          lambda limit, offset: self.records(limit, offset, media_type, query,
+                                                             order=order, period=period))
 
     @_safe
     def run_page(self, page=0, page_size=100) -> dict:
@@ -759,12 +794,112 @@ class HistoryStore:
         exported = 0
         with Path(destination).open("w", newline="", encoding="utf-8-sig") as file:
             writer = csv.writer(file)
-            writer.writerow(_CSV_FIELDS)
-            for row in self._db.execute("SELECT " + ",".join(_CSV_FIELDS) + " FROM media ORDER BY tweet_id,num"):
+            writer.writerow(_CSV_FIELDS + _CSV_LIKE_FIELDS)
+            columns = ",".join(["media." + name for name in _CSV_FIELDS] + ["likes." + name for name in _CSV_LIKE_FIELDS])
+            for row in self._db.execute("SELECT " + columns + " FROM media LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
+                                        "ORDER BY media.tweet_id,media.num"):
                 writer.writerow([_csv_cell(value) for value in row])
                 exported += 1
         return exported
 
     @_safe
+    def like_order(self, run_id: int) -> "LikeOrder":
+        return LikeOrder(self, run_id)
+
+    @_safe
     def close(self) -> None:
         self._db.close()
+
+
+class LikeOrder:
+    """Remember the order of Likes and when each was first seen.
+
+    X lists Likes newest first but does not say when a tweet was liked. While a
+    run walks that list, each newly seen tweet gets a sort key between the
+    already known tweets around it, so sorting by key restores Like order. The
+    tweet was liked before this run started (``liked_before``). Tweets newer
+    than every known one were also liked after the previous complete run
+    started (``liked_after``); older ones have no known lower bound.
+    """
+
+    STEP = 1024.0
+
+    def __init__(self, store: HistoryStore, run_id: int):
+        self._store = store
+        self._keys = {row[0]: row[1] for row in store._db.execute("SELECT tweet_id,like_key FROM likes")}
+        self._sorted = sorted(self._keys.values())
+        started = store._db.execute("SELECT started_at FROM runs WHERE id=?", (run_id,)).fetchone()
+        if started is None:
+            raise HistoryError(_HISTORY_HELP)
+        self._seen_by = started[0]
+        with store._db:
+            store._db.execute("INSERT OR IGNORE INTO catalog_meta(key,value) VALUES ('likes_tracked_since',?)",
+                              (self._seen_by,))
+        since = store._db.execute("SELECT value FROM catalog_meta WHERE key='likes_tracked_since'").fetchone()[0]
+        # Only a normally finished run that also tracked Likes saw every Like
+        # made before it started; a newer Like above it is from after then.
+        previous = store._db.execute(
+            "SELECT started_at FROM runs WHERE status='finished' AND id<? AND started_at>=? "
+            "ORDER BY started_at DESC,id DESC LIMIT 1", (run_id, since)).fetchone()
+        self._after = previous[0] if previous else None
+        self._upper = None      # key of the last known tweet seen in this run
+        self._pending = []      # new tweets since then, newest first
+        self._visited = set()
+
+    @_safe
+    def visit(self, tweet_id: str) -> None:
+        tweet_id = str(tweet_id)
+        if tweet_id in self._visited or not re.fullmatch(r"[0-9]{1,20}", tweet_id):
+            return
+        self._visited.add(tweet_id)
+        key = self._keys.get(tweet_id)
+        if key is None:
+            self._pending.append(tweet_id)
+            return
+        self._place(key)
+        self._upper = key
+
+    @_safe
+    def flush(self) -> None:
+        """Place tweets seen after the last known one (call when a run ends)."""
+        self._place(None)
+
+    def _above(self, key):
+        index = bisect.bisect_right(self._sorted, key)
+        return self._sorted[index] if index < len(self._sorted) else None
+
+    def _below(self, key):
+        index = bisect.bisect_left(self._sorted, key)
+        return self._sorted[index - 1] if index else None
+
+    @staticmethod
+    def _between(low, high, count):
+        """``count`` keys strictly between low and high, largest first."""
+        if high is None:
+            low = 0.0 if low is None else low
+            return [low + LikeOrder.STEP * (count - index) for index in range(count)]
+        if low is None:
+            return [high - LikeOrder.STEP * (index + 1) for index in range(count)]
+        return [low + (high - low) * (count - index) / (count + 1) for index in range(count)]
+
+    def _place(self, lower):
+        pending, self._pending = self._pending, []
+        if not pending:
+            return
+        top = self._upper is None
+        if top:
+            # Newest Likes: above every key, including those of un-liked tweets.
+            keys = self._between(self._sorted[-1] if self._sorted else None, None, len(pending))
+        elif lower is not None:
+            high = self._upper if self._upper > lower else self._above(lower)
+            keys = self._between(lower, high, len(pending))
+        else:
+            keys = self._between(self._below(self._upper), self._upper, len(pending))
+        after = self._after if top else None
+        rows = [(tweet_id, key, after, self._seen_by) for tweet_id, key in zip(pending, keys)]
+        with self._store._db:
+            self._store._db.executemany(
+                "INSERT OR IGNORE INTO likes(tweet_id,like_key,liked_after,liked_before) VALUES (?,?,?,?)", rows)
+        for tweet_id, key, *_ in rows:
+            self._keys[tweet_id] = key
+            bisect.insort(self._sorted, key)

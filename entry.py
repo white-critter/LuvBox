@@ -144,6 +144,14 @@ def main() -> int:
                     page = store.record_page(page=9, page_size=50)
                     assert page["total"] == 1 and page["page"] == 0 and len(page["rows"]) == 1
                     assert store.run_page()["total"] == 0
+                    # Like order is kept beside the records and sorts them.
+                    run = store.start_run("flat")
+                    order = store.like_order(run)
+                    order.visit("100")
+                    order.flush()
+                    store.finish_run(run, "finished")
+                    liked = store.record_page(order="liked", period=("posted", "", ""))["rows"][0]
+                    assert liked["liked_before"] and liked["like_key"] is not None
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -164,7 +172,7 @@ def main() -> int:
                       "font": actual_font, "record_pagination": "queried-and-clamped",
                       "appearance": "light-dark-live-switch", "local_previews": "photo-video-gif",
                       "gif_conversion": "animated-with-source-author-metadata", "gif_size_presets": "fitted-exact-frames",
-                      "dialogs": "themed", "progress": "rounded-borderless",
+                      "dialogs": "themed", "like_order": "recorded-and-sorted", "progress": "rounded-borderless",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",
