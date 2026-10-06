@@ -17,7 +17,7 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .storage import StoragePaths, prepare_storage
+from .storage import StoragePaths, prepare_storage, records_root
 
 
 _KOREA = timezone(timedelta(hours=9))
@@ -156,6 +156,10 @@ class HistoryStore:
         self.legacy_dir = Path(legacy_dir).expanduser() if legacy_dir is not None else None
         self._isolated_records = media_dir is not None
         self._folder_cache = None
+        # This PC's live records and their backups are never media, even when
+        # a chosen media folder happens to contain the app data folder.
+        records = records_root().resolve()
+        self._app_data = (records, records.parent / "backups")
         self.account_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.account_dir / ".xlikesaver-history.sqlite3"
         self._db = sqlite3.connect(self.path, timeout=5)
@@ -309,6 +313,8 @@ class HistoryStore:
                 candidate = cache[key] / supplied.name
             record_roots = getattr(self, "_media_roots", (self.output_dir,))
             if self._isolated_records and any(candidate.is_relative_to(parent / ".xlikesaver") for parent in record_roots):
+                return None
+            if any(candidate.is_relative_to(folder) for folder in self._app_data):
                 return None
             return candidate
         except (OSError, RuntimeError, ValueError):
@@ -640,7 +646,8 @@ class HistoryStore:
                     if entry.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
                         continue
                     if entry.is_dir(follow_symlinks=False):
-                        if entry.name == ".xlikesaver" or (restricted and directory == root and entry.name in account_names):
+                        if (entry.name == ".xlikesaver" or (restricted and directory == root and entry.name in account_names)
+                                or path in self._app_data):
                             continue
                         pending.append(path)
                     elif entry.is_file(follow_symlinks=False) and _FILENAME.fullmatch(entry.name):

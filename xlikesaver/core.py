@@ -49,6 +49,8 @@ _COMPATIBILITY_ERROR = ("내장 gallery-dl 구성이 이 버전의 XlikeSaver가
                         "배포된 실행 파일을 다시 받거나 setup.ps1로 고정된 버전을 설치해 주세요.")
 _HISTORY_ERROR = "저장 이력을 기록하지 못했습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
 _METADATA_ERROR = "출처 또는 작성자를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다."
+_SNAPSHOT_ERROR = ("저장 폴더에 기록 사본을 쓰지 못했습니다. 기록은 이 PC에 그대로 있으며 다음 저장 때 다시 씁니다. "
+                   "동기화 프로그램이 파일을 쓰는 중이면 잠시 뒤 다시 시도됩니다.")
 _DATE_MOVE_ERROR = "저장 완료일 폴더로 옮기지 못했습니다. 기존 파일 위치와 중복 방지 기록은 보존했습니다."
 _LOCAL_WRITE_ERROR = ("미디어 파일을 쓰지 못해 중단했습니다. 저장 폴더의 쓰기 권한, 다른 프로그램의 파일 사용 여부, "
                       "디스크 여유 공간을 확인한 뒤 직접 다시 실행해 주세요. "
@@ -1247,6 +1249,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 backup_catalog(history.account_dir, normalized.account)
             except (OSError, sqlite3.Error):
                 pass
+            # The media folder keeps a complete copy, so records travel with it.
+            try:
+                from .storage import MigrationError, publish_snapshot
+                publish_snapshot(storage)
+            except (MigrationError, OSError, sqlite3.Error, ValueError):
+                emit({"type": "log", "level": "warning", "message": _SNAPSHOT_ERROR})
         if guard is not None:
             guard.close()
         if output_guard is not None:

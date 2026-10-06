@@ -2,6 +2,13 @@
 
 Media may share an output folder; authentication-independent records never do.
 Legacy databases are copied with SQLite's backup API, never opened for writing.
+
+The live record databases are on this PC (records_root), never in the media
+folder: cloud-sync tools upload and download SQLite files and their WAL
+sidecars at different moments, which corrupted a catalog. After changes, a
+verified snapshot of each database is placed in the media folder's
+.xlikesaver/<account> as a complete file (no WAL), so records still travel
+with the folder; a PC without local records starts from that snapshot.
 """
 
 from __future__ import annotations
@@ -29,6 +36,9 @@ _LEGACY_SYNC = ".xlikesaver-sync.sqlite3"
 _DATABASES = (".xlikesaver-history.sqlite3", ".xlikesaver-archive.sqlite3",
               ".xlikesaver-archive.date.sqlite3", ".xlikesaver-archive.flat.sqlite3",
               _LEGACY_SYNC)
+# Sizes and times of the snapshot files this PC last wrote or read; a
+# snapshot that differs was written elsewhere and is merged in.
+_SNAPSHOT_STATE = "snapshot.json"
 
 
 @dataclass(frozen=True)
@@ -39,6 +49,7 @@ class StoragePaths:
     legacy_dir: Path
     account: str
     separate_accounts: bool
+    snapshot_dir: Path
 
 
 class MigrationError(ValueError):
@@ -68,6 +79,21 @@ def _legacy_source(path: Path, output_dir: Path) -> bool:
     return path.resolve().is_relative_to(output_dir) and path.is_file()
 
 
+def records_root() -> Path:
+    """Where live record databases are kept: this PC's application data."""
+    from .protection import state_directory
+    return state_directory().parent / "records"
+
+
+def _output_key(output: Path) -> str:
+    """A readable, unique folder name for one media folder's records."""
+    name = re.sub(r"[^\w.-]+", "_", output.name).strip("._")[:40] or "root"
+    if name.lower() in _RESERVED:
+        name = "_" + name
+    digest = hashlib.sha256(os.path.normcase(str(output)).encode("utf-8")).hexdigest()[:12]
+    return f"{name}-{digest}"
+
+
 def resolve_storage(output_dir: str | Path, account: str, separate_accounts: bool = False) -> StoragePaths:
     """Resolve paths without creating folders or changing existing records."""
     account = account.strip().lstrip("@").lower()
@@ -76,14 +102,21 @@ def resolve_storage(output_dir: str | Path, account: str, separate_accounts: boo
     output = Path(output_dir).expanduser().resolve()
     folder = ("_" if account in _RESERVED else "") + account
     legacy = output / folder
-    record = output / ".xlikesaver" / folder
-    for path in (output / ".xlikesaver", record):
+    snapshot = output / ".xlikesaver" / folder
+    for path in (output / ".xlikesaver", snapshot):
         if _linked(path) or not path.resolve().is_relative_to(output):
             raise ValueError("기록 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
     if separate_accounts and (_linked(legacy) or not legacy.resolve().is_relative_to(output)):
         raise ValueError("계정 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
+    root = records_root()
+    if output.is_relative_to(root.resolve()) or root.resolve().is_relative_to(output / ".xlikesaver"):
+        raise ValueError("앱의 기록 폴더 안에는 저장 경로를 지정할 수 없습니다. 다른 저장 경로를 선택해 주세요.")
+    record = root / _output_key(output) / folder
+    for path in (root, record.parent, record):
+        if _linked(path):
+            raise ValueError("이 PC의 기록 폴더가 다른 위치에 연결되어 있습니다. 앱 데이터 폴더를 확인해 주세요.")
     return StoragePaths(output, legacy if separate_accounts else output, record, legacy,
-                        account, separate_accounts)
+                        account, separate_accounts, snapshot)
 
 
 def prepare_storage(paths: StoragePaths, *, protected: bool = False) -> None:
@@ -98,18 +131,21 @@ def prepare_storage(paths: StoragePaths, *, protected: bool = False) -> None:
         destination = checked.record_dir / name
         if _linked(destination) or not destination.resolve().is_relative_to(checked.record_dir):
             raise ValueError("기록 파일이 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
-    if _linked(checked.legacy_dir) or not checked.legacy_dir.resolve().is_relative_to(checked.output_dir):
-        return
+    legacy = not _linked(checked.legacy_dir) and checked.legacy_dir.resolve().is_relative_to(checked.output_dir)
+    imported = {}
     for name in _DATABASES:
         if name == _LEGACY_SYNC:
             continue
         destination = checked.record_dir / name
         if destination.exists():
             continue
-        # Also recognize an account folder previously selected as the output
-        # root. Its isolated ledgers can be one account level deeper.
-        sources = (checked.legacy_dir / name,
-                   checked.legacy_dir / ".xlikesaver" / checked.record_dir.name / name)
+        # The media folder's snapshot first (records from earlier versions,
+        # which kept them there live, or from another PC). Also recognize an
+        # account folder previously selected as the output root; its
+        # isolated ledgers can be one account level deeper.
+        sources = (checked.snapshot_dir / name,)
+        if legacy:
+            sources += (checked.legacy_dir / name, checked.legacy_dir / ".xlikesaver" / checked.record_dir.name / name)
         source = next((path for path in sources if _legacy_source(path, checked.output_dir)), None)
         if source is None:
             continue
@@ -130,10 +166,128 @@ def prepare_storage(paths: StoragePaths, *, protected: bool = False) -> None:
                     staged.rename(destination)
                 else:
                     os.link(staged, destination)
+                if source == checked.snapshot_dir / name:
+                    imported[name] = _file_state(source)
             except FileExistsError:
                 pass
         finally:
             staged.unlink(missing_ok=True)
+    if imported:
+        state = _snapshot_state(checked)
+        state.update(imported)
+        _write_snapshot_state(checked, state)
+    if protected:
+        _merge_changed_snapshot(checked)
+
+
+def _file_state(path: Path) -> list[int]:
+    status = path.stat()
+    return [status.st_size, status.st_mtime_ns]
+
+
+def _snapshot_state(paths: StoragePaths) -> dict:
+    location = paths.record_dir / _SNAPSHOT_STATE
+    try:
+        if _linked(location) or location.stat().st_size > 65536:
+            return {}
+        value = json.loads(location.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    files = value.get("files") if isinstance(value, dict) else None
+    return {name: state for name, state in files.items() if name in _DATABASES and isinstance(state, list)} \
+        if isinstance(files, dict) else {}
+
+
+def _write_snapshot_state(paths: StoragePaths, files: dict) -> None:
+    location = paths.record_dir / _SNAPSHOT_STATE
+    temporary = paths.record_dir / (".snapshot-" + uuid.uuid4().hex + ".json")
+    try:
+        temporary.write_text(json.dumps({"version": 1, "output": str(paths.output_dir), "files": files},
+                                        ensure_ascii=False), encoding="utf-8")
+        os.replace(temporary, location)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _merge_changed_snapshot(paths: StoragePaths) -> None:
+    """Merge a snapshot that another PC wrote since this PC last saw it.
+
+    Download records are combined; file records keep the better version.
+    A damaged or unreadable snapshot is skipped, never blocking a save.
+    """
+    state = _snapshot_state(paths)
+    changed = False
+    for name in _DATABASES:
+        if name == _LEGACY_SYNC:
+            continue
+        shared, local = paths.snapshot_dir / name, paths.record_dir / name
+        if not local.is_file() or not _legacy_source(shared, paths.output_dir):
+            continue
+        current = _file_state(shared)
+        if state.get(name) == current:
+            continue
+        incoming = paths.record_dir.parent / (".incoming-" + uuid.uuid4().hex + ".sqlite3")
+        try:
+            _backup_database(shared, incoming)
+            _merge_database(name, local, incoming)
+        except (MigrationError, OSError, sqlite3.Error, ValueError):
+            pass
+        finally:
+            incoming.unlink(missing_ok=True)
+        state[name] = current
+        changed = True
+    if changed:
+        _write_snapshot_state(paths, state)
+
+
+def _replace(source: Path, target: Path) -> None:
+    """os.replace, retrying while a sync tool or scanner briefly holds the file."""
+    for attempt in range(10):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.2)
+
+
+def publish_snapshot(paths: StoragePaths) -> int:
+    """Place verified copies of this PC's records in the media folder.
+
+    Each database is copied with SQLite's backup API, checked, switched to a
+    single-file journal and swapped in whole, so a sync tool only ever sees
+    complete files. Returns how many databases were written.
+    """
+    checked = resolve_storage(paths.output_dir, paths.account, paths.separate_accounts)
+    snapshot = checked.snapshot_dir
+    snapshot.mkdir(parents=True, exist_ok=True)
+    if _linked(snapshot) or not snapshot.resolve().is_relative_to(checked.output_dir):
+        raise MigrationError(_MIGRATION_HELP)
+    state = _snapshot_state(checked)
+    written = 0
+    for name in _DATABASES:
+        source = checked.record_dir / name
+        if name == _LEGACY_SYNC or not source.is_file():
+            continue
+        target = snapshot / name
+        if _linked(target):
+            raise MigrationError(_MIGRATION_HELP)
+        temporary = snapshot / (".snapshot-" + uuid.uuid4().hex + ".sqlite3")
+        try:
+            _backup_database(source, temporary)
+            _replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        # Earlier versions used these as live WAL databases.
+        for suffix in ("-wal", "-shm", "-journal"):
+            leftover = snapshot / (name + suffix)
+            if leftover.is_file() and not _linked(leftover):
+                leftover.unlink(missing_ok=True)
+        state[name] = _file_state(target)
+        written += 1
+    _write_snapshot_state(checked, state)
+    return written
 
 
 OUTPUT_BUSY_HELP = "이 저장 경로에서 다른 작업이 실행 중입니다. 먼저 실행한 작업을 종료해 주세요."
@@ -147,7 +301,7 @@ def _record_files(directory: Path) -> None:
         raise MigrationError(_MIGRATION_HELP)
     if not directory.exists():
         return
-    names = {name + suffix for name in _DATABASES for suffix in ("", "-wal", "-shm", "-journal")}
+    names = {name + suffix for name in _DATABASES for suffix in ("", "-wal", "-shm", "-journal")} | {_SNAPSHOT_STATE}
     for child in directory.iterdir():
         if child.name not in names or _linked(child) or not child.is_file():
             raise MigrationError("기록 폴더에 다른 파일이 있어 자동으로 옮기지 못했습니다. 이전 기록은 보존했습니다.")
@@ -222,7 +376,7 @@ def _available_databases(paths: StoragePaths) -> dict[str, Path]:
         if current.is_file():
             result[name] = current
             continue
-        candidates = (paths.legacy_dir / name,
+        candidates = (paths.snapshot_dir / name, paths.legacy_dir / name,
                       paths.legacy_dir / ".xlikesaver" / paths.record_dir.name / name)
         legacy = next((item for item in candidates if _legacy_source(item, paths.output_dir)), None)
         if legacy is not None:
@@ -555,6 +709,10 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
         databases = sum((stage / name).is_file() for name in _DATABASES)
         _publish_records(destination, stage)
         stage = None
+        try:
+            publish_snapshot(destination)
+        except (MigrationError, OSError, sqlite3.Error, ValueError):
+            pass   # the next save writes the snapshot
         return MigrationResult(source.record_dir, destination.record_dir, databases, count, True)
     except (MigrationError, ProtectionError):
         raise

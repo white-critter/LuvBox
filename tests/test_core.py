@@ -17,6 +17,7 @@ from gallery_dl.extractor.common import Extractor
 from gallery_dl.extractor.message import Message
 
 from xlikesaver.core import JobOptions, run_worker
+from xlikesaver.storage import resolve_storage
 
 
 SECRET = "offline-test-cookie-secret-never-emit"
@@ -80,7 +81,8 @@ class CoreTests(unittest.TestCase):
         self.protection_root.start()
         self.addCleanup(self.protection_root.stop)
         self.output = self.base / "photos"
-        self.record_dir = self.output / ".xlikesaver" / "myaccount"
+        # Live records are on this PC (patched app data), not in the output.
+        self.record_dir = resolve_storage(self.output, "myaccount").record_dir
         self.cookie_file = self.base / "cookies.txt"
         self.write_cookies()
         self.options = JobOptions("@MyAccount", str(self.output), "file", str(self.cookie_file),
@@ -119,7 +121,7 @@ class CoreTests(unittest.TestCase):
 
     def copied_records_for_new_output(self, output):
         """Simulate the verified ledger transfer without copying media."""
-        target = output / ".xlikesaver" / "myaccount"
+        target = resolve_storage(output, "myaccount").record_dir
         target.mkdir(parents=True)
         for source in self.record_dir.glob("*.sqlite3"):
             with closing(sqlite3.connect(source)) as old, closing(sqlite3.connect(target / source.name)) as copied:

@@ -20,13 +20,18 @@ class StorageTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        # Live records go to this PC's app data; keep it inside the test.
+        protection = patch("xlikesaver.protection.state_directory", return_value=self.root / "app" / "request-protection")
+        protection.start()
+        self.addCleanup(protection.stop)
 
     def test_default_flat_root_and_account_option_use_one_record_location(self):
         direct = resolve_storage(self.root, "@Alice")
         split = resolve_storage(self.root, "Alice", True)
         self.assertEqual(direct.media_dir, self.root)
         self.assertEqual(split.media_dir, self.root / "alice")
-        self.assertEqual(direct.record_dir, self.root / ".xlikesaver" / "alice")
+        self.assertEqual(direct.snapshot_dir, self.root / ".xlikesaver" / "alice")
+        self.assertEqual(direct.record_dir.parent.parent, self.root / "app" / "records")
         self.assertEqual(direct.record_dir, split.record_dir)
         self.assertFalse(direct.record_dir.exists())
         self.assertEqual(resolve_storage(self.root, "CON", True).media_dir.name, "_con")

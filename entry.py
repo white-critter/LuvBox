@@ -18,6 +18,11 @@ def main() -> int:
             return 2
         report = {"ok": False}
         root = None
+        # Keep the check's settings, locks and records out of the user's app
+        # data (the worker child process inherits this too).
+        import tempfile as _tempfile
+        app_data = _tempfile.TemporaryDirectory(prefix="xlikesaver-selftest-", ignore_cleanup_errors=True)
+        os.environ["LOCALAPPDATA"] = app_data.name
         try:
             import importlib
             import base64
@@ -130,9 +135,12 @@ def main() -> int:
                     previous = store.records()[0]
                 finally:
                     store.close()
+                # Live records are in app data; the media folder gets a snapshot.
+                assert not paths.record_dir.is_relative_to(Path(folder))
                 relocated = resolve_storage(Path(folder) / "새 저장 폴더", "example")
                 migration = migrate_records(paths, relocated)
                 assert migration.changed and migration.media_records == 1
+                assert (relocated.snapshot_dir / ".xlikesaver-history.sqlite3").is_file()
                 store = HistoryStore.for_storage(relocated)
                 try:
                     store.import_legacy(refresh=True)
@@ -183,7 +191,8 @@ def main() -> int:
                       "appearance": "light-dark-live-switch", "local_previews": "photo-video-gif",
                       "gif_conversion": "animated-with-source-author-metadata", "gif_size_presets": "fitted-exact-frames",
                       "dialogs": "themed", "like_order": "recorded-and-sorted", "tweet_text": "searchable",
-                      "statistics": "authors-and-months", "catalog_recovery": "salvage-verified", "progress": "rounded-borderless",
+                      "statistics": "authors-and-months", "catalog_recovery": "salvage-verified",
+                      "records": "local-with-folder-snapshot", "progress": "rounded-borderless",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",

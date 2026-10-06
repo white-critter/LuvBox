@@ -22,7 +22,7 @@ from .charts import MonthlyBars
 from .gallery import ThumbnailGrid
 from .history import CatalogDamaged, HistoryError, HistoryStore
 from .preview import PreviewLoader
-from .storage import OutputGuard, StoragePaths
+from .storage import MigrationError, OutputGuard, StoragePaths, publish_snapshot
 
 
 MEDIA_LABELS = {"all": "전체", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF"}
@@ -73,6 +73,15 @@ def format_short(value: str | None) -> str:
         return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
     except (ValueError, TypeError):
         return "–"
+
+
+def _publish(location):
+    """Refresh the media folder's copy of the records after a local change."""
+    if isinstance(location, StoragePaths):
+        try:
+            publish_snapshot(location)
+        except (MigrationError, OSError, sqlite3.Error, ValueError):
+            pass   # the next save writes it again
 
 
 def liked_period(row: dict) -> str:
@@ -1064,7 +1073,13 @@ class HistoryWindow(tk.Toplevel):
             return
         archives = self.current_summary.get("archivepaths", [])
         archive_text = "\n".join(map(str, archives)) or "아직 다운로드 기록 파일이 없습니다."
-        dialogs.showinfo("기록 저장 위치", f"기록·통계:\n{self.current_account_dir / '.xlikesaver-history.sqlite3'}\n\n중복 방지:\n{archive_text}\n\n기록은 계정별로 관리합니다. 저장 폴더의 .xlikesaver 폴더를 지우면 앱이 저장 내역을 잊습니다. 파일 목록은 저장 시각 순서이며 예전 저장 시각은 알 수 없습니다.", parent=self)
+        snapshot = (str(self.current_storage.snapshot_dir) if isinstance(self.current_storage, StoragePaths)
+                    else "저장 폴더의 .xlikesaver")
+        dialogs.showinfo("기록 저장 위치", f"이 PC의 기록·통계:\n{self.current_account_dir / '.xlikesaver-history.sqlite3'}\n\n"
+                         f"이 PC의 중복 방지 기록:\n{archive_text}\n\n저장 폴더에 두는 사본:\n{snapshot}\n\n"
+                         "기록은 계정과 저장 폴더마다 이 PC에 따로 둡니다. 저장할 때마다 저장 폴더의 .xlikesaver에 "
+                         "검사를 통과한 사본을 통째로 바꿔 두므로, 다른 PC나 다시 설치한 앱은 이 사본에서 기록을 가져옵니다. "
+                         "파일 목록은 저장 시각 순서이며 예전 저장 시각은 알 수 없습니다.", parent=self)
 
     def export(self):
         if self.busy or self.current_account_dir is None:
@@ -1134,6 +1149,7 @@ class HistoryWindow(tk.Toplevel):
                 output_guard = OutputGuard(location.output_dir)
                 output_guard.acquire()
             result = repair_history(record_dir, account)
+            _publish(location)
             counts = result["counts"]
             results.put((generation, "repaired",
                          f"기록 복구 완료 · 파일 기록 {counts.get('media', 0):,}개, 실행 기록 {counts.get('runs', 0):,}개를 살렸습니다. "
@@ -1293,6 +1309,7 @@ class HistoryWindow(tk.Toplevel):
             try:
                 if store is not None:
                     store.close()
+                    _publish(directory)
             finally:
                 try:
                     for guard in reversed(output_guards):
@@ -1372,6 +1389,7 @@ class HistoryWindow(tk.Toplevel):
             try:
                 if store is not None:
                     store.close()
+                    _publish(directory)
             finally:
                 try:
                     for guard in reversed(output_guards):

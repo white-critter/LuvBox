@@ -411,7 +411,8 @@ class GuiTests(unittest.TestCase):
         account, paths = self.app._history_location()
         self.assertEqual(account, "offline_test")
         self.assertEqual(paths.media_dir, directory)
-        self.assertEqual(paths.record_dir, directory / ".xlikesaver" / "offline_test")
+        self.assertEqual(paths.snapshot_dir, directory / ".xlikesaver" / "offline_test")
+        self.assertTrue(paths.record_dir.is_relative_to(Path(self.temp.name) / "records"))
         with patch("xlikesaver.gui.os.startfile") as opened:
             self.app.open_folder()
         opened.assert_called_once_with(str(directory))

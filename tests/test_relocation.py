@@ -209,7 +209,7 @@ class RelocationTests(unittest.TestCase):
         result = migrate_records(self.a, self.b)
         self.assertEqual(result.media_records, 0)
         self.assertEqual(len(self.rows(self.b)[0]), 0)
-        self.assertEqual({path.name for path in self.b.record_dir.iterdir()}, {".xlikesaver-history.sqlite3"})
+        self.assertEqual({path.name for path in self.b.record_dir.iterdir()}, {".xlikesaver-history.sqlite3", "snapshot.json"})
         self.assertFalse((self.b.output_dir / "cookies.txt").exists())
 
     def test_nonexistent_source_does_not_silently_reset_records(self):
@@ -376,8 +376,12 @@ class RelocationTests(unittest.TestCase):
 
     def test_record_root_overlap_is_rejected_but_parent_child_media_roots_work(self):
         self.record(self.a, 100)
+        # Neither this PC's records folder nor the media folder's snapshot
+        # folder may hold the media.
+        with self.assertRaisesRegex(ValueError, "기록 폴더 안"):
+            resolve_storage(self.a.record_dir / "media", "alice")
         with self.assertRaisesRegex(MigrationError, "기록 폴더 안"):
-            migrate_records(self.a, resolve_storage(self.a.record_dir / "media", "alice"))
+            migrate_records(self.a, resolve_storage(self.a.snapshot_dir / "media", "alice"))
         nested = resolve_storage(self.a.output_dir / "nested", "alice")
         self.assertTrue(migrate_records(self.a, nested).changed)
         self.assertEqual(self.rows(nested)[0][0]["tweet_id"], "100")
