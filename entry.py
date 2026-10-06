@@ -34,6 +34,7 @@ def main() -> int:
             from xlikesaver.storage import migrate_records, resolve_storage
             from xlikesaver.media import convert_mp4_to_gif, ffmpeg_path
             from xlikesaver.preview import thumbnail
+            from xlikesaver import charts, gallery  # bundled UI modules
             from PIL import Image
 
             importlib.import_module("gallery_dl.extractor.utils.twitter_transaction_id")
@@ -152,6 +153,12 @@ def main() -> int:
                     store.finish_run(run, "finished")
                     liked = store.record_page(order="liked", period=("posted", "", ""))["rows"][0]
                     assert liked["liked_before"] and liked["like_key"] is not None
+                    store.record_tweets([("100", "자체 점검 글", ["점검"])])
+                    assert store.record_page(query="#점검")["total"] == 1
+                    assert store.record_page(author="Example_Author")["total"] == 1
+                    assert store.statistics()["authors"][0]["files"] == 1
+                    assert charts.bins([("2026-01", 1), ("2026-03", 2)])[0][1] == ("2026-02", 0)
+                    assert gallery.TILE == (150, 112)
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -172,7 +179,8 @@ def main() -> int:
                       "font": actual_font, "record_pagination": "queried-and-clamped",
                       "appearance": "light-dark-live-switch", "local_previews": "photo-video-gif",
                       "gif_conversion": "animated-with-source-author-metadata", "gif_size_presets": "fitted-exact-frames",
-                      "dialogs": "themed", "like_order": "recorded-and-sorted", "progress": "rounded-borderless",
+                      "dialogs": "themed", "like_order": "recorded-and-sorted", "tweet_text": "searchable",
+                      "statistics": "authors-and-months", "progress": "rounded-borderless",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",

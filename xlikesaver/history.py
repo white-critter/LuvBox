@@ -40,6 +40,11 @@ _CSV_FIELDS = ("folder_mode", "tweet_id", "num", "media_type", "author", "author
                "posted_at", "posted_source", "saved_at", "path", "filesize", "status", "record_source",
                "source_url", "metadata_status", "author_metadata_status")
 _CSV_LIKE_FIELDS = ("liked_after", "liked_before")
+_CSV_TWEET_FIELDS = ("content", "hashtags")
+_TWEET_TEXT_LIMIT = 5000
+# Catalog rows joined with what is known per tweet (Like order and text).
+_JOINED = ("media LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
+           "LEFT JOIN tweets ON tweets.tweet_id=media.tweet_id")
 # Sort orders for the records list. Like order exists only for tweets a run
 # has walked since 1.8.0; the rest follow in tweet order.
 _ORDERS = {
@@ -171,6 +176,10 @@ class HistoryStore:
                     liked_after TEXT, liked_before TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS likes_order ON likes(like_key);
+                CREATE TABLE IF NOT EXISTS tweets (
+                    tweet_id TEXT PRIMARY KEY, content TEXT NOT NULL DEFAULT '',
+                    hashtags TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+                );
             """)
             primary = [row["name"] for row in sorted(self._db.execute("PRAGMA table_info(media)").fetchall(),
                                                      key=lambda row: row["pk"]) if row["pk"]]
@@ -714,7 +723,7 @@ class HistoryStore:
         return result
 
     @staticmethod
-    def _record_filter(media_type, query, period=None):
+    def _record_filter(media_type, query, period=None, author=""):
         """WHERE clause on media; ``period`` is (field, first day, last day).
 
         Days are inclusive YYYY-MM-DD dates in Korean time, either may be empty.
@@ -727,9 +736,15 @@ class HistoryStore:
             clauses.append("media.media_type=?")
             params.append(media_type)
         if query:
-            clauses.append("(media.author LIKE ? ESCAPE '\\' OR media.tweet_id LIKE ? ESCAPE '\\' OR media.filename LIKE ? ESCAPE '\\')")
+            clauses.append("(media.author LIKE ? ESCAPE '\\' OR media.tweet_id LIKE ? ESCAPE '\\' OR media.filename LIKE ? ESCAPE '\\'"
+                           " OR tweets.content LIKE ? ESCAPE '\\' OR tweets.hashtags LIKE ? ESCAPE '\\')")
             query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.extend(["%" + query + "%"] * 3)
+            params.extend(["%" + query + "%"] * 5)
+        if author:
+            if not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author):
+                raise HistoryError(_HISTORY_HELP)
+            clauses.append("media.author=? COLLATE NOCASE")
+            params.append(author)
         if period is not None:
             field, first, last = period
             if field not in _PERIOD_FIELDS:
@@ -745,14 +760,15 @@ class HistoryStore:
         return " WHERE " + " AND ".join(clauses) if clauses else "", params
 
     @_safe
-    def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None) -> list[dict]:
+    def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None,
+                author="") -> list[dict]:
         if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
                 isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
                 media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS):
             raise HistoryError(_HISTORY_HELP)
-        where, params = self._record_filter(media_type, query, period)
-        rows = self._db.execute("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before FROM media "
-                                "LEFT JOIN likes ON likes.tweet_id=media.tweet_id" + where +
+        where, params = self._record_filter(media_type, query, period, author)
+        rows = self._db.execute("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,"
+                                "tweets.content,tweets.hashtags FROM " + _JOINED + where +
                                 " ORDER BY " + _ORDERS[order] + ",media.num,media.folder_mode,media.media_type LIMIT ? OFFSET ?",
                                 (*params, limit, offset))
         return [dict(row) for row in rows]
@@ -765,11 +781,12 @@ class HistoryStore:
         return [dict(row) for row in self._db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))]
 
     @_safe
-    def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None) -> dict:
-        where, params = self._record_filter(media_type, query, period)
-        return self._page("media" + where, params, page, page_size,
+    def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None,
+                    author="") -> dict:
+        where, params = self._record_filter(media_type, query, period, author)
+        return self._page(_JOINED + where, params, page, page_size,
                           lambda limit, offset: self.records(limit, offset, media_type, query,
-                                                             order=order, period=period))
+                                                             order=order, period=period, author=author))
 
     @_safe
     def run_page(self, page=0, page_size=100) -> dict:
@@ -794,10 +811,10 @@ class HistoryStore:
         exported = 0
         with Path(destination).open("w", newline="", encoding="utf-8-sig") as file:
             writer = csv.writer(file)
-            writer.writerow(_CSV_FIELDS + _CSV_LIKE_FIELDS)
-            columns = ",".join(["media." + name for name in _CSV_FIELDS] + ["likes." + name for name in _CSV_LIKE_FIELDS])
-            for row in self._db.execute("SELECT " + columns + " FROM media LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
-                                        "ORDER BY media.tweet_id,media.num"):
+            writer.writerow(_CSV_FIELDS + _CSV_LIKE_FIELDS + _CSV_TWEET_FIELDS)
+            columns = ",".join(["media." + name for name in _CSV_FIELDS] + ["likes." + name for name in _CSV_LIKE_FIELDS] +
+                               ["tweets." + name for name in _CSV_TWEET_FIELDS])
+            for row in self._db.execute("SELECT " + columns + " FROM " + _JOINED + " ORDER BY media.tweet_id,media.num"):
                 writer.writerow([_csv_cell(value) for value in row])
                 exported += 1
         return exported
@@ -805,6 +822,48 @@ class HistoryStore:
     @_safe
     def like_order(self, run_id: int) -> "LikeOrder":
         return LikeOrder(self, run_id)
+
+    @_safe
+    def record_tweets(self, tweets) -> None:
+        """Keep each tweet's text and hashtags; ``tweets`` holds (id, text, tags)."""
+        rows = []
+        for tweet_id, content, hashtags in tweets:
+            tweet_id = str(tweet_id)
+            if not re.fullmatch(r"[0-9]{1,20}", tweet_id):
+                continue
+            tags = " ".join("#" + _clean_text(tag, 140) for tag in hashtags or () if isinstance(tag, str) and tag)
+            # Line breaks become spaces; other control characters are dropped.
+            text = " ".join(_clean_text(" ".join(content.split()) if isinstance(content, str) else "",
+                                        _TWEET_TEXT_LIMIT).split())
+            rows.append((tweet_id, text, tags[:2000], _now()))
+        if not rows:
+            return
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO tweets(tweet_id,content,hashtags,updated_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(tweet_id) DO UPDATE SET content=excluded.content,hashtags=excluded.hashtags,"
+                "updated_at=excluded.updated_at", rows)
+
+    @_safe
+    def statistics(self, top: int = 20) -> dict:
+        """Most saved authors and counts per month for the statistics tab.
+
+        Months are Korean-time YYYY-MM. 'liked' counts only Likes whose period
+        is known (first seen after an earlier complete run), by month seen.
+        """
+        authors = [dict(row) for row in self._db.execute(
+            "SELECT MAX(author) AS author,COUNT(*) AS files,COUNT(DISTINCT tweet_id) AS posts,"
+            "MAX(posted_at) AS latest FROM media WHERE author!='' GROUP BY lower(author) "
+            "ORDER BY files DESC,posts DESC,lower(author) LIMIT ?", (top,))]
+        months = {}
+        for name, query in (
+                ("posted", "SELECT substr(posted_at,1,7),COUNT(*) FROM media WHERE posted_at IS NOT NULL GROUP BY 1"),
+                ("saved", "SELECT substr(saved_at,1,7),COUNT(*) FROM media WHERE saved_at IS NOT NULL GROUP BY 1"),
+                ("liked", "SELECT substr(liked_before,1,7),COUNT(*) FROM likes WHERE liked_after IS NOT NULL GROUP BY 1")):
+            months[name] = [(month, count) for month, count in self._db.execute(query)
+                            if isinstance(month, str) and re.fullmatch(r"\d{4}-\d\d", month)]
+            months[name].sort()
+        return {"authors": authors, "months": months}
 
     @_safe
     def close(self) -> None:

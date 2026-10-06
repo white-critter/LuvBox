@@ -412,6 +412,11 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
         for row in _rows(source, "likes"):
             target.execute("INSERT OR IGNORE INTO likes(tweet_id,like_key,liked_after,liked_before) VALUES (?,?,?,?)",
                            (row["tweet_id"], row["like_key"], row["liked_after"], row["liked_before"]))
+    if "tweets" in source_tables:
+        _prepare_table(target, source, "tweets")
+        for row in _rows(source, "tweets"):
+            target.execute("INSERT OR IGNORE INTO tweets(tweet_id,content,hashtags,updated_at) VALUES (?,?,?,?)",
+                           (row["tweet_id"], row["content"], row["hashtags"], row["updated_at"]))
     if "catalog_meta" in source_tables:
         _prepare_table(target, source, "catalog_meta")
         for key, value in source.execute("SELECT key,value FROM catalog_meta WHERE key != 'allowed_media_roots'"):

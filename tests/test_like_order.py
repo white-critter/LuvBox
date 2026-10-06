@@ -110,7 +110,7 @@ class LikeOrderTests(unittest.TestCase):
         exported = Path(self.temp.name) / "records.csv"
         self.store.export_records(exported)
         header, *rows = exported.read_text(encoding="utf-8-sig").splitlines()
-        self.assertTrue(header.endswith("liked_after,liked_before"))
+        self.assertTrue(header.endswith("liked_after,liked_before,content,hashtags"))
 
     def test_record_relocation_carries_like_order(self):
         self.walk(["2", "1"])

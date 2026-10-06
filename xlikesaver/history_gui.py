@@ -17,6 +17,8 @@ import webbrowser
 from PIL import ImageTk
 
 from . import dialogs, theme
+from .charts import MonthlyBars
+from .gallery import ThumbnailGrid
 from .history import HistoryError, HistoryStore
 from .preview import PreviewLoader
 from .storage import OutputGuard, StoragePaths
@@ -31,6 +33,12 @@ PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
 ORDER_LABELS = {"saved": "저장한 순", "liked": "Like한 순", "posted": "게시일 최신순", "posted_oldest": "게시일 오래된 순"}
 PERIOD_LABELS = {"posted": "게시일", "saved": "저장일"}
+MONTH_FIELDS = {"saved": "저장한 달", "posted": "게시된 달", "liked": "Like한 달"}
+MONTH_NOTES = {
+    "saved": "이 앱이 파일을 저장한 달마다 센 파일 수입니다. 처음 저장한 달은 그동안의 Like가 한꺼번에 들어가 높게 나옵니다.",
+    "posted": "트윗이 올라온 달마다 센 파일 수입니다. 3년이 넘으면 해마다 묶어 보여 줍니다.",
+    "liked": "새로 누른 Like 수입니다(앱이 처음 발견한 달 기준). 자동 저장을 켜 둔 뒤의 새 Like만 들어갑니다.",
+}
 GIF_SIZE_LABELS = {"original": "원본 크기", "720": "최대 720px · 초당 15장", "480": "최대 480px · 초당 12장"}
 NO_SELECTION = ("표에서 파일을 고르면 미리보기와 출처를 볼 수 있습니다. 두 번 누르면 파일이 열립니다.\n"
                 "위 검색칸에서 작성자 아이디, 파일명, 트윗 번호로 찾을 수 있습니다.")
@@ -78,6 +86,13 @@ def liked_period(row: dict) -> str:
     if after == "–":
         return f"{before} 이전"
     return f"{after} ~ {before} 사이"
+
+
+def tweet_text(row: dict) -> str:
+    if row.get("content") is None:
+        return "기록 전 (다음 저장 실행부터 기록)"
+    text = " ".join(filter(None, (row.get("content") or "", row.get("hashtags") or "")))
+    return text or "(글 없음)"
 
 
 def format_day(value: str | None) -> str:
@@ -150,6 +165,12 @@ class HistoryWindow(tk.Toplevel):
         self.period_from = tk.StringVar(self)
         self.period_to = tk.StringVar(self)
         self.applied_period = None
+        self.author_filter = ""
+        self.view_mode = "table"
+        self.month_field = tk.StringVar(self, value=MONTH_FIELDS["saved"])
+        self.month_note = tk.StringVar(self, value=MONTH_NOTES["saved"])
+        self.stats = {}
+        self.stats_authors = {}
         self.page_text = tk.StringVar(self)
         self.run_page_text = tk.StringVar(self)
         self.page_size = tk.StringVar(self, value=str(PAGE_SIZE))
@@ -244,9 +265,20 @@ class HistoryWindow(tk.Toplevel):
         entry = ttk.Entry(search, textvariable=self.query, font=theme.BODY)
         entry.pack(side="left", fill="x", expand=True, padx=8)
         entry.bind("<Return>", lambda _: self.search())
+        self.search_entry = entry
+        # Shown while only one author's files are listed; click to show all.
+        self.author_chip = ttk.Button(search, text="", style="CompactPrimary.TButton", command=self.clear_author)
         ttk.Button(search, text="찾기", command=self.search).pack(side="left")
         self.export_button = ttk.Button(search, text="CSV로 저장", command=self.export)
         self.export_button.pack(side="right", padx=(8, 0))
+        views = ttk.Frame(search)
+        views.pack(side="right", padx=(8, 0))
+        self.view_buttons = {}
+        for mode, label in (("table", "표"), ("grid", "모아보기")):
+            button = ttk.Button(views, text=label, style="Compact.TButton", command=lambda mode=mode: self.set_view(mode))
+            button.pack(side="left", padx=(0 if mode == "table" else 4, 0))
+            self.view_buttons[mode] = button
+        self._update_view_buttons()
 
         columns = ("posted", "kind", "author", "filename", "size", "saved")
         self.file_browser = ttk.Frame(files)
@@ -281,6 +313,8 @@ class HistoryWindow(tk.Toplevel):
         ttk.Button(self.preview_info, text="크게 열기", command=self.open_file,
                    style="Compact.TButton").pack(anchor="w", pady=(8, 0))
         self.file_browser.bind("<Configure>", self._queue_pager_layout)
+        self.grid_view = ThumbnailGrid(self.file_browser, on_select=self._select_key,
+                                       on_open=lambda key: (self._select_key(key), self.open_file()))
 
         actions = ttk.Frame(files)
         actions.grid(row=3, column=0, sticky="ew", pady=(8, 6))
@@ -290,11 +324,13 @@ class HistoryWindow(tk.Toplevel):
         self.backfill_button.pack(side="left")
         self.convert_button = ttk.Button(actions, text="MP4 GIF를 GIF로", command=self.convert_gifs)
         self.convert_button.pack(side="left", padx=(8, 0))
+        self.author_button = ttk.Button(actions, text="이 작성자만 보기", command=self.filter_selected_author)
+        self.author_button.pack(side="left", padx=(8, 0))
         self._pagination(files, row=2)
         details = ttk.Frame(files, style="Card.TFrame", padding=(14, 8))
         details.grid(row=4, column=0, sticky="ew")
         details.columnconfigure(0, weight=1)
-        self.selection_detail = tk.Text(details, height=4, width=1, wrap="word", font=theme.BODY,
+        self.selection_detail = tk.Text(details, height=5, width=1, wrap="word", font=theme.BODY,
                                         background=theme.CARD, foreground=theme.INK,
                                         borderwidth=0, highlightthickness=0, state="disabled")
         self.selection_detail.grid(row=0, column=0, sticky="ew")
@@ -317,6 +353,44 @@ class HistoryWindow(tk.Toplevel):
         self._pagination(runs, row=1, runs=True)
         run_details.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(run_details, textvariable=self.run_text, style="Card.TLabel", wraplength=1000, justify="left").pack(anchor="w")
+
+        stats = ttk.Frame(tabs, padding=(10, 12))
+        tabs.add(stats, text="통계")
+        stats.columnconfigure(0, weight=2, uniform="stats")
+        stats.columnconfigure(1, weight=3, uniform="stats")
+        stats.rowconfigure(0, weight=1)
+        ranking = ttk.Frame(stats, style="Card.TFrame", padding=(14, 12))
+        ranking.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        ranking.columnconfigure(0, weight=1)
+        ranking.rowconfigure(1, weight=1)
+        ttk.Label(ranking, text="많이 저장한 작성자", style="CardHeading.TLabel").grid(row=0, column=0, sticky="w")
+        author_columns = ("rank", "author", "files", "posts", "latest")
+        self.author_tree = ttk.Treeview(ranking, columns=author_columns, show="headings", height=8, selectmode="browse")
+        for key, title, width in zip(author_columns, ("순위", "작성자", "파일", "트윗", "최근 게시일"), (44, 130, 56, 56, 100)):
+            self.author_tree.heading(key, text=title)
+            self.author_tree.column(key, width=width, minwidth=40, stretch=key == "author",
+                                    anchor="w" if key == "author" else "center")
+        self.author_tree.grid(row=1, column=0, sticky="nsew", pady=(8, 8))
+        self.author_tree.bind("<Double-1>", lambda _: self.show_ranked_author())
+        ttk.Button(ranking, text="이 작성자 파일 보기", style="Compact.TButton",
+                   command=self.show_ranked_author).grid(row=2, column=0, sticky="w")
+        months = ttk.Frame(stats, style="Card.TFrame", padding=(14, 12))
+        months.grid(row=0, column=1, sticky="nsew")
+        months.columnconfigure(0, weight=1)
+        months.rowconfigure(2, weight=1)
+        header = ttk.Frame(months, style="Plain.TFrame")
+        header.grid(row=0, column=0, sticky="ew")
+        ttk.Label(header, text="달마다 몇 개?", style="CardHeading.TLabel").pack(side="left")
+        field = ttk.Combobox(header, textvariable=self.month_field, values=list(MONTH_FIELDS.values()),
+                             state="readonly", width=10, font=theme.BODY)
+        field.pack(side="right")
+        field.bind("<<ComboboxSelected>>", lambda _: self._draw_months())
+        # Wrapped to this card, not to the window like other notes.
+        note = ttk.Label(months, textvariable=self.month_note, style="CardMuted.TLabel", justify="left")
+        note.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+        months.bind("<Configure>", lambda event: note.configure(wraplength=max(200, event.width - 30)), add="+")
+        self.month_chart = MonthlyBars(months)
+        self.month_chart.grid(row=2, column=0, sticky="nsew")
         ttk.Label(body, textvariable=self.status_text, style="Muted.TLabel", wraplength=1000, justify="left").grid(row=5, column=0, sticky="w", pady=(10, 0))
 
     def _pagination(self, parent, *, row, runs=False):
@@ -618,6 +692,8 @@ class HistoryWindow(tk.Toplevel):
             return
         if widget_class == "Treeview" and not getattr(event, "state", 0) & 0x4:
             return
+        if self.tabs.index("current") == 2:
+            return
         runs = self.tabs.index("current") == 1
         if event.keysym == "Prior":
             self.change_page(-1, runs=runs)
@@ -673,20 +749,21 @@ class HistoryWindow(tk.Toplevel):
             query = query[1:]
         order = next(key for key, label in ORDER_LABELS.items() if label == self.order.get())
         threading.Thread(target=partial(HistoryWindow._load_worker, self.results), args=(generation, location, kind, query, self.page, do_import,
-                                                 self._page_size(), self.run_page, order, self.applied_period), daemon=True).start()
+                                                 self._page_size(), self.run_page, order, self.applied_period,
+                                                 self.author_filter), daemon=True).start()
 
     @staticmethod
     def _store(location):
         return HistoryStore.for_storage(location) if isinstance(location, StoragePaths) else HistoryStore(location)
 
     def _load(self, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0,
-              order="saved", period=None):
+              order="saved", period=None, author=""):
         return self._load_worker(self.results, generation, directory, kind, query, page, do_import, page_size, run_page,
-                                 order, period)
+                                 order, period, author)
 
     @staticmethod
     def _load_worker(results, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0,
-                     order="saved", period=None):
+                     order="saved", period=None, author=""):
         store = None
         try:
             store = HistoryWindow._store(directory)
@@ -694,7 +771,8 @@ class HistoryWindow(tk.Toplevel):
             def snapshot(warnings):
                 summary = store.summary()
                 summary["warnings"] = warnings
-                files = store.record_page(page, page_size, kind, query, order=order, period=period)
+                summary["stats"] = store.statistics()
+                files = store.record_page(page, page_size, kind, query, order=order, period=period, author=author)
                 runs = store.run_page(run_page, page_size)
                 return store.account_dir, summary, files["rows"], runs["rows"], files["page"], files, runs
 
@@ -764,6 +842,8 @@ class HistoryWindow(tk.Toplevel):
         except queue.Empty:
             pass
         self._poll_previews()
+        if self.view_mode == "grid":
+            self.grid_view.poll()
         if self.winfo_exists():
             self._poll_timer = self.after(120, self._poll)
 
@@ -851,6 +931,9 @@ class HistoryWindow(tk.Toplevel):
         warning = " ".join(summary.get("warnings", []))
         self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") +
                              f"파일 안에 출처가 기록된 파일 {summary.get('embedded_sources', 0):,}개 · 작성자까지 기록된 파일 {summary.get('embedded_authors', 0):,}개")
+        self._show_stats(summary.get("stats") or {})
+        if self.view_mode == "grid":
+            self._show_grid()
         self.select_record(force=True)
         self.select_run()
 
@@ -865,6 +948,10 @@ class HistoryWindow(tk.Toplevel):
     def select_record(self, _=None, *, force=False):
         row = self.selected()
         self._start_preview(row, force=force)
+        if self.view_mode == "grid":
+            selection = self.tree.selection()
+            self.grid_view.select(selection[0] if selection else None)
+        self._update_author_button()
         if row is None:
             self.selection_text.set(NO_SELECTION)
             return
@@ -879,6 +966,7 @@ class HistoryWindow(tk.Toplevel):
             author += " (ID " + row["author_id"] + ")"
         self.selection_text.set(
             f"작성자  {author}   ·   Like한 시기  {liked_period(row)}\n"
+            f"내용     {tweet_text(row)}\n"
             f"트윗     {row.get('source_url') or 'https://x.com/i/web/status/' + row['tweet_id']}\n"
             f"파일     {row.get('path') or '위치 미확인 (이전 다운로드 기록만 있음)'}\n"
             f"저장한 때 {saved if saved != '–' else '알 수 없음'} · 파일 안 기록: {metadata} · {author_status} · 게시일 출처: {source}")
@@ -1245,6 +1333,7 @@ class HistoryWindow(tk.Toplevel):
             return
         self._destroyed = True
         self._preview_loader.close()
+        self.grid_view.release()
         self._preview_image = None
         self.selection_text.trace_remove("write", self._selection_trace)
         if self._pager_layout_timer is not None:
@@ -1277,6 +1366,101 @@ class HistoryWindow(tk.Toplevel):
             elif isinstance(value, list) and any(isinstance(child, tk.Misc) for child in value):
                 value.clear()
         self.get_location = self.is_downloading = self.get_gif_options = None
+
+    # ----------------------------------------------------------- views/stats
+    def set_view(self, mode):
+        if mode == self.view_mode:
+            return
+        self.view_mode = mode
+        table = self.tree.master
+        if mode == "grid":
+            info = table.grid_info()
+            table.grid_remove()
+            self.grid_view.grid(row=info.get("row", 0), column=info.get("column", 0), sticky="nsew")
+            self._show_grid()
+            selection = self.tree.selection()
+            self.grid_view.select(selection[0] if selection else None)
+        else:
+            self.grid_view.grid_remove()
+            self.grid_view.show([], lambda paths: set())
+            table.grid()
+        self._update_view_buttons()
+
+    def _update_view_buttons(self):
+        for mode, button in self.view_buttons.items():
+            button.configure(style="CompactPrimary.TButton" if mode == self.view_mode else "Compact.TButton")
+
+    def _show_grid(self):
+        location = self.current_storage
+
+        def permitted(paths):
+            if location is None:
+                return set()
+            with closing(HistoryWindow._store(location)) as store:
+                return {path for path in paths if store.is_media_path(path)}
+
+        rows = [(key, self.rows[key]) for key in self.tree.get_children()]
+        self.grid_view.show(rows, permitted, empty_text=self.table_note.get() or "표시할 파일이 없습니다.")
+
+    def _select_key(self, key):
+        if key not in self.rows:
+            return
+        self.tree.selection_set(key)
+        self.tree.focus(key)
+        self.tree.see(key)
+        self.select_record()
+
+    def _update_author_button(self):
+        row = self.selected()
+        handle = (row or {}).get("author") or ""
+        valid = bool(re.fullmatch(r"[A-Za-z0-9_]{1,15}", handle))
+        self.author_button.configure(state="normal" if valid and handle.lower() != self.author_filter.lower() else "disabled")
+
+    def filter_selected_author(self):
+        row = self.selected()
+        if row and re.fullmatch(r"[A-Za-z0-9_]{1,15}", row.get("author") or ""):
+            self.set_author(row["author"])
+
+    def set_author(self, handle):
+        """List only this author's files (exact handle, any letter case)."""
+        self.author_filter = handle
+        self.author_chip.configure(text=f"@{handle} 만 보는 중 ✕")
+        if not self.author_chip.winfo_manager():
+            self.author_chip.pack(side="left", padx=(8, 0), before=self.search_entry)
+        self.tabs.select(0)
+        self.search()
+
+    def clear_author(self):
+        self.author_filter = ""
+        self.author_chip.pack_forget()
+        self.search()
+
+    def show_ranked_author(self):
+        selection = self.author_tree.selection()
+        row = self.stats_authors.get(selection[0]) if selection else None
+        if row and re.fullmatch(r"[A-Za-z0-9_]{1,15}", row.get("author") or ""):
+            self.set_author(row["author"])
+
+    def _show_stats(self, stats):
+        self.stats = stats
+        selection = self.author_tree.selection()
+        previous = self.stats_authors.get(selection[0], {}).get("author") if selection else None
+        self.author_tree.delete(*self.author_tree.get_children())
+        self.stats_authors = {}
+        for index, row in enumerate(stats.get("authors", [])):
+            key = str(index)
+            self.stats_authors[key] = row
+            self.author_tree.insert("", "end", iid=key, values=(index + 1, "@" + row["author"], f"{row['files']:,}",
+                                                                f"{row['posts']:,}", format_day(row.get("latest"))))
+            if previous and row["author"].lower() == previous.lower():
+                self.author_tree.selection_set(key)
+        self._draw_months()
+
+    def _draw_months(self):
+        field = next(key for key, label in MONTH_FIELDS.items() if label == self.month_field.get())
+        self.month_note.set(MONTH_NOTES[field])
+        empty = {"liked": "아직 기간을 아는 새 Like가 없습니다.\n자동 저장을 켜 두면 새 Like가 쌓입니다."}.get(field, "아직 기록이 없습니다.")
+        self.month_chart.show(list(self.stats.get("months", {}).get(field, [])), empty_text=empty)
 
     def _export(self, generation, directory, destination):
         return self._export_worker(self.results, generation, directory, destination)

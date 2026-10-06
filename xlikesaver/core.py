@@ -459,6 +459,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     history = None
     run_id = None
     likes = None
+    tweet_texts = []
     visited_ids = set()
     last_tweet_id = last_posted_at = ""
     flag = Path(stop_file) if stop_file is not None else None
@@ -491,6 +492,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             check_stop()
             time.sleep(min(remaining, 0.1))
         check_stop()
+
+    def flush_tweet_texts():
+        if tweet_texts and history is not None:
+            batch = tweet_texts[:]
+            tweet_texts.clear()
+            history.record_tweets(batch)
 
     def history_update(**fields):
         if history is not None and run_id is not None:
@@ -842,9 +849,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 last_tweet_id = str(kwdict["tweet_id"])
                 last_posted_at = _media_details(kwdict)["posted_at"]
                 visited_ids.add(last_tweet_id)
-                # Every liked tweet with media, saved or not, keeps Like order.
+                # Every liked tweet with media, saved or not, keeps Like order
+                # and its text, which the records window can search.
+                if isinstance(kwdict.get("content"), str):
+                    tweet_texts.append((last_tweet_id, kwdict["content"], kwdict.get("hashtags") or ()))
                 try:
                     likes.visit(last_tweet_id)
+                    if len(tweet_texts) >= 50:
+                        flush_tweet_texts()
                 except HistoryError:
                     raise exception.AbortExtraction("history store unavailable") from None
                 history_update(visited=len(visited_ids), last_tweet_id=last_tweet_id,
@@ -1197,6 +1209,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             try:
                 if likes is not None:
                     likes.flush()
+                flush_tweet_texts()
                 if run_id is not None:
                     run_status = "limited" if stop_reason == "limit" and status == "finished" else status
                     history.finish_run(run_id, run_status, saved=saved, skipped=skipped, size_skipped=size_skipped,

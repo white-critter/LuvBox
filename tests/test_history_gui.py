@@ -697,7 +697,7 @@ class HistoryGuiTests(unittest.TestCase):
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.search()
         args = thread.call_args.kwargs["args"]
-        self.assertEqual(args[-2:], ("liked", None))
+        self.assertEqual(args[-3:], ("liked", None, ""))
         self.window._load(*args)
         self.window._poll()
         self.assertEqual([self.window.rows[key]["tweet_id"] for key in self.window.tree.get_children()], ["101", "100", "102"])
@@ -710,7 +710,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.period_to.set("20260901")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.search()
-        self.assertEqual(thread.call_args.kwargs["args"][-1], ("saved", "2026-09-01", "2026-09-02"))
+        self.assertEqual(thread.call_args.kwargs["args"][-2], ("saved", "2026-09-01", "2026-09-02"))
         self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("2026-09-01", "2026-09-02"))
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
@@ -722,8 +722,88 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertIn("연-월-일", self.window.status_text.get())
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.clear_period()
-        self.assertIsNone(thread.call_args.kwargs["args"][-1])
+        self.assertIsNone(thread.call_args.kwargs["args"][-2])
         self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("", ""))
+
+    def test_grid_view_shows_page_thumbnails_and_follows_selection(self):
+        store = HistoryStore(self.account)
+        self.addCleanup(store.close)
+        for index, color in enumerate(("red", "green", "blue")):
+            path = self.account / f"{100 + index}_1.jpg"
+            Image.new("RGB", (640, 480), color).save(path)
+            store.record_media("flat", {"tweet_id": str(100 + index), "num": 1, "type": "photo",
+                                        "author": {"name": "alice"}}, path)
+        outside = Path(self.temporary.name) / "200_1.jpg"
+        Image.new("RGB", (64, 48), "black").save(outside)
+        self.load()
+        self.window.rows["2"]["path"] = str(outside)   # a path the catalog does not allow
+        self.window.set_view("grid")
+        self.assertFalse(self.window.tree.master.winfo_manager())
+        grid = self.window.grid_view
+        self.assertEqual(list(grid.tiles), ["0", "1", "2"])
+        deadline = time.monotonic() + 10
+        while len(grid.images) < 2 and time.monotonic() < deadline:
+            self.window._poll()
+            time.sleep(0.05)
+        self.window._poll()
+        self.assertEqual(sorted(grid.images), ["0", "1"])
+        self.assertLessEqual(max(grid.images["0"].width(), grid.images["0"].height()), 150)
+        self.assertIn("미리보기 없음", grid.tiles["2"].cget("text"))
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        self.window.deiconify()
+        self.root.update()
+        grid.tiles["1"].event_generate("<Button-1>", x=5, y=5)
+        self.root.update()
+        self.assertEqual(self.window.tree.selection(), ("1",))
+        self.assertEqual(grid.selected, "1")
+        self.window.set_view("table")
+        self.assertTrue(self.window.tree.master.winfo_manager())
+        self.assertEqual(grid.images, {})
+
+    def test_author_filter_stats_tab_and_tweet_text(self):
+        store = self.records(2)
+        store.record_tweets([("100", "오늘의 고양이", ["cat"])])
+        self.load()
+        self.window.tree.selection_set("0")
+        self.window.select_record()
+        row = self.window.selected()
+        detail = self.window.selection_text.get()
+        self.assertIn("내용", detail)
+        expected = "오늘의 고양이 #cat" if row["tweet_id"] == "100" else "기록 전"
+        self.assertIn(expected, detail)
+        self.assertEqual(str(self.window.author_button.cget("state")), "normal")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.filter_selected_author()
+        self.assertEqual(thread.call_args.kwargs["args"][-1], "alice")
+        self.assertIn("@alice", self.window.author_chip.cget("text"))
+        self.assertTrue(self.window.author_chip.winfo_manager())
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.assertEqual(str(self.window.author_button.cget("state")), "disabled")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.clear_author()
+        self.assertEqual(thread.call_args.kwargs["args"][-1], "")
+        self.assertFalse(self.window.author_chip.winfo_manager())
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        # Statistics tab: ranking, opening an author, and the monthly chart.
+        self.window.tabs.select(2)
+        self.assertEqual(self.window.author_tree.item("0", "values")[1:3], ("@alice", "2"))
+        self.window.author_tree.selection_set("0")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.show_ranked_author()
+        self.assertEqual(thread.call_args.kwargs["args"][-1], "alice")
+        self.assertEqual(self.window.tabs.index("current"), 0)
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.window.month_field.set("Like한 달")
+        self.window._draw_months()
+        self.assertIn("새로 누른 Like", self.window.month_note.get())
+        self.window.month_field.set("저장한 달")
+        self.window._draw_months()
+        self.assertEqual(sum(count for _, count in self.window.month_chart.data), 2)
 
     def test_refresh_skips_whole_folder_rescan_while_downloading(self):
         # The worker records every file itself; a rescan would only compete

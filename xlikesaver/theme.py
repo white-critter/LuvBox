@@ -510,6 +510,10 @@ def _refresh_classic(widget, selected):
         widget.configure(insertbackground=INK, selectbackground=_tone("#e3eaff"), selectforeground=INK)
     if isinstance(widget, Progressbar):
         widget._draw()
+    # Canvas drawings (e.g. charts) repaint their items in the new colors.
+    redraw = getattr(widget, "theme_redraw", None)
+    if callable(redraw):
+        redraw()
 
 
 def _refresh_widgets(owner, selected):
