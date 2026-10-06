@@ -39,7 +39,9 @@ def package() -> None:
         raise ValueError("Release directory must be inside the project")
     output.mkdir(exist_ok=True)
     # Versioned names: a running older executable never blocks a new build.
-    executable = output / f"XlikeSaver-{__version__}.exe"
+    # The application is a folder: the exe and its _internal runtime.
+    application = output / f"XlikeSaver-{__version__}"
+    executable = application / f"XlikeSaver-{__version__}.exe"
     if not executable.is_file():
         raise FileNotFoundError("Build the application first")
     destination = output / f"XlikeSaver-{__version__}.zip"
@@ -48,7 +50,9 @@ def package() -> None:
     staged = Path(filename)
     try:
         with zipfile.ZipFile(staged, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            archive.write(executable, executable.name)
+            for path in sorted(application.rglob("*")):
+                if path.is_file():
+                    archive.write(path, application.name + "/" + path.relative_to(application).as_posix())
             archive.write(ROOT / "docs" / "사용안내.txt", "사용안내.txt")
             archive.write(ROOT / "LICENSE", "LICENSE")
             archive.write(ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")
@@ -101,7 +105,7 @@ def package() -> None:
             digest = hashlib.file_digest(file, "sha256").hexdigest()
         rows.append(f"{digest}  {path.name}")
     (output / f"SHA256-{__version__}.txt").write_text("\n".join(rows) + "\n", encoding="utf-8")
-    print(f"Release {__version__}: {executable.name}, {destination.name}")
+    print(f"Release {__version__}: {application.name}/{executable.name}, {destination.name}")
 
 
 if __name__ == "__main__":

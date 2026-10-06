@@ -60,6 +60,16 @@ class HistoryError(RuntimeError):
     """A fixed application error; source exceptions may include user paths."""
 
 
+class CatalogDamaged(HistoryError):
+    """The records database file itself is damaged; it can be rebuilt."""
+
+
+_DAMAGED_HELP = ("기록 DB 파일이 손상되어 읽을 수 없습니다. ‘기록 · 통계’에서 ‘기록 복구’를 눌러 주세요. "
+                 "저장한 사진·영상과 중복 방지 기록은 그대로 있습니다.")
+# SQLITE_CORRUPT and SQLITE_NOTADB, including their extended codes.
+_DAMAGED_CODES = {11, 26}
+
+
 def _safe(method):
     @functools.wraps(method)
     def call(*args, **kwargs):
@@ -67,6 +77,10 @@ def _safe(method):
             return method(*args, **kwargs)
         except HistoryError:
             raise
+        except sqlite3.DatabaseError as exc:
+            if (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF in _DAMAGED_CODES:
+                raise CatalogDamaged(_DAMAGED_HELP) from None
+            raise HistoryError(_HISTORY_HELP) from None
         except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
             raise HistoryError(_HISTORY_HELP) from None
     return call
@@ -141,6 +155,7 @@ class HistoryStore:
         self.output_dir = Path(output_dir if output_dir is not None else self.media_dir).expanduser().resolve()
         self.legacy_dir = Path(legacy_dir).expanduser() if legacy_dir is not None else None
         self._isolated_records = media_dir is not None
+        self._folder_cache = None
         self.account_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.account_dir / ".xlikesaver-history.sqlite3"
         self._db = sqlite3.connect(self.path, timeout=5)
@@ -250,45 +265,74 @@ class HistoryStore:
         """Selected output roots whose known files may still be opened or tagged."""
         return self._media_roots
 
+    @staticmethod
+    def _linked(path: Path) -> bool:
+        return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+
+    def _real_folders(self, folder: Path) -> bool:
+        """Whether a folder and every ancestor are ordinary folders.
+
+        Include the root and its ancestors: a formerly ordinary folder can
+        later be replaced with a junction to another location, so outside a
+        whole-folder rescan every check looks again.
+        """
+        current = folder
+        while True:
+            if self._linked(current):
+                return False
+            if current == current.parent:
+                return True
+            current = current.parent
+
     def _path_in_root(self, path: Path | str, root: Path) -> Path | None:
-        candidate = Path(path)
         try:
-            supplied = Path(os.path.abspath(candidate))
-            if not supplied.is_relative_to(root):
+            supplied = Path(os.path.abspath(path))
+            if not supplied.is_relative_to(root) or self._linked(supplied):
                 return None
-            current = supplied
-            # Include the root and its ancestors: a formerly ordinary folder
-            # can later be replaced with a junction to another location.
-            while True:
-                if current.is_symlink() or (hasattr(current, "is_junction") and current.is_junction()):
+            cache = self._folder_cache
+            if cache is None:
+                # A single check (e.g. a download target) resolves the file itself.
+                if not self._real_folders(supplied.parent):
                     return None
-                if current == current.parent:
-                    break
-                current = current.parent
-            candidate = candidate.resolve()
+                candidate = Path(path).resolve()
+                if not candidate.is_relative_to(root):
+                    return None
+            else:
+                # A whole-folder rescan only records paths; it checks each
+                # folder once. Writes and opens later check the file again.
+                key = (supplied.parent, root)
+                if key not in cache:
+                    folder = supplied.parent.resolve() if self._real_folders(supplied.parent) else None
+                    cache[key] = folder if folder is not None and folder.is_relative_to(root) else None
+                if cache[key] is None:
+                    return None
+                candidate = cache[key] / supplied.name
             record_roots = getattr(self, "_media_roots", (self.output_dir,))
-            if (not candidate.is_relative_to(root) or
-                    (self._isolated_records and any(candidate.is_relative_to(parent / ".xlikesaver")
-                                                   for parent in record_roots))):
+            if self._isolated_records and any(candidate.is_relative_to(parent / ".xlikesaver") for parent in record_roots):
                 return None
             return candidate
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError, ValueError):
             return None
 
     def is_download_path(self, path: Path | str) -> bool:
         """New downloads may only write within the currently selected output."""
         return self._path_in_root(path, self.output_dir) is not None
 
-    def is_media_path(self, path: Path | str) -> bool:
-        """Allow former roots only for exact paths already present in this catalog."""
-        if self.is_download_path(path):
-            return True
+    def _media_path(self, path: Path | str) -> Path | None:
+        """The resolved path when it may be read (see is_media_path)."""
+        candidate = self._path_in_root(path, self.output_dir)
+        if candidate is not None:
+            return candidate
         for root in self.media_roots[1:]:
             candidate = self._path_in_root(path, root)
             if candidate is not None and self._db.execute(
                     "SELECT 1 FROM media WHERE path=? LIMIT 1", (str(candidate),)).fetchone():
-                return True
-        return False
+                return candidate
+        return None
+
+    def is_media_path(self, path: Path | str) -> bool:
+        """Allow former roots only for exact paths already present in this catalog."""
+        return self._media_path(path) is not None
 
     def _preserve_missing_location(self, path: str, actual: str) -> str:
         # A disconnected drive should remain visible and become usable again
@@ -314,11 +358,12 @@ class HistoryStore:
         candidate = Path(path)
         # Check both the supplied path and resolved target to avoid importing
         # symlink/junction targets outside the explicitly selected account.
-        if candidate.is_symlink() or (hasattr(candidate, "is_junction") and candidate.is_junction()):
+        if self._linked(candidate):
             return "", None, candidate.name
-        if not self.is_media_path(candidate):
+        resolved = self._media_path(candidate)
+        if resolved is None:
             raise HistoryError(_HISTORY_HELP)
-        candidate = candidate.resolve()
+        candidate = resolved
         try:
             stat = candidate.stat()
         except FileNotFoundError:
@@ -364,6 +409,9 @@ class HistoryStore:
             # a file that has since been imported with richer metadata.
             if row["record_source"] == "archive":
                 row["media_type"] = old["media_type"]
+        if previous is not None and all(row[key] == previous[key] for key in row if key != "updated_at"):
+            # Nothing changed: skip the write (and the disk flush of its commit).
+            return
         row["updated_at"] = _now()
         columns = tuple(row)
         self._db.execute("INSERT OR REPLACE INTO media (" + ",".join(columns) + ") VALUES (" +
@@ -617,6 +665,13 @@ class HistoryStore:
         imported = self._db.execute("SELECT value FROM catalog_meta WHERE key='legacy_imported'").fetchone()
         if imported is not None and not refresh:
             return {"imported": False, "records": 0, "warnings": []}
+        self._folder_cache = {}
+        try:
+            return self._import_legacy(refresh)
+        finally:
+            self._folder_cache = None
+
+    def _import_legacy(self, refresh: bool) -> dict:
         before = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
         warnings = []
         if refresh:
@@ -652,6 +707,11 @@ class HistoryStore:
                         archived.append(self._legacy_row(mode, match[1], int(match[3]), media_type=media_type))
             except sqlite3.Error:
                 warnings = ["일부 기존 다운로드 기록을 읽지 못했습니다. 실제 파일에서 확인한 내역은 표시합니다."]
+        # A known record with a date gains nothing from its archive entry.
+        dated = {(row[0], row[1], row[2], row[3]) for row in self._db.execute(
+            "SELECT folder_mode,tweet_id,num,media_type FROM media WHERE posted_at IS NOT NULL")}
+        archived = [row for row in archived
+                    if (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) not in dated]
         self._write_batches(archived, lambda row: self._upsert(row, replace_path=False))
         known = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
                  for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type FROM media")}
@@ -670,6 +730,10 @@ class HistoryStore:
             tag = (match[2] or "").lower()
             media_type = "animated_gif" if tag in {"gif", "animated_gif"} or extension == "gif" else "video" if tag == "video" or extension == "mp4" else "photo"
             previous = known_paths.get(actual)
+            if (previous is not None and previous["filesize"] == size and previous["filename"] == filename and
+                    previous["posted_at"] and (previous["folder_mode"] != "author" or previous["author"])):
+                # Already recorded exactly here; rewriting it would change nothing.
+                continue
             if previous is not None:
                 # An author's handle can equal the account-folder name.
                 # The recorded identity resolves that directory ambiguity.

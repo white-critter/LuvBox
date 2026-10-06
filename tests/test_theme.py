@@ -156,7 +156,14 @@ class ThemeTests(unittest.TestCase):
                 for state in ((), ("active",), ("pressed",), ("disabled",), ("focus",), ("readonly",)):
                     with self.subTest(widget=widget.winfo_class(), background=background, state=state):
                         self.assertEqual(style.lookup(widget.cget("style"), "background", state), background)
-        self.assertTrue(self.root._xlikesaver_theme_images["button"].transparency_get(0, 0))
+        # Images are opaque (fast to draw on Windows); each surface has its
+        # own copy whose rounded corners are blended onto that surface.
+        images = self.root._xlikesaver_theme_images
+        for name, surface in (("button", theme.BG), ("button_card", theme.CARD)):
+            self.assertFalse(images[name].transparency_get(0, 0))
+            self.assertEqual("#%02x%02x%02x" % tuple(images[name].get(0, 0)), surface)
+        self.assertEqual(style.layout("SurfaceCard.TButton")[0][0], "Soft.Button.card")
+        self.assertGreaterEqual(images["card"].width(), 640)
 
     def test_popup_controls_created_later_use_the_white_surface(self):
         popup = tk.Toplevel(self.root)

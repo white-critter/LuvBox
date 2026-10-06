@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import sqlite3
 import threading
 import tkinter as tk
 from tkinter import filedialog, ttk
@@ -19,7 +20,7 @@ from PIL import ImageTk
 from . import dialogs, theme
 from .charts import MonthlyBars
 from .gallery import ThumbnailGrid
-from .history import HistoryError, HistoryStore
+from .history import CatalogDamaged, HistoryError, HistoryStore
 from .preview import PreviewLoader
 from .storage import OutputGuard, StoragePaths
 
@@ -205,6 +206,7 @@ class HistoryWindow(tk.Toplevel):
         ttk.Button(heading, text="새로고침", command=lambda: self.refresh(import_legacy=True)).pack(side="right")
         ttk.Button(heading, text="기록 위치", command=self.show_locations).pack(side="right", padx=8)
         self.source_stop_button = ttk.Button(heading, text="출처·작성자 기록 중단", command=self.stop_metadata, state="disabled")
+        self.repair_button = ttk.Button(heading, text="기록 복구", style="Primary.TButton", command=self.repair_records)
         ttk.Label(body, textvariable=self.location_text, style="Muted.TLabel", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(2, 10))
 
         tiles = ttk.Frame(body)
@@ -785,6 +787,8 @@ class HistoryWindow(tk.Toplevel):
                 results.put((generation, "loaded", snapshot(imported.get("warnings", []))))
             else:
                 results.put((generation, "loaded", snapshot([])))
+        except CatalogDamaged as exc:
+            results.put((generation, "damaged", str(exc)))
         except Exception:
             results.put((generation, "error", "기록을 읽지 못했습니다. 저장 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."))
         finally:
@@ -821,14 +825,22 @@ class HistoryWindow(tk.Toplevel):
                 if self.closing:
                     self.destroy()
                     return
-                if kind == "loaded":
+                if kind != "damaged":
+                    self.repair_button.pack_forget()
+                if kind == "damaged":
+                    self._display({}, [], [])
+                    self._show_table_note("기록 DB 파일이 손상되어 읽을 수 없습니다.\n위의 ‘기록 복구’를 눌러 주세요.")
+                    self.status_text.set(result)
+                    self.repair_button.configure(state="normal")
+                    self.repair_button.pack(side="right", padx=(0, 8))
+                elif kind == "loaded":
                     directory, *snapshot = result
                     self.loaded_locations.add(directory)
                     if not self.pending:
                         self._display(*snapshot)
                 else:
                     self.status_text.set(result)
-                    if kind in {"backfilled", "converted"}:
+                    if kind in {"backfilled", "converted", "repaired"}:
                         self.completion_text = result
                     elif kind == "error" and not self.tree.get_children():
                         self._show_table_note("기록을 읽지 못했습니다.\n아래 안내를 확인해 주세요.")
@@ -839,6 +851,9 @@ class HistoryWindow(tk.Toplevel):
                     self.refresh(import_legacy=do_import)
                 elif kind in {"backfilled", "converted"}:
                     self.refresh()
+                elif kind == "repaired":
+                    self.loaded_locations.discard(self.current_account_dir)
+                    self.refresh(import_legacy=True)
         except queue.Empty:
             pass
         self._poll_previews()
@@ -1083,6 +1098,56 @@ class HistoryWindow(tk.Toplevel):
         self._start_local_job("출처·작성자 기록 중단", "출처와 작성자를 기록하는 중입니다… 화질은 그대로이며 X에 요청하지 않습니다.")
         threading.Thread(target=partial(HistoryWindow._backfill_worker, self.results, self.metadata_stop),
                          args=(self.generation, self.current_storage), daemon=True).start()
+
+    def repair_records(self):
+        if self.busy or self.current_storage is None:
+            return
+        if self.is_downloading():
+            dialogs.showinfo("저장 진행 중", "저장 작업이 끝난 뒤 기록을 복구해 주세요.", parent=self)
+            return
+        if not dialogs.askyesno(
+                "기록 복구",
+                "손상된 기록 DB를 고칩니다.\n\n"
+                "· 손상된 파일은 먼저 이 PC의 앱 데이터 폴더(backups)에 그대로 보관합니다.\n"
+                "· 읽을 수 있는 기록을 모두 살려 새 DB를 만들고, 저장 폴더의 파일을 다시 확인해 빠진 기록을 채웁니다.\n"
+                "· 사진·영상 파일과 중복 방지 기록은 건드리지 않습니다.\n\n계속할까요?", parent=self):
+            return
+        self.repair_button.configure(state="disabled")
+        self.busy = True
+        self._update_controls()
+        self.generation += 1
+        self.status_text.set("기록 DB를 복구하는 중입니다…")
+        threading.Thread(target=partial(HistoryWindow._repair_worker, self.results),
+                         args=(self.generation, self.current_storage), daemon=True).start()
+
+    @staticmethod
+    def _repair_worker(results, generation, location):
+        from .protection import AccountGuard, ProtectionError
+        from .recovery import RecoveryError, repair_history
+        account_guard = output_guard = None
+        try:
+            record_dir = location.record_dir if isinstance(location, StoragePaths) else Path(location)
+            account = location.account if isinstance(location, StoragePaths) else record_dir.name
+            if isinstance(location, StoragePaths):
+                account_guard = AccountGuard(location.account, sleep=lambda *_: None)
+                account_guard.acquire(respect_cooldown=False)
+                output_guard = OutputGuard(location.output_dir)
+                output_guard.acquire()
+            result = repair_history(record_dir, account)
+            counts = result["counts"]
+            results.put((generation, "repaired",
+                         f"기록 복구 완료 · 파일 기록 {counts.get('media', 0):,}개, 실행 기록 {counts.get('runs', 0):,}개를 살렸습니다. "
+                         f"손상된 원본은 {result['kept']}에 보관했습니다."))
+        except ProtectionError as exc:
+            results.put((generation, "damaged", str(exc)))
+        except (RecoveryError, OSError, sqlite3.Error, HistoryError):
+            results.put((generation, "damaged", "기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
+                                                "저장 폴더 권한을 확인하고 다시 시도해 주세요."))
+        finally:
+            if output_guard is not None:
+                output_guard.close()
+            if account_guard is not None:
+                account_guard.close()
 
     def _start_local_job(self, stop_text, status):
         """Start one local file job (metadata or GIF conversion) at a time."""

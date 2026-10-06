@@ -159,6 +159,9 @@ def main() -> int:
                     assert store.statistics()["authors"][0]["files"] == 1
                     assert charts.bins([("2026-01", 1), ("2026-03", 2)])[0][1] == ("2026-02", 0)
                     assert gallery.TILE == (150, 112)
+                    # Damaged-database salvage reads the catalog page by page.
+                    from xlikesaver.recovery import salvage
+                    assert len(salvage(store.path)["media"]["rows"]) == 1
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -180,7 +183,7 @@ def main() -> int:
                       "appearance": "light-dark-live-switch", "local_previews": "photo-video-gif",
                       "gif_conversion": "animated-with-source-author-metadata", "gif_size_presets": "fitted-exact-frames",
                       "dialogs": "themed", "like_order": "recorded-and-sorted", "tweet_text": "searchable",
-                      "statistics": "authors-and-months", "progress": "rounded-borderless",
+                      "statistics": "authors-and-months", "catalog_recovery": "salvage-verified", "progress": "rounded-borderless",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",

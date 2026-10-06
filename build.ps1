@@ -12,7 +12,7 @@ if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw '버�
 $name = "XlikeSaver-$version"
 # A versioned name lets an older running build stay open. The same version
 # cannot be replaced while it runs, so stop with a clear message instead.
-$target = Join-Path $PSScriptRoot "release\$name.exe"
+$target = Join-Path $PSScriptRoot "release\$name\$name.exe"
 if (Test-Path -LiteralPath $target) {
     try { [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None').Close() }
     catch { throw "$name.exe가 실행 중이라 덮어쓸 수 없습니다. 프로그램을 닫거나 xlikesaver\__init__.py의 버전을 올린 뒤 다시 빌드하세요." }
@@ -20,8 +20,10 @@ if (Test-Path -LiteralPath $target) {
 
 # Collect only application dependencies and our pinned metadata helper. Never
 # collect the workspace, saved settings, account records, or authentication.
-& $taskPython -m PyInstaller --noconfirm --clean --windowed --onefile --name $name `
-    --distpath release --workpath build\onefile `
+# A folder build starts in well under a second; a one-file exe unpacked about
+# 40MB to a temporary folder on every launch, including each save's worker.
+& $taskPython -m PyInstaller --noconfirm --clean --windowed --onedir --name $name `
+    --distpath release --workpath build\onedir `
     --collect-all gallery_dl --collect-binaries PIL --collect-data PIL --exclude-module imageio_ffmpeg `
     --copy-metadata pillow --copy-metadata requests --copy-metadata urllib3 `
     --copy-metadata certifi --copy-metadata charset-normalizer --copy-metadata idna `
@@ -32,6 +34,6 @@ if (Test-Path -LiteralPath $target) {
 if ($LASTEXITCODE -ne 0) { throw '실행 파일 빌드에 실패했습니다.' }
 & $taskPython 'tools\package_release.py'
 if ($LASTEXITCODE -ne 0) { throw '소스와 라이선스가 포함된 배포 ZIP 준비에 실패했습니다.' }
-Write-Host "빌드 완료: release\$name.exe (실행 파일 하나로 실행 가능)"
+Write-Host "빌드 완료: release\$name\$name.exe (같은 폴더의 _internal과 함께 실행)"
 Write-Host "배포 ZIP: release\$name.zip (사용 안내, 소스, 라이선스 포함)"
 Write-Host "체크섬: release\SHA256-$version.txt"

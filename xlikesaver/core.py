@@ -24,7 +24,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 from .protection import API_INTERVAL, MEDIA_INTERVAL, AccountGuard, ProtectionError
-from .history import HistoryError, HistoryStore, _author_fields
+from .history import CatalogDamaged, HistoryError, HistoryStore, _author_fields
 from .storage import OutputGuard, resolve_storage
 from .media import GIF_SIZES, ConversionError, ConversionSizeLimit, convert_mp4_to_gif
 from .media import move_without_overwrite as _move_without_overwrite
@@ -499,12 +499,29 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             tweet_texts.clear()
             history.record_tweets(batch)
 
-    def history_update(**fields):
-        if history is not None and run_id is not None:
-            try:
-                history.update_run(run_id, **fields)
-            except HistoryError:
-                raise exception.AbortExtraction("history store unavailable") from None
+    progress_fields = {}
+    progress_written = 0.0
+
+    def history_update(*, force=False, **fields):
+        """Record run progress at most every two seconds.
+
+        Every commit flushes to disk (slow in cloud-synced folders), and a
+        quick scan visits hundreds of known tweets. The final counts are
+        always written when the run finishes.
+        """
+        nonlocal progress_written
+        progress_fields.update(fields)
+        if history is None or run_id is None:
+            return
+        now = time.monotonic()
+        if not force and now - progress_written < 2.0:
+            return
+        progress_written = now
+        try:
+            history.update_run(run_id, **progress_fields)
+        except HistoryError:
+            raise exception.AbortExtraction("history store unavailable") from None
+        progress_fields.clear()
 
     def record_source(kwdict, media_path, media_status):
         nonlocal metadata_failed, metadata_warned, author_deferred
@@ -828,7 +845,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if self.gif_temporary is not None:
                     self.gif_temporary.unlink(missing_ok=True)
                     self.gif_temporary = None
-            history_update(saved=saved, skipped=skipped, size_skipped=size_skipped)
+            history_update(saved=saved, skipped=skipped, size_skipped=size_skipped, force=bool(self.last_output and self.last_output[0] == "saved"))
             # Archive insertion happens after out.success; stop only once the
             # completed file has been recorded, so reruns remain consistent.
             if normalized.photo_limit and saved >= normalized.photo_limit:
@@ -1196,6 +1213,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         status, exit_code, message = "error", 1, _COMPATIBILITY_ERROR
     except sqlite3.Error:
         status, exit_code, message = "error", 1, _RECORD_ERROR
+    except CatalogDamaged as exc:
+        status, exit_code, message = "error", 1, str(exc)
     except HistoryError:
         status, exit_code, message = "error", 1, _HISTORY_ERROR
     except OSError as exc:
@@ -1222,6 +1241,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     history.close()
                 except HistoryError:
                     status, exit_code, message = "error", 1, _HISTORY_ERROR
+            # A verified copy on this PC, so a damaged catalog can be restored.
+            try:
+                from .recovery import backup_catalog
+                backup_catalog(history.account_dir, normalized.account)
+            except (OSError, sqlite3.Error):
+                pass
         if guard is not None:
             guard.close()
         if output_guard is not None:

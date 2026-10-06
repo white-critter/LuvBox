@@ -151,13 +151,50 @@ def _round_rect(pixels, canvas_width, canvas_height, bounds, radius, fill, outli
             pixels[index:index + 4] = bytes((*color, alpha))
 
 
-def _panel_png(fill, outline, *, radius=12, stroke=1, width=40, height=40):
+def _flatten(pixels, surface):
+    """Blend antialiased edges onto the surface color and make every pixel opaque.
+
+    Tk on Windows composites images with partial transparency in software on
+    every redraw, which made resizing a window slow. Each control therefore
+    gets images pre-blended onto the surface it sits on (window or card).
+    """
+    background = _rgb(surface)
+    for index in range(0, len(pixels), 4):
+        alpha = pixels[index + 3]
+        if alpha != 255:
+            for channel in range(3):
+                pixels[index + channel] = (pixels[index + channel] * alpha + background[channel] * (255 - alpha) + 127) // 255
+            pixels[index + 3] = 255
+    return pixels
+
+
+def _stretch(pixels, width, height, size):
+    """Enlarge by repeating the uniform middle row and column.
+
+    A large center means ttk draws a card or button as a few image tiles
+    instead of hundreds of small ones.
+    """
+    new_width, new_height = max(width, size[0]), max(height, size[1])
+    middle_x, middle_y = width // 2, height // 2
+    rows = []
+    for y in range(height):
+        row = bytes(pixels[y * width * 4:(y + 1) * width * 4])
+        rows.append(row[:middle_x * 4] + row[middle_x * 4:middle_x * 4 + 4] * (new_width - width + 1) + row[middle_x * 4 + 4:])
+    rows = rows[:middle_y] + [rows[middle_y]] * (new_height - height + 1) + rows[middle_y + 1:]
+    return bytearray(b"".join(rows)), new_width, new_height
+
+
+def _panel_png(fill, outline, *, radius=12, stroke=1, width=40, height=40, surface=None, size=None):
     pixels = bytearray(width * height * 4)
     _round_rect(pixels, width, height, (0, 0, width, height), radius, fill, outline, stroke)
+    if surface is not None:
+        _flatten(pixels, surface)
+    if size is not None:
+        pixels, width, height = _stretch(pixels, width, height, size)
     return _png(width, height, pixels)
 
 
-def _switch_png(*, selected=False, disabled=False, active=False, focus=False):
+def _switch_png(*, selected=False, disabled=False, active=False, focus=False, surface=None):
     width, height = 56, 30
     pixels = bytearray(width * height * 4)
     if focus:
@@ -166,10 +203,12 @@ def _switch_png(*, selected=False, disabled=False, active=False, focus=False):
     _round_rect(pixels, width, height, (2, 3, 46, 27), 12, track)
     start = 25 if selected else 5
     _round_rect(pixels, width, height, (start, 6, start + 18, 24), 9, "#f5f7fc" if disabled else KNOB)
+    if surface is not None:
+        _flatten(pixels, surface)
     return _png(width, height, pixels)
 
 
-def _radio_png(*, selected=False, disabled=False, active=False, focus=False):
+def _radio_png(*, selected=False, disabled=False, active=False, focus=False, surface=None):
     width, height = 32, 28
     pixels = bytearray(width * height * 4)
     if focus:
@@ -178,7 +217,28 @@ def _radio_png(*, selected=False, disabled=False, active=False, focus=False):
     _round_rect(pixels, width, height, (3, 3, 25, 25), 11, "#f5f7fc" if disabled else CARD, border, 1.5)
     if selected:
         _round_rect(pixels, width, height, (8, 8, 20, 20), 6, "#a9b8e3" if disabled else BLUE_ACTIVE if active else BLUE)
+    if surface is not None:
+        _flatten(pixels, surface)
     return _png(width, height, pixels)
+
+
+# Each Soft.* element exists twice: the plain name is pre-blended onto the
+# window background, ".card" onto a card. _bind_surfaces picks the layout.
+_SURFACES = (("", "BG"), ("_card", "CARD"))
+CARD_ELEMENT = ".card"
+
+
+def _card_layout(spec):
+    """A copy of a layout whose Soft.* elements are the card-surface ones."""
+    result = []
+    for element, options in spec:
+        options = dict(options)
+        if "children" in options:
+            options["children"] = _card_layout(options["children"])
+        if element.startswith("Soft.") and not element.startswith("Soft.Progress") and not element.endswith(CARD_ELEMENT):
+            element += CARD_ELEMENT
+        result.append((element, options))
+    return result
 
 
 def _image_element(style, name, images, *, border=0, minimum=(0, 0)):
@@ -198,65 +258,71 @@ def _control_images(root, style):
             images[name] = tk.PhotoImage(master=root, data=data)
         return images[name]
 
-    def panel(name, fill, outline, **kwargs):
-        return asset(name, _panel_png(fill, outline, **kwargs))
+    surfaces = [(suffix, globals()[color]) for suffix, color in _SURFACES]
 
-    # A generous solid center avoids hundreds of tiny image tiles when cards
-    # stretch across a wide window on Windows.
-    panel("card", CARD, LINE, radius=15, width=160, height=96)
-    panel("button", "#edf1f8", "#e2e8f2")
-    panel("button_active", "#e4ebf7", "#d3def2")
-    panel("button_pressed", "#d8e2f3", "#c7d5ed")
-    panel("button_focus", "#edf1f8", "#859ded", stroke=2)
-    panel("button_focus_active", "#e4ebf7", "#859ded", stroke=2)
-    panel("button_disabled", "#f0f3f8", "#e8edf5")
-    panel("primary", BLUE, BLUE)
-    panel("primary_active", BLUE_ACTIVE, BLUE_ACTIVE)
-    panel("primary_pressed", "#354fb9", "#354fb9")
-    panel("primary_focus", BLUE, "#b8c7ff", stroke=2)
-    panel("primary_focus_active", BLUE_ACTIVE, "#b8c7ff", stroke=2)
-    panel("primary_disabled", "#c6d1ee", "#c6d1ee")
-    panel("entry", CARD, "#d6dfed", radius=10)
-    panel("entry_focus", CARD, "#8299ef", radius=10, stroke=2)
-    panel("entry_disabled", "#f0f3f8", "#e2e8f2", radius=10)
-    panel("entry_readonly", "#f8faff", "#d6dfed", radius=10)
-    panel("tab", BG, BG, radius=11)
-    panel("tab_active", "#e9eef9", "#e9eef9", radius=11)
-    panel("tab_selected", CARD, "#d6dff6", radius=11)
-    panel("tab_focus", BG, "#91a7f3", radius=11, stroke=2)
-    panel("tab_selected_focus", CARD, "#91a7f3", radius=11, stroke=2)
-    panel("tab_disabled", "#f0f3f8", "#f0f3f8", radius=10)
-    panel("progress_trough", "#e6ecf7", "#e6ecf7", radius=7, width=28, height=14)
-    panel("progress_bar", BLUE, BLUE, radius=7, width=28, height=14)
+    def panel(name, fill, outline, *, size, **kwargs):
+        for suffix, surface in surfaces:
+            asset(name + suffix, _panel_png(fill, outline, surface=surface, size=size, **kwargs))
+
+    # Opaque, generously sized images: a card or button is a few fast tiles.
+    card, button, field, tab = (640, 400), (320, 64), (480, 56), (240, 56)
+    panel("card", CARD, LINE, radius=15, width=48, height=48, size=card)
+    panel("button", "#edf1f8", "#e2e8f2", size=button)
+    panel("button_active", "#e4ebf7", "#d3def2", size=button)
+    panel("button_pressed", "#d8e2f3", "#c7d5ed", size=button)
+    panel("button_focus", "#edf1f8", "#859ded", stroke=2, size=button)
+    panel("button_focus_active", "#e4ebf7", "#859ded", stroke=2, size=button)
+    panel("button_disabled", "#f0f3f8", "#e8edf5", size=button)
+    panel("primary", BLUE, BLUE, size=button)
+    panel("primary_active", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
+    panel("primary_pressed", "#354fb9", "#354fb9", size=button)
+    panel("primary_focus", BLUE, "#b8c7ff", stroke=2, size=button)
+    panel("primary_focus_active", BLUE_ACTIVE, "#b8c7ff", stroke=2, size=button)
+    panel("primary_disabled", "#c6d1ee", "#c6d1ee", size=button)
+    panel("entry", CARD, "#d6dfed", radius=10, size=field)
+    panel("entry_focus", CARD, "#8299ef", radius=10, stroke=2, size=field)
+    panel("entry_disabled", "#f0f3f8", "#e2e8f2", radius=10, size=field)
+    panel("entry_readonly", "#f8faff", "#d6dfed", radius=10, size=field)
+    panel("tab", BG, BG, radius=11, size=tab)
+    panel("tab_active", "#e9eef9", "#e9eef9", radius=11, size=tab)
+    panel("tab_selected", CARD, "#d6dff6", radius=11, size=tab)
+    panel("tab_focus", BG, "#91a7f3", radius=11, stroke=2, size=tab)
+    panel("tab_selected_focus", CARD, "#91a7f3", radius=11, stroke=2, size=tab)
+    panel("tab_disabled", "#f0f3f8", "#f0f3f8", radius=10, size=tab)
+    asset("progress_trough", _panel_png("#e6ecf7", "#e6ecf7", radius=7, width=28, height=14))
+    asset("progress_bar", _panel_png(BLUE, BLUE, radius=7, width=28, height=14))
     for kind, generator in (("switch", _switch_png), ("radio", _radio_png)):
         for name, states in (("off", {}), ("on", {"selected": True}),
                              ("off_active", {"active": True}), ("on_active", {"selected": True, "active": True}),
                              ("off_focus", {"focus": True}), ("on_focus", {"selected": True, "focus": True}),
                              ("off_disabled", {"disabled": True}), ("on_disabled", {"selected": True, "disabled": True})):
-            asset(kind + "_" + name, generator(**states))
+            for suffix, surface in surfaces:
+                asset(kind + "_" + name + suffix, generator(surface=surface, **states))
 
-    for name, prefix in (("Soft.Button", "button"), ("Soft.Primary", "primary")):
-        _image_element(style, name, [images[prefix],
-                       ("disabled", images[prefix + "_disabled"]),
-                       ("pressed", images[prefix + "_pressed"]),
-                       ("active", "focus", images[prefix + "_focus_active"]),
-                       ("focus", images[prefix + "_focus"]),
-                       ("active", images[prefix + "_active"])], border=12)
-    _image_element(style, "Soft.Card", [images["card"]], border=15)
-    _image_element(style, "Soft.Entry", [images["entry"], ("disabled", images["entry_disabled"]),
-                   ("focus", images["entry_focus"]), ("readonly", images["entry_readonly"])], border=10)
-    for name, prefix, size in (("Soft.Switch", "switch", (56, 30)), ("Soft.Radio", "radio", (32, 28))):
-        _image_element(style, name, [images[prefix + "_off"],
-                       ("disabled", "selected", images[prefix + "_on_disabled"]),
-                       ("disabled", images[prefix + "_off_disabled"]),
-                       ("focus", "selected", images[prefix + "_on_focus"]),
-                       ("focus", images[prefix + "_off_focus"]),
-                       ("active", "selected", images[prefix + "_on_active"]),
-                       ("active", images[prefix + "_off_active"]),
-                       ("selected", images[prefix + "_on"])], minimum=size)
-    _image_element(style, "Soft.Tab", [images["tab"], ("disabled", images["tab_disabled"]),
-                   ("selected", "focus", images["tab_selected_focus"]), ("focus", images["tab_focus"]),
-                   ("selected", images["tab_selected"]), ("active", images["tab_active"])], border=10)
+    for suffix, _ in surfaces:
+        element = CARD_ELEMENT if suffix else ""
+        for name, prefix in (("Soft.Button", "button"), ("Soft.Primary", "primary")):
+            _image_element(style, name + element, [images[prefix + suffix],
+                           ("disabled", images[prefix + "_disabled" + suffix]),
+                           ("pressed", images[prefix + "_pressed" + suffix]),
+                           ("active", "focus", images[prefix + "_focus_active" + suffix]),
+                           ("focus", images[prefix + "_focus" + suffix]),
+                           ("active", images[prefix + "_active" + suffix])], border=12)
+        _image_element(style, "Soft.Card" + element, [images["card" + suffix]], border=15)
+        _image_element(style, "Soft.Entry" + element, [images["entry" + suffix], ("disabled", images["entry_disabled" + suffix]),
+                       ("focus", images["entry_focus" + suffix]), ("readonly", images["entry_readonly" + suffix])], border=10)
+        for name, prefix, size in (("Soft.Switch", "switch", (56, 30)), ("Soft.Radio", "radio", (32, 28))):
+            _image_element(style, name + element, [images[prefix + "_off" + suffix],
+                           ("disabled", "selected", images[prefix + "_on_disabled" + suffix]),
+                           ("disabled", images[prefix + "_off_disabled" + suffix]),
+                           ("focus", "selected", images[prefix + "_on_focus" + suffix]),
+                           ("focus", images[prefix + "_off_focus" + suffix]),
+                           ("active", "selected", images[prefix + "_on_active" + suffix]),
+                           ("active", images[prefix + "_off_active" + suffix]),
+                           ("selected", images[prefix + "_on" + suffix])], minimum=size)
+        _image_element(style, "Soft.Tab" + element, [images["tab" + suffix], ("disabled", images["tab_disabled" + suffix]),
+                       ("selected", "focus", images["tab_selected_focus" + suffix]), ("focus", images["tab_focus" + suffix]),
+                       ("selected", images["tab_selected" + suffix]), ("active", images["tab_active" + suffix])], border=10)
     _image_element(style, "Soft.Progress.trough", [images["progress_trough"]], border=6, minimum=(0, 14))
     _image_element(style, "Soft.Progress.pbar", [images["progress_bar"]], border=6, minimum=(0, 14))
     # A PhotoImage is deleted by Tk when its Python object is collected.
@@ -398,6 +464,7 @@ def _bind_surfaces(root, style):
     if hasattr(owner, "_xlikesaver_surface_binding"):
         return
     controls = {"TButton", "TEntry", "TSpinbox", "TCombobox", "TCheckbutton", "TRadiobutton", "TProgressbar"}
+    card_layouts = set()
 
     def surface(parent):
         if isinstance(parent, ttk.Widget):
@@ -436,6 +503,13 @@ def _bind_surfaces(root, style):
         name = ("SurfaceCard." if color == CARD else "SurfaceBg.") + base
         style.configure(name, background=color)
         style.map(name, background=[("disabled", color), ("!disabled", color)])
+        if color == CARD and name not in card_layouts:
+            # Same layout, drawn with the images blended onto a card.
+            try:
+                style.layout(name, _card_layout(style.layout(base)))
+            except tk.TclError:
+                pass
+            card_layouts.add(name)
         if widget.cget("style") != name:
             widget.configure(style=name)
 
