@@ -65,6 +65,12 @@ def main() -> int:
             theme.apply(root, "light")
             assert app.log.cget("background") == theme.LIGHT["CARD"]
             theme.apply(root, original_mode)
+            theme_images = "drawn"
+            if getattr(sys, "frozen", False):
+                # Both appearances were drawn once and kept for the next start.
+                cached = list((Path(app_data.name) / "XlikeSaver" / "cache").glob(f"theme-{__version__}-*.zip"))
+                assert len(cached) == 2, cached
+                theme_images = "cached-light-and-dark"
             assert int(app.progress.cget("highlightthickness")) == 0
             assert app.auth.get()
             assert app.content_view.winfo_manager() == "grid"
@@ -203,7 +209,8 @@ def main() -> int:
                 assert final["saved"] == 0
             report = {"ok": True, "version": __version__, "gallery_dl": version.__version__,
                       "font": actual_font, "record_pagination": "queried-and-clamped",
-                      "appearance": "light-dark-live-switch", "local_previews": "photo-video-gif",
+                      "appearance": "light-dark-live-switch", "theme_images": theme_images,
+                      "local_previews": "photo-video-gif",
                       "gif_conversion": "animated-with-source-author-metadata", "gif_size_presets": "fitted-exact-frames",
                       "dialogs": "themed", "like_order": "recorded-and-sorted", "tweet_text": "searchable",
                       "statistics": "authors-and-months", "catalog_recovery": "salvage-verified",

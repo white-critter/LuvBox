@@ -5,13 +5,18 @@ their keyboard, selection or command behavior. Images stretch with ttk's
 nine-slice element support and stay alive for the whole Tk interpreter.
 """
 
+import hashlib
+import json
 import math
+import os
+from pathlib import Path
 import struct
 import sys
 import time
 import tkinter as tk
 from tkinter import ttk
 from types import SimpleNamespace
+import zipfile
 import zlib
 
 from .fonts import load_family
@@ -258,15 +263,71 @@ def _image_element(style, name, images, *, border=0, minimum=(0, 0), padding=0):
                          width=minimum[0], height=minimum[1], sticky="nsew")
 
 
-def _control_images(root, style):
-    images = getattr(root._root(), "_xlikesaver_theme_images", {})
-    def asset(name, data):
-        if name in images:
-            images[name].configure(data=data)
-        else:
-            images[name] = tk.PhotoImage(master=root, data=data)
-        return images[name]
+_ASSET_CACHE: dict[str, dict[str, bytes]] = {}
 
+
+def _asset_key() -> str:
+    """Identify the generated images: palette, mode and the drawing code."""
+    from . import __version__
+    try:
+        code = Path(__file__).read_bytes()
+    except OSError:
+        code = b""   # a frozen build: the version identifies the code
+    palette = DARK if _active_mode == "dark" else LIGHT
+    material = json.dumps([__version__, _active_mode, palette], sort_keys=True).encode("utf-8") + code
+    return hashlib.sha256(material).hexdigest()[:20]
+
+
+def _asset_cache_path(key: str) -> Path | None:
+    # Only the installed app keeps a disk cache; tests and source runs draw.
+    if not getattr(sys, "frozen", False):
+        return None
+    from . import __version__
+    from .settings import app_directory
+    return app_directory() / "cache" / f"theme-{__version__}-{_active_mode}-{key}.zip"
+
+
+def _read_asset_cache(key: str) -> dict[str, bytes] | None:
+    location = _asset_cache_path(key)
+    if location is None or not location.is_file():
+        return None
+    try:
+        with zipfile.ZipFile(location) as archive:
+            assets = {name: archive.read(name) for name in archive.namelist()}
+    except (OSError, zipfile.BadZipFile, KeyError):
+        return None
+    return assets if all(data.startswith(b"\x89PNG") for data in assets.values()) and assets else None
+
+
+def _write_asset_cache(key: str, assets: dict[str, bytes]) -> None:
+    location = _asset_cache_path(key)
+    if location is None:
+        return
+    try:
+        location.parent.mkdir(parents=True, exist_ok=True)
+        # Keep both appearances of this version; drop other versions' images.
+        current = location.name.split("-")[1]
+        for old in location.parent.glob("theme-*.zip"):
+            if old.name.split("-")[1:2] != [current]:
+                old.unlink(missing_ok=True)
+    except OSError:
+        pass
+    # A second app window may draw at the same time; never share a temp file.
+    temporary = location.with_name(f".{location.stem}-{os.getpid()}.partial")
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_STORED) as archive:
+            for name, data in assets.items():
+                archive.writestr(name, data)
+        os.replace(temporary, location)
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _draw_assets(asset):
+    """Generate every control image for the current palette (PNG bytes)."""
     surfaces = [(suffix, globals()[color]) for suffix, color in _SURFACES]
 
     def panel(name, fill, outline, *, size, **kwargs):
@@ -331,6 +392,29 @@ def _control_images(root, style):
                              ("off_disabled", {"disabled": True}), ("on_disabled", {"selected": True, "disabled": True})):
             for suffix, surface in surfaces:
                 asset(kind + "_" + name + suffix, generator(surface=surface, **states))
+
+
+def _control_images(root, style):
+    images = getattr(root._root(), "_xlikesaver_theme_images", {})
+    def asset(name, data):
+        if name in images:
+            images[name].configure(data=data)
+        else:
+            images[name] = tk.PhotoImage(master=root, data=data)
+        return images[name]
+
+    surfaces = [(suffix, globals()[color]) for suffix, color in _SURFACES]
+    # Drawing ~110 antialiased images in Python took about a second on every
+    # start and theme switch; the result only depends on version and palette.
+    key = _asset_key()
+    assets = _ASSET_CACHE.get(key) or _read_asset_cache(key)
+    if assets is None:
+        assets = {}
+        _draw_assets(assets.__setitem__)
+        _write_asset_cache(key, assets)
+    _ASSET_CACHE[key] = assets
+    for name, data in assets.items():
+        asset(name, data)
 
     for suffix, _ in surfaces:
         element = CARD_ELEMENT if suffix else ""

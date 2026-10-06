@@ -2,9 +2,13 @@
 
 import gc
 import os
+import sys
+import tempfile
 import tkinter as tk
+from pathlib import Path
 from tkinter import font, ttk
 import unittest
+from unittest.mock import patch
 
 from xlikesaver import theme
 from xlikesaver import fonts
@@ -137,6 +141,36 @@ class ThemeTests(unittest.TestCase):
         gc.collect()
         self.assertTrue(names.issubset(set(map(str, self.root.tk.call("image", "names")))))
         self.assertEqual(len(names), len(self.root.tk.call("image", "names")))
+
+    def test_installed_app_reuses_drawn_images_for_both_appearances(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(sys, "frozen", True, create=True), \
+                patch("xlikesaver.settings.app_directory", return_value=Path(folder)), \
+                patch.dict(theme._ASSET_CACHE, clear=True):
+            cache = Path(folder) / "cache"
+            cache.mkdir()
+            (cache / "theme-0.0.1-light-old.zip").write_bytes(b"older version")
+            light = theme._asset_cache_path(theme._asset_key())
+            theme._ASSET_CACHE.clear()
+            theme.apply_style(self.root, mode="dark")
+            theme.apply_style(self.root, mode="light")
+            self.assertEqual(len(list(cache.glob("theme-*.zip"))), 2)
+            self.assertTrue(light.is_file())
+            self.assertFalse((cache / "theme-0.0.1-light-old.zip").exists())
+            drawn = theme._read_asset_cache(theme._asset_key())
+            self.assertEqual(set(drawn), set(theme._ASSET_CACHE[theme._asset_key()]))
+            theme._ASSET_CACHE.clear()
+            with patch.object(theme, "_draw_assets", side_effect=AssertionError("drawn again")):
+                theme.apply_style(self.root, mode="dark")
+                theme.apply_style(self.root, mode="light")
+            # A damaged file is drawn again and replaced.
+            light.write_bytes(b"not a zip")
+            theme._ASSET_CACHE.clear()
+            self.assertIsNone(theme._read_asset_cache(theme._asset_key()))
+            theme.apply_style(self.root, mode="dark")
+            theme.apply_style(self.root, mode="light")
+            self.assertIsNotNone(theme._read_asset_cache(theme._asset_key()))
+            self.assertFalse(list(cache.glob("*.partial")))
 
     def test_rounded_controls_match_their_parent_background_in_every_state(self):
         # These state backgrounds caused the visible square outside the PNG's
