@@ -197,8 +197,8 @@ class DeleteDialog(Dialog):
         if len(names) > 5:
             preview += f"\n외 {len(names) - 5:,}개"
         message = (f"선택한 파일 {count:,}개 · {format_bytes(total_bytes)}\n\n{preview}\n\n"
-                   "Windows 휴지통으로 옮깁니다. 옮길 수 없는 파일은 그대로 둡니다.\n"
-                   "동기화 폴더에서는 클라우드에도 삭제가 반영될 수 있습니다.")
+                   "휴지통으로 옮깁니다. 옮길 수 없는 파일은 그대로 둡니다.\n"
+                   "동기화 폴더라면 클라우드에서도 지워질 수 있습니다.")
         super().__init__(parent, "선택한 파일을 삭제할까요?", message, icon="warning",
                          buttons=(("취소", None), ("휴지통으로 이동", True)), default=0, cancel=None)
         self.keep_deleted = tk.BooleanVar(self, value=True)

@@ -71,7 +71,7 @@ class ScheduledRunTests(unittest.TestCase):
     def test_runs_that_cannot_start_safely_are_refused_and_logged(self):
         cases = (
             ({}, "저장된 설정이 없습니다"),
-            (dict(self.settings, auth_mode="file"), "인증 토큰 연결"),
+            (dict(self.settings, auth_mode="file"), "브라우저 로그인 연결"),
             (dict(self.settings, record_locations={"offline_test": str(self.root / "다른 폴더")}), "저장 폴더 변경이 끝나지"),
             (dict(self.settings, max_video_mb="200"), "0 이상의 정수"),
             (dict(self.settings, gif_format=["gif"]), "GIF 저장 형식"),

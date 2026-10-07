@@ -495,7 +495,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["status"], "finished")
         self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["skipped"]), ("quick", 2, 3))
-        self.assertIn("이전 확인 지점", events[-1]["message"])
+        self.assertIn("이어져 멈췄습니다", events[-1]["message"])
         self.assertEqual(listed, ["200", "201", "100", "101", "102"])
         self.assertEqual(FakeHttpDownloader.downloaded[-2:], [
             "https://pbs.twimg.com/media/200_1?format=jpg&name=orig",
@@ -549,7 +549,7 @@ class CoreTests(unittest.TestCase):
         for changed in (replace(quick, include_videos=True), replace(quick, include_videos=True, max_video_mb=500)):
             code, events = self.worker(rows, options=changed)
             self.assertEqual(events[-1]["scan_mode"], "full")
-            self.assertTrue(any("설정이 이전 확인 때와 달라" in event.get("message", "") for event in events))
+            self.assertTrue(any("설정이 바뀌어" in event.get("message", "") for event in events))
             self.assertEqual(self.worker(rows, options=changed)[1][-1]["scan_mode"], "quick")
 
     def test_quick_readiness_is_separate_for_each_folder_layout(self):
@@ -630,7 +630,7 @@ class CoreTests(unittest.TestCase):
         for raw in ("AuthRequired: authenticated cookies needed", "AuthorizationError: Account temporarily locked",
                     "Invalid login credentials", "'401 Unauthorized'", "403 Forbidden", "cookie expired"):
             with self.subTest(raw=raw):
-                self.assertIn("인증 토큰", _safe_diagnostic(raw, "managed"))
+                self.assertIn("Edge에서 X 로그인", _safe_diagnostic(raw, "managed"))
         for raw in ("1849: Missing 'author' data", "Failed to download 1429_1.jpg",
                     "Failed to download 1840412345_1.jpg"):
             with self.subTest(raw=raw):
@@ -649,7 +649,7 @@ class CoreTests(unittest.TestCase):
             code = run_worker(self.options, events.append)
         find.assert_not_called()
         self.assertEqual(code, 1)
-        self.assertIn("gallery-dl 구성", events[-1]["message"])
+        self.assertIn("gallery-dl이 예상과 달라", events[-1]["message"])
         self.assertFalse(self.record_dir.exists())
 
     def test_no_results_is_actionable_error(self):
@@ -727,7 +727,7 @@ class CoreTests(unittest.TestCase):
             code, events = self.worker(options=replace(self.options, auth_mode="managed"))
         self.assertNotEqual(code, 0)
         self.assertEqual(events[-1]["status"], "error")
-        self.assertIn("인증 토큰 연결", events[-1]["message"])
+        self.assertIn("Edge에서 X 로그인", events[-1]["message"])
 
     def test_stop_before_managed_start_does_not_load_session(self):
         flag = self.base / "stop.flag"
@@ -803,7 +803,7 @@ class CoreTests(unittest.TestCase):
                 self.assertNotEqual(code, 0)
                 self.assertEqual(events[-1]["status"], "error")
                 self.assertNotIn(SECRET, json.dumps(events))
-                self.assertIn("인증 토큰 연결", events[-1]["message"])
+                self.assertIn("브라우저 로그인", events[-1]["message"])
                 self.assertIn("cookies.txt", events[-1]["message"])
                 session_load.assert_not_called()
                 library_load.assert_not_called()
@@ -814,7 +814,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertEqual(events[-1]["status"], "error")
         self.assertIn("cookies.txt", events[-1]["message"])
-        self.assertIn("쿠키 파일", events[-1]["message"])
+        self.assertIn("다시 로그인", events[-1]["message"])
 
     def test_failed_download_reports_error_and_no_archive_success(self):
         FakeHttpDownloader.failure = True

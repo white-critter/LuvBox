@@ -50,16 +50,14 @@ QUICK_STOP_AFTER = 100
 _KOREA = timezone(timedelta(hours=9))
 _RECORD_ERROR = ("저장 기록을 읽거나 갱신하지 못했습니다. "
                  "저장 폴더의 권한과 다른 실행 중인 프로그램을 확인해 주세요.")
-_COMPATIBILITY_ERROR = ("내장 gallery-dl 구성이 이 버전의 XlikeSaver가 예상한 것과 달라 요청을 보내기 전에 중단했습니다. "
-                        "배포된 실행 파일을 다시 받거나 setup.ps1로 고정된 버전을 설치해 주세요.")
+_COMPATIBILITY_ERROR = ("내장 gallery-dl이 예상과 달라 요청 전에 멈췄습니다. "
+                        "실행 파일을 다시 받거나 setup.ps1로 다시 설치해 주세요.")
 _HISTORY_ERROR = "저장 이력을 기록하지 못했습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
 _METADATA_ERROR = "출처 또는 작성자를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다."
-_SNAPSHOT_ERROR = ("저장 폴더에 기록 사본을 쓰지 못했습니다. 기록은 이 PC에 그대로 있으며 다음 저장 때 다시 씁니다. "
-                   "동기화 프로그램이 파일을 쓰는 중이면 잠시 뒤 다시 시도됩니다.")
+_SNAPSHOT_ERROR = "저장 폴더에 기록 사본을 쓰지 못했습니다. 기록은 이 PC에 있고 다음 저장 때 다시 씁니다."
 _DATE_MOVE_ERROR = "저장 완료일 폴더로 옮기지 못했습니다. 기존 파일 위치와 중복 방지 기록은 보존했습니다."
-_LOCAL_WRITE_ERROR = ("미디어 파일을 쓰지 못해 중단했습니다. 저장 폴더의 쓰기 권한, 다른 프로그램의 파일 사용 여부, "
-                      "디스크 여유 공간을 확인한 뒤 직접 다시 실행해 주세요. "
-                      "저장 완료 파일과 중복 방지 기록은 유지됩니다.")
+_LOCAL_WRITE_ERROR = ("파일을 쓰지 못해 멈췄습니다. 폴더 쓰기 권한, 디스크 공간, 파일을 쓰는 다른 프로그램을 "
+                      "확인한 뒤 다시 실행해 주세요. 받은 파일은 그대로 있습니다.")
 
 
 def _save_day() -> date:
@@ -259,7 +257,7 @@ class JobOptions:
     def validate(self) -> "JobOptions":
         account = _normal_account(self.account)
         if not isinstance(self.auth_mode, str) or self.auth_mode.strip().lower() not in _AUTH_MODES:
-            raise ValueError("지원하는 인증 방법은 ‘인증 토큰 연결’과 ‘쿠키 파일(cookies.txt)’입니다. 인증 방법을 다시 선택해 주세요.")
+            raise ValueError("로그인 방법을 ‘브라우저 로그인’이나 ‘cookies.txt 파일’ 중에서 다시 골라 주세요.")
         auth_mode = self.auth_mode.strip().lower()
         if not isinstance(self.folder_mode, str) or self.folder_mode.strip().lower() not in _FOLDER_MODES:
             raise ValueError("저장 방식은 작성자별, 날짜별, 구분 없이 중 하나를 선택해 주세요.")
@@ -310,8 +308,8 @@ class JobOptions:
 
 def _auth_help(mode: str) -> str:
     if mode == "managed":
-        return "저장된 인증 토큰이 만료되었거나 유효하지 않습니다. ‘인증 토큰 연결’을 선택하고 auth_token을 다시 입력해 ‘연결 저장’을 눌러 주세요."
-    return "X에 다시 로그인한 뒤 본인 계정의 새 cookies.txt 파일을 내보내 ‘쿠키 파일’에서 선택해 주세요."
+        return "로그인 연결이 만료됐습니다. ‘로그인 연결 → Edge에서 X 로그인’으로 다시 연결해 주세요."
+    return "X에 다시 로그인한 뒤 새 cookies.txt를 내보내 선택해 주세요."
 
 
 # Match whole terms: a plain substring test would read gallery-dl's
@@ -1276,10 +1274,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             readiness = history.quick_scan_readiness(normalized.folder_mode, normalized.media_signature)
             quick_scan = readiness == "ready"
             scan_note = {
-                "ready": f"새 Like만 빠르게 확인합니다. 이미 저장한 파일이 {QUICK_STOP_AFTER}개 연속으로 나오면 이전 확인 지점으로 보고 멈춥니다.",
-                "settings-changed": "동영상·GIF·용량 제한 설정이 이전 확인 때와 달라 이번에는 전체 목록을 확인합니다. 다음 실행부터 다시 빠르게 확인합니다.",
-            }.get(readiness, "이전 실행이 끝까지 확인되지 않았거나(첫 실행·중단·오류·시험 저장) 이번 방식의 기록이 없어 전체 목록을 확인합니다. "
-                             "다음 실행부터 빠르게 확인합니다.")
+                "ready": f"새 Like만 확인합니다. 이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다.",
+                "settings-changed": "동영상·GIF·용량 설정이 바뀌어 이번만 전체 목록을 확인합니다.",
+            }.get(readiness, "이전 확인이 끝까지 되지 않아(첫 실행·중단·오류·시험 저장) 이번만 전체 목록을 확인합니다.")
         run_id = history.start_run(normalized.folder_mode,
                                    scan_mode="retry" if targets else "quick" if quick_scan else "full",
                                    media_signature=normalized.media_signature)
@@ -1295,8 +1292,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         _configure_gallery(normalized, archive_path, storage.legacy_dir.name)
         common.CACHE_COOKIES.clear()
         common.CACHE_MEMORY.clear()
-        emit({"type": "log", "level": "info", "message": "사진은 원본 크기, 동영상은 가장 높은 화질로 저장합니다. 새 GIF는 MP4를 받은 뒤 이 PC에서 GIF로 변환합니다."})
-        emit({"type": "log", "level": "info", "message": f"X 목록 요청은 최소 {API_INTERVAL:g}초, 미디어 요청은 최소 {MEDIA_INTERVAL:g}초 간격으로 보냅니다. 남은 요청 한도가 5회 이하이거나 요청 한도·계정 인증 제한을 만나면 중단합니다."})
+        emit({"type": "log", "level": "info", "message": "사진은 원본, 동영상은 최고 화질로 저장합니다. GIF는 받은 뒤 이 PC에서 변환합니다."})
+        emit({"type": "log", "level": "info", "message": f"목록은 {API_INTERVAL:g}초, 미디어는 {MEDIA_INTERVAL:g}초 간격으로 요청합니다. 요청 한도가 거의 차거나 계정 제한이 오면 멈춥니다."})
         if scan_note:
             emit({"type": "log", "level": "info", "message": scan_note})
         # One resident ExifTool for the run; the availability check above stays the only one.
@@ -1356,19 +1353,18 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                      unavailable_tweets, absent_files, size_skipped)
         elif stop_reason == "limit":
             status = "finished"
-            message = (f"테스트 파일 {saved}개 저장을 마쳤습니다. 저장한 파일 기록은 유지됩니다. "
-                       "한도를 해제하고 다시 실행하면 이미 저장한 파일을 건너뛰고 계속 확인합니다.")
+            message = f"시험 저장 {saved}개를 마쳤습니다. 시험 저장을 끄고 다시 실행하면 이어서 저장합니다."
         elif stop_reason == "caught-up":
             status = "finished"
-            message = (f"새 Like 확인을 마쳤습니다. 이번에 {saved:,}개를 저장했고, 이미 저장한 파일이 "
-                       f"{QUICK_STOP_AFTER}개 연속으로 나와 이전 확인 지점에서 멈췄습니다.")
+            message = (f"새 Like 확인을 마쳤습니다. {saved:,}개를 저장했고, 이미 저장한 파일이 "
+                       f"{QUICK_STOP_AFTER}개 이어져 멈췄습니다.")
         elif not saved and not skipped and not size_skipped:
             exit_code = 1
-            message = ("저장할 미디어를 찾지 못했습니다. 본인 계정으로 로그인했는지 확인해 주세요. "
-                       "마음에 들어요에 선택한 형식의 미디어가 없거나 X가 목록 접근을 제한했을 수 있습니다.")
+            message = ("저장할 미디어를 찾지 못했습니다. 본인 계정으로 로그인했는지, "
+                       "좋아요에 사진·영상이 있는지 확인해 주세요.")
         else:
-            message = ("X에서 현재 읽을 수 있는 목록의 확인을 마쳤습니다. 저장한 파일 기록은 유지됩니다. "
-                       "삭제된 게시물이나 X가 제공하지 않은 과거 마음에 들어요는 포함되지 않을 수 있습니다.")
+            message = ("X가 보여 주는 좋아요 목록을 모두 확인했습니다. "
+                       "삭제된 게시물이나 X가 더는 보여 주지 않는 오래된 좋아요는 빠질 수 있습니다.")
             status = "finished"
     except exception.StopExtraction:
         status, exit_code = "stopped", 0
@@ -1456,8 +1452,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             logger.propagate = propagate
     if author_deferred:
         emit({"type": "log", "level": "info",
-              "message": f"이미 저장된 파일 {author_deferred:,}개는 작성자 정보를 기록 DB에만 반영했습니다. "
-                         "파일 안에도 넣으려면 ‘기록 · 통계 → 출처·작성자 기록’을 누르세요."})
+              "message": f"이미 있던 파일 {author_deferred:,}개는 작성자를 기록에만 넣었습니다. "
+                         "파일에도 넣으려면 ‘기록 · 통계 → 출처·작성자 기록’을 누르세요."})
     if status == "error":
         emit({"type": "log", "level": "error", "message": message})
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,

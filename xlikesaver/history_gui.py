@@ -45,9 +45,8 @@ GIF_SIZE_LABELS = {"original": "원본 크기", "720": "최대 720px · 초당 1
 NO_SELECTION = "파일을 선택하면 미리보기와 출처를 보여 드립니다."
 NO_RUN_SELECTION = "실행을 고르면 어떻게 끝났는지 볼 수 있습니다."
 SCAN_LABELS = {"quick": "새 Like만 빠르게 확인", "full": "전체 목록 확인", "retry": "사라진 파일 다시 받기"}
-MISSING_HELP = ("저장한 뒤 지워진 파일입니다. 일부러 지운 파일은 ‘다시 받지 않기’로 숨기면 앞으로 저장할 때도 받지 않습니다. "
-                "실수로 사라진 파일은 골라서 ‘다시 받기’를 누르세요. 트윗마다 X 요청을 1번씩 10초 간격으로 보냅니다. "
-                "폴더 밖으로 옮긴 파일도 여기에 나오니 확인한 뒤 고르세요.")
+MISSING_HELP = ("저장한 뒤 사라진 파일입니다. 필요하면 ‘다시 받기’, 일부러 지웠다면 ‘다시 받지 않기’를 누르세요. "
+                "다른 폴더로 옮긴 파일도 여기 나옵니다.")
 ALL_AUTHORS = "작성자 전체"
 FILE_HINT = "끌어서 고르거나 ‘여러 개 선택’을 켜고 클릭하세요."
 SAMPLE_HINT = "작성자를 고르면 최근 게시물 사진을 보여 드립니다."
@@ -1614,9 +1613,8 @@ class HistoryWindow(tk.Toplevel):
         media_dir = self.current_storage.media_dir if isinstance(self.current_storage, StoragePaths) else self.current_account_dir
         dialogs.showinfo("기록 저장 위치", f"저장 폴더:\n{media_dir}\n\n이 PC의 기록·통계:\n{self.current_account_dir / '.xlikesaver-history.sqlite3'}\n\n"
                          f"이 PC의 중복 방지 기록:\n{archive_text}\n\n저장 폴더에 두는 사본:\n{snapshot}\n\n"
-                         "기록은 계정과 저장 폴더마다 이 PC에 따로 둡니다. 저장할 때마다 저장 폴더의 .xlikesaver에 "
-                         "검사를 통과한 사본을 통째로 바꿔 두므로, 다른 PC나 다시 설치한 앱은 이 사본에서 기록을 가져옵니다. "
-                         "파일 목록은 저장 시각 순서이며 예전 저장 시각은 알 수 없습니다.", parent=self)
+                         "기록은 이 PC에 두고, 저장할 때마다 저장 폴더의 .xlikesaver에 사본을 둡니다. "
+                         "다른 PC나 새로 설치한 앱은 이 사본에서 기록을 가져옵니다.", parent=self)
 
     def export(self):
         if self.busy or self.current_account_dir is None:
@@ -1644,9 +1642,9 @@ class HistoryWindow(tk.Toplevel):
         if not dialogs.askyesno(
                 "출처·작성자 기록",
                 "예전에 받은 파일 안에 트윗 주소와 작성자를 기록합니다.\n\n"
-                "· 화질은 그대로이며 X에 요청하지 않습니다.\n"
-                "· 파일을 다시 쓰므로 Google Drive·OneDrive 폴더라면 다시 올라갈 수 있습니다.\n"
-                "· 이미 기록된 파일은 건너뜁니다. 중간에 멈춰도 됩니다.\n\n계속할까요?", parent=self):
+                "· 화질은 그대로이고 X에 요청하지 않습니다.\n"
+                "· 파일을 다시 쓰므로 동기화 폴더라면 다시 올라갑니다.\n"
+                "· 이미 기록된 파일은 건너뛰며 언제든 멈출 수 있습니다.\n\n계속할까요?", parent=self):
             return
         if not self._local_context_valid(account, location, generation):
             return
@@ -1664,9 +1662,9 @@ class HistoryWindow(tk.Toplevel):
         if not dialogs.askyesno(
                 "기록 복구",
                 "손상된 기록 DB를 고칩니다.\n\n"
-                "· 손상된 파일은 먼저 이 PC의 앱 데이터 폴더(backups)에 그대로 보관합니다.\n"
-                "· 읽을 수 있는 기록을 모두 살려 새 DB를 만들고, 저장 폴더의 파일을 다시 확인해 빠진 기록을 채웁니다.\n"
-                "· 사진·영상 파일과 중복 방지 기록은 건드리지 않습니다.\n\n계속할까요?", parent=self):
+                "· 손상된 파일은 먼저 백업해 둡니다.\n"
+                "· 읽을 수 있는 기록을 살리고, 폴더를 다시 확인해 빠진 기록을 채웁니다.\n"
+                "· 사진·영상과 중복 방지 기록은 건드리지 않습니다.\n\n계속할까요?", parent=self):
             return
         if not self._local_context_valid(account, location, generation):
             return
@@ -1735,12 +1733,12 @@ class HistoryWindow(tk.Toplevel):
         account, location, generation = self.current_account, self.current_storage, self.generation
         if not dialogs.askyesno(
                 "MP4 GIF를 GIF로 바꾸기",
-                f"MP4로 저장된 움직이는 GIF {count:,}개를 .gif 파일로 바꿉니다.\n\n"
-                f"· GIF 크기: {GIF_SIZE_LABELS.get(size, size)} (저장 옵션에서 바꿀 수 있습니다)\n"
-                "· GIF는 보통 MP4보다 용량이 몇 배 커집니다. 영상 용량 제한을 넘는 파일은 MP4로 둡니다.\n"
-                "· 바꾼 파일의 원본 MP4는 휴지통으로 옮깁니다. 휴지통이 없는 위치의 파일은 바꾸지 않습니다.\n"
-                "· Google Drive·OneDrive 폴더라면 새 GIF가 다시 올라갑니다.\n"
-                "· X에 요청하지 않으며, 중간에 멈춰도 됩니다.\n\n계속할까요?", parent=self):
+                f"MP4로 저장된 움직이는 GIF {count:,}개를 .gif로 바꿉니다.\n\n"
+                f"· 크기: {GIF_SIZE_LABELS.get(size, size)} (저장 설정에서 변경)\n"
+                "· GIF는 보통 MP4보다 몇 배 큽니다. 용량 제한을 넘으면 MP4로 둡니다.\n"
+                "· 원본 MP4는 휴지통으로 옮깁니다. 휴지통이 없는 위치는 건너뜁니다.\n"
+                "· 동기화 폴더라면 새 GIF가 올라갑니다.\n"
+                "· X에 요청하지 않으며 언제든 멈출 수 있습니다.\n\n계속할까요?", parent=self):
             return
         if not self._local_context_valid(account, location, generation):
             return
@@ -2630,10 +2628,10 @@ class HistoryWindow(tk.Toplevel):
         location, generation = self.current_storage, self.generation
         if ignored and not dialogs.askyesno(
                 "다시 받지 않기",
-                f"선택한 파일 {len(items):,}개를 목록에서 숨기고, 앞으로 저장할 때도 받지 않습니다.\n\n"
-                "· 다른 저장 방식(작성자별·날짜별)으로 바꿔도 받지 않습니다.\n"
-                "· 파일이나 기록을 지우지 않으며 X에 요청하지 않습니다.\n"
-                "· ‘숨긴 파일도 보기’에서 언제든 ‘숨김 해제’할 수 있습니다.\n\n계속할까요?", parent=self):
+                f"선택한 파일 {len(items):,}개를 숨기고 앞으로 받지 않습니다.\n\n"
+                "· 저장 방식을 바꿔도 받지 않습니다.\n"
+                "· 파일과 기록은 지우지 않습니다.\n"
+                "· ‘숨긴 파일도 보기’에서 언제든 해제할 수 있습니다.\n\n계속할까요?", parent=self):
             return
         # Modal dialogs process events too; do not apply old selections to a
         # refreshed catalog or start a local write after a download began.
@@ -2705,12 +2703,12 @@ class HistoryWindow(tk.Toplevel):
         hidden = sum(bool(item.get("ignored")) for item in items)
         if not dialogs.askyesno(
                 "사라진 파일 다시 받기",
-                f"선택한 파일 {len(items):,}개(트윗 {tweets:,}개)를 X에서 다시 받습니다.\n\n"
-                f"· 트윗마다 X 요청을 1번씩 10초 간격으로 보내 약 {minutes:,}분 걸립니다.\n"
+                f"선택한 파일 {len(items):,}개(트윗 {tweets:,}개)를 다시 받습니다.\n\n"
+                f"· 트윗마다 10초 간격으로 요청해 약 {minutes:,}분 걸립니다.\n"
                 "· 지금 저장 설정의 폴더 방식으로 저장합니다.\n"
-                "· 삭제·비공개된 트윗의 파일은 받을 수 없으며 목록에 남습니다.\n"
-                + (f"· 숨긴 파일 {hidden:,}개도 포함되어, 받으면 숨김이 풀립니다.\n" if hidden else "")
-                + "· 진행 상황은 메인 화면에서 보고 중단할 수 있습니다.\n\n계속할까요?", parent=self):
+                "· 삭제·비공개된 트윗의 파일은 받을 수 없습니다.\n"
+                + (f"· 숨긴 파일 {hidden:,}개는 받으면 숨김이 풀립니다.\n" if hidden else "")
+                + "· 진행과 중단은 메인 화면에서 합니다.\n\n계속할까요?", parent=self):
             return
         if self._destroyed or self.closing or self.busy or self.is_downloading() or generation != self.generation:
             return

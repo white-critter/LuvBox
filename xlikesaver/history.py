@@ -27,7 +27,7 @@ _KOREA = timezone(timedelta(hours=9))
 _MODES = {"author", "date", "flat"}
 _TYPES = {"photo", "video", "animated_gif"}
 _HISTORY_HELP = "저장 내역을 읽거나 기록하지 못했습니다. 저장 폴더의 권한과 다른 실행 중인 작업을 확인해 주세요."
-_INTERRUPTED_MESSAGE = "이전 작업이 정상 종료되지 않아 중단된 기록으로 정리했습니다. 실제 종료 시각은 알 수 없습니다. 완료한 파일과 마지막으로 기록된 진행 수치는 보존했습니다."
+_INTERRUPTED_MESSAGE = "이전 작업이 비정상 종료되어 중단으로 정리했습니다. 받은 파일과 진행 수치는 그대로입니다."
 _ENTRY = re.compile(r"(?:twitter)?([0-9]{1,20})_(?:(video|animated_gif|gif)_)?([0-9]{1,5})\Z")
 _FILENAME = re.compile(r"([0-9]{1,20})_(?:(video|gif|animated_gif)_)?([0-9]{1,5})\.(jpg|jpeg|png|webp|gif|mp4)\Z", re.I)
 _ARCHIVES = {"author": ".xlikesaver-archive.sqlite3",
@@ -70,8 +70,8 @@ class CatalogDamaged(HistoryError):
     """The records database file itself is damaged; it can be rebuilt."""
 
 
-_DAMAGED_HELP = ("기록 DB 파일이 손상되어 읽을 수 없습니다. ‘기록 · 통계’에서 ‘기록 복구’를 눌러 주세요. "
-                 "저장한 사진·영상과 중복 방지 기록은 그대로 있습니다.")
+_DAMAGED_HELP = ("기록 DB가 손상됐습니다. ‘기록 · 통계’에서 ‘기록 복구’를 눌러 주세요. "
+                 "사진·영상과 중복 방지 기록은 그대로 있습니다.")
 # SQLITE_CORRUPT and SQLITE_NOTADB, including their extended codes.
 _DAMAGED_CODES = {11, 26}
 

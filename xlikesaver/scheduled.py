@@ -28,8 +28,7 @@ TASK_NAME = "XlikeSaver 자동 저장"
 _KEEP_LOGS = 30
 _KOREA = timezone(timedelta(hours=9))
 _TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])\Z")
-_SCHEDULE_HELP = ("Windows 작업 스케줄러에 연결하지 못했습니다. 잠시 후 다시 시도하거나, "
-                  "회사·학교 PC라면 관리자 정책을 확인해 주세요.")
+_SCHEDULE_HELP = "작업 스케줄러에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요(회사·학교 PC는 관리자 정책 확인)."
 
 
 class ScheduleError(RuntimeError):
@@ -192,7 +191,7 @@ def _options_from_settings(settings: dict, full: bool):
     from .core import JobOptions, _normal_account
 
     if settings.get("auth_mode", "managed") != "managed":
-        raise ValueError("예약 실행은 ‘인증 토큰 연결’ 방식에서만 사용할 수 있습니다. 앱에서 인증 토큰을 연결해 주세요.")
+        raise ValueError("예약 실행은 브라우저 로그인 연결에서만 쓸 수 있습니다. 앱의 ‘로그인 연결’에서 연결해 주세요.")
     account, output = settings.get("account"), settings.get("output_dir")
     if not isinstance(account, str) or not account.strip() or not isinstance(output, str) or not output.strip():
         raise ValueError("저장된 설정이 없습니다. 앱에서 한 번 저장을 실행한 뒤 예약 실행을 사용해 주세요.")
@@ -251,7 +250,7 @@ def _notify_failure(outcome: dict) -> None:
         dialog = dialogs.Dialog(
             root, "XlikeSaver 자동 저장 실패",
             f"{outcome['finished_at'][:16].replace('T', ' ')} 자동 저장을 마치지 못했습니다.\n\n{outcome['message']}\n\n"
-            "앱을 열어 안내를 확인해 주세요. 자세한 내용은 ‘자동 저장 → 실행 기록’에 있습니다.",
+            "자세한 내용은 앱의 ‘자동 저장 → 실행 기록’에 있습니다.",
             icon="warning", buttons=(("앱 열기", "open"), ("닫기", None)))
         dialog.attributes("-topmost", True)
         choice = dialog.run()

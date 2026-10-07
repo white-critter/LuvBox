@@ -3,6 +3,7 @@
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timezone
@@ -76,6 +77,7 @@ class BrowseCatalogTests(unittest.TestCase):
         self.assertEqual(stats["months"]["liked"], [])
         run = self.store.start_run("flat")
         self.store.finish_run(run, "finished")
+        time.sleep(0.02)  # Windows' clock is coarse; real runs are far apart.
         order = self.store.like_order(self.store.start_run("flat"))
         for tweet in ("900", "100"):
             order.visit(tweet)

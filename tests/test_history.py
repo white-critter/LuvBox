@@ -602,7 +602,7 @@ class HistoryTests(unittest.TestCase):
         self.assertIsNone(recovered["finished_at"])
         for key in ("started_at", "saved", "skipped", "size_skipped", "visited", "last_tweet_id", "last_posted_at"):
             self.assertEqual(recovered[key], original[key])
-        self.assertIn("실제 종료 시각은 알 수 없습니다", recovered["message"])
+        self.assertIn("비정상 종료", recovered["message"])
         self.assertEqual(next(row for row in self.store.runs() if row["id"] == finished)["status"], "finished")
         self.assertEqual(self.store.recover_interrupted_runs(), 0)
 

@@ -217,8 +217,8 @@ class ProtectionTests(unittest.TestCase):
                 with self.subTest(content_range=content_range), \
                         self.assertRaisesRegex(ProtectionError, "이어받기") as raised:
                     session.send(request)
-                self.assertIn(".part 파일은 보존", str(raised.exception))
-                self.assertIn("직접 다시 실행", str(raised.exception))
+                self.assertIn(".part 파일은 남겨", str(raised.exception))
+                self.assertIn("다시 실행", str(raised.exception))
                 self.assertNotIn("private", str(raised.exception))
             response.close.assert_called_once()
             self.assertEqual(original.call_count, 1)

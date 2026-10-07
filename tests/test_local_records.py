@@ -1,6 +1,7 @@
 """Live records on this PC; complete snapshots travel with the media folder."""
 
 import json
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -20,6 +21,17 @@ ARCHIVE = ".xlikesaver-archive.flat.sqlite3"
 def count(path, table="media"):
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
         return db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+
+
+def written_later(*paths):
+    """Give files another PC changed a later time, as a synced copy would have.
+
+    Within one coarse Windows clock tick, a same-size test write right after
+    publishing could keep the published size and time and look unchanged.
+    """
+    for path in paths:
+        written = path.stat()
+        os.utime(path, ns=(written.st_atime_ns, written.st_mtime_ns + 1_000_000_000))
 
 
 class LocalRecordTests(unittest.TestCase):
@@ -95,6 +107,7 @@ class LocalRecordTests(unittest.TestCase):
             store.record_media("flat", {"tweet_id": "200", "num": 1, "type": "photo"}, path)
         with closing(sqlite3.connect(other)) as db:
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        written_later(self.paths.snapshot_dir / ARCHIVE, other)
         prepare_storage(self.paths)                 # a records window does not merge
         self.assertEqual(count(self.paths.record_dir / ARCHIVE, "archive"), 1)
         prepare_storage(self.paths, protected=True)  # a save does
@@ -114,6 +127,7 @@ class LocalRecordTests(unittest.TestCase):
         with closing(sqlite3.connect(self.paths.snapshot_dir / ARCHIVE)) as db:
             db.execute("INSERT INTO archive VALUES ('twitter200_1')")
             db.commit()
+        written_later(self.paths.snapshot_dir / ARCHIVE)
 
     def test_locked_merge_does_not_mark_snapshot_consumed_and_retries(self):
         self.changed_archive_snapshot()

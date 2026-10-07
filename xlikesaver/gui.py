@@ -48,18 +48,18 @@ SCAN_MODES = {"새 Like만 빠르게 확인 (권장)": "quick", "전체 목록 �
 STATUS_TEXT = {"stopped": "중단됨", "limited": "시험 저장으로 끝남", "error": "실패"}
 GIF_FORMATS = {"GIF로 바꿔 저장": "gif", "원본 MP4 그대로 저장": "mp4"}
 GIF_FORMAT_HINTS = {
-    "gif": "어디서나 바로 움직이는 .gif 파일입니다. 색이 256개로 줄고 용량이 MP4보다 몇 배 커질 수 있습니다.",
-    "mp4": "X가 주는 원본 MP4를 그대로 저장합니다. 용량이 작고 화질이 그대로입니다.",
+    "gif": "어디서나 움직이는 .gif입니다. 색이 256개로 줄고 MP4보다 몇 배 클 수 있습니다.",
+    "mp4": "X의 원본 MP4를 그대로 저장합니다. 작고 화질이 좋습니다.",
 }
 GIF_SIZES = {"원본 크기": "original", "최대 720px · 초당 15장 (용량 절약)": "720",
              "최대 480px · 초당 12장 (가장 작게)": "480"}
 SCAN_HINTS = {
-    "quick": f"이미 저장한 파일이 {QUICK_STOP_AFTER}개 연속으로 나오면 멈춥니다. 평소에는 이것을 쓰세요.",
-    "full": "오래된 Like까지 처음부터 다시 확인합니다. 시간이 오래 걸립니다.",
+    "quick": f"이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다. 평소에 쓰세요.",
+    "full": "오래된 Like까지 처음부터 확인합니다. 오래 걸립니다.",
 }
-TOKEN_STEPS = ("1. 크롬이나 엣지에서 x.com에 로그인합니다.\n"
-               "2. F12를 누르고 Application(애플리케이션) → Cookies → https://x.com 을 엽니다.\n"
-               "3. auth_token 줄의 Value 값을 복사합니다.\n"
+TOKEN_STEPS = ("1. 크롬·엣지에서 x.com에 로그인합니다.\n"
+               "2. F12 → Application(애플리케이션) → Cookies → https://x.com\n"
+               "3. auth_token의 Value를 복사합니다.\n"
                "4. 아래 칸에 붙여 넣고 ‘연결 저장’을 누릅니다.")
 
 
@@ -345,7 +345,7 @@ class App:
         self.log.tag_configure("time", foreground=theme.MUTED)
         self.log.tag_configure("error", foreground=theme.RED)
         self.log.tag_configure("warning", foreground=theme.ORANGE)
-        self._wrapping_label(shell, text="X 요청 제한 안내가 나오면 기다린 뒤 다시 저장하세요. 계정 제한 위험을 완전히 없앨 수는 없습니다.",
+        self._wrapping_label(shell, text="요청 한도 안내가 나오면 알려 준 시각 이후에 다시 저장하세요.",
                              style="Muted.TLabel", wraplength=800).pack(fill="x", pady=(0, 4))
         if self.detailed_progress.get():
             self._toggle_progress()
@@ -507,7 +507,7 @@ class App:
             amount = f"{format_bytes(downloaded)} / 전체 용량 미확인"
         self.progress_summary.set(f"{kind} · {filename} · {amount}")
         author = str(event.get("author") or "작성자 미확인")
-        self.progress_details.set(f"속도 {format_bytes(event.get('speed') or 0)}/초 · 작성자 @{author} · 트윗 {event.get('tweet_id') or '미확인'}\n트윗 게시일 {format_date(event.get('posted_at'))} · 현재 파일의 진행률이며 전체 Like 목록의 완료율은 알 수 없습니다.")
+        self.progress_details.set(f"속도 {format_bytes(event.get('speed') or 0)}/초 · 작성자 @{author} · 트윗 {event.get('tweet_id') or '미확인'}\n게시일 {format_date(event.get('posted_at'))} · 막대는 지금 받는 파일의 진행률입니다.")
         if not self.stopping:
             self.status.set("파일을 저장하고 있습니다…")
 
@@ -983,9 +983,9 @@ class App:
         fresh = not source.output_dir.is_dir()
         if fresh and not dialogs.askyesno(
                 "이전 저장 폴더 연결 확인",
-                "이전 폴더를 찾을 수 없습니다.\n새 폴더에서 저장을 시작할까요?\n\n"
-                "이전 기록을 가져오지 못해 중복 저장될 수 있습니다.\n"
-                "기존 파일·기록은 보존됩니다. 이전 폴더를 다시 선택하면 기록을 합칠 수 있습니다.",
+                "이전 폴더를 찾을 수 없습니다. 새 폴더에서 시작할까요?\n\n"
+                "이전 기록을 못 가져와 같은 파일을 다시 받을 수 있습니다.\n"
+                "나중에 이전 폴더를 다시 고르면 기록을 합칠 수 있습니다.",
                 parent=self.root, default="no"):
             self.folder.set(str(source.output_dir))
             self.status.set("이전 저장 폴더를 유지했습니다")
@@ -1093,7 +1093,7 @@ class App:
     HELP_SECTIONS = (
         ("처음 시작하기", (
             "1. ‘내 X 아이디’에 본인 아이디를 입력합니다.",
-            "2. ‘로그인 연결’을 눌러 X 로그인을 연결합니다. 처음 한 번만 하면 됩니다.",
+            "2. ‘로그인 연결’로 X 로그인을 연결합니다(처음 한 번).",
             "3. 저장할 폴더를 고르고 ‘저장 시작’을 누릅니다.",
         ), "이미 저장한 파일은 다음부터 자동으로 건너뜁니다."),
         ("로그인 연결 방법", (
@@ -1102,28 +1102,28 @@ class App:
             "연결이 안 되면 ‘토큰 직접 입력’이나 cookies.txt 파일을 사용하세요.",
         ), "연결 정보는 이 Windows 계정에 암호화해 저장합니다. 만료되면 다시 연결하세요."),
         ("저장 설정", (
-            f"새 Like만 빠르게: 이미 저장한 파일이 {QUICK_STOP_AFTER}개 연속으로 나오면 멈춥니다. 평소에는 이것을 쓰세요.",
+            f"새 Like만 빠르게: 이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다. 평소에 쓰세요.",
             "전체 다시 확인: 오래된 Like까지 처음부터 확인합니다. 오래 걸립니다.",
-            "직전 실행이 중단됐거나 옵션을 바꾸면 다음 한 번은 자동으로 전체를 확인합니다.",
-        ), "폴더 정리 방식, 동영상·GIF 포함 여부, 영상 최대 크기는 ‘저장 설정’에서 바꿉니다."),
+            "직전 실행이 중단됐거나 설정을 바꾸면 다음 한 번은 전체를 확인합니다.",
+        ), "폴더 정리, 동영상·GIF, 영상 최대 크기는 ‘저장 설정’에서 바꿉니다."),
         ("저장되는 파일", (
-            "사진은 원본 크기로, 동영상은 최고 화질의 MP4로 저장합니다. 움직이는 GIF는 GIF로 변환해 저장합니다.",
-            "영상이 최대 크기(기본 200MB)보다 크면 건너뜁니다. 크기를 늘리면 다음에 받습니다.",
+            "사진은 원본, 동영상은 최고 화질 MP4, 움직이는 GIF는 .gif로 저장합니다.",
+            "영상이 최대 크기(기본 200MB)보다 크면 건너뜁니다. 늘리면 다음에 받습니다.",
             "새로 받은 파일 안에는 트윗 주소와 작성자 아이디가 기록됩니다.",
         ), None),
         ("기록 · 통계", (
             "현재 파일 수와 과거 저장 기록·실행 기록을 봅니다.",
             "끌어서 고르거나 ‘여러 개 선택’을 켜고 하나씩 클릭하세요.",
             "통계에서 작성자를 클릭하면 최근 게시물의 대표 이미지를 봅니다.",
-            "파일을 고르면 썸네일이 보입니다. ‘파일 열기’나 ‘트윗 열기’로 원본을 확인하세요.",
+            "파일을 고르면 미리보기가 나옵니다. ‘파일 열기’·‘트윗 열기’로 원본을 봅니다.",
             "예전 파일에 출처·작성자를 넣으려면 ‘출처·작성자 기록’을 누르세요.",
-        ), "이 작업은 파일을 다시 쓰므로 Google Drive·OneDrive 폴더라면 파일이 다시 올라갈 수 있습니다."),
+        ), "출처·작성자 기록은 파일을 다시 쓰므로 동기화 폴더라면 다시 올라갈 수 있습니다."),
         ("매일 자동 저장", (
             "메뉴에서 ‘자동 저장’을 열어 시각을 고르고 ‘예약 켜기’를 누릅니다.",
             "매일 그 시각에 저장된 계정과 설정으로 새 Like만 저장합니다.",
-            "PC가 꺼져 있었으면 다음에 켰을 때 바로 실행하고, 배터리로 쓰는 중에도 실행합니다.",
-            "실패하면 알림 창이 뜨고, 다음에 앱을 열 때도 알려 줍니다. 결과는 ‘실행 기록’에 남습니다.",
-        ), "인증 토큰 연결에서만 동작하며 Windows에 로그인해 있을 때 실행됩니다. 새 버전을 처음 열면 예약을 그 버전으로 바꿀지 묻습니다."),
+            "PC가 꺼져 있던 날은 다음에 켤 때 실행하고, 배터리일 때도 실행합니다.",
+            "실패하면 알림이 뜨고, 결과는 ‘실행 기록’에 남습니다.",
+        ), "브라우저 로그인으로 연결했을 때, Windows에 로그인해 있는 동안 실행됩니다."),
         ("주의할 점", (
             "X 공식 API가 아닌 방식이라 천천히 요청해도 계정이 제한될 수 있습니다.",
             "‘요청 한도’ 안내가 나오면 알려 준 시각까지 기다렸다가 다시 시작하세요.",
@@ -1217,9 +1217,8 @@ class App:
         self.schedule_off_button = ttk.Button(buttons, text="예약 끄기", command=self.unregister_schedule)
         self.schedule_off_button.pack(side="left", padx=8)
         ttk.Button(buttons, text="실행 기록", command=self.open_schedule_logs).pack(side="left")
-        self._wrapping_label(body, text="PC가 꺼져 있거나 잠자기 상태였으면 다음에 켰을 때 바로 실행하고, 배터리로 쓰는 중에도 실행합니다. "
-                                        "Windows에 로그인해 있을 때만 실행됩니다. 실패하면 알림 창이 뜹니다. "
-                                        "Windows 작업 스케줄러에 ‘XlikeSaver 자동 저장’으로 등록됩니다.",
+        self._wrapping_label(body, text="PC가 꺼져 있던 날은 다음에 켤 때, 배터리일 때도 실행합니다. "
+                                        "Windows에 로그인해 있어야 하며, 실패하면 알림이 뜹니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(16, 0))
         window.protocol("WM_DELETE_WINDOW", self._close_schedule)
         window.bind("<Escape>", lambda _: self._close_schedule())
@@ -1269,7 +1268,7 @@ class App:
             self._storage_action = "schedule"
             return
         if AUTH_MODES[self.auth.get()] != "managed":
-            dialogs.showinfo("자동 저장", "자동 저장은 ‘인증 토큰’ 연결에서만 사용할 수 있습니다. 로그인 연결 방식을 바꿔 주세요.",
+            dialogs.showinfo("자동 저장", "자동 저장은 브라우저 로그인 연결에서만 쓸 수 있습니다. ‘로그인 연결’에서 바꿔 주세요.",
                              parent=self.schedule_window or self.root)
             return
         try:
@@ -1331,15 +1330,14 @@ class App:
             when = info.get("time") or "시각 미확인"
             upcoming = f" · 다음 실행 {format_short(info['next_run'])}" if info.get("next_run") else ""
             if not info.get("current"):
-                state = (f"매일 {when}에 다른 실행 파일({Path(info.get('program') or '').name or '알 수 없음'})로 등록돼 있습니다. "
-                         "‘예약 갱신’을 누르면 이 버전으로 바꿉니다.")
+                state = (f"매일 {when}, 다른 실행 파일({Path(info.get('program') or '').name or '알 수 없음'})로 등록돼 있습니다. "
+                         "‘예약 갱신’으로 이 버전으로 바꾸세요.")
                 summary = f"매일 {when} · 다른 실행 파일로 등록됨 · ‘자동 저장’에서 갱신하세요."
             elif not (info.get("catch_up") and info.get("on_battery")):
-                state = (f"매일 {when}에 켜져 있지만, 예전 방식으로 등록돼 PC가 꺼져 있었거나 배터리일 때는 건너뜁니다. "
-                         "‘예약 갱신’을 누르면 고쳐집니다.")
-                summary = f"매일 {when} · 켜짐 · 놓친 실행을 건너뛰는 예전 설정입니다. ‘자동 저장’에서 갱신하세요."
+                state = f"매일 {when} · 켜짐. 예전 방식이라 놓친 날은 건너뜁니다. ‘예약 갱신’을 누르세요."
+                summary = f"매일 {when} · 켜짐 · 예전 설정이라 ‘자동 저장’에서 갱신하세요."
             elif not info.get("enabled"):
-                state = f"매일 {when}로 등록돼 있지만 Windows 작업 스케줄러에서 꺼져 있습니다. ‘예약 갱신’을 누르면 다시 켜집니다."
+                state = f"매일 {when} · 작업 스케줄러에서 꺼져 있습니다. ‘예약 갱신’을 누르면 켜집니다."
                 summary = f"매일 {when} · 작업 스케줄러에서 꺼져 있음"
             else:
                 state = f"켜져 있습니다 · 매일 {when}{upcoming}"
@@ -1671,7 +1669,7 @@ class App:
                 self.status_detail.set(message if headline != message else "")
                 self._log(message)
                 if event.get("metadata_failed"):
-                    self._log(f"파일 내부 출처·작성자 기록 실패 {int(event['metadata_failed']):,}개 · 미디어는 보존했습니다. ‘기록 · 통계 → 파일 관리’에서 다시 시도할 수 있습니다.")
+                    self._log(f"파일 안 출처·작성자 기록 실패 {int(event['metadata_failed']):,}개 · 파일은 그대로 있습니다. ‘기록 · 통계 → 파일 관리’에서 다시 시도하세요.")
                 if event.get("retry_at"):
                     self._log("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))
             elif kind == "process_exit":

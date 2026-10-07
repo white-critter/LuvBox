@@ -887,7 +887,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(self.app.progress.cget("value"), 50)
         self.assertIn("50%", self.app.progress_summary.get())
         self.assertIn("alice", self.app.progress_details.get())
-        self.assertIn("전체 Like 목록의 완료율은 알 수 없습니다", self.app.progress_details.get())
+        self.assertIn("지금 받는 파일의 진행률", self.app.progress_details.get())
         self.app.events.put({"type": "progress", "filename": "101_1.jpg", "downloaded": 123, "total": 0})
         self.app._poll()
         self.assertEqual(str(self.app.progress.cget("mode")), "indeterminate")

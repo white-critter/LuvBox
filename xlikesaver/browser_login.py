@@ -33,8 +33,7 @@ _PROFILE_PREFIX = "login-profile-"
 _START_TIMEOUT = 20
 _WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 NO_EDGE = "Microsoft Edge를 찾지 못했습니다. ‘토큰 직접 입력’으로 연결해 주세요."
-NO_DEBUGGING = ("로그인 창과 연결하지 못했습니다. 회사·학교 PC라면 Edge 정책이 막았을 수 있습니다. "
-                "‘토큰 직접 입력’으로 연결해 주세요.")
+NO_DEBUGGING = "로그인 창에 연결하지 못했습니다(회사·학교 PC의 Edge 정책일 수 있음). ‘토큰 직접 입력’을 사용해 주세요."
 CLOSED = "로그인 창이 닫혀 연결하지 않았습니다."
 TIMED_OUT = "로그인을 기다리는 시간이 지나 창을 닫았습니다. 다시 시도해 주세요."
 CANCELLED = "로그인 연결을 취소했습니다."
