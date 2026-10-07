@@ -61,6 +61,26 @@ def available() -> bool:
     return executable.is_file() and (executable.parent / "exiftool_files").is_dir()
 
 
+def _tool_command() -> tuple[list[str], dict]:
+    """Run the bundled writer itself so a timeout also stops its file writes.
+
+    The Windows executable is a launcher for this same bundled Perl script.
+    Killing only the launcher can leave Perl holding our output pipes and
+    temporary file. An ASCII script name relative to the bundle avoids Perl's
+    command-line encoding limitations in Unicode installation directories.
+    """
+    executable = exiftool_path()
+    bundle = executable.parent / "exiftool_files"
+    perl = bundle / "perl.exe"
+    if os.name == "nt" and perl.is_file() and (bundle / "exiftool.pl").is_file():
+        environment = os.environ.copy()
+        # Unix-oriented host locales (e.g. C.UTF-8) are absent on Windows Perl.
+        # File names still use the explicit filename=UTF8 argument protocol.
+        environment["PERL_BADLANG"] = "0"
+        return [str(perl), "exiftool.pl"], {"cwd": str(bundle), "env": environment}
+    return [str(executable)], {}
+
+
 class _SessionUnavailable(RuntimeError):
     """The resident ExifTool cannot run a command; use a one-shot process."""
 
@@ -77,15 +97,19 @@ class _ExifToolSession:
     def __init__(self):
         self._lock = threading.RLock()
         self._counter = 0
+        command, options = _tool_command()
         self._process = subprocess.Popen(
-            [str(exiftool_path()), "-config", "", "-stay_open", "True", "-@", "-",
+            [*command, "-config", "", "-stay_open", "True", "-@", "-",
              "-common_args", "-charset", "filename=UTF8"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options)
         self._lines = {"stdout": queue.Queue(), "stderr": queue.Queue()}
+        self._readers = []
         for name in self._lines:
-            threading.Thread(target=self._pump, args=(getattr(self._process, name), self._lines[name]),
-                             daemon=True).start()
+            reader = threading.Thread(target=self._pump,
+                                      args=(getattr(self._process, name), self._lines[name]), daemon=True)
+            self._readers.append(reader)
+            reader.start()
 
     @staticmethod
     def _pump(stream, lines):
@@ -96,6 +120,13 @@ class _ExifToolSession:
             # Another thread may be closing a failed process's pipe.
             pass
         finally:
+            # A BufferedReader must be closed by its reader after readline
+            # releases its internal mutex. Closing it from the shutdown thread
+            # can wait forever when another process still holds the pipe.
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
             lines.put(None)
 
     def _collect(self, name: str, done, deadline: float) -> tuple[list[str], str]:
@@ -145,6 +176,9 @@ class _ExifToolSession:
                 # copy. (TimeoutError is an OSError, so it is handled first.)
                 self.close(force=True)
                 raise
+            except _SessionUnavailable:
+                self.close(force=True)
+                raise
             except (OSError, ValueError):
                 self.close(force=True)
                 raise _SessionUnavailable("exiftool pipe failed") from None
@@ -166,11 +200,13 @@ class _ExifToolSession:
                     process.wait(timeout=5)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
-            for stream in (process.stdin, process.stdout, process.stderr):
-                try:
-                    stream.close()
-                except (OSError, ValueError):
-                    pass
+            try:
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+            deadline = time.monotonic() + 0.5
+            for reader in self._readers:
+                reader.join(timeout=max(0, deadline - time.monotonic()))
 
 
 _session: _ExifToolSession | None = None
@@ -245,11 +281,12 @@ def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
                 raise TimeoutError("metadata timeout") from None
         finally:
             _release_session(session)
+    command, options = _tool_command()
     return subprocess.run(
-        [str(exiftool_path()), "-config", "", "-charset", "filename=UTF8", "-@", "-"],
+        [*command, "-config", "", "-charset", "filename=UTF8", "-@", "-"],
         input="\n".join(arguments) + "\n", capture_output=True, text=True,
         encoding="utf-8", errors="replace", timeout=remaining, shell=False,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options,
     )
 
 

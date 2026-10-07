@@ -227,7 +227,7 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
         connection = sqlite3.connect(built)
         try:
             with connection:
-                for table in ("media", "runs", "catalog_meta", "likes", "tweets", "missing_choices"):
+                for table in ("media", "runs", "catalog_meta", "likes", "tweets", "missing_choices", "deletion_items"):
                     target = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
                     rows = []
                     for source in sources:
@@ -244,6 +244,19 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
                             records = sorted(latest.values(), key=lambda item: item[0])
                         rows.extend(row for _, row in records)
                     columns = [name for name in target if any(name in row for row in rows)]
+                    if table == "deletion_items":
+                        # UUIDs remain stable across folder snapshots. Prefer
+                        # a finished/newer receipt to an older pending intent.
+                        latest = {}
+                        for row in rows:
+                            ident = row.get("id")
+                            if not isinstance(ident, str) or not ident:
+                                continue
+                            rank = lambda item: (bool(item.get("finished_at")),
+                                                 item.get("finished_at") or item.get("created_at") or "")
+                            if ident not in latest or rank(row) > rank(latest[ident]):
+                                latest[ident] = row
+                        rows = list(latest.values())
                     if not rows or not columns:
                         counts[table] = 0
                         continue

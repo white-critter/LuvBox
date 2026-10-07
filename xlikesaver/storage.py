@@ -517,11 +517,19 @@ def _media_score(row: dict) -> tuple:
 
 def _merge_media(previous: dict, incoming: dict) -> dict:
     first, second = (incoming, previous) if _media_score(incoming) > _media_score(previous) else (previous, incoming)
+    latest = max((previous, incoming), key=lambda row: row.get("updated_at") or "")
+    if (latest.get("last_path") and not latest.get("path")
+            and not any(_media_score(row)[0] for row in (previous, incoming))):
+        # An intentionally removed file has no present path. A stale snapshot
+        # must not refill that path and inflate the cached file statistics.
+        first, second = latest, previous if latest is incoming else incoming
     result = dict(first)
     if "author_metadata_status" in first or "author_metadata_status" in second:
         # The verified status belongs to the chosen file, not another copy.
         result.setdefault("author_metadata_status", "pending")
     for key, value in second.items():
+        if key in {"path", "filesize"} and first.get("last_path") and not first.get("path"):
+            continue
         if key not in result or result[key] in (None, ""):
             result[key] = value
     if second.get("posted_source") == "metadata" and first.get("posted_source") != "metadata":
@@ -606,6 +614,18 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                 "ON CONFLICT(tweet_id,num,media_type) DO UPDATE SET ignored=excluded.ignored,updated_at=excluded.updated_at "
                 "WHERE excluded.updated_at>missing_choices.updated_at",
                 (row["tweet_id"], row["num"], row["media_type"], row["ignored"], row["updated_at"]))
+    if "deletion_items" in source_tables:
+        _prepare_table(target, source, "deletion_items")
+        previous = {row["id"]: row for row in _rows(target, "deletion_items")}
+        rank = lambda row: (bool(row.get("finished_at")), row.get("finished_at") or row.get("created_at") or "")
+        for row in _rows(source, "deletion_items"):
+            old = previous.get(row["id"])
+            if old is not None and rank(old) >= rank(row):
+                continue
+            if old is not None:
+                target.execute("DELETE FROM deletion_items WHERE id=?", (row["id"],))
+            _insert(target, "deletion_items", row)
+            previous[row["id"]] = row
     if "catalog_meta" in source_tables:
         _prepare_table(target, source, "catalog_meta")
         for key, value in source.execute("SELECT key,value FROM catalog_meta WHERE key != 'allowed_media_roots'"):

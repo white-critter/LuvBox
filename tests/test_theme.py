@@ -9,6 +9,7 @@ from pathlib import Path
 from tkinter import font, ttk
 import unittest
 from unittest.mock import patch
+import zipfile
 
 from xlikesaver import theme
 from xlikesaver import fonts
@@ -171,6 +172,68 @@ class ThemeTests(unittest.TestCase):
             theme.apply_style(self.root, mode="light")
             self.assertIsNotNone(theme._read_asset_cache(theme._asset_key()))
             self.assertFalse(list(cache.glob("*.partial")))
+
+    def test_installed_app_recovers_incomplete_or_undecodable_cache_at_start(self):
+        original = dict(theme._ASSET_CACHE[theme._asset_key()])
+        without_button = dict(original)
+        without_button.pop("button")
+        damaged = {**original, "card": original["card"][:16]}
+        for case, assets in (("single-image", {"card": original["card"]}),
+                             ("missing-image", without_button), ("broken-png", damaged)):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder, \
+                    patch.object(sys, "frozen", True, create=True), \
+                    patch("xlikesaver.settings.app_directory", return_value=Path(folder)), \
+                    patch.dict(theme._ASSET_CACHE, clear=True):
+                location = theme._asset_cache_path(theme._asset_key())
+                location.parent.mkdir()
+                with zipfile.ZipFile(location, "w", zipfile.ZIP_STORED) as archive:
+                    for name, data in assets.items():
+                        archive.writestr(name, data)
+                for attempt in ("recovery", "next-start"):
+                    window = tk.Tk()
+                    window.withdraw()
+                    try:
+                        theme._ASSET_CACHE.clear()
+                        with patch.object(theme, "_draw_assets", wraps=theme._draw_assets) as draw:
+                            theme.apply_style(window, mode="light")
+                        self.assertEqual(draw.call_count, int(attempt == "recovery"))
+                        button = ttk.Button(window, text="Save", style="Primary.TButton")
+                        self.assertIn("Soft.Primary", ttk.Style(window).layout("Primary.TButton")[0][0])
+                        self.assertEqual(set(window._xlikesaver_theme_images), set(original))
+                        self.assertEqual(theme._read_asset_cache(theme._asset_key()), original)
+                        button.destroy()
+                    finally:
+                        window.update_idletasks()
+                        window.destroy()
+
+    def test_installed_app_recovers_broken_png_during_theme_switch(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(sys, "frozen", True, create=True), \
+                patch("xlikesaver.settings.app_directory", return_value=Path(folder)), \
+                patch.dict(theme._ASSET_CACHE, clear=True):
+            theme.apply_style(self.root, mode="dark")
+            location = theme._asset_cache_path(theme._asset_key())
+            original = dict(theme._ASSET_CACHE[theme._asset_key()])
+            image_names = set(map(str, self.root.tk.call("image", "names")))
+            theme.apply_style(self.root, mode="light")
+            # This late image fails after the button/card images were recolored.
+            with zipfile.ZipFile(location, "w", zipfile.ZIP_STORED) as archive:
+                for name, data in original.items():
+                    archive.writestr(name, data[:16] if name == "radio_on_disabled_card" else data)
+            theme._ASSET_CACHE.clear()
+            with patch.object(theme, "_draw_assets", wraps=theme._draw_assets) as draw:
+                theme.apply_style(self.root, mode="dark")
+            self.assertEqual(draw.call_count, 1)
+            self.assertEqual(theme._read_asset_cache(theme._asset_key()), original)
+            self.assertEqual(set(map(str, self.root.tk.call("image", "names"))), image_names)
+            images = self.root._xlikesaver_theme_images
+            for name, color in (("button", theme.DARK["BG"]), ("button_card", theme.DARK["CARD"]),
+                                ("radio_on_disabled_card", theme.DARK["CARD"])):
+                self.assertEqual("#%02x%02x%02x" % tuple(images[name].get(0, 0)), color)
+            theme._ASSET_CACHE.clear()
+            with patch.object(theme, "_draw_assets", side_effect=AssertionError("drawn again")):
+                theme.apply_style(self.root, mode="light")
+                theme.apply_style(self.root, mode="dark")
 
     def test_rounded_controls_match_their_parent_background_in_every_state(self):
         # These state backgrounds caused the visible square outside the PNG's

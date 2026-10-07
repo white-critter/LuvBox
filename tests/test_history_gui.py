@@ -466,11 +466,11 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.tabs.select(1)
         with patch.object(self.window, "go_page") as go:
             self.window._page_key(SimpleNamespace(widget=self.window.run_tree, keysym="End", state=0x4))
-        go.assert_called_once_with(None, runs=True)
+        go.assert_called_once_with(None, runs=True, missing=False, deletions=False)
         # A page button needs no modifier.
         with patch.object(self.window, "change_page") as change:
             self.window._page_key(SimpleNamespace(widget=self.window.tabs, keysym="Next", state=0))
-        change.assert_called_once_with(1, runs=True)
+        change.assert_called_once_with(1, runs=True, missing=False, deletions=False)
 
     def test_preview_updates_only_current_selection_and_clear_releases_image(self):
         self.records(2)
@@ -985,7 +985,7 @@ class HistoryGuiTests(unittest.TestCase):
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.search()
         args = thread.call_args.kwargs["args"]
-        self.assertEqual(args[-3:], ("liked", None, ""))
+        self.assertEqual(args[-4:-1], ("liked", None, ""))
         self.window._load(*args)
         self.window._poll()
         self.assertEqual([self.window.rows[key]["tweet_id"] for key in self.window.tree.get_children()], ["101", "100", "102"])
@@ -998,7 +998,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.period_to.set("20260901")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.search()
-        self.assertEqual(thread.call_args.kwargs["args"][-2], ("saved", "2026-09-01", "2026-09-02"))
+        self.assertEqual(thread.call_args.kwargs["args"][-3], ("saved", "2026-09-01", "2026-09-02"))
         self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("2026-09-01", "2026-09-02"))
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
@@ -1010,7 +1010,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertIn("연-월-일", self.window.status_text.get())
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.clear_period()
-        self.assertIsNone(thread.call_args.kwargs["args"][-2])
+        self.assertIsNone(thread.call_args.kwargs["args"][-3])
         self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("", ""))
 
     def test_grid_view_shows_page_thumbnails_and_follows_selection(self):
@@ -1064,7 +1064,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.author_button.cget("state")), "normal")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.filter_selected_author()
-        self.assertEqual(thread.call_args.kwargs["args"][-1], "alice")
+        self.assertEqual(thread.call_args.kwargs["args"][-2], "alice")
         self.assertIn("@alice", self.window.author_chip.cget("text"))
         self.assertTrue(self.window.author_chip.winfo_manager())
         self.window._load(*thread.call_args.kwargs["args"])
@@ -1072,7 +1072,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.author_button.cget("state")), "disabled")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.clear_author()
-        self.assertEqual(thread.call_args.kwargs["args"][-1], "")
+        self.assertEqual(thread.call_args.kwargs["args"][-2], "")
         self.assertFalse(self.window.author_chip.winfo_manager())
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
@@ -1082,7 +1082,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.author_tree.selection_set("0")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.show_ranked_author()
-        self.assertEqual(thread.call_args.kwargs["args"][-1], "alice")
+        self.assertEqual(thread.call_args.kwargs["args"][-2], "alice")
         self.assertEqual(self.window.tabs.index("current"), 0)
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()

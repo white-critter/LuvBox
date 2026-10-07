@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -35,6 +36,22 @@ class HistoryTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return path
+
+    def test_opening_never_waits_for_another_writer_but_still_migrates_old_rows(self):
+        path = self.file("100_1.jpg")
+        self.store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo"}, path)
+        self.store.close()
+        writer = sqlite3.connect(self.account / ".xlikesaver-history.sqlite3", isolation_level=None)
+        self.addCleanup(writer.close)
+        writer.execute("BEGIN IMMEDIATE")  # e.g. a save recording a file
+        started = time.monotonic()
+        with closing(HistoryStore(self.account)) as reader:
+            self.assertEqual(len(reader.records()), 1)
+        self.assertLess(time.monotonic() - started, 1.0)
+        writer.execute("UPDATE media SET source_url=''")  # a row from an early version
+        writer.execute("COMMIT")
+        with closing(HistoryStore(self.account)) as migrated:
+            self.assertEqual(migrated.records()[0]["source_url"], "https://x.com/i/web/status/100")
 
     def test_gif_without_a_kind_marker_imports_as_an_animation(self):
         self.file("100_1.gif", b"GIF89a" + b"offline-local-animation")
@@ -565,6 +582,38 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in self.store.runs(limit=2, offset=3)], [ids[3], ids[2]])
         with self.assertRaises(HistoryError):
             self.store.runs(offset=-1)
+
+    def test_missing_snapshot_contains_more_than_five_thousand_media(self):
+        self.archive((f"twitter{ident}_1" for ident in range(10000, 15001)), mode="flat")
+        self.store.import_legacy()
+        self.store.record_tweets([("10000", "oldest missing media", ["old"]),
+                                  ("15000", "newest missing media", ["new"])])
+
+        snapshot = self.store.overview()
+
+        self.assertEqual((snapshot["missing_files"], len(snapshot["missing"])), (5001, 5001))
+        self.assertEqual((snapshot["missing"][0]["tweet_id"], snapshot["missing"][-1]["tweet_id"]),
+                         ("15000", "10000"))
+        self.assertEqual(snapshot["missing"][-1]["content"], "oldest missing media")
+        self.assertEqual(len(self.store.missing_media()), 5001)
+
+    def test_hidden_missing_media_never_displaces_older_visible_media(self):
+        self.archive((f"twitter{ident}_1" for ident in range(10000, 15001)), mode="flat")
+        self.store.import_legacy()
+        hidden = [(str(ident), 1, "photo") for ident in range(10001, 15001)]
+        self.store.set_missing_ignored(hidden, True)
+
+        snapshot = self.store.overview()
+        visible = [item for item in snapshot["missing"] if not item["ignored"]]
+
+        self.assertEqual((snapshot["missing_files"], snapshot["ignored_missing"]), (1, 5000))
+        self.assertEqual([item["tweet_id"] for item in visible], ["10000"])
+        self.assertEqual(len(snapshot["missing"]), 5001)
+        self.store.set_missing_ignored([("10001", 1, "photo")], False)
+        snapshot = self.store.overview()
+        self.assertEqual(snapshot["missing_files"], 2)
+        self.assertEqual({item["tweet_id"] for item in snapshot["missing"] if not item["ignored"]},
+                         {"10000", "10001"})
 
     def test_outside_paths_and_missing_saved_files_are_rejected_without_catalog_rows(self):
         outside = Path(self.temp.name) / "outside.jpg"

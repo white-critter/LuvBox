@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xlikesaver import recovery
-from xlikesaver.history import CatalogDamaged, HistoryStore
+from xlikesaver.history import CatalogDamaged, HistoryError, HistoryStore
 from xlikesaver.history_gui import HistoryWindow
 
 
@@ -41,6 +41,27 @@ def damage_media_table(path: Path):
     data[target + 3:target + 5] = (cells + 1).to_bytes(2, "big")
     data[target + 8 + 2 * cells:target + 10 + 2 * cells] = (size - 2).to_bytes(2, "big")
     path.write_bytes(bytes(data))
+
+
+def damage_media_constraint(path: Path):
+    """Leave one NULL identity under the original NOT NULL schema.
+
+    This reproduces corruption reported as a constraint error, rather than
+    SQLITE_CORRUPT, when the catalog's source URL migration visits the row.
+    """
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("PRAGMA journal_mode=DELETE")
+        schema = connection.execute("SELECT sql FROM sqlite_master WHERE name='media'").fetchone()[0]
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute("UPDATE sqlite_master SET sql=? WHERE name='media'",
+                           (schema.replace("tweet_id TEXT NOT NULL", "tweet_id TEXT"),))
+        connection.commit()
+    with closing(sqlite3.connect(path)) as connection:
+        connection.execute("UPDATE media SET tweet_id=NULL,source_url='' WHERE tweet_id='1000'")
+        connection.commit()
+        connection.execute("PRAGMA writable_schema=ON")
+        connection.execute("UPDATE sqlite_master SET sql=? WHERE name='media'", (schema,))
+        connection.commit()
 
 
 class RecoveryTests(unittest.TestCase):
@@ -79,6 +100,33 @@ class RecoveryTests(unittest.TestCase):
         # A damaged file never replaces the last good backup.
         self.assertIsNone(recovery.backup_catalog(self.account, "myaccount"))
         self.assertEqual(len(list(recovery._catalog_backups("myaccount", self.account).glob("history-*"))), 1)
+
+    def test_constraint_error_from_damaged_catalog_still_offers_recovery(self):
+        damage_media_constraint(self.live)
+        with closing(sqlite3.connect(self.live)) as connection:
+            with self.assertRaises(sqlite3.IntegrityError) as failure:
+                connection.execute("UPDATE media SET source_url='https://x.com/i/web/status/' || tweet_id "
+                                   "WHERE source_url=''")
+            self.assertEqual(failure.exception.sqlite_errorcode, sqlite3.SQLITE_CONSTRAINT_NOTNULL)
+            self.assertNotEqual(connection.execute("PRAGMA quick_check").fetchall(), [("ok",)])
+
+        with self.assertRaises(CatalogDamaged):
+            HistoryStore(self.account)
+        results = queue.Queue()
+        HistoryWindow._load_worker(results, 1, self.account, "all", "", 0, False)
+        self.assertEqual(results.get_nowait()[1], "damaged")
+
+    def test_valid_catalog_constraint_error_does_not_offer_damage_recovery(self):
+        with closing(sqlite3.connect(self.live)) as connection:
+            connection.execute("UPDATE media SET source_url='' WHERE tweet_id='1000'")
+            connection.execute("CREATE TRIGGER deny_source_update BEFORE UPDATE OF source_url ON media "
+                               "BEGIN SELECT RAISE(ABORT, 'offline constraint fixture'); END")
+            connection.commit()
+            self.assertEqual(connection.execute("PRAGMA quick_check").fetchall(), [("ok",)])
+
+        with self.assertRaises(HistoryError) as failure:
+            HistoryStore(self.account)
+        self.assertNotIsInstance(failure.exception, CatalogDamaged)
 
     def test_repair_rebuilds_a_verified_database_and_keeps_the_damaged_one(self):
         damage_media_table(self.live)

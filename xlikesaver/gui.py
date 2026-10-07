@@ -24,7 +24,7 @@ from . import __version__, dialogs, theme
 from .core import QUICK_STOP_AFTER, JobOptions, _normal_account
 from .login import clear_session, has_session, save_auth_token
 from .settings import load_settings, settings_path
-from .storage import resolve_storage
+from .storage import StoragePaths, resolve_storage
 
 
 def _file_label(event) -> str:
@@ -906,10 +906,9 @@ class App:
             return False
         if source.output_dir == destination.output_dir:
             return True
-        window = self.history_window
-        if window is not None and window.winfo_exists() and window.metadata_active:
+        if self._library_job_active():
             self.folder.set(str(source.output_dir))
-            dialogs.showinfo("기록 화면 작업 중", "기록 화면의 출처·작성자 기록이나 GIF 변환이 끝난 뒤 저장 폴더를 바꿔 주세요.", parent=self.root)
+            dialogs.showinfo("기록 화면 작업 중", "라이브러리 작업이 끝난 뒤 저장 폴더를 바꿔 주세요.", parent=self.root)
             return False
         fresh = not source.output_dir.is_dir()
         if fresh and not dialogs.askyesno(
@@ -1367,9 +1366,24 @@ class App:
                           max_video_mb=self._video_limit(), separate_accounts=self.separate_accounts.get(),
                           gif_format=GIF_FORMATS[self.gif_format.get()], gif_size=GIF_SIZES[self.gif_size.get()]).validate()
 
-    def retry_missing(self, targets) -> bool:
+    def retry_missing(self, targets, account, location) -> bool:
         """Download chosen missing files again (from the library window)."""
         if self.relocating or self.running or not targets:
+            return False
+        # Check the selected catalog before changing credentials, settings or
+        # records. Layout options may change, but account/output must match.
+        try:
+            current_account, paths = self._history_location()
+            selected_account = _normal_account(account)
+            selected_dir = location.record_dir if isinstance(location, StoragePaths) else Path(location)
+            same = (selected_account == current_account and
+                    selected_dir.resolve() == paths.record_dir.resolve())
+            if isinstance(location, StoragePaths):
+                same = same and location.account == selected_account and location.output_dir == paths.output_dir
+        except (ValueError, OSError):
+            same = False
+        if not same:
+            dialogs.showinfo("기록 다시 확인", "아이디나 저장 폴더가 바뀌었습니다.\n라이브러리를 새로고침한 뒤 다시 골라 주세요.", parent=self.root)
             return False
         return self.start(targets=tuple(targets))
 
@@ -1381,8 +1395,8 @@ class App:
             return False
         if self.running:
             return False
-        if self.history_window is not None and self.history_window.winfo_exists() and self.history_window.metadata_active:
-            dialogs.showinfo("기록 화면 작업 중", "기록 화면의 출처·작성자 기록이나 GIF 변환을 마치거나 중단한 뒤 저장을 시작해 주세요.", parent=self.root)
+        if self._library_job_active():
+            dialogs.showinfo("기록 화면 작업 중", "라이브러리 작업이 끝난 뒤 저장을 시작해 주세요.", parent=self.root)
             return False
         if AUTH_MODES[self.auth.get()] == "managed" and self.token.get():
             if not self.connect_token():
@@ -1449,6 +1463,9 @@ class App:
         if not value:
             self._auth_changed()
         self._update_schedule_buttons()
+        if self.history_window is not None and self.history_window.winfo_exists():
+            self.history_window._update_missing_actions()
+            self.history_window._update_file_actions()
 
     def _run_process(self, options):
         return_code = 1
@@ -1464,15 +1481,18 @@ class App:
                 kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
                 with subprocess.Popen(worker_command(request, events, stop), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs) as process:
                     self.process = process
-                    with events.open("r", encoding="utf-8") as stream:
-                        partial = ""
+                    # Read bytes and decode whole lines only. A text-mode read
+                    # can end inside a Korean character the worker is still
+                    # writing; its decode error used to stop every later update.
+                    with events.open("rb") as stream:
+                        partial = b""
                         stop_at = None
                         while True:
                             chunk = stream.read()
                             if chunk:
                                 partial += chunk
-                                while "\n" in partial:
-                                    line, partial = partial.split("\n", 1)
+                                while b"\n" in partial:
+                                    line, partial = partial.split(b"\n", 1)
                                     try:
                                         self.events.put(json.loads(line))
                                     except ValueError:
@@ -1615,6 +1635,12 @@ class App:
             self.log.see("end")
         self.log.configure(state="disabled")
 
+    def _library_job_active(self) -> bool:
+        """A library job that writes records or files has not finished yet."""
+        window = self.history_window
+        return bool(window is not None and window.winfo_exists() and (
+            window.metadata_active or window.choice_active or window.delete_active or window.repair_active))
+
     def close(self):
         if self.relocating:
             self.closing = True
@@ -1622,9 +1648,14 @@ class App:
         elif self.running:
             self.closing = True
             self.stop()
-        elif self.history_window is not None and self.history_window.winfo_exists() and self.history_window.metadata_active:
+        elif self._library_job_active():
             self.closing = True
-            self.history_window.stop_metadata()
+            if self.history_window.metadata_active or self.history_window.delete_active:
+                self.history_window.stop_metadata()
+            elif self.history_window.repair_active:
+                self.status.set("기록 복구를 마친 뒤 종료합니다…")
+            else:
+                self.status.set("라이브러리 기록을 저장한 뒤 종료합니다…")
             self.root.after(150, self.close)
         else:
             self.root.destroy()

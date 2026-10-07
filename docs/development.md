@@ -1,5 +1,25 @@
 # 개발·문제 해결 안내
 
+## 2.2.1 안정화
+
+- 메인 창은 작업 프로세스의 이벤트 파일을 바이트로 읽고 줄 단위로만 해석합니다. 텍스트 모드 `read()`는 쓰는 중인 한글 UTF-8 중간에서 `UnicodeDecodeError`를 일으켜, 그 실행의 나머지 진행 이벤트를 모두 잃었습니다.
+- `HistoryStore` 초기화는 옛 행에 빈 `source_url`이 있을 때만 UPDATE를 실행합니다. UPDATE는 맞는 행이 없어도 쓰기 잠금을 기다리므로, 저장·삭제가 쓰는 동안 화면 스레드의 파일 열기와 미리보기 확인이 최대 5초(busy timeout) 멈추거나 실패했습니다. 평소 열기는 이제 읽기만 합니다.
+- 기록 복구는 `repair_active`로 표시합니다. 라이브러리 창·메인 창을 닫으면 복구가 끝난 뒤 닫고, 그동안 저장·기록 이전을 시작하지 않습니다. 메인 창은 라이브러리 작업 상태를 `_library_job_active()` 하나로 확인합니다.
+- `deletion_items(tweet_id,num,media_type)` 색인으로 라이브러리의 삭제 제외 조건이 기록마다 삭제 기록 전체를 훑지 않습니다. `_apply_deleted_path`는 파일 이름이 트윗 ID로 시작한다는 점을 이용해 같은 트윗의 행만 기본 키로 조회합니다.
+- `recycling._linked`는 심볼릭 링크와 이름 대리(name-surrogate) reparse 태그(정션·마운트 지점 등)만 링크로 봅니다. Python `lstat`은 OneDrive·Dropbox 클라우드 자리표시자 같은 다른 reparse 종류를 일반 파일로 열고 태그를 0으로 보고하므로, 속성 비트(`0x400`)만으로 거부하던 것을 바꿨습니다.
+- 휴지통 이동에 `FOF_NOCONFIRMATION`과 `FOF_WANTNUKEWARNING`을 함께 지정합니다. Explorer의 선택적 파일별 확인은 생략하되 영구 삭제 경고는 자동 승인하지 않으며, PreDeleteItem 검사도 그대로 영구 삭제를 중단합니다. GIF 변환 정리(`media.recycle`)와 같은 조합입니다.
+- 폴더 재확인(`import_legacy`) 끝에 `_release_restored_choices`가 휴지통에서 원래 경로로 돌아온 파일을 찾아, 그 삭제가 같은 시각으로 기록한 ‘다시 받지 않기’만 해제합니다. 이후 다른 사본의 삭제나 사용자의 이후 선택은 시각이 달라 유지됩니다.
+
+## 2.2.0 라이브러리 삭제
+
+`deletion.run_deletion`은 계정 잠금(요청 cooldown은 변경하지 않음)과 현재·이전 저장 폴더 잠금을 획득하고 실제 파일 경로를 중복 제거합니다. 승인된 저장 경로와 카탈로그 식별자·현재 경로를 다시 확인하며, 배치의 장치·파일 ID·크기·수정 시각을 먼저 보관합니다. `recycling.recycle_file`은 IFileOperation의 `FOFX_RECYCLEONDELETE`와 progress sink를 사용합니다. PreDelete에서 휴지통 플래그 및 원본 변경을 확인하고, PostDelete의 `$R` 파일과 `$I` 원본 경로·크기 영수증이 일치해야 성공입니다. 링크·reparse 폴더와 휴지통을 지원하지 않는 위치는 영구 삭제로 우회하지 않습니다.
+
+SQLite `deletion_items`에 UUID 의도를 먼저 commit하고, 성공한 물리 경로만 `media.path`에서 `last_path`로 옮깁니다. 다른 실제 사본과 출처·작성자·실행 기록은 유지합니다. `keep_deleted`는 미디어 식별자별 재다운로드 선택에 반영되며 실패한 삭제에는 적용하지 않습니다. pending 의도는 정상 작업 잠금 안에서 `reconcile_deletions`로 확인합니다. 원본이 없어도 휴지통 성공으로 추정하지 않으며 삭제는 다시 시도하지 않습니다. 불확실한 파일 이동이나 DB 쓰기 실패는 배치를 중단합니다. 삭제 기록은 사본 합병·DB 복구에도 포함됩니다.
+
+GUI는 목록과 갤러리 선택을 동기화하고 현재 페이지 범위의 선택을 제공합니다. 확인창 후 계정·저장 위치·세대·진행 상태를 다시 검사하며, 저장·메타데이터·변환·기록 이전과 삭제를 동시에 실행하지 않습니다. 검사와 화면 QA에는 격리한 임시 데이터만 사용합니다. `tests.test_recycling`의 네이티브 Windows 검사는 `XLIKESAVER_NATIVE_RECYCLE_TEST=1`로 명시했을 때 새 임시 파일 하나만 휴지통으로 옮깁니다.
+
+Windows ExifTool 런처만 종료하면 실제 Perl 작성 프로세스가 파이프를 계속 보유할 수 있습니다. 번들 `perl.exe`와 `exiftool.pl`을 직접 실행해 timeout이 실제 작성 프로세스를 종료하도록 했습니다. 상대 ASCII 스크립트와 번들 cwd로 한글·이모지 설치 경로를 지원하고, stdout/stderr는 reader가 EOF 뒤 닫습니다. 종료 스레드는 최대 0.5초만 reader를 기다리므로 BufferedReader의 잠금으로 무한 대기하지 않습니다. 같은 번들·라이선스를 그대로 사용하며 제3자 runtime 파일은 바꾸지 않습니다.
+
 ## 개발 환경
 
 Windows 64비트, Python 3.12 + Tkinter, gallery-dl 1.32.15, PyInstaller 6.22.3을 사용합니다. 실행에 Node.js나 별도 서버, X 개발자 API 키는 필요하지 않습니다. `setup.ps1`은 가상환경과 고정된 ExifTool 13.59 Windows 패키지를 준비합니다.
@@ -162,10 +182,22 @@ GIF 변환/동영상 섬네일에 쓰는 `tools/ffmpeg/runtime/ffmpeg.exe`는 �
 
 ## 2.1.0 사라진 파일
 
-`HistoryStore._missing`은 미디어 식별자(트윗·번호·종류)마다 현재 파일이 하나도 없는 것을 모읍니다. 저장 방식이 달라 같은 미디어에 기록이 여럿이어도 한 번만 나오고, 한 기록이라도 파일이 있으면 사라진 것이 아닙니다. `summary()`의 `missing_files`도 이 기준이며 숨긴 것은 `ignored_missing`으로 따로 셉니다(기존 행 기준 값은 `unmatched_records`). `overview()`는 같은 스냅숏에서 `missing` 목록을 함께 돌려줍니다(최대 5,000개).
+`HistoryStore._missing`은 미디어 식별자(트윗·번호·종류)마다 현재 파일이 하나도 없는 것을 모읍니다. 저장 방식이 달라 같은 미디어에 기록이 여럿이어도 한 번만 나오고, 한 기록이라도 파일이 있으면 사라진 것이 아닙니다. `summary()`의 `missing_files`도 이 기준이며 숨긴 것은 `ignored_missing`으로 따로 셉니다(기존 행 기준 값은 `unmatched_records`). `overview()`는 같은 스냅숏에서 전체 `missing` 목록을 함께 돌려줍니다. 2.1.1부터 5,000개 제한을 없애고 UI에서 숨김 필터 후 50·100·200개씩 표시합니다. 사라진 파일 페이지 이동은 이미 읽은 스냅숏을 사용하여 추가 DB·폴더 조회를 하지 않습니다.
 
 `missing_choices(tweet_id, num, media_type, ignored, updated_at)`는 ‘다시 받지 않기’ 선택입니다. 숨김 해제도 행으로 남겨, 다른 PC 사본과 합칠 때(`storage._merge_history`) `updated_at`이 늦은 선택이 이깁니다. 기록 복구(`rebuild_history`)도 이 표를 살립니다. worker는 시작할 때 `ignored_media()`를 읽어 저장 방식과 관계없이 그 미디어를 건너뜁니다(중복 방지 기록이 없는 다른 방식의 archive에서도).
 
 다시 받기는 `JobOptions.targets`(history.`archive_key` 형식, 최대 2,000개)로 실행합니다. worker는 Like 목록 대신 트윗마다 `https://x.com/i/web/status/<id>`를 `tweet-endpoint: restid`(TweetResultByRestId 1회)로 엽니다. 트윗을 처리하기 직전에 그 트윗의 고른 키만 현재 방식 archive에서 지우고(예전 `gif_` 표기·접두어 없는 표기 포함), 끝나면 받지 못한 항목의 원래 항목을 다시 넣습니다. 중단·요청 한도·오류에도 같습니다. 고르지 않은 같은 트윗의 다른 미디어는 건드리지 않고, 동영상·GIF 저장을 꺼 두었어도 고른 것은 받습니다(용량 제한은 적용). 실행은 `scan_mode='retry'`로 기록하고 `quick_scan_readiness`와 `LikeOrder`의 이전 완료 실행 판단에서 제외하며, Like 순서도 기록하지 않습니다. 트윗을 볼 수 없거나(디렉터리 메타데이터 없음) 미디어를 받지 못한 경우는 오류 대신 트윗 주소와 함께 안내하고 다음 트윗으로 넘어갑니다. 요청 한도·인증·저장소·기록 오류(`_FATAL_TERMS`)는 전체를 멈춥니다. 숨겼던 파일을 다시 받으면 숨김을 풉니다.
 
 라이브러리 탭의 숨은 페이지는 마지막 너비를 유지하므로, 미리보기·통계 배치는 숨은 페이지일 때 노트북 너비(`_page_width`)로 정합니다. 좁은 창에서 쌓인 통계 페이지가 다른 탭을 길게 만들던 문제를 막습니다.
+
+## 2.1.1 경계 조건 보완
+
+라이브러리의 retry 콜백은 파일 키와 함께 표시 중인 계정·StoragePaths를 전달합니다. 메인은 현재 계정·기록 DB 경로·저장 경로를 먼저 비교하고, 달라졌으면 인증/기록을 변경하기 전에 새로고침을 안내합니다. 저장 방식과 계정별 하위 폴더 옵션은 현재 설정을 사용할 수 있습니다. 확인창 전의 선택 컨텍스트와 세대를 캡처하여, 확인창 중 새로고침·저장 시작·창 닫기가 발생하면 이전 선택을 적용하지 않습니다.
+
+숨김 선택 worker는 `choice_active`로 메인 저장·기록 이전과 겹치지 않게 하며, AccountGuard와 OutputGuard로 다른 프로세스의 다운로드도 제외합니다. DB를 닫은 뒤 폴더 사본과 로컬 백업을 갱신하고 잠금을 해제한 다음 결과를 전달합니다. 사본/백업 실패는 로컬 선택을 보존하며 별도로 안내합니다. 창을 닫으면 선택 worker가 마칠 때까지 기다립니다. 일반 기록 로딩은 메인 저장을 막지 않습니다.
+
+개별 재다운로드에서 gallery-dl의 정확한 `AuthRequired: Protected Tweet`·`AuthRequired: NSFW Tweet`만 트윗 접근 불가로 처리합니다. 다른 인증 로그·HTTP 401/403·요청 제한은 계속 전체 중단합니다. 복원 완료 항목의 숨김 해제는 worker의 `finally`에서 실행해 사용자 중단이나 후속 오류에서도 남깁니다.
+
+테마 캐시는 필수 자산 명세와 ZIP 목록을 대조하고, 실제 Tk PNG 디코딩이 실패하면 모든 자산을 다시 생성해 한 번 교체합니다. 정상 캐시는 기존처럼 메모리/디스크에서 재사용합니다.
+
+DB 초기화에서 제약 오류가 나면 그 오류 경로에서만 `quick_check`를 실행합니다. 실제 손상일 때는 `CatalogDamaged`로 분류해 기록 복구 버튼을 표시하며, 정상 DB의 제약 오류는 기존 일반 오류로 둡니다.

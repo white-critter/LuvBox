@@ -124,9 +124,10 @@ class _GridDecoder:
 
 
 class ThumbnailGrid(ttk.Frame):
-    def __init__(self, parent, *, on_select, on_open):
+    def __init__(self, parent, *, on_select, on_open, on_selection=None):
         super().__init__(parent, style="Card.TFrame", padding=8)
         self.on_select, self.on_open = on_select, on_open
+        self.on_selection = on_selection
         self.canvas = tk.Canvas(self, background=theme.CARD, highlightthickness=0, borderwidth=0, width=1, height=1)
         self.scrollbar = ttk.Scrollbar(self, command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
@@ -144,6 +145,8 @@ class ThumbnailGrid(ttk.Frame):
         self._source_images = {}
         self.order: list[str] = []
         self.selected = None
+        self.selected_keys: tuple[str, ...] = ()
+        self._anchor = None
         self.columns = 0
         self._weighted_columns = 0
         self.placeholder = tk.PhotoImage(master=self, width=TILE[0], height=TILE[1])
@@ -170,8 +173,6 @@ class ThumbnailGrid(ttk.Frame):
                 self.images.pop(key, None)
                 self._source_images.pop(key, None)
                 self._captions.pop(key, None)
-                if self.selected == key:
-                    self.selected = None
         relayout = order != self.order or len(self.tiles) != len(rows)
         self.order = order
         self._paths = paths
@@ -185,8 +186,8 @@ class ThumbnailGrid(ttk.Frame):
             if key not in self.tiles:
                 tile = tk.Label(self.inner, image=self.placeholder, text=caption, compound="top",
                                 background=theme.CARD, foreground=theme.INK, font=theme.SMALL, justify="center",
-                                wraplength=TILE[0], padx=4, pady=4, cursor="hand2")
-                tile.bind("<Button-1>", lambda _, key=key: self.on_select(key))
+                                wraplength=TILE[0], padx=4, pady=4, cursor="hand2", takefocus=True)
+                tile.bind("<Button-1>", lambda event, key=key: self._click(event, key))
                 tile.bind("<Double-1>", lambda _, key=key: self.on_open(key))
                 tile.bind("<MouseWheel>", self._wheel)
                 self.tiles[key] = tile
@@ -197,6 +198,9 @@ class ThumbnailGrid(ttk.Frame):
             if row.get("path"):
                 jobs.append((key, row["path"]))
         self.empty.configure(text="" if rows else empty_text)
+        # Keep surviving selections on refresh without transferring a selected
+        # position to an unrelated record on the next page.
+        self.select_many(self.selected_keys, focus=self.selected, scroll=False, _preserve_anchor=True)
         self._layout()
         if relayout:
             self.canvas.yview_moveto(0)
@@ -226,13 +230,71 @@ class ThumbnailGrid(ttk.Frame):
 
     # ------------------------------------------------------------- selection
     def select(self, key):
-        if self.selected in self.tiles:
-            self.tiles[self.selected].configure(background=theme.CARD, foreground=theme.INK)
-        self.selected = key if key in self.tiles else None
+        """Synchronize one selected record without invoking either callback."""
+        self.select_many((key,) if key is not None else (), focus=key)
+        self._anchor = self.selected
+
+    def select_many(self, keys, focus=None, *, scroll=True, _preserve_anchor=False):
+        """Synchronize selection, retaining display order and a preview focus.
+
+        Callbacks are reserved for user clicks, so table/gallery updates can
+        synchronize each other without re-entering selection handlers.
+        """
+        requested = set(keys)
+        previous = set(self.selected_keys)
+        previous_focus = self.selected
+        self.selected_keys = tuple(key for key in self.order if key in requested)
+        selected = set(self.selected_keys)
+        self.selected = focus if focus in selected else (
+            self.selected if self.selected in selected else next(iter(self.selected_keys), None)
+        )
+        if self._anchor not in self.tiles or (
+            not _preserve_anchor and (previous != selected or previous_focus != self.selected)
+        ):
+            self._anchor = self.selected
+        for key in previous | selected:
+            if key in self.tiles:
+                chosen = key in selected
+                self.tiles[key].configure(
+                    background=theme._tone(_SELECTED) if chosen else theme.CARD,
+                    foreground=theme._tone(_SELECTED_INK) if chosen else theme.INK,
+                )
+        if scroll:
+            self._scroll_selected()
+
+    def _click(self, event, key):
+        if self._released or key not in self.tiles:
+            return "break"
+        # Let window-level Delete/Ctrl+A shortcuts work from the gallery too.
+        self.tiles[key].focus_set()
+        shift, control = bool(event.state & 0x0001), bool(event.state & 0x0004)
+        chosen = set(self.selected_keys)
+        if shift:
+            anchor = self._anchor if self._anchor in self.tiles else self.selected or key
+            first, last = sorted((self.order.index(anchor), self.order.index(key)))
+            span = set(self.order[first:last + 1])
+            chosen = chosen | span if control else span
+            self._anchor = anchor
+        elif control:
+            if key in chosen:
+                chosen.remove(key)
+            else:
+                chosen.add(key)
+            self._anchor = key
+        else:
+            chosen = {key}
+            self._anchor = key
+        self.select_many(chosen, focus=key, _preserve_anchor=True)
+        if self.on_selection is not None:
+            self.on_selection(self.selected_keys, self.selected)
+        elif self.on_select is not None:
+            self.on_select(key)
+        return "break"
+
+    def _scroll_selected(self):
         if self.selected is None:
             return
         tile = self.tiles[self.selected]
-        tile.configure(background=theme._tone(_SELECTED), foreground=theme._tone(_SELECTED_INK))
         self.update_idletasks()
         height = self.inner.winfo_height()
         if height > 1:
@@ -285,8 +347,11 @@ class ThumbnailGrid(ttk.Frame):
         for tile in self.tiles.values():
             tile.destroy()
         self.tiles.clear()
+        self.order.clear()
+        self.selected = self._anchor = None
+        self.selected_keys = ()
         self.placeholder = None
-        self.on_select = self.on_open = None
+        self.on_select = self.on_open = self.on_selection = None
 
     def destroy(self):
         self.release()

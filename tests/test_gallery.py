@@ -6,6 +6,7 @@ import queue
 import tempfile
 import threading
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
 import weakref
 from unittest.mock import patch
@@ -211,6 +212,89 @@ class GalleryLayoutTests(unittest.TestCase):
             self.assertNotIn("one", self.grid.images)
             self.assertIsNone(self.grid._source_images["one"])
             self.assertIn("미리보기 없음", tile.cget("text"))
+
+    def selection_rows(self):
+        self.grid.show([(str(index), {"author": "offline"}) for index in range(6)], set)
+        self.root.update()
+
+    def click(self, key, state=0):
+        return self.grid._click(SimpleNamespace(state=state), key)
+
+    def test_control_click_toggles_multiple_records_and_preview_focus(self):
+        self.selection_rows()
+        changes = []
+        self.grid.on_selection = lambda keys, focus: changes.append((keys, focus))
+        self.click("1")
+        self.click("3", 0x0004)
+        self.assertEqual(self.grid.selected_keys, ("1", "3"))
+        self.assertEqual(self.grid.selected, "3")
+        self.assertEqual(self.grid.tiles["1"].cget("background"), self.grid.tiles["3"].cget("background"))
+        self.assertNotEqual(self.grid.tiles["2"].cget("background"), self.grid.tiles["3"].cget("background"))
+        self.click("3", 0x0004)
+        self.assertEqual((self.grid.selected_keys, self.grid.selected), (("1",), "1"))
+        self.assertEqual(self.grid.tiles["3"].cget("background"), theme.CARD)
+        self.click("1", 0x0004)
+        self.assertEqual((self.grid.selected_keys, self.grid.selected), ((), None))
+        self.assertEqual(changes[-1], ((), None))
+
+    def test_shift_selects_a_range_from_stable_anchor_and_control_adds_range(self):
+        self.selection_rows()
+        self.click("1")
+        self.click("4", 0x0001)
+        self.assertEqual(self.grid.selected_keys, ("1", "2", "3", "4"))
+        self.click("2", 0x0001)
+        self.assertEqual(self.grid.selected_keys, ("1", "2"))
+        self.click("5", 0x0004)
+        self.click("3", 0x0005)
+        self.assertEqual(self.grid.selected_keys, ("1", "2", "3", "4", "5"))
+        self.assertEqual(self.grid.selected, "3")
+        self.click("0")
+        self.assertEqual((self.grid.selected_keys, self.grid.selected), (("0",), "0"))
+
+    def test_external_selection_sync_does_not_reenter_callbacks(self):
+        self.selection_rows()
+        self.grid.on_selection = lambda *_: self.fail("external selection invoked callback")
+        self.grid.on_select = lambda *_: self.fail("external selection invoked legacy callback")
+        self.grid.select_many(("4", "1", "1", "absent"), focus="4")
+        self.assertEqual((self.grid.selected_keys, self.grid.selected), (("1", "4"), "4"))
+        self.grid.select("2")
+        self.assertEqual((self.grid.selected_keys, self.grid.selected), (("2",), "2"))
+        self.grid.select(None)
+        self.assertEqual((self.grid.selected_keys, self.grid.selected), ((), None))
+
+    def test_external_selection_sets_range_anchor_but_callback_sync_preserves_it(self):
+        self.selection_rows()
+        self.click("0")
+        self.grid.select_many(("3", "5"), focus="3")
+        self.grid.on_selection = lambda keys, focus: self.grid.select_many(keys, focus)
+        self.click("4", 0x0001)
+        self.assertEqual(self.grid.selected_keys, ("3", "4"))
+        self.click("1", 0x0001)
+        self.assertEqual(self.grid.selected_keys, ("1", "2", "3"))
+
+    def test_refresh_preserves_surviving_keys_but_new_page_does_not_inherit_selection(self):
+        self.selection_rows()
+        self.grid.select_many(("1", "3"), focus="3")
+        self.grid.show([("1", {"author": "offline"}), ("4", {"author": "offline"})], set)
+        self.assertEqual((self.grid.selected_keys, self.grid.selected), (("1",), "1"))
+        self.assertNotEqual(self.grid.tiles["1"].cget("background"), theme.CARD)
+        self.grid.show([("new-1", {"author": "offline"}), ("new-4", {"author": "offline"})], set)
+        self.assertEqual((self.grid.selected_keys, self.grid.selected), ((), None))
+        for tile in self.grid.tiles.values():
+            self.assertEqual(tile.cget("background"), theme.CARD)
+
+    def test_click_passes_legacy_key_or_new_selection_callback_and_focuses_tile(self):
+        self.selection_rows()
+        legacy, changes = [], []
+        self.grid.on_select = legacy.append
+        self.click("2")
+        self.assertEqual(legacy, ["2"])
+        self.grid.on_selection = lambda keys, focus: changes.append((keys, focus))
+        with patch.object(self.grid.tiles["4"], "focus_set") as focus:
+            self.assertEqual(self.click("4", 0x0004), "break")
+            focus.assert_called_once_with()
+        self.assertEqual(legacy, ["2"])
+        self.assertEqual(changes, [(("2", "4"), "4")])
 
 
 if __name__ == "__main__":

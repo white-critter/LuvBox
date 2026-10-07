@@ -1156,5 +1156,38 @@ class ScheduleWorkerLifetimeTests(unittest.TestCase):
             gc.collect()
 
 
+# A worker that pauses in the middle of a Korean character, as a line can be
+# read while the worker is still writing it.
+_SPLIT_WRITER = r"""
+import sys, time
+line = '{"type": "log", "level": "info", "message": "한글 진행 상황"}\n'.encode("utf-8")
+cut = line.index("글".encode("utf-8")) + 1
+with open(sys.argv[2], "ab", buffering=0) as stream:
+    stream.write(line[:cut])
+    time.sleep(0.5)
+    stream.write(line[cut:])
+    stream.write('{"type": "finished", "status": "finished", "saved": 1, "message": "완료"}\n'.encode("utf-8"))
+"""
+
+
+class WorkerEventReaderTests(unittest.TestCase):
+    def test_partially_written_character_never_stops_progress_updates(self):
+        import queue
+        import sys
+        from xlikesaver.core import JobOptions
+
+        app = App.__new__(App)
+        app.events, app.stopping, app.stop_path, app.process = queue.Queue(), False, None, None
+        command = lambda request, events, stop: [sys.executable, "-c", _SPLIT_WRITER, str(request), str(events), str(stop)]
+        with tempfile.TemporaryDirectory() as folder, patch("xlikesaver.gui.worker_command", command):
+            app._run_process(JobOptions(account="example", output_dir=folder))
+        events = []
+        while not app.events.empty():
+            events.append(app.events.get_nowait())
+        self.assertEqual([event.get("message") for event in events if event["type"] == "log"], ["한글 진행 상황"])
+        self.assertEqual([event["type"] for event in events], ["log", "finished", "process_exit"])
+        self.assertEqual(events[-1]["code"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

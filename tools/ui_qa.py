@@ -105,6 +105,20 @@ def make_catalog(temporary, account="demo_account", count=168):
         for index in gone:
             (output / f"{2030000000000000000 + index}_1.jpg").unlink()
         store.set_missing_ignored([(str(2030000000000000000 + gone[-1]), 1, "photo")], True)
+        # Deletion history fixtures: native Shell is never invoked by UI QA.
+        from xlikesaver.recycling import file_signature
+        sample = next(row for row in store.records() if row["path"] and Path(row["path"]).is_file())
+        for index in range(112):
+            ident = store.begin_deletion("ui-qa", sample, index % 2 == 0, file_signature(sample["path"]))
+            store.finish_deletion(ident, "failed" if index % 3 else "cancelled",
+                                  "검증용 기록입니다. 실제 파일은 그대로 두었습니다.")
+        removed = next(row for row in reversed(store.records()) if row["path"] and Path(row["path"]).is_file())
+        ident = store.begin_deletion("ui-qa", removed, True, file_signature(removed["path"]))
+        fake_bin = output.parent / "ui-qa-recycled"
+        fake_bin.mkdir(exist_ok=True)
+        receipt = fake_bin / removed["filename"]
+        Path(removed["path"]).rename(receipt)
+        store.finish_deletion(ident, "recycled", "임시 QA 파일 이동 결과입니다.", str(receipt))
         for index in range(112):
             run = store.start_run("flat", scan_mode="quick")
             status = "error" if index % 19 == 0 else "stopped" if index % 11 == 0 else "finished"
@@ -135,6 +149,7 @@ def make_contact_sheets(output, screenshots):
         "library-default": ["library-default-files", "library-maximized-files"],
         "library-browse": ["library-files", "library-filters", "library-compact", "library-compact-detail", "library-gallery"],
         "library-history-stats": ["library-runs", "library-stats", "library-stats-compact", "library-tools"],
+        "library-deletion": ["library-delete-selection", "library-gallery-selection", "library-deletions", "library-deletions-compact", "dialog-delete"],
     }
     available = {row["name"] for row in screenshots}
     font_path = ROOT / "assets/fonts/Pretendard/Pretendard-Regular.ttf"
@@ -439,6 +454,9 @@ class CaptureSession:
         if not self.simulated_screen:
             self.capture(history, f"library-maximized-files-{selected}", maximized=True)
         self.capture(history, f"library-files-{selected}", "1200x860")
+        history.tree.selection_set(history.tree.get_children()[:3])
+        history.select_record()
+        self.capture(history, f"library-delete-selection-{selected}", "1200x860")
         history.toggle_filters()
         self.capture(history, f"library-filters-{selected}", "1200x860")
         history.toggle_filters()
@@ -448,6 +466,7 @@ class CaptureSession:
         history.set_view("grid")
         self.settle(lambda: len(history.grid_view.images) >= min(25, len(history.rows)), timeout=12)
         self.capture(history, f"library-gallery-{selected}", "1200x860")
+        self.capture(history, f"library-gallery-selection-{selected}", "1200x860")
         history.tabs.select(1)
         first_run = history.run_tree.get_children()[0]
         history.run_tree.selection_set(first_run)
@@ -466,6 +485,9 @@ class CaptureSession:
         self.capture(history, f"library-missing-hidden-{selected}", "1200x860")
         history.show_ignored.set(False)
         history._show_missing()
+        history.tabs.select(4)
+        self.capture(history, f"library-deletions-{selected}", "1200x860")
+        self.capture(history, f"library-deletions-compact-{selected}", "820x700")
         history.tabs.select(0)
         history.show_tools()
         self.capture(history._tools_window, f"library-tools-{selected}")
@@ -475,6 +497,15 @@ class CaptureSession:
 
     def dialogs(self):
         from xlikesaver import dialogs
+        for selected in ("light", "dark"):
+            self.appearance(selected)
+            dialog = dialogs.DeleteDialog(self.root, 3, 7340032,
+                                          ["2030000000000000001_1.jpg", "2030000000000000002_video_1.mp4", "2030000000000000003_gif_1.gif"])
+            try:
+                dialog._place()
+                self.capture(dialog, f"dialog-delete-{selected}")
+            finally:
+                dialog.destroy()
         cases = [
             ("dialog-confirm-light", "light", "이전 저장 폴더 연결 확인",
              "이전 폴더를 찾을 수 없습니다.\n새 폴더에서 저장을 시작할까요?\n\n"

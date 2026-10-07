@@ -393,6 +393,11 @@ class _GalleryLogHandler(logging.Handler):
         if raw == "media size exceeded":
             return
         text = raw.lower()
+        # gallery-dl uses AuthRequired for these two per-tweet visibility
+        # results even with valid cookies. Keep every other authentication
+        # error fatal, including either message accompanied by 401/403.
+        if self.per_tweet and text in {"authrequired: protected tweet", "authrequired: nsfw tweet"}:
+            return
         notice = _skipped_post_notice(raw) if record.levelno < logging.ERROR else ""
         if notice:
             level, message, priority = "info", notice, 0
@@ -1258,6 +1263,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             previous_output_guards.append(previous_guard)
         history.import_legacy()
         history.recover_interrupted_runs()
+        # Account/output locks protect reconciliation. Never infer a successful
+        # recycle from absence, and never retry an interrupted file deletion.
+        history.reconcile_deletions()
         targets = frozenset(normalized.targets)
         ignored = history.ignored_media()
         scan_note = ""
@@ -1329,10 +1337,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         notice = "트윗을 볼 수 없어(삭제·비공개·제한) 다시 받지 못했습니다."
                     # The address lets the user check the tweet in a browser.
                     emit({"type": "log", "level": "info", "message": f"{notice} https://x.com/i/web/status/{tweet_id}"})
-                # A hidden file the user chose to download again is back.
-                restored = [identity for identity in map(_key_identity, recovered) if identity in ignored]
-                if restored:
-                    history.set_missing_ignored(restored, False)
             else:
                 active_job = PhotoJob(f"https://x.com/{normalized.account}/likes")
                 exit_code = active_job.run()
@@ -1398,6 +1402,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     finally:
         if history is not None:
             try:
+                # Persist completed retries even if a later tweet was stopped
+                # or failed. Unprocessed choices keep their hidden state.
+                restored = [identity for identity in map(_key_identity, recovered) if identity in ignored]
+                if restored:
+                    history.set_missing_ignored(restored, False)
                 if likes is not None:
                     likes.flush()
                 flush_tweet_texts()

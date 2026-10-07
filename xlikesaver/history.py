@@ -14,6 +14,7 @@ import os
 import re
 import sqlite3
 import stat
+import uuid
 from collections import Counter
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
@@ -58,8 +59,7 @@ _ORDERS = {
 _PERIOD_FIELDS = {"posted": "media.posted_at", "saved": "media.saved_at"}
 # 'retry' runs download chosen missing files by tweet, not the Like list.
 _SCAN_MODES = {"full", "quick", "retry"}
-# A missing file is listed once per media, however many layouts recorded it.
-_MISSING_LIMIT = 5000
+_DELETION_STATUSES = {"pending", "recycled", "failed", "cancelled", "interrupted"}
 
 
 class HistoryError(RuntimeError):
@@ -219,6 +219,19 @@ class HistoryStore:
                     ignored INTEGER NOT NULL, updated_at TEXT NOT NULL,
                     PRIMARY KEY(tweet_id, num, media_type)
                 );
+                CREATE TABLE IF NOT EXISTS deletion_items (
+                    id TEXT PRIMARY KEY, batch_id TEXT NOT NULL,
+                    tweet_id TEXT NOT NULL, num INTEGER NOT NULL, media_type TEXT NOT NULL,
+                    folder_mode TEXT NOT NULL, path TEXT NOT NULL, filename TEXT NOT NULL,
+                    filesize INTEGER, signature TEXT NOT NULL,
+                    posted_at TEXT, author TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+                    message TEXT NOT NULL DEFAULT '', recycle_path TEXT NOT NULL DEFAULT '',
+                    keep_deleted INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS deletion_created ON deletion_items(created_at);
+                -- The library filter looks up each record's deletion receipt.
+                CREATE INDEX IF NOT EXISTS deletion_identity ON deletion_items(tweet_id,num,media_type);
             """)
             primary = [row["name"] for row in sorted(self._db.execute("PRAGMA table_info(media)").fetchall(),
                                                      key=lambda row: row["pk"]) if row["pk"]]
@@ -244,7 +257,13 @@ class HistoryStore:
                     self._db.execute("ALTER TABLE media ADD COLUMN author_id TEXT NOT NULL DEFAULT ''")
                 if "author_metadata_status" not in columns:
                     self._db.execute("ALTER TABLE media ADD COLUMN author_metadata_status TEXT NOT NULL DEFAULT 'pending'")
-                self._db.execute("UPDATE media SET source_url='https://x.com/i/web/status/' || tweet_id WHERE source_url=''")
+                if "last_path" not in columns:
+                    self._db.execute("ALTER TABLE media ADD COLUMN last_path TEXT NOT NULL DEFAULT ''")
+                # Write only when an old row needs it. An UPDATE always waits
+                # for the write lock, so every open (even a file opened from
+                # the library while a save writes) used to wait up to 5 s.
+                if self._db.execute("SELECT 1 FROM media WHERE source_url='' LIMIT 1").fetchone():
+                    self._db.execute("UPDATE media SET source_url='https://x.com/i/web/status/' || tweet_id WHERE source_url=''")
             run_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}
             with self._db:
                 # Runs from earlier versions keep 'full' with no signature, so
@@ -254,6 +273,22 @@ class HistoryStore:
                 if "media_signature" not in run_columns:
                     self._db.execute("ALTER TABLE runs ADD COLUMN media_signature TEXT NOT NULL DEFAULT ''")
             self._media_roots = self._read_media_roots()
+        except sqlite3.IntegrityError:
+            # A damaged row can reach a NOT NULL check before SQLite reports
+            # SQLITE_CORRUPT during the source-URL migration. Verify only this
+            # error path; normal catalog opens need no full integrity scan.
+            try:
+                try:
+                    checked = self._db.execute("PRAGMA quick_check").fetchall()
+                except sqlite3.DatabaseError as exc:
+                    damaged = (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF in _DAMAGED_CODES
+                else:
+                    damaged = len(checked) != 1 or checked[0][0] != "ok"
+                if damaged:
+                    raise CatalogDamaged(_DAMAGED_HELP) from None
+            finally:
+                self._db.close()
+            raise
         except Exception:
             self._db.close()
             raise
@@ -407,6 +442,7 @@ class HistoryStore:
                                     (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])).fetchone()
         if previous is not None:
             old = dict(previous)
+            row.setdefault("last_path", old["last_path"])
             if not row["author"] or (row["record_source"] in {"archive", "file_scan"} and old["author"]):
                 row["author"] = old["author"]
             if not row["author_id"]:
@@ -719,8 +755,9 @@ class HistoryStore:
                                     row["media_type"], row["path"]))
             # The final path condition leaves rows a download changed meanwhile.
             self._write_batches(changed, lambda values: self._db.execute(
-                "UPDATE media SET path=?,filesize=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
-                values))
+                "UPDATE media SET last_path=CASE WHEN ?='' THEN path ELSE last_path END,path=?,filesize=? "
+                "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
+                (values[0], *values)))
         archived = []
         for mode, name in _ARCHIVES.items():
             archive = self.account_dir / name
@@ -793,10 +830,45 @@ class HistoryStore:
                         self.is_media_path(old_path) and Path(old_path).is_file())
             scanned.append((row, not keep_old))
         self._write_batches(scanned, lambda item: self._upsert(item[0], replace_path=item[1]))
+        self._release_restored_choices()
         with self._db:
             self._db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('legacy_imported',?)", (_now(),))
         after = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
         return {"imported": True, "records": after - before, "warnings": warnings}
+
+    def _release_restored_choices(self) -> None:
+        """Allow downloads again once a recycled file is back at its original path.
+
+        Restoring from the Recycle Bin means the user wants the file. Only the
+        choice that deletion itself recorded (same time stamp) is released, so
+        a later deletion of another copy or a later explicit choice is kept.
+        """
+        candidates = self._db.execute(
+            "SELECT deletion_items.tweet_id,deletion_items.num,deletion_items.media_type,"
+            "deletion_items.path,deletion_items.finished_at FROM deletion_items JOIN missing_choices "
+            "ON missing_choices.tweet_id=deletion_items.tweet_id AND missing_choices.num=deletion_items.num "
+            "AND missing_choices.media_type=deletion_items.media_type "
+            "WHERE deletion_items.keep_deleted=1 AND deletion_items.status IN ('recycled','interrupted') "
+            "AND missing_choices.ignored=1 AND missing_choices.updated_at=deletion_items.finished_at").fetchall()
+        modes = sorted(_MODES)
+        released = []
+        for item in candidates:
+            key = self._file_key(item["path"])
+            present = [row for row in self._db.execute(
+                "SELECT tweet_id,num,media_type,path FROM media WHERE folder_mode IN ("
+                + ",".join("?" for _ in modes) + ") AND tweet_id=? AND path!=''", (*modes, item["tweet_id"]))
+                       if self._file_key(row["path"]) == key and os.path.isfile(row["path"])]
+            if present:
+                identities = {(item["tweet_id"], item["num"], item["media_type"])}
+                identities.update((row["tweet_id"], row["num"], row["media_type"]) for row in present)
+                released.extend((*identity, item["finished_at"]) for identity in identities)
+        if released:
+            stamp = _now()
+            with self._db:
+                self._db.executemany(
+                    "UPDATE missing_choices SET ignored=0,updated_at=? "
+                    "WHERE tweet_id=? AND num=? AND media_type=? AND ignored=1 AND updated_at=?",
+                    [(stamp, *values) for values in released])
 
     @staticmethod
     def _file_key(path: str) -> str:
@@ -875,7 +947,8 @@ class HistoryStore:
 
     def _ignored(self) -> set:
         return {(row[0], row[1], row[2]) for row in self._db.execute(
-            "SELECT tweet_id,num,media_type FROM missing_choices WHERE ignored=1")}
+            "SELECT tweet_id,num,media_type FROM missing_choices WHERE ignored=1 "
+            "UNION SELECT tweet_id,num,media_type FROM deletion_items WHERE status='pending' AND keep_deleted=1")}
 
     def _summary(self, rows: list[dict], files: list[dict], matched: int, found: set) -> dict:
         # A media is missing when no layout's record points at a present file;
@@ -928,6 +1001,8 @@ class HistoryStore:
 
         Each carries what is known across its layouts, whether the user chose
         not to download it again, and the key that names it in an archive.
+        Return the complete snapshot so filtering and paging cannot hide older
+        media behind the user's choices to keep newer files deleted.
         """
         groups = {}
         for row in rows:
@@ -953,7 +1028,6 @@ class HistoryStore:
             items.append(item)
         items.sort(key=lambda item: (item["saved_at"] or item["posted_at"] or "", item["tweet_id"], item["num"]),
                    reverse=True)
-        items = items[:_MISSING_LIMIT]
         tweets = sorted({item["tweet_id"] for item in items})
         details = {}
         for start in range(0, len(tweets), 500):
@@ -994,16 +1068,153 @@ class HistoryStore:
         """Media the user chose not to download again, in any layout."""
         return self._ignored()
 
+    @_safe
+    def begin_deletion(self, batch_id: str, row: dict, keep_deleted: bool, signature) -> str:
+        """Commit intent before the worker moves one approved file to the Recycle Bin.
+
+        The journal preserves the original record even after a successful move
+        clears its present-file path. File operations belong to the protected
+        worker; recording intent never removes a file or its media history.
+        """
+        if (not isinstance(batch_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", batch_id)
+                or type(keep_deleted) is not bool or not isinstance(row, dict)
+                or not isinstance(signature, (list, tuple)) or len(signature) != 4
+                or any(type(value) is not int or value < 0 for value in signature)):
+            raise HistoryError(_HISTORY_HELP)
+        tweet_id, number, media_type = row.get("tweet_id"), row.get("num"), row.get("media_type")
+        mode, path = row.get("folder_mode"), row.get("path")
+        if (not isinstance(tweet_id, str) or not re.fullmatch(r"[0-9]{1,20}", tweet_id)
+                or type(number) is not int or not 1 <= number <= 10000
+                or media_type not in _TYPES or mode not in _MODES
+                or not isinstance(path, str) or not path or not Path(path).is_absolute()
+                or not self.is_media_path(path)):
+            raise HistoryError(_HISTORY_HELP)
+        stored = self._db.execute(
+            "SELECT * FROM media WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+            (mode, tweet_id, number, media_type)).fetchone()
+        if stored is None or not stored["path"] or self._file_key(stored["path"]) != self._file_key(path):
+            raise HistoryError(_HISTORY_HELP)
+        ident = uuid.uuid4().hex
+        with self._db:
+            self._db.execute(
+                "INSERT INTO deletion_items(id,batch_id,tweet_id,num,media_type,folder_mode,path,filename,"
+                "filesize,signature,posted_at,author,created_at,status,keep_deleted) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)",
+                (ident, batch_id, tweet_id, number, media_type, mode, str(Path(os.path.abspath(path))),
+                 stored["filename"] or Path(path).name, signature[2], json.dumps(list(signature)),
+                 stored["posted_at"], stored["author"], _now(), int(keep_deleted)))
+        return ident
+
     @staticmethod
-    def _record_filter(media_type, query, period=None, author=""):
+    def _deletion_path_absent(path: str) -> bool:
+        try:
+            Path(path).lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            pass  # An inaccessible file is not evidence that it was removed.
+        return False
+
+    def _apply_deleted_path(self, item: dict, stamp: str) -> None:
+        """Update only records of this physical path, within the journal commit."""
+        path = item["path"]
+        identities = {(item["tweet_id"], item["num"], item["media_type"])}
+        # A file recreated at the original path is a present file. Never clear
+        # its catalog path merely because an earlier copy was recycled.
+        if self._deletion_path_absent(path) and self.is_media_path(path):
+            # File names begin with their tweet ID, so only that tweet's
+            # records can share this path. The mode list lets SQLite use the
+            # primary key instead of reading the whole library for each file.
+            modes = sorted(_MODES)
+            matching = [row for row in self._db.execute(
+                "SELECT folder_mode,tweet_id,num,media_type,path,last_path FROM media "
+                "WHERE folder_mode IN (" + ",".join("?" for _ in modes) + ") AND tweet_id=? "
+                "AND (path!='' OR last_path!='')", (*modes, item["tweet_id"]))
+                        if self._file_key(row["path"] or row["last_path"]) == self._file_key(path)]
+            for row in matching:
+                identities.add((row["tweet_id"], row["num"], row["media_type"]))
+                self._db.execute(
+                    "UPDATE media SET last_path=CASE WHEN path='' THEN last_path ELSE path END,"
+                    "path='',filesize=NULL,updated_at=? "
+                    "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
+                    (stamp, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row["path"]))
+        for identity in identities:
+            self._db.execute(
+                "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(tweet_id,num,media_type) DO UPDATE SET ignored=excluded.ignored,updated_at=excluded.updated_at",
+                (*identity, item["keep_deleted"], stamp))
+
+    @_safe
+    def finish_deletion(self, ident: str, status: str, message: str = "", recycle_path: str = "") -> None:
+        """Persist a verified outcome; repeated completion is harmless.
+
+        ``recycled`` is supplied only after the native worker verifies a
+        Recycle Bin receipt. Missing paths alone are never called successful.
+        """
+        if (not isinstance(ident, str) or status not in _DELETION_STATUSES - {"pending"}
+                or not isinstance(message, str) or not isinstance(recycle_path, str)):
+            raise HistoryError(_HISTORY_HELP)
+        stored = self._db.execute("SELECT * FROM deletion_items WHERE id=?", (ident,)).fetchone()
+        if stored is None:
+            raise HistoryError(_HISTORY_HELP)
+        item = dict(stored)
+        if item["status"] != "pending":
+            return
+        stamp = _now()
+        with self._db:
+            if status == "recycled" or (status == "interrupted" and self._deletion_path_absent(item["path"])):
+                self._apply_deleted_path(item, stamp)
+            self._db.execute(
+                "UPDATE deletion_items SET status=?,message=?,recycle_path=?,finished_at=? WHERE id=? AND status='pending'",
+                (status, _clean_text(message, 2000), recycle_path, stamp, ident))
+
+    @_safe
+    def pending_deletions(self) -> list[dict]:
+        return [dict(row) for row in self._db.execute(
+            "SELECT * FROM deletion_items WHERE status='pending' ORDER BY created_at,id")]
+
+    @_safe
+    def reconcile_deletions(self) -> dict:
+        """Settle interrupted intents while the caller holds the output locks.
+
+        A surviving file remains untouched. A vanished file is marked as an
+        uncertain interruption, retaining the chosen download policy and its
+        original path in the journal. This never retries a deletion.
+        """
+        result = {"interrupted": 0, "missing": 0}
+        for item in self.pending_deletions():
+            absent = self._deletion_path_absent(item["path"])
+            self.finish_deletion(item["id"], "interrupted",
+                                 "작업이 중단되어 휴지통 이동 결과를 확인하지 못했습니다. 파일과 Windows 휴지통을 확인해 주세요."
+                                 if absent else "이전 삭제 작업이 중단되었습니다. 파일은 그대로 두었습니다.")
+            result["interrupted"] += 1
+            result["missing"] += int(absent)
+        return result
+
+    @_safe
+    def deletion_page(self, page=0, page_size=100) -> dict:
+        def reader(limit, offset):
+            return [dict(row) for row in self._db.execute(
+                "SELECT * FROM deletion_items ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (limit, offset))]
+        return self._page("deletion_items", (), page, page_size, reader)
+
+    @staticmethod
+    def _record_filter(media_type, query, period=None, author="", include_deleted=True):
         """WHERE clause on media; ``period`` is (field, first day, last day).
 
         Days are inclusive YYYY-MM-DD dates in Korean time, either may be empty.
         Stored times are Korean-time ISO strings, so they compare as text.
         """
-        if media_type not in _TYPES | {"all"} or not isinstance(query, str):
+        if media_type not in _TYPES | {"all"} or not isinstance(query, str) or type(include_deleted) is not bool:
             raise HistoryError(_HISTORY_HELP)
         clauses, params = [], []
+        if not include_deleted:
+            clauses.append("NOT (media.path='' AND media.last_path!='' AND EXISTS ("
+                           "SELECT 1 FROM deletion_items WHERE deletion_items.tweet_id=media.tweet_id "
+                           "AND deletion_items.num=media.num AND deletion_items.media_type=media.media_type "
+                           "AND deletion_items.path=media.last_path "
+                           + ("COLLATE NOCASE " if os.name == "nt" else "") +
+                           "AND deletion_items.status IN ('recycled','interrupted')))" )
         if media_type != "all":
             clauses.append("media.media_type=?")
             params.append(media_type)
@@ -1033,12 +1244,12 @@ class HistoryStore:
 
     @_safe
     def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None,
-                author="") -> list[dict]:
+                author="", include_deleted=True) -> list[dict]:
         if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
                 isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
                 media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS):
             raise HistoryError(_HISTORY_HELP)
-        where, params = self._record_filter(media_type, query, period, author)
+        where, params = self._record_filter(media_type, query, period, author, include_deleted)
         rows = self._db.execute("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,"
                                 "tweets.content,tweets.hashtags FROM " + _JOINED + where +
                                 " ORDER BY " + _ORDERS[order] + ",media.num,media.folder_mode,media.media_type LIMIT ? OFFSET ?",
@@ -1054,11 +1265,12 @@ class HistoryStore:
 
     @_safe
     def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None,
-                    author="") -> dict:
-        where, params = self._record_filter(media_type, query, period, author)
+                    author="", include_deleted=True) -> dict:
+        where, params = self._record_filter(media_type, query, period, author, include_deleted)
         return self._page(_JOINED + where, params, page, page_size,
                           lambda limit, offset: self.records(limit, offset, media_type, query,
-                                                             order=order, period=period, author=author))
+                                                             order=order, period=period, author=author,
+                                                             include_deleted=include_deleted))
 
     @_safe
     def run_page(self, page=0, page_size=100) -> dict:

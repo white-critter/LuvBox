@@ -40,6 +40,7 @@ def main() -> int:
             from xlikesaver.media import convert_mp4_to_gif, ffmpeg_path
             from xlikesaver.preview import thumbnail
             from xlikesaver import charts, gallery  # bundled UI modules
+            from xlikesaver import deletion, recycling
             from PIL import Image
 
             importlib.import_module("gallery_dl.extractor.utils.twitter_transaction_id")
@@ -133,6 +134,7 @@ def main() -> int:
                 resident.write_bytes(target.read_bytes())
                 with metadata.persistent():
                     assert metadata._session is not None
+                    assert Path(metadata._session._process.args[0]).name.lower() == "perl.exe"
                     assert metadata.embed_source(resident, "101", author["author"], author["author_id"])["status"] == "embedded"
                     assert metadata.read_source(resident) == "https://x.com/i/web/status/101"
                     assert metadata.read_author(resident) == author
@@ -203,9 +205,26 @@ def main() -> int:
                     assert retry.targets == ("200_1",)
                     assert charts.bins([("2026-01", 1), ("2026-03", 2)])[0][1] == ("2026-02", 0)
                     assert gallery.TILE == (150, 112)
+                    # Exercise the bundled journal using our disposable fixture.
+                    # This check never deletes a user file or uses the real bin.
+                    disposable = relocated.media_dir / "300_1.jpg"
+                    disposable.write_bytes(b"isolated deletion self-test")
+                    store.record_media("flat", {"tweet_id": "300", "num": 1, "type": "photo"}, disposable)
+                    candidate = next(row for row in store.records() if row["tweet_id"] == "300")
+                    ident = store.begin_deletion("selftest", candidate, True, recycling.file_signature(disposable))
+                    receipt = disposable.with_name("recycled-selftest.jpg")
+                    disposable.rename(receipt)
+                    store.finish_deletion(ident, "recycled", "isolated fixture", str(receipt))
+                    assert store.deletion_page()["rows"][0]["status"] == "recycled"
+                    assert store.record_page(include_deleted=False)["total"] == 3
+                    assert ("300", 1, "photo") in store.ignored_media()
+                    question = dialogs.DeleteDialog(root, 1, 26, [disposable.name])
+                    assert question.keep_deleted.get() and question.default_button.cget("text") == "취소"
+                    question.cancel()
+                    assert question.result is None and callable(deletion.run_deletion)
                     # Damaged-database salvage reads the catalog page by page.
                     from xlikesaver.recovery import salvage
-                    assert len(salvage(store.path)["media"]["rows"]) == 3
+                    assert len(salvage(store.path)["media"]["rows"]) == 4
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -231,13 +250,14 @@ def main() -> int:
                       "statistics": "authors-and-months", "catalog_recovery": "salvage-verified",
                       "records": "local-with-folder-snapshot", "progress": "rounded-borderless",
                       "missing_files": "listed-keep-deleted-or-retry-by-tweet",
+                      "deletion": "bundled-journal-choice-and-redownload-policy",
                       "workspace": "sidebar-scrollable-dashboard-three-settings-tabs",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
                       "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",
                       "flat_storage": "direct",
                       "worker": "stopped-before-authentication", "record_relocation": "preserved-old-file",
-                      "gallery_hooks": "verified", "resident_exiftool": "embedded-and-read-back"}
+                      "gallery_hooks": "verified", "resident_exiftool": "direct-writer-embedded-and-read-back"}
         except Exception as exc:
             report["error"] = type(exc).__name__
         finally:

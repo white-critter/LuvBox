@@ -328,7 +328,7 @@ class MissingTabTests(unittest.TestCase):
     def test_retry_hands_chosen_files_to_the_main_window_after_confirmation(self):
         self.deleted()
         started = []
-        self.window.retry_missing = lambda keys: started.append(keys) or True
+        self.window.retry_missing = lambda keys, account, location: started.append((keys, account, location)) or True
         self.window.select_all_missing()
         self.window._update_missing_actions()
         self.assertEqual(self.window.retry_button.cget("text"), "다시 받기 (1개)")
@@ -344,7 +344,7 @@ class MissingTabTests(unittest.TestCase):
         self.window.is_downloading = lambda: False
         with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True):
             self.window.retry_missing_files()
-        self.assertEqual(started, [["100_1"]])
+        self.assertEqual(started, [(["100_1"], "offline", self.account)])
         self.assertIn("메인 화면", self.window.status_text.get())
 
 
@@ -357,15 +357,16 @@ class RetryStartTests(unittest.TestCase):
         self.session_mock.return_value = True
         self.app.folder_mode.set("저장일별 폴더")
         self.app.limited.set(True)
+        account, paths = self.app._history_location()
         with patch("xlikesaver.gui.threading.Thread") as thread:
-            self.assertTrue(self.app.retry_missing(["100_1", "200_video_1"]))
+            self.assertTrue(self.app.retry_missing(["100_1", "200_video_1"], account, paths))
         options = thread.call_args.kwargs["args"][0]
         self.assertEqual((options.targets, options.folder_mode, options.photo_limit),
                          (("100_1", "200_video_1"), "date", 0))
         self.assertIn("사라진 파일", self.app.status.get())
         self.assertTrue(self.app.running)
         with patch("xlikesaver.gui.threading.Thread") as thread:
-            self.assertFalse(self.app.retry_missing(["100_1"]))
+            self.assertFalse(self.app.retry_missing(["100_1"], account, paths))
         thread.assert_not_called()
         self.app.events.put({"type": "finished", "status": "finished", "saved": 1, "skipped": 0,
                              "size_skipped": 0, "scan_mode": "retry", "message": "끝"})

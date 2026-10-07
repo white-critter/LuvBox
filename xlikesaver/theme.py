@@ -293,10 +293,13 @@ def _read_asset_cache(key: str) -> dict[str, bytes] | None:
         return None
     try:
         with zipfile.ZipFile(location) as archive:
-            assets = {name: archive.read(name) for name in archive.namelist()}
-    except (OSError, zipfile.BadZipFile, KeyError):
+            names = archive.namelist()
+            if len(names) != len(_ASSET_NAMES) or set(names) != _ASSET_NAMES:
+                return None
+            assets = {name: archive.read(name) for name in names}
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, EOFError, zlib.error):
         return None
-    return assets if all(data.startswith(b"\x89PNG") for data in assets.values()) and assets else None
+    return assets if all(data.startswith(b"\x89PNG\r\n\x1a\n") for data in assets.values()) else None
 
 
 def _write_asset_cache(key: str, assets: dict[str, bytes]) -> None:
@@ -326,51 +329,51 @@ def _write_asset_cache(key: str, assets: dict[str, bytes]) -> None:
             pass
 
 
-def _draw_assets(asset):
-    """Generate every control image for the current palette (PNG bytes)."""
+def _asset_specs():
+    """Describe each image once, for both drawing and cache completeness."""
     surfaces = [(suffix, globals()[color]) for suffix, color in _SURFACES]
 
     def panel(name, fill, outline, *, size, **kwargs):
         for suffix, surface in surfaces:
-            asset(name + suffix, _panel_png(fill, outline, surface=surface, size=size, **kwargs))
+            yield name + suffix, _panel_png, dict(fill=fill, outline=outline, surface=surface, size=size, **kwargs)
 
     # Opaque, generously sized images: a card or button is a few fast tiles.
     card, button, field, tab = (640, 400), (320, 64), (480, 56), (240, 56)
-    panel("card", CARD, LINE, radius=18, width=48, height=48, size=card)
-    panel("button", BUTTON, BUTTON, size=button)
-    panel("button_active", BUTTON_HOVER, BUTTON_HOVER, size=button)
-    panel("button_pressed", BUTTON_PRESSED, BUTTON_PRESSED, size=button)
-    panel("button_focus", BUTTON, BLUE, stroke=2, size=button)
-    panel("button_focus_active", BUTTON_HOVER, BLUE, stroke=2, size=button)
-    panel("button_disabled", FIELD_DISABLED, FIELD_DISABLED, size=button)
-    panel("primary", BLUE, BLUE, size=button)
-    panel("primary_active", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
-    panel("primary_pressed", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
-    panel("primary_focus", BLUE, ACCENT_LINE, stroke=2, size=button)
-    panel("primary_focus_active", BLUE_ACTIVE, ACCENT_LINE, stroke=2, size=button)
-    panel("primary_disabled", ACCENT_LINE, ACCENT_LINE, size=button)
-    panel("entry", CARD, LINE, radius=11, size=field)
-    panel("entry_focus", CARD, BLUE, radius=11, stroke=2, size=field)
-    panel("entry_disabled", FIELD_DISABLED, LINE, radius=11, size=field)
-    panel("entry_readonly", CARD, LINE, radius=11, size=field)
-    panel("tab", BG, BG, radius=11, size=tab)
-    panel("tab_active", BUTTON, BUTTON, radius=11, size=tab)
-    panel("tab_selected", ACCENT_SOFT, ACCENT_SOFT, radius=11, size=tab)
-    panel("tab_focus", BG, BLUE, radius=11, stroke=2, size=tab)
-    panel("tab_selected_focus", ACCENT_SOFT, BLUE, radius=11, stroke=2, size=tab)
-    panel("tab_disabled", FIELD_DISABLED, FIELD_DISABLED, radius=11, size=tab)
+    yield from panel("card", CARD, LINE, radius=18, width=48, height=48, size=card)
+    yield from panel("button", BUTTON, BUTTON, size=button)
+    yield from panel("button_active", BUTTON_HOVER, BUTTON_HOVER, size=button)
+    yield from panel("button_pressed", BUTTON_PRESSED, BUTTON_PRESSED, size=button)
+    yield from panel("button_focus", BUTTON, BLUE, stroke=2, size=button)
+    yield from panel("button_focus_active", BUTTON_HOVER, BLUE, stroke=2, size=button)
+    yield from panel("button_disabled", FIELD_DISABLED, FIELD_DISABLED, size=button)
+    yield from panel("primary", BLUE, BLUE, size=button)
+    yield from panel("primary_active", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
+    yield from panel("primary_pressed", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
+    yield from panel("primary_focus", BLUE, ACCENT_LINE, stroke=2, size=button)
+    yield from panel("primary_focus_active", BLUE_ACTIVE, ACCENT_LINE, stroke=2, size=button)
+    yield from panel("primary_disabled", ACCENT_LINE, ACCENT_LINE, size=button)
+    yield from panel("entry", CARD, LINE, radius=11, size=field)
+    yield from panel("entry_focus", CARD, BLUE, radius=11, stroke=2, size=field)
+    yield from panel("entry_disabled", FIELD_DISABLED, LINE, radius=11, size=field)
+    yield from panel("entry_readonly", CARD, LINE, radius=11, size=field)
+    yield from panel("tab", BG, BG, radius=11, size=tab)
+    yield from panel("tab_active", BUTTON, BUTTON, radius=11, size=tab)
+    yield from panel("tab_selected", ACCENT_SOFT, ACCENT_SOFT, radius=11, size=tab)
+    yield from panel("tab_focus", BG, BLUE, radius=11, stroke=2, size=tab)
+    yield from panel("tab_selected_focus", ACCENT_SOFT, BLUE, radius=11, stroke=2, size=tab)
+    yield from panel("tab_disabled", FIELD_DISABLED, FIELD_DISABLED, radius=11, size=tab)
     # A popup notebook sits on CARD, while the library sits on BG. Its
     # inactive tabs should merge into that surface rather than paint a dark
     # window-colored rectangle over the popup.
     for name, fill, outline, stroke in (("tab", CARD, CARD, 1), ("tab_focus", CARD, BLUE, 2)):
-        asset(name + "_card", _panel_png(fill, outline, radius=11, surface=CARD, stroke=stroke, size=tab))
-    asset("notebook_card", _panel_png(CARD, LINE, radius=12, surface=CARD, size=card))
-    panel("selected", ACCENT_SOFT, ACCENT_SOFT, size=button)
-    panel("selected_active", ACCENT_LINE, ACCENT_LINE, size=button)
-    panel("selected_pressed", ACCENT_LINE, ACCENT_LINE, size=button)
-    panel("selected_focus", ACCENT_SOFT, BLUE, stroke=2, size=button)
-    panel("selected_focus_active", ACCENT_LINE, BLUE, stroke=2, size=button)
-    panel("selected_disabled", FIELD_DISABLED, FIELD_DISABLED, size=button)
+        yield name + "_card", _panel_png, dict(fill=fill, outline=outline, radius=11, surface=CARD, stroke=stroke, size=tab)
+    yield "notebook_card", _panel_png, dict(fill=CARD, outline=LINE, radius=12, surface=CARD, size=card)
+    yield from panel("selected", ACCENT_SOFT, ACCENT_SOFT, size=button)
+    yield from panel("selected_active", ACCENT_LINE, ACCENT_LINE, size=button)
+    yield from panel("selected_pressed", ACCENT_LINE, ACCENT_LINE, size=button)
+    yield from panel("selected_focus", ACCENT_SOFT, BLUE, stroke=2, size=button)
+    yield from panel("selected_focus_active", ACCENT_LINE, BLUE, stroke=2, size=button)
+    yield from panel("selected_disabled", FIELD_DISABLED, FIELD_DISABLED, size=button)
     for suffix, surface in surfaces:
         # Quiet navigation has no resting button fill, including on white
         # sidebars. Its entire image, not just its corners, follows the parent.
@@ -381,17 +384,26 @@ def _draw_assets(asset):
                 ("ghost_focus", surface, BLUE, 2),
                 ("ghost_focus_active", BUTTON, BLUE, 2),
                 ("ghost_disabled", surface, surface, 1)):
-            asset(name + suffix, _panel_png(fill, outline, surface=surface,
-                                          stroke=stroke, size=button))
-    asset("progress_trough", _panel_png(TRACK, TRACK, radius=7, width=28, height=14))
-    asset("progress_bar", _panel_png(BLUE, BLUE, radius=7, width=28, height=14))
+            yield name + suffix, _panel_png, dict(fill=fill, outline=outline, surface=surface,
+                                                stroke=stroke, size=button)
+    yield "progress_trough", _panel_png, dict(fill=TRACK, outline=TRACK, radius=7, width=28, height=14)
+    yield "progress_bar", _panel_png, dict(fill=BLUE, outline=BLUE, radius=7, width=28, height=14)
     for kind, generator in (("switch", _switch_png), ("radio", _radio_png)):
         for name, states in (("off", {}), ("on", {"selected": True}),
                              ("off_active", {"active": True}), ("on_active", {"selected": True, "active": True}),
                              ("off_focus", {"focus": True}), ("on_focus", {"selected": True, "focus": True}),
                              ("off_disabled", {"disabled": True}), ("on_disabled", {"selected": True, "disabled": True})):
             for suffix, surface in surfaces:
-                asset(kind + "_" + name + suffix, generator(surface=surface, **states))
+                yield kind + "_" + name + suffix, generator, dict(surface=surface, **states)
+
+
+_ASSET_NAMES = frozenset(name for name, _, _ in _asset_specs())
+
+
+def _draw_assets(asset):
+    """Generate every control image for the current palette (PNG bytes)."""
+    for name, generator, options in _asset_specs():
+        asset(name, generator(**options))
 
 
 def _control_images(root, style):
@@ -408,13 +420,22 @@ def _control_images(root, style):
     # start and theme switch; the result only depends on version and palette.
     key = _asset_key()
     assets = _ASSET_CACHE.get(key) or _read_asset_cache(key)
+    if assets is not None:
+        try:
+            for name, data in assets.items():
+                asset(name, data)
+        except tk.TclError:
+            # A valid ZIP/signature does not guarantee a decodable PNG.
+            # Repaint every image, including ones already recolored before
+            # the failure, so a theme switch cannot leave mixed colors.
+            assets = None
     if assets is None:
         assets = {}
         _draw_assets(assets.__setitem__)
+        for name, data in assets.items():
+            asset(name, data)
         _write_asset_cache(key, assets)
     _ASSET_CACHE[key] = assets
-    for name, data in assets.items():
-        asset(name, data)
 
     for suffix, _ in surfaces:
         element = CARD_ELEMENT if suffix else ""
