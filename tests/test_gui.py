@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import tkinter as tk
 import unittest
 import weakref
@@ -559,6 +560,7 @@ class GuiTests(unittest.TestCase):
         self.root.attributes("-alpha", 0)
         self.root.deiconify()
         self.app.show_connect()
+        self.app.toggle_manual_token()
         window = self.app.connect_window
         window.attributes("-alpha", 0)
         window.update()
@@ -931,6 +933,53 @@ class GuiTests(unittest.TestCase):
             self.app.start()
         self.assertTrue(error.called)
         thread.assert_not_called()
+
+    def test_browser_connection_runs_off_ui_thread_and_blocks_duplicate_actions(self):
+        self.app.show_connect()
+        self.assertFalse(self.app.manual_controls.winfo_manager())
+        with patch("xlikesaver.gui.threading.Thread") as thread:
+            self.app.connect_browser()
+            self.app.connect_browser()
+        thread.assert_called_once()
+        self.assertTrue(self.app.login_busy)
+        self.assertFalse(self.app.start())
+        with patch("xlikesaver.gui.save_auth_token") as save:
+            self.assertFalse(self.app.connect_token())
+        save.assert_not_called()
+        args = thread.call_args.kwargs["args"]
+        self.assertIs(args[0], self.app.events)
+        self.assertIsInstance(args[1], threading.Event)
+        with patch("xlikesaver.browser_login.sign_in") as sign_in:
+            thread.call_args.kwargs["target"](*args)
+        sign_in.assert_called_once_with(self.app.login_cancel)
+        self.session_mock.return_value = True
+        self.app._poll()
+        self.assertFalse(self.app.login_busy)
+        self.assertIsNone(self.app.connect_window)
+        self.assertIn("로그인을 연결", self.app.status.get())
+
+    def test_closing_login_popup_cancels_and_error_does_not_leak_exception(self):
+        self.app.show_connect()
+        with patch("xlikesaver.gui.threading.Thread"):
+            self.app.connect_browser()
+        cancel = self.app.login_cancel
+        self.app._close_connect()
+        self.assertTrue(cancel.is_set())
+        secret = "offline-secret-in-exception"
+        with patch("xlikesaver.browser_login.sign_in", side_effect=OSError(secret)):
+            App._browser_worker(self.app.events, cancel)
+        self.app._poll()
+        self.assertFalse(self.app.login_busy)
+        self.assertNotIn(secret, self.app.status.get())
+
+    def test_app_close_waits_for_login_cleanup(self):
+        self.app.login_busy = True
+        with patch.object(self.root, "destroy") as destroy, patch.object(self.root, "after") as after:
+            self.app.close()
+        destroy.assert_not_called()
+        self.assertTrue(self.app.login_cancel.is_set())
+        self.assertTrue(self.app.closing)
+        after.assert_called_once_with(150, self.app.close)
 
     def test_token_connection_masks_and_clears_input_without_launching_worker(self):
         self.app.saved, self.app.skipped = 7, 3

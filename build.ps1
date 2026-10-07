@@ -23,6 +23,7 @@ if (Test-Path -LiteralPath $target) {
 # A folder build starts in well under a second; a one-file exe unpacked about
 # 40MB to a temporary folder on every launch, including each save's worker.
 & $taskPython -m PyInstaller --noconfirm --clean --windowed --onedir --name $name `
+    --icon 'assets\icons\xlikesaver.ico' --add-data 'assets\icons;assets/icons' `
     --distpath release --workpath build\onedir `
     --collect-all gallery_dl --collect-binaries PIL --collect-data PIL --exclude-module imageio_ffmpeg `
     --copy-metadata pillow --copy-metadata requests --copy-metadata urllib3 `

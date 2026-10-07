@@ -232,6 +232,7 @@ class DeleteRecordTests(unittest.TestCase):
                 self.store.begin_deletion(*args)
         self.assertEqual(self.store.deletion_page()["total"], 0)
 
+    @patch("xlikesaver.history._now", new=lambda: "2026-10-08T00:00:00+00:00")
     def test_snapshot_merge_keeps_finished_journal_and_deleted_path(self):
         row = self.media()
         ident = self.begin(row)

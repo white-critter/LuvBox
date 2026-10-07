@@ -145,6 +145,39 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(sorted(actual[0], key=key), sorted(expected[0], key=key))
         self.assertEqual(actual[1:], expected[1:])
 
+    def test_author_samples_skip_deleted_files_without_truncating_available_samples(self):
+        for index in range(40):
+            path = self.file(f"{200 + index}_1.jpg")
+            self.store.record_media("flat", {"tweet_id": str(200 + index), "num": 1, "type": "photo",
+                                             "author": {"name": "alice"},
+                                             "date": datetime(2020, 1, 1, tzinfo=timezone.utc)}, path)
+            if index >= 4:
+                path.unlink()
+        self.assertEqual([row["tweet_id"] for row in self.store.author_samples("alice", 4)],
+                         ["203", "202", "201", "200"])
+
+    def test_author_samples_are_newest_present_files_once_each(self):
+        for index in range(12):
+            path = self.file(f"{100 + index}_1.jpg")
+            for mode in ("flat", "author") if index == 11 else ("flat",):
+                self.store.record_media(mode, {"tweet_id": str(100 + index), "num": 1, "type": "photo",
+                                               "author": {"name": "Alice"},
+                                               "date": datetime(2020, 1, 1 + index, tzinfo=timezone.utc)}, path)
+        with self.store._db:
+            self.store._db.execute("UPDATE media SET path='' WHERE tweet_id='110'")  # a deleted file
+        samples = self.store.author_samples("alice", 4)
+        self.assertEqual([row["tweet_id"] for row in samples], ["111", "109", "108", "107"])
+        self.assertEqual(self.store.author_samples("nobody"), [])
+        for bad in ("", "x" * 16, "bad name"):
+            with self.subTest(bad=bad), self.assertRaises(HistoryError):
+                self.store.author_samples(bad)
+        authors = [{"name": f"author{index:02d}"} for index in range(25)]
+        for index, author in enumerate(authors):
+            path = self.file(f"{500 + index}_1.jpg")
+            self.store.record_media("flat", {"tweet_id": str(500 + index), "num": 1, "type": "photo", "author": author}, path)
+        self.assertEqual(len(self.store.overview(verify_files=False)["stats"]["authors"]), 20)
+        self.assertEqual(len(self.store.overview(verify_files=False, top=None)["stats"]["authors"]), 26)
+
     def test_gif_without_a_kind_marker_imports_as_an_animation(self):
         self.file("100_1.gif", b"GIF89a" + b"offline-local-animation")
         self.store.import_legacy(refresh=True)

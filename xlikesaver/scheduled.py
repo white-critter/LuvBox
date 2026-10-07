@@ -242,6 +242,8 @@ def _notify_failure(outcome: dict) -> None:
         from . import dialogs, theme
         root = tk.Tk()
         root.withdraw()
+        from .app_icon import install
+        install(root)
         try:
             theme.apply(root, "dark" if load_settings().get("appearance") == "dark" else "light")
         except (OSError, ValueError, tk.TclError):

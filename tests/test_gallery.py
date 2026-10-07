@@ -297,5 +297,74 @@ class GalleryLayoutTests(unittest.TestCase):
         self.assertEqual(changes, [(("2", "4"), "4")])
 
 
+    def pointer(self, key, dx=0, dy=0, state=0):
+        tile = self.grid.tiles[key]
+        return SimpleNamespace(x_root=tile.winfo_rootx() + tile.winfo_width() // 2 + dx,
+                               y_root=tile.winfo_rooty() + tile.winfo_height() // 2 + dy, state=state)
+
+    def drag(self, start, end, state=0, start_key=None):
+        self.grid._press(start, start_key)
+        self.grid._drag_motion(end)
+        boxed = [frame.winfo_manager() for frame in self.grid._band]
+        self.grid._release_drag(end)
+        return boxed
+
+    def test_drag_box_selects_every_touched_tile_across_rows(self):
+        self.grid.show([(str(index), {"author": "offline"}) for index in range(12)], set)
+        self.root.update()
+        self.assertEqual(self.grid.columns, 6)
+        changes = []
+        self.grid.on_selection = lambda keys, focus: changes.append(keys)
+        boxed = self.drag(self.pointer("1"), self.pointer("8"), start_key="1")
+        self.assertEqual(boxed, ["place"] * 4)  # the box is drawn while dragging
+        self.assertEqual(self.grid.selected_keys, ("1", "2", "7", "8"))
+        self.assertEqual(changes[-1], ("1", "2", "7", "8"))
+        self.assertTrue(all(not frame.winfo_manager() for frame in self.grid._band))
+        self.assertTrue(self.grid.tiles["7"].cget("text").startswith("✓ "))
+        self.assertFalse(self.grid.tiles["3"].cget("text").startswith("✓ "))
+
+    def test_small_moves_click_and_empty_space_clears_but_control_drag_adds(self):
+        self.selection_rows()
+        self.drag(self.pointer("0"), self.pointer("0", dx=3), start_key="0")
+        self.assertEqual(self.grid.selected_keys, ("0",))
+        empty = SimpleNamespace(x_root=self.grid.canvas.winfo_rootx() + 5,
+                                y_root=self.grid.canvas.winfo_rooty() + self.grid.canvas.winfo_height() - 5, state=0)
+        self.grid._press(empty, None)
+        self.grid._release_drag(empty)
+        self.assertEqual(self.grid.selected_keys, ())
+        self.click("5")
+        self.drag(self.pointer("1", state=0x0004), self.pointer("2", state=0x0004), start_key="1")
+        self.assertEqual(self.grid.selected_keys, ("1", "2", "5"))
+
+    def test_select_several_mode_adds_and_removes_with_plain_clicks(self):
+        self.selection_rows()
+        self.grid.toggle_mode = True
+        self.click("1")
+        self.click("3")
+        self.assertEqual(self.grid.selected_keys, ("1", "3"))
+        self.click("1")
+        self.assertEqual(self.grid.selected_keys, ("3",))
+        self.assertTrue(self.grid.tiles["3"].cget("text").startswith("✓ @offline"))
+        self.drag(self.pointer("4"), self.pointer("5"), start_key="4")
+        self.assertEqual(self.grid.selected_keys, ("3", "4", "5"))
+
+    def test_dragging_past_the_edge_scrolls_and_keeps_extending(self):
+        self.root.geometry("1050x220")
+        self.grid.show([(str(index), {"author": "offline"}) for index in range(60)], set)
+        self.root.update()
+        start = self.pointer("0")
+        self.grid._press(start, "0")
+        below = SimpleNamespace(x_root=start.x_root, y_root=self.grid.canvas.winfo_rooty() + self.grid.canvas.winfo_height() + 30,
+                                state=0)
+        self.grid._drag_motion(below)
+        self.assertIsNotNone(self.grid._drag_scroll)
+        first, chosen = self.grid.canvas.yview()[0], len(self.grid.selected_keys)
+        for _ in range(10):
+            self.grid._scroll_drag()
+        self.assertGreater(self.grid.canvas.yview()[0], first)
+        self.assertGreater(len(self.grid.selected_keys), chosen)  # rows scrolled into the box join it
+        self.grid._release_drag(below)
+        self.assertIsNone(self.grid._drag_scroll)
+
 if __name__ == "__main__":
     unittest.main()

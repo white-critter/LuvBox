@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from contextlib import closing
+from datetime import datetime, timezone
 import json
 import gc
 import queue
@@ -352,6 +353,221 @@ class HistoryGuiTests(unittest.TestCase):
         with patch("xlikesaver.history_gui.threading.Thread"):
             self.window.change_page_size()  # view-only loads reuse totals and are not measured
         self.assertIsNone(self.window._load_started)
+
+    def test_table_drag_selects_a_range_and_select_several_toggles_rows(self):
+        self.records(6)
+        self.load()
+        tree = self.window.tree
+        rows = list(tree.get_children())
+        event = lambda y, state=0: SimpleNamespace(x=5, y=y, state=state)
+        with patch.object(tree, "identify_region", return_value="cell"), \
+                patch.object(tree, "identify_row", side_effect=lambda y: rows[y // 10]):
+            self.assertIsNone(self.window._tree_press(event(10)))  # Tk's own click then selects it
+            tree.selection_set(rows[1])
+            self.assertEqual(self.window._tree_motion(event(40)), "break")
+            self.assertEqual(tree.selection(), tuple(rows[1:5]))
+            self.window._tree_release()
+            self.window.toggle_select_several()
+            self.assertEqual(self.window.toggle_button.cget("text"), "여러 개 선택 끝내기")
+            self.assertTrue(self.window.grid_view.toggle_mode)
+            self.assertEqual(self.window._tree_press(event(0)), "break")
+            self.assertEqual(set(tree.selection()), {rows[0], *rows[1:5]})
+            self.assertEqual(self.window._tree_press(event(20)), "break")
+            self.assertNotIn(rows[2], tree.selection())
+            self.window._tree_release()
+        self.window.clear_file_selection()
+        self.assertEqual(tree.selection(), ())
+        self.assertEqual(str(self.window.file_clear_button.cget("state")), "disabled")
+
+    def test_switching_sample_author_clears_previous_images_and_ignores_late_results(self):
+        self.records(2)
+        self.load()
+        self.window.stats_authors = {"0": {"author": "alice"}, "1": {"author": "bob"}}
+        self.window.author_tree.delete(*self.window.author_tree.get_children())
+        for key in self.window.stats_authors:
+            self.window.author_tree.insert("", "end", iid=key)
+        self.window._sample_author = "alice"
+        self.window.sample_rows = {"0": {"author": "alice"}}
+        self.window.sample_view.show(list(self.window.sample_rows.items()), set)
+        old_token = self.window._sample_token
+        self.window.author_tree.selection_set("1")
+        with patch("xlikesaver.history_gui.threading.Thread"):
+            self.window._show_author_samples()
+        self.assertEqual(self.window.sample_rows, {})
+        self.assertEqual(self.window.sample_view.order, [])
+        self.window._sample_results.put((old_token, "alice", [{"author": "alice"}]))
+        self.window._poll_samples()
+        self.assertEqual(self.window.sample_rows, {})
+        self.assertIn("@bob", self.window.sample_text.get())
+
+    def test_statistics_list_every_author_with_search_and_recent_samples(self):
+        store = HistoryStore(self.account)
+        self.addCleanup(store.close)
+        for index in range(25):
+            path = self.account / f"{200 + index}_1.jpg"
+            path.write_bytes(b"offline-image")
+            store.record_media("flat", {"tweet_id": str(200 + index), "num": 1, "type": "photo",
+                                        "author": {"name": f"artist{index:02d}"}}, path)
+        for index in range(10):
+            path = self.account / f"{300 + index}_1.jpg"
+            path.write_bytes(b"offline-image")
+            store.record_media("flat", {"tweet_id": str(300 + index), "num": 1, "type": "photo",
+                                        "author": {"name": "alice"},
+                                        "date": datetime(2020, 1, 1 + index, tzinfo=timezone.utc)}, path)
+        self.load()
+        self.assertEqual(len(self.window.author_tree.get_children()), 26)  # more than the old top 20
+        self.window.author_query.set("ARTIST0")
+        self.assertEqual(len(self.window.author_tree.get_children()), 10)
+        self.window.author_query.set("alice")
+        [key] = self.window.author_tree.get_children()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.author_tree.selection_set(key)
+            self.window._show_author_samples()
+        self.window._samples_worker(self.window._sample_results, *thread.call_args.kwargs["args"])
+        self.window._poll_samples()
+        self.assertEqual(len(self.window.sample_view.tiles), 8)
+        newest = [row["tweet_id"] for row in self.window.sample_rows.values()]
+        self.assertEqual(newest, [str(309 - index) for index in range(8)])
+        self.assertIn("@alice", self.window.sample_text.get())
+        with patch("xlikesaver.history_gui.os.startfile") as start:
+            self.window._open_sample("0")
+        start.assert_called_once_with(str(self.account / "309_1.jpg"))
+
+    def test_repeated_author_selection_reuses_inflight_and_empty_result(self):
+        self.records()
+        self.load()
+        [key] = self.window.author_tree.get_children()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.author_tree.selection_set(key)
+            self.window._show_author_samples()
+            token = self.window._sample_token
+            self.window._show_author_samples()
+            thread.assert_called_once()
+            self.assertEqual(self.window._sample_token, token)
+            self.window._sample_results.put((token, "alice", []))
+            self.window._poll_samples()
+            self.window._show_author_samples()
+            thread.assert_called_once()
+            self.assertEqual(self.window._sample_token, token)
+
+    def test_context_menu_keeps_multiple_selection_and_targets_right_clicked_row(self):
+        self.records(3)
+        self.load()
+        keys = list(self.window.rows)
+        self.window.tree.selection_set(keys[:2])
+        event = SimpleNamespace(x=30,y=40,x_root=100,y_root=100)
+        with patch.object(self.window.tree,"identify_region",return_value="cell"), \
+                patch.object(self.window.tree,"identify_row",return_value=keys[1]), \
+                patch.object(self.window,"_post_context") as post:
+            self.window._tree_context(event,"files")
+        self.assertEqual(self.window.tree.selection(),tuple(keys[:2]))
+        self.assertEqual(self.window.tree.focus(),keys[1])
+        commands = {label:(callback,enabled) for label,callback,enabled in post.call_args.args[1]}
+        commands["선택한 파일 경로 복사"][0]()
+        self.assertEqual(set(self.window.clipboard_get().splitlines()),
+                         {self.window.rows[key]["path"] for key in keys[:2]})
+        with patch("xlikesaver.history_gui.webbrowser.open") as open_tweet:
+            commands["트윗 열기"][0]()
+        open_tweet.assert_called_once_with("https://x.com/i/web/status/"+self.window.rows[keys[1]]["tweet_id"])
+        self.assertTrue(commands["선택한 파일 삭제"][1])
+        self.window.is_downloading = lambda:True
+        commands = {label:enabled for label,_,enabled in self.window._file_menu_commands()}
+        self.assertFalse(commands["선택한 파일 삭제"])
+        with patch.object(self.window,"_post_context"):
+            self.window._gallery_context(event,keys[2])
+        self.assertEqual(self.window.tree.selection(),(keys[2],))
+
+    def test_context_menu_ignores_heading_and_uses_current_theme(self):
+        self.records()
+        self.load()
+        event = SimpleNamespace(x=30,y=4,x_root=100,y_root=100)
+        with patch.object(self.window.tree,"identify_region",return_value="heading"), \
+                patch.object(self.window,"_post_context") as post:
+            self.window._tree_context(event,"files")
+        post.assert_not_called()
+        with patch("tkinter.Menu.tk_popup"):
+            theme.apply(self.root,"dark")
+            self.window._post_context(event,[("실행",lambda:None,True),("사용 불가",lambda:None,False)])
+        self.assertEqual(str(self.window._context_menu.cget("background")),theme.DARK["CARD"])
+        self.assertEqual(self.window._context_menu.entrycget(1,"state"),"disabled")
+
+    def test_statistics_sample_context_keeps_original_author_and_media(self):
+        self.records()
+        self.load()
+        self.window._sample_author = "alice"
+        path = str(self.account / "100_1.jpg")
+        self.window.sample_rows = {"0":{"path":path,"tweet_id":"100"}}
+        event = SimpleNamespace(x_root=100,y_root=100)
+        with patch.object(self.window,"_post_context") as post:
+            self.window._sample_context(event,"0")
+        self.window._sample_author = "bob"
+        commands = {label:callback for label,callback,_ in post.call_args.args[1]}
+        with patch.object(self.window,"set_author") as author:
+            commands["이 작성자 파일 전체 보기"]()
+        author.assert_called_once_with("alice")
+        commands["파일 경로 복사"]()
+        self.assertEqual(self.window.clipboard_get(),path)
+
+    def test_missing_context_keeps_selection_and_opens_focused_tweet(self):
+        self.records()
+        self.load()
+        self.window.missing_rows = {"a":{"tweet_id":"101","ignored":False},
+                                    "b":{"tweet_id":"102","ignored":True}}
+        for key in self.window.missing_rows:
+            self.window.missing_tree.insert("", "end", iid=key)
+        self.window.missing_tree.selection_set(("a","b"))
+        self.window.is_downloading = lambda:True
+        event = SimpleNamespace(x=30,y=40,x_root=100,y_root=100)
+        with patch.object(self.window.missing_tree,"identify_region",return_value="cell"), \
+                patch.object(self.window.missing_tree,"identify_row",return_value="b"), \
+                patch.object(self.window,"_post_context") as post:
+            self.window._tree_context(event,"missing")
+        self.assertEqual(self.window.missing_tree.selection(),("a","b"))
+        commands = {label:(callback,enabled) for label,callback,enabled in post.call_args.args[1]}
+        for label in ("다시 받기","다시 받지 않기","숨김 해제"):
+            self.assertFalse(commands[label][1])
+        with patch("xlikesaver.history_gui.webbrowser.open") as open_tweet:
+            commands["트윗 열기"][0]()
+        open_tweet.assert_called_once_with("https://x.com/i/web/status/102")
+
+    def test_execution_and_deletion_context_copy_selected_details(self):
+        self.window._display({},[],[{"id":1,"message":"offline completed","status":"finished"}])
+        self.window.deletion_rows = {"0":{"tweet_id":"100","path":"offline.jpg","status":"done"}}
+        self.window.deletion_tree.insert("","end",iid="0")
+        event = SimpleNamespace(x=30,y=40,x_root=100,y_root=100)
+        for kind,tree,label,detail in (("runs",self.window.run_tree,"실행 기록 복사",self.window.run_text),
+                                       ("deletions",self.window.deletion_tree,"삭제 기록 복사",self.window.deletion_detail)):
+            with self.subTest(kind=kind), \
+                    patch.object(tree,"identify_region",return_value="cell"), \
+                    patch.object(tree,"identify_row",return_value="0"), \
+                    patch.object(self.window,"_post_context") as post:
+                self.window._tree_context(event,kind)
+            commands = {name:callback for name,callback,_ in post.call_args.args[1]}
+            commands[label]()
+            self.assertEqual(self.window.clipboard_get(),detail.get())
+
+    def test_files_tab_author_selector_narrows_the_list_and_applies_a_choice(self):
+        self.records(2)
+        self.load()
+        self.window.author_choice.set("al")
+        self.window._author_choices()
+        self.assertEqual(list(self.window.author_combo.cget("values")), ["작성자 전체", "@alice · 2개"])
+        self.window.author_choice.set("@alice · 2개")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window._choose_author()
+        self.assertEqual(thread.call_args.kwargs["args"][-3], "alice")
+        self.assertEqual(self.window.author_choice.get(), "@alice")
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.window.author_choice.set("작성자 전체")
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window._choose_author()
+        self.assertEqual(thread.call_args.kwargs["args"][-3], "")
+        self.window._load(*thread.call_args.kwargs["args"])
+        self.window._poll()
+        self.window.author_choice.set("not a handle!")
+        self.window._choose_author()
+        self.assertEqual(self.window.author_choice.get(), "작성자 전체")
 
     def test_pending_search_does_not_relabel_previous_page_results(self):
         self.records(105)
@@ -1101,15 +1317,14 @@ class HistoryGuiTests(unittest.TestCase):
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.filter_selected_author()
         self.assertEqual(thread.call_args.kwargs["args"][-3], "alice")
-        self.assertIn("@alice", self.window.author_chip.cget("text"))
-        self.assertTrue(self.window.author_chip.winfo_manager())
+        self.assertEqual(self.window.author_choice.get(), "@alice")
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual(str(self.window.author_button.cget("state")), "disabled")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.clear_author()
         self.assertEqual(thread.call_args.kwargs["args"][-3], "")
-        self.assertFalse(self.window.author_chip.winfo_manager())
+        self.assertEqual(self.window.author_choice.get(), "작성자 전체")
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         # Statistics tab: ranking, opening an author, and the monthly chart.

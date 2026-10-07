@@ -517,7 +517,11 @@ def _media_score(row: dict) -> tuple:
 
 def _merge_media(previous: dict, incoming: dict) -> dict:
     first, second = (incoming, previous) if _media_score(incoming) > _media_score(previous) else (previous, incoming)
-    latest = max((previous, incoming), key=lambda row: row.get("updated_at") or "")
+    # Older catalogs timestamp changes to the second. On a tie, an explicit
+    # removal must win over a stale path, regardless of merge direction. The
+    # present-file check below still preserves a real restored/alternate copy.
+    latest = max((previous, incoming), key=lambda row: (
+        row.get("updated_at") or "", bool(row.get("last_path") and not row.get("path"))))
     if (latest.get("last_path") and not latest.get("path")
             and not any(_media_score(row)[0] for row in (previous, incoming))):
         # An intentionally removed file has no present path. A stale snapshot

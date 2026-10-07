@@ -143,7 +143,7 @@ def make_contact_sheets(output, screenshots):
     groups = {
         "dashboard-default": ["dashboard-default-ready", "dashboard-default-running", "dashboard-default-error"],
         "dashboard": ["dashboard-ready", "dashboard-running", "dashboard-compact", "dashboard-compact-log", "dashboard-error"],
-        "connection-help": ["connect-token", "connect-file", "schedule", "schedule-off", "help"],
+        "connection-help": ["connect-browser", "connect-token", "connect-file", "schedule", "schedule-off", "help"],
         "settings": ["options-1", "options-2", "options-3"],
         "dialogs": ["dialog-confirm", "dialog-long"],
         "library-default": ["library-default-files", "library-maximized-files"],
@@ -408,6 +408,8 @@ class CaptureSession:
         session_mock.return_value = False
         app._auth_changed()
         app.show_connect()
+        self.capture(app.connect_window, f"connect-browser-{selected}")
+        app.toggle_manual_token()
         self.capture(app.connect_window, f"connect-token-{selected}")
         app.auth.set("cookies.txt 파일")
         self.capture(app.connect_window, f"connect-file-{selected}")
@@ -473,6 +475,9 @@ class CaptureSession:
         history.select_run()
         self.capture(history, f"library-runs-{selected}", "1200x860")
         history.tabs.select(2)
+        history.author_tree.selection_set(history.author_tree.get_children()[0])
+        history._show_author_samples()
+        self.settle(lambda: bool(history.sample_rows) and bool(history.sample_view.images), timeout=8)
         self.capture(history, f"library-stats-{selected}", "1200x860")
         self.capture(history, f"library-stats-compact-{selected}", "820x700")
         history.tabs.select(3)
@@ -644,6 +649,7 @@ def main():
                 if history is not None and history.winfo_exists():
                     history._preview_loader.close()
                     history.grid_view.release()
+                    history.sample_view.release()
                     history.destroy()
                     app.history_window = None
                 for thread in threading.enumerate():

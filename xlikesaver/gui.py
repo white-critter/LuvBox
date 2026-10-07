@@ -82,6 +82,10 @@ class App:
         y = max(0, (root.winfo_screenheight() - height - 80) // 2)
         root.geometry(f"{width}x{height}+{x}+{y}")
         root.minsize(min(780, width), min(620, height))
+        # On Windows iconbitmap creates the native wrapper. Request geometry
+        # first so a withdrawn window does not retain Tk's default 200x200 size.
+        from .app_icon import install
+        install(root)
         root.configure(bg=theme.BG)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.events: queue.Queue = queue.Queue()
@@ -99,6 +103,8 @@ class App:
         self.size_skipped = 0
         self.history_window = None
         self.connect_window = None
+        self.login_cancel = threading.Event()
+        self.login_busy = False
         self.options_window = None
         self.help_window = None
         self.schedule_window = None
@@ -194,6 +200,7 @@ class App:
 
     def _release_ui(self, event):
         if event.widget is self.root:
+            self.login_cancel.set()
             theme.release_variables(self)
             self.inputs.clear()
 
@@ -539,13 +546,18 @@ class App:
             if mode == "managed":
                 self.cookie_controls.pack_forget()
                 self.token_controls.pack(fill="x")
-                self.clear_button.configure(state="normal" if has_session() and not self.running else "disabled")
+                self.clear_button.configure(state="normal" if has_session() and not self.running and not self.login_busy else "disabled")
             else:
                 self.token_controls.pack_forget()
                 self.cookie_controls.pack(fill="x")
+            if mode != "managed":
+                self.login_cancel.set()
+            self.browser_button.configure(state="disabled" if self.login_busy else "normal")
+            self.token_button.configure(state="disabled" if self.login_busy else "normal")
+            self.browser_button.configure(text="로그인 기다리는 중…" if self.login_busy else "Edge에서 X 로그인")
 
     def show_connect(self, notice=""):
-        """Open the small login window (token or cookies.txt)."""
+        """Connect in a dedicated Edge window, or use a manual token/file."""
         window = self.connect_window
         if window is not None and window.winfo_exists():
             window.lift()
@@ -559,7 +571,7 @@ class App:
         heading = ttk.Frame(window, style="Plain.TFrame", padding=(28, 24, 28, 8))
         heading.pack(fill="x")
         ttk.Label(heading, text="X 로그인 연결", style="CardTitle.TLabel").pack(anchor="w")
-        self._wrapping_label(heading, text="로그인된 브라우저의 연결 정보를 이 PC에 저장합니다.",
+        self._wrapping_label(heading, text="Edge 창에서 로그인하면 자동으로 연결됩니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
         body = self._popup_content(window, padding=(28, 12, 28, 8))
         if notice:
@@ -567,18 +579,29 @@ class App:
         modes = ttk.Frame(body, style="Plain.TFrame")
         modes.pack(anchor="w", pady=(18, 16))
         for label in AUTH_MODES:
-            ttk.Radiobutton(modes, text=label, value=label, variable=self.auth).pack(anchor="w", pady=(0, 4))
+            ttk.Radiobutton(modes, text="브라우저 로그인 (권장)" if AUTH_MODES[label] == "managed" else label,
+                            value=label, variable=self.auth).pack(anchor="w", pady=(0, 4))
 
         self.token_controls = ttk.Frame(body, style="Plain.TFrame")
-        self._wrapping_label(self.token_controls, text=TOKEN_STEPS, style="Card.TLabel", wraplength=640).pack(fill="x")
-        row = ttk.Frame(self.token_controls, style="Plain.TFrame")
+        self.browser_button = ttk.Button(self.token_controls, text="Edge에서 X 로그인", style="DialogPrimary.TButton", command=self.connect_browser)
+        self.browser_button.pack(fill="x", pady=(0, 8))
+        self._wrapping_label(self.token_controls, text="열린 창에서 본인 계정에 로그인하세요. 연결되면 창이 자동으로 닫힙니다.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x")
+        self.browser_status = tk.StringVar(self.root)
+        self._wrapping_label(self.token_controls, textvariable=self.browser_status,
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
+        self.manual_button = ttk.Button(self.token_controls, text="토큰 직접 입력 ▾", style="Ghost.TButton", command=self.toggle_manual_token)
+        self.manual_button.pack(anchor="w", pady=(8, 0))
+        self.manual_controls = ttk.Frame(self.token_controls, style="Plain.TFrame")
+        self._wrapping_label(self.manual_controls, text=TOKEN_STEPS, style="Card.TLabel", width=1, wraplength=640).pack(fill="x")
+        row = ttk.Frame(self.manual_controls, style="Plain.TFrame")
         row.pack(fill="x", pady=(16, 8))
         self.token_entry = ttk.Entry(row, textvariable=self.token, show="●", width=1, font=theme.BODY)
         self.token_entry.pack(side="left", fill="x", expand=True)
         self.token_entry.bind("<Return>", lambda _: self._connect_from_window())
         self.token_button = ttk.Button(row, text="연결 저장", width=11, command=self._connect_from_window)
         self.token_button.pack(side="left", padx=(8, 0))
-        self._wrapping_label(self.token_controls, text="토큰은 이 PC의 Windows 계정에서만 열 수 있게 암호화해 저장합니다.\n비밀번호처럼 다루고 다른 사람에게 보내지 마세요.",
+        self._wrapping_label(self.token_controls, text="연결 정보는 이 Windows 계정에 암호화해 저장합니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x")
         self.clear_button = ttk.Button(self.token_controls, text="저장된 연결 지우기", command=self.disconnect)
         self.clear_button.pack(anchor="w", pady=(10, 0))
@@ -603,7 +626,52 @@ class App:
         window.bind("<Escape>", lambda _: self._close_connect())
         self._auth_changed()
         self._fit_popup(window)
-        (self.token_entry if AUTH_MODES[self.auth.get()] == "managed" else self.cookie_entry).focus_set()
+        (self.browser_button if AUTH_MODES[self.auth.get()] == "managed" else self.cookie_entry).focus_set()
+
+    def toggle_manual_token(self):
+        if self.manual_controls.winfo_manager():
+            self.manual_controls.pack_forget()
+            self.manual_button.configure(text="토큰 직접 입력 ▾")
+        else:
+            self.manual_controls.pack(fill="x", after=self.manual_button, pady=(12, 8))
+            self.manual_button.configure(text="토큰 직접 입력 ▴")
+            self.token_entry.focus_set()
+        self._fit_popup(self.connect_window)
+
+    def connect_browser(self):
+        if self.login_busy or self.running or self.closing:
+            return
+        self.login_cancel = threading.Event()
+        self.login_busy = True
+        self.browser_status.set("Edge 창에서 로그인해 주세요. 닫기를 누르면 취소합니다.")
+        self._auth_changed()
+        # The worker owns no Tk widgets or variables, including on shutdown.
+        threading.Thread(target=App._browser_worker, args=(self.events, self.login_cancel), daemon=True).start()
+
+    @staticmethod
+    def _browser_worker(events, cancel):
+        from .browser_login import sign_in, SignInError
+        message = ""
+        try:
+            sign_in(cancel)
+        except SignInError as exc:
+            message = str(exc)
+        except Exception:
+            message = "로그인 연결을 마치지 못했습니다. 다시 시도하거나 ‘토큰 직접 입력’을 사용해 주세요."
+        events.put({"type": "browser-login", "message": message})
+
+    def _browser_result(self, event):
+        self.login_busy = False
+        self._auth_changed()
+        message = event.get("message")
+        if message:
+            self.status.set(message)
+            if self.connect_window is not None and self.connect_window.winfo_exists():
+                self.browser_status.set(message)
+        else:
+            self.status.set("로그인을 연결했습니다")
+            self.status_detail.set("연결 정보 저장됨 · 이제 저장을 시작할 수 있습니다.")
+            self._close_connect()
 
     @staticmethod
     def _popup_content(window, *, padding):
@@ -629,6 +697,8 @@ class App:
         window.geometry(f"{width}x{height}")
 
     def _close_connect(self):
+        if self.login_busy:
+            self.login_cancel.set()
         window, self.connect_window = self.connect_window, None
         self.token.set("")
         if window is not None and window.winfo_exists():
@@ -639,7 +709,7 @@ class App:
             self._close_connect()
 
     def connect_token(self) -> bool:
-        if self.running:
+        if self.running or self.login_busy:
             return False
         try:
             save_auth_token(self.token.get())
@@ -658,7 +728,7 @@ class App:
         return True
 
     def disconnect(self):
-        if self.running:
+        if self.running or self.login_busy:
             return
         try:
             clear_session()
@@ -1026,9 +1096,11 @@ class App:
             "2. ‘로그인 연결’을 눌러 X 로그인을 연결합니다. 처음 한 번만 하면 됩니다.",
             "3. 저장할 폴더를 고르고 ‘저장 시작’을 누릅니다.",
         ), "이미 저장한 파일은 다음부터 자동으로 건너뜁니다."),
-        ("로그인 연결 방법", TOKEN_STEPS.replace("아래 칸에", "‘로그인 연결’ 창의 칸에").splitlines(),
-         "토큰은 이 PC에 암호화해 저장합니다. 비밀번호처럼 다루세요. 토큰이 만료되면 같은 방법으로 다시 연결합니다. "
-         "cookies.txt 파일로도 연결할 수 있습니다."),
+        ("로그인 연결 방법", (
+            "‘로그인 연결 → Edge에서 X 로그인’을 누릅니다.",
+            "열린 Edge 창에서 본인 계정에 로그인하면 자동 연결됩니다.",
+            "연결이 안 되면 ‘토큰 직접 입력’이나 cookies.txt 파일을 사용하세요.",
+        ), "연결 정보는 이 Windows 계정에 암호화해 저장합니다. 만료되면 다시 연결하세요."),
         ("저장 설정", (
             f"새 Like만 빠르게: 이미 저장한 파일이 {QUICK_STOP_AFTER}개 연속으로 나오면 멈춥니다. 평소에는 이것을 쓰세요.",
             "전체 다시 확인: 오래된 Like까지 처음부터 확인합니다. 오래 걸립니다.",
@@ -1041,6 +1113,8 @@ class App:
         ), None),
         ("기록 · 통계", (
             "현재 파일 수와 과거 저장 기록·실행 기록을 봅니다.",
+            "끌어서 고르거나 ‘여러 개 선택’을 켜고 하나씩 클릭하세요.",
+            "통계에서 작성자를 클릭하면 최근 게시물의 대표 이미지를 봅니다.",
             "파일을 고르면 썸네일이 보입니다. ‘파일 열기’나 ‘트윗 열기’로 원본을 확인하세요.",
             "예전 파일에 출처·작성자를 넣으려면 ‘출처·작성자 기록’을 누르세요.",
         ), "이 작업은 파일을 다시 쓰므로 Google Drive·OneDrive 폴더라면 파일이 다시 올라갈 수 있습니다."),
@@ -1189,7 +1263,7 @@ class App:
         from .scheduled import normal_time
         if self._options_editing():
             return
-        if self.schedule_busy or self.running:
+        if self.schedule_busy or self.running or self.login_busy:
             return
         if self.relocating:
             self._storage_action = "schedule"
@@ -1388,6 +1462,9 @@ class App:
         return self.start(targets=tuple(targets))
 
     def start(self, targets=()):
+        if self.login_busy:
+            self.status.set("로그인 연결이 끝난 뒤 저장을 시작해 주세요")
+            return False
         if self._options_editing():
             return False
         if self.relocating:
@@ -1403,7 +1480,7 @@ class App:
                 return False
         if AUTH_MODES[self.auth.get()] == "managed" and not has_session():
             self.status.set("먼저 X 로그인을 연결해 주세요")
-            self.status_detail.set("열린 창의 안내대로 auth_token을 붙여 넣으면 됩니다.")
+            self.status_detail.set("‘Edge에서 X 로그인’을 누르고 본인 계정에 로그인하세요.")
             self.show_connect("저장하려면 먼저 X 로그인을 연결해야 합니다.")
             return False
         try:
@@ -1545,7 +1622,9 @@ class App:
             except queue.Empty:
                 break
             kind = event.get("type")
-            if kind == "storage-finished":
+            if kind == "browser-login":
+                self._browser_result(event)
+            elif kind == "storage-finished":
                 self._finish_relocation(event)
                 if self.closing:
                     return
@@ -1642,7 +1721,12 @@ class App:
             window.metadata_active or window.choice_active or window.delete_active or window.repair_active))
 
     def close(self):
-        if self.relocating:
+        if self.login_busy:
+            self.closing = True
+            self.login_cancel.set()
+            self.status.set("로그인 창을 정리한 뒤 종료합니다…")
+            self.root.after(150, self.close)
+        elif self.relocating:
             self.closing = True
             self.status.set("기록 이전을 마친 뒤 종료합니다…")
         elif self.running:

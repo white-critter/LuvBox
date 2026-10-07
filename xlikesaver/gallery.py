@@ -2,7 +2,8 @@
 
 Thumbnails decode on a background thread (local files only, permission checked
 there against the catalog); Tk images are created and released on the UI
-thread. Selecting a tile selects the same record in the table.
+thread. Selecting a tile selects the same record in the table. Dragging draws
+a selection box; in 'select several' mode a plain click adds or removes a tile.
 """
 
 from __future__ import annotations
@@ -26,6 +27,8 @@ _GAP = 10
 _CACHE_SIZE = 240
 _SELECTED = "#e3eaff"           # theme maps this to the dark selection color
 _SELECTED_INK = "#314fbb"
+_DRAG_START = 6        # pixels the pointer moves before a press becomes a drag
+_CONTROL = 0x0004
 
 
 class _GridDecoder:
@@ -124,10 +127,11 @@ class _GridDecoder:
 
 
 class ThumbnailGrid(ttk.Frame):
-    def __init__(self, parent, *, on_select, on_open, on_selection=None):
+    def __init__(self, parent, *, on_select, on_open, on_selection=None, on_context=None):
         super().__init__(parent, style="Card.TFrame", padding=8)
         self.on_select, self.on_open = on_select, on_open
         self.on_selection = on_selection
+        self.on_context = on_context
         self.canvas = tk.Canvas(self, background=theme.CARD, highlightthickness=0, borderwidth=0, width=1, height=1)
         self.scrollbar = ttk.Scrollbar(self, command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
@@ -154,9 +158,17 @@ class ThumbnailGrid(ttk.Frame):
         self._decoder = _GridDecoder(self._results)
         self._token = 0
         self._released = False
+        # 'Select several' mode: a plain click adds or removes one tile.
+        self.toggle_mode = False
+        self._drag = None
+        self._drag_scroll = None
+        self._unavailable = set()
+        # Tk cannot overlay a translucent rectangle, so the box is four lines.
+        self._band = [tk.Frame(self.inner, width=1, height=1, background=theme.BLUE) for _ in range(4)]
         self.canvas.bind("<Configure>", lambda _: self._layout())
         for widget in (self.canvas, self.inner, self.empty):
             widget.bind("<MouseWheel>", self._wheel)
+            self._bind_pointer(widget, None)
 
     # -------------------------------------------------------------- contents
     def show(self, rows, permitted, *, empty_text="표시할 파일이 없습니다."):
@@ -164,6 +176,9 @@ class ThumbnailGrid(ttk.Frame):
         the decoding thread and returns the subset that may be read."""
         if self._released:
             return
+        if self._drag is not None:
+            self._drag = None
+            self._release_drag(None)
         self._token += 1
         order = [key for key, _ in rows]
         paths = {key: row.get("path") for key, row in rows}
@@ -173,6 +188,7 @@ class ThumbnailGrid(ttk.Frame):
                 self.images.pop(key, None)
                 self._source_images.pop(key, None)
                 self._captions.pop(key, None)
+                self._unavailable.discard(key)
         relayout = order != self.order or len(self.tiles) != len(rows)
         self.order = order
         self._paths = paths
@@ -187,14 +203,14 @@ class ThumbnailGrid(ttk.Frame):
                 tile = tk.Label(self.inner, image=self.placeholder, text=caption, compound="top",
                                 background=theme.CARD, foreground=theme.INK, font=theme.SMALL, justify="center",
                                 wraplength=TILE[0], padx=4, pady=4, cursor="hand2", takefocus=True)
-                tile.bind("<Button-1>", lambda event, key=key: self._click(event, key))
+                self._bind_pointer(tile, key)
                 tile.bind("<Double-1>", lambda _, key=key: self.on_open(key))
                 tile.bind("<MouseWheel>", self._wheel)
                 self.tiles[key] = tile
+                self._captions[key] = caption
             elif caption != self._captions[key]:
-                unavailable = key in self._source_images and self._source_images[key] is None
-                self.tiles[key].configure(text=f"{author}\n미리보기 없음" if unavailable else caption)
-            self._captions[key] = caption
+                self._captions[key] = caption
+                self.tiles[key].configure(text=self._tile_text(key))
             if row.get("path"):
                 jobs.append((key, row["path"]))
         self.empty.configure(text="" if rows else empty_text)
@@ -222,11 +238,13 @@ class ThumbnailGrid(ttk.Frame):
                 continue
             self._source_images[key] = image
             if image is None:
-                tile.configure(image=self.placeholder, text=self._captions[key].split("\n")[0] + "\n미리보기 없음")
+                self._unavailable.add(key)
+                tile.configure(image=self.placeholder, text=self._tile_text(key))
                 self.images.pop(key, None)
                 continue
+            self._unavailable.discard(key)
             self.images[key] = ImageTk.PhotoImage(image, master=self)
-            tile.configure(image=self.images[key], text=self._captions[key])
+            tile.configure(image=self.images[key], text=self._tile_text(key))
 
     # ------------------------------------------------------------- selection
     def select(self, key):
@@ -258,16 +276,30 @@ class ThumbnailGrid(ttk.Frame):
                 self.tiles[key].configure(
                     background=theme._tone(_SELECTED) if chosen else theme.CARD,
                     foreground=theme._tone(_SELECTED_INK) if chosen else theme.INK,
+                    text=self._tile_text(key),
                 )
         if scroll:
             self._scroll_selected()
+
+    def _tile_text(self, key):
+        """The caption; a check mark makes each chosen tile obvious."""
+        author, _, day = self._captions.get(key, "").partition("\n")
+        second = "미리보기 없음" if key in self._unavailable else day
+        return ("✓ " if key in self.selected_keys else "") + author + "\n" + second
+
+    def _notify(self, key=None):
+        if self.on_selection is not None:
+            self.on_selection(self.selected_keys, self.selected)
+        elif self.on_select is not None and key is not None:
+            self.on_select(key)
 
     def _click(self, event, key):
         if self._released or key not in self.tiles:
             return "break"
         # Let window-level Delete/Ctrl+A shortcuts work from the gallery too.
         self.tiles[key].focus_set()
-        shift, control = bool(event.state & 0x0001), bool(event.state & 0x0004)
+        shift = bool(event.state & 0x0001)
+        control = bool(event.state & _CONTROL) or self.toggle_mode
         chosen = set(self.selected_keys)
         if shift:
             anchor = self._anchor if self._anchor in self.tiles else self.selected or key
@@ -285,10 +317,99 @@ class ThumbnailGrid(ttk.Frame):
             chosen = {key}
             self._anchor = key
         self.select_many(chosen, focus=key, _preserve_anchor=True)
-        if self.on_selection is not None:
-            self.on_selection(self.selected_keys, self.selected)
-        elif self.on_select is not None:
-            self.on_select(key)
+        self._notify(key)
+        return "break"
+
+    # ------------------------------------------------------------ drag box
+    def _bind_pointer(self, widget, key):
+        widget.bind("<ButtonPress-1>", lambda event: self._press(event, key))
+        widget.bind("<B1-Motion>", self._drag_motion)
+        widget.bind("<ButtonRelease-1>", self._release_drag)
+        if self.on_context is not None and key is not None:
+            widget.bind("<Button-3>", lambda event: self.on_context(event, key))
+
+    def _inner_point(self, x_root, y_root):
+        # Content coordinates: they stay put while the view scrolls.
+        return x_root - self.inner.winfo_rootx(), y_root - self.inner.winfo_rooty()
+
+    def _press(self, event, key):
+        if self._released:
+            return "break"
+        adding = bool(event.state & _CONTROL) or self.toggle_mode
+        self._drag = {"origin": self._inner_point(event.x_root, event.y_root), "root": (event.x_root, event.y_root),
+                      "moved": False, "key": key, "base": set(self.selected_keys) if adding else set()}
+        if key is None:
+            self.canvas.focus_set()
+            return "break"
+        return self._click(event, key)
+
+    def _drag_motion(self, event):
+        drag = self._drag
+        if drag is None or self._released:
+            return "break"
+        drag["root"] = (event.x_root, event.y_root)
+        if not drag["moved"]:
+            x, y = self._inner_point(event.x_root, event.y_root)
+            if abs(x - drag["origin"][0]) < _DRAG_START and abs(y - drag["origin"][1]) < _DRAG_START:
+                return "break"
+            drag["moved"] = True
+        self._update_band()
+        top = self.canvas.winfo_rooty()
+        direction = -1 if event.y_root < top else 1 if event.y_root > top + self.canvas.winfo_height() else 0
+        drag["scroll"] = direction
+        if direction and self._drag_scroll is None:
+            self._drag_scroll = self.after(60, self._scroll_drag)
+        return "break"
+
+    def _scroll_drag(self):
+        self._drag_scroll = None
+        drag = self._drag
+        if drag is None or not drag.get("scroll") or self._released:
+            return
+        self.canvas.yview_scroll(drag["scroll"], "units")
+        self.canvas.update_idletasks()
+        self._update_band()
+        self._drag_scroll = self.after(60, self._scroll_drag)
+
+    def _update_band(self):
+        drag = self._drag
+        width, height = self.inner.winfo_width(), self.inner.winfo_height()
+        x, y = self._inner_point(*drag["root"])
+        (x0, x1), (y0, y1) = sorted((drag["origin"][0], x)), sorted((drag["origin"][1], y))
+        x0, x1 = max(0, x0), min(width, x1)
+        y0, y1 = max(0, y0), min(height, y1)
+        span_x, span_y = max(2, x1 - x0), max(2, y1 - y0)
+        for frame, place in zip(self._band, ((x0, y0, span_x, 2), (x0, y1 - 2, span_x, 2),
+                                             (x0, y0, 2, span_y), (x1 - 2, y0, 2, span_y))):
+            frame.configure(background=theme.BLUE)
+            frame.place(x=place[0], y=place[1], width=place[2], height=place[3])
+            frame.lift()
+        hits = set()
+        for key in self.order:
+            tile = self.tiles.get(key)
+            if (tile is not None and tile.winfo_x() < x1 and x0 < tile.winfo_x() + tile.winfo_width()
+                    and tile.winfo_y() < y1 and y0 < tile.winfo_y() + tile.winfo_height()):
+                hits.add(key)
+        chosen = drag["base"] | hits
+        if chosen != set(self.selected_keys):
+            focus = self.selected if self.selected in chosen else next((key for key in self.order if key in hits), None)
+            self.select_many(chosen, focus=focus, scroll=False, _preserve_anchor=True)
+            self._notify(focus)
+
+    def _release_drag(self, event):
+        drag, self._drag = self._drag, None
+        if self._drag_scroll is not None:
+            self.after_cancel(self._drag_scroll)
+            self._drag_scroll = None
+        for frame in self._band:
+            frame.place_forget()
+        if drag is None or self._released:
+            return "break"
+        if (not drag["moved"] and drag["key"] is None and not event.state & _CONTROL
+                and not self.toggle_mode and self.selected_keys):
+            # A click on empty space clears the selection, as in Explorer.
+            self.select_many((), scroll=False)
+            self._notify()
         return "break"
 
     def _scroll_selected(self):
@@ -339,6 +460,11 @@ class ThumbnailGrid(ttk.Frame):
             return
         self._released = True
         self._token += 1
+        self._drag = None
+        if self._drag_scroll is not None:
+            self.after_cancel(self._drag_scroll)
+            self._drag_scroll = None
+        self._unavailable.clear()
         self._decoder.close()
         self.images.clear()
         self._source_images.clear()

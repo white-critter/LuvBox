@@ -1,5 +1,15 @@
 # 개발·문제 해결 안내
 
+## 2.4.0 아이콘·우클릭·Edge 로그인
+
+`app_icon.install`은 메인 창과 새 Toplevel의 Windows 아이콘을 설정합니다. `assets/icons`는 실행 파일 리소스와 런타임에 모두 포함됩니다. PNG에서 ICO 재생성은 `tools/build_icon.py`로 합니다.
+
+우클릭 메뉴는 기존 버튼의 사용 가능 상태와 함수를 재사용합니다. 파일 열기는 포커스 행, 여러 파일 작업은 기존 선택 전체를 대상으로 합니다. 통계의 대표 이미지 메뉴는 경로·트윗·작성자를 열 때의 값으로 고정합니다.
+
+Edge 전용 로그인은 비어 있는 loopback 포트를 골라 `/json/version`의 검증된 브라우저 WebSocket 주소를 사용합니다. 10초 뒤 X 로그인 문서가 비어 있고 입력 칸이 없으면 한 번 다시 불러옵니다. 별도 프로필에 속한 프로세스만 정리하고, 임시 프로필 경로를 강제로 덮어쓰는 정책은 실행 전에 확인합니다. 검토와 실제 화면 검증은 `review-2.4.0.md`에 기록했습니다.
+
+`_merge_media`는 갱신 시각이 같은 경우 명시적 삭제 상태를 최신 상태로 고릅니다. 두 기록 모두 실제 파일이 없을 때 삭제 전 경로를 채워 넣지 않으며, 실제로 존재하는 복원본이나 다른 위치의 사본은 우선합니다. 같은 초 안의 저장·삭제·반복 병합을 시각을 고정한 검사로 재현합니다.
+
 ## 2.2.2 라이브러리 속도
 
 - `HistoryWindow.refresh(view_only=True)`: 페이지·검색·종류·정렬·기간·작성자·페이지 크기 변경은 직전 `overview`(요약·통계·사라진 파일)를 worker에 넘겨 재사용하고, 목록·실행·삭제 기록 페이지만 다시 읽습니다. 새 위치, 폴더 재확인, 대기 중이던 새로고침, 작업 완료, 저장 중 자동 갱신, 새로고침 버튼은 언제나 다시 계산합니다.
@@ -60,11 +70,15 @@ worker는 gallery-dl의 비공개 함수 몇 개(`TwitterExtractor._extract_medi
 
 ## 로그인
 
-인증 토큰 연결과 Netscape cookies.txt 두 방법을 지원합니다. 일반 브라우저에서 정상 로그인된 본인 X 세션을 사용합니다.
+기본은 전용 Edge 창 로그인입니다(`browser_login.py`). 임시 사용자 프로필과 무작위 로컬 디버깅 포트를 사용하며 기존 브라우저 프로필은 열지 않습니다. X 로그인 후 `Storage.getCookies`에서 정상적인 x.com `auth_token`만 골라 기존 `save_auth_token`으로 DPAPI 저장합니다. 완료·취소·시간 초과 때 해당 창을 닫고 이번 시도의 임시 프로필만 정리합니다. 다른 앱 인스턴스의 임시 프로필은 지우지 않습니다. 강제 종료하면 임시 프로필이 남을 수 있습니다.
+
+GUI 작업 스레드는 Tk 객체를 보유하지 않고 queue로 결과만 전달합니다. 취소 후 worker 정리가 끝나기 전에는 다시 연결하거나 저장을 시작하지 않습니다. 앱을 닫아도 worker 정리를 기다립니다.
+
+토큰 직접 입력과 Netscape cookies.txt도 지원합니다. 일반 브라우저에서 정상 로그인된 본인 X 세션을 사용합니다.
 
 토큰은 X 탭에서 F12 → Application → Cookies → https://x.com → `auth_token`의 Value를 복사해 앱에 저장합니다. 토큰 이름이나 비밀번호를 입력하지 않습니다. 현재 Windows 사용자 범위로 DPAPI 암호화해 `%LOCALAPPDATA%/XlikeSaver/session.bin`에 저장합니다. 원문을 로그·설정·배포본에 넣지 않습니다. [Chrome 쿠키 화면](https://developer.chrome.com/docs/devtools/application/cookies/)
 
-cookies.txt는 Netscape 형식으로 X 사이트의 쿠키만 내보내 지정합니다. 이 파일은 암호화되지 않으므로 직접 보관해야 합니다. 자동 Chrome 연결과 브라우저 프로필 직접 읽기는 제공하지 않습니다. [gallery-dl 쿠키 안내](https://github.com/mikf/gallery-dl/blob/v1.32.15/README.rst#cookies)
+cookies.txt는 Netscape 형식으로 X 사이트의 쿠키만 내보내 지정합니다. 이 파일은 암호화되지 않으므로 직접 보관해야 합니다. 사용 중인 Chrome/Edge 프로필 직접 읽기는 제공하지 않습니다. [gallery-dl 쿠키 안내](https://github.com/mikf/gallery-dl/blob/v1.32.15/README.rst#cookies)
 
 ## 파일·기록
 

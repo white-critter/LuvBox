@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT))
 from xlikesaver import __version__  # noqa: E402
 
 SOURCE_FILES = (
+    "assets/icons/xlikesaver.png", "assets/icons/xlikesaver.ico", "assets/icons/README.md", "tools/build_icon.py",
     "entry.py", "setup.ps1", "build.ps1", "run.bat", "requirements.txt",
     "requirements-dev.txt", "requirements-lock.txt", "README.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "XlikeSaver.code-workspace",

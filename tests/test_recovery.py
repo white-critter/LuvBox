@@ -15,7 +15,7 @@ from xlikesaver.history_gui import HistoryWindow
 
 
 def damage_media_table(path: Path):
-    """Claim one extra cell on a media leaf page, as a broken write would.
+    """Add an unreadable cell to a leaf page, leaving real cells intact.
 
     SQLite then refuses the table, while every real row stays on its page.
     """
@@ -38,8 +38,17 @@ def damage_media_table(path: Path):
             leaves.append(number)
     target = (leaves[len(leaves) // 2] - 1) * size
     cells = int.from_bytes(data[target + 3:target + 5], "big")
+    offset = 8 + 2 * (cells + 1)
+    content = int.from_bytes(data[target + 5:target + 7], "big") or size
+    if content - offset < 6:
+        raise AssertionError("The corruption fixture needs six unused bytes")
+    # payload size 3, rowid 800, record header size 2, one-byte TEXT (serial 15),
+    # invalid UTF-8. SQL decoding fails, and page salvage skips just this fake
+    # cell. Pointing at the last row's data could accidentally produce a valid
+    # phantom SQL row depending on the path/timestamp bytes at the page end.
     data[target + 3:target + 5] = (cells + 1).to_bytes(2, "big")
-    data[target + 8 + 2 * cells:target + 10 + 2 * cells] = (size - 2).to_bytes(2, "big")
+    data[target + 8 + 2 * cells:target + 10 + 2 * cells] = offset.to_bytes(2, "big")
+    data[target + offset:target + offset + 6] = b"\x03\x86\x20\x02\x0f\xff"
     path.write_bytes(bytes(data))
 
 

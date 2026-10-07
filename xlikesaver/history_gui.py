@@ -20,7 +20,7 @@ from PIL import ImageTk
 
 from . import dialogs, theme
 from .charts import MonthlyBars
-from .gallery import ThumbnailGrid
+from .gallery import TILE, ThumbnailGrid
 from .history import CatalogDamaged, HistoryError, HistoryStore
 from .preview import PreviewLoader
 from .storage import MigrationError, OutputGuard, StoragePaths, publish_snapshot
@@ -48,6 +48,10 @@ SCAN_LABELS = {"quick": "새 Like만 빠르게 확인", "full": "전체 목록 �
 MISSING_HELP = ("저장한 뒤 지워진 파일입니다. 일부러 지운 파일은 ‘다시 받지 않기’로 숨기면 앞으로 저장할 때도 받지 않습니다. "
                 "실수로 사라진 파일은 골라서 ‘다시 받기’를 누르세요. 트윗마다 X 요청을 1번씩 10초 간격으로 보냅니다. "
                 "폴더 밖으로 옮긴 파일도 여기에 나오니 확인한 뒤 고르세요.")
+ALL_AUTHORS = "작성자 전체"
+FILE_HINT = "끌어서 고르거나 ‘여러 개 선택’을 켜고 클릭하세요."
+SAMPLE_HINT = "작성자를 고르면 최근 게시물 사진을 보여 드립니다."
+_HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
 DELETION_LABELS = {"pending": "처리 중", "recycled": "휴지통으로 보냄", "failed": "실패",
                    "cancelled": "취소됨", "interrupted": "중단된 처리"}
 
@@ -152,6 +156,15 @@ class HistoryWindow(tk.Toplevel):
         self.delete_active = False
         # A record repair replaces the catalog file; it is finished, never cut off.
         self.repair_active = False
+        # 'Select several' mode: a plain click adds or removes one file.
+        self.select_several = False
+        self._tree_drag = None
+        self._tree_scroll = None
+        self._sample_token = 0
+        self._sample_author = None
+        self._sample_results = queue.Queue()
+        self.sample_rows = {}
+        self._context_menu = None
         # How long the last full catalog load took; it paces refreshes during a save.
         self.last_load_seconds = 0.0
         self._load_started = None
@@ -194,7 +207,10 @@ class HistoryWindow(tk.Toplevel):
         self.status_text = tk.StringVar(self)
         self.table_note = tk.StringVar(self, value="기록을 불러오는 중…")
         self.selection_text = tk.StringVar(self, value=NO_SELECTION)
-        self.file_selection_text = tk.StringVar(self, value="여러 파일은 Ctrl·Shift로 선택하세요.")
+        self.file_selection_text = tk.StringVar(self, value=FILE_HINT)
+        self.author_choice = tk.StringVar(self, value=ALL_AUTHORS)
+        self.author_query = tk.StringVar(self)
+        self.sample_text = tk.StringVar(self, value=SAMPLE_HINT)
         self.media_filter = tk.StringVar(self, value="전체")
         self.query = tk.StringVar(self)
         self.order = tk.StringVar(self, value=ORDER_LABELS["saved"])
@@ -232,6 +248,9 @@ class HistoryWindow(tk.Toplevel):
         self.missing_note = tk.StringVar(self)
         self.show_ignored = tk.BooleanVar(self, value=False)
         self._build()
+        for kind, tree in (("files", self.tree), ("authors", self.author_tree), ("runs", self.run_tree),
+                           ("missing", self.missing_tree), ("deletions", self.deletion_tree)):
+            tree.bind("<Button-3>", lambda event, kind=kind: self._tree_context(event, kind))
         self.wrapping_labels = []
 
         widgets = list(self.winfo_children())
@@ -316,12 +335,16 @@ class HistoryWindow(tk.Toplevel):
                              state="readonly", width=9, font=theme.BODY)
         combo.pack(side="left")
         combo.bind("<<ComboboxSelected>>", lambda _: self.search())
+        # Type part of a handle and open the list to see only matching authors.
+        self.author_combo = ttk.Combobox(search, textvariable=self.author_choice, width=18, font=theme.BODY,
+                                         postcommand=self._author_choices)
+        self.author_combo.pack(side="left", padx=(8, 0))
+        self.author_combo.bind("<<ComboboxSelected>>", lambda _: self._choose_author())
+        self.author_combo.bind("<Return>", lambda _: self._choose_author())
         entry = ttk.Entry(search, textvariable=self.query, font=theme.BODY)
         entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
         entry.bind("<Return>", lambda _: self.search())
         self.search_entry = entry
-        # The chip lives in this row so keyboard focus and clearing stay obvious.
-        self.author_chip = ttk.Button(search, text="", style="CompactPrimary.TButton", command=self.clear_author)
         ttk.Button(search, text="검색", command=self.search).pack(side="left")
         views = ttk.Frame(search)
         views.pack(side="right", padx=(10, 0))
@@ -387,6 +410,9 @@ class HistoryWindow(tk.Toplevel):
             self.tree.heading(key, text=title)
             self.tree.column(key, width=width, minwidth=60, stretch=key == "filename")
         self.tree.bind("<<TreeviewSelect>>", self.select_record)
+        self.tree.bind("<ButtonPress-1>", self._tree_press)
+        self.tree.bind("<B1-Motion>", self._tree_motion)
+        self.tree.bind("<ButtonRelease-1>", self._tree_release)
         self.tree.bind("<Double-1>", lambda _: self.open_file())
         self.tree.bind("<Return>", lambda _: self.open_file())
         self._file_columns = columns
@@ -432,7 +458,7 @@ class HistoryWindow(tk.Toplevel):
         self.file_browser.bind("<Configure>", self._queue_pager_layout)
         self.grid_view = ThumbnailGrid(self.file_browser, on_select=self._select_key,
                                        on_open=lambda key: (self._select_key(key), self.open_file()),
-                                       on_selection=self._select_gallery)
+                                       on_selection=self._select_gallery, on_context=self._gallery_context)
         selection_bar = self.file_selection_bar = ttk.Frame(filters)
         selection_bar.pack(fill="x", pady=(10, 0))
         selection_bar.columnconfigure(0, weight=1)
@@ -441,9 +467,15 @@ class HistoryWindow(tk.Toplevel):
         self.file_selection_label.grid(row=0, column=0, sticky="w", padx=(0, 12))
         self.file_selection_actions = ttk.Frame(selection_bar)
         self.file_selection_actions.grid(row=0, column=1, sticky="e")
+        self.toggle_button = ttk.Button(self.file_selection_actions, text="여러 개 선택",
+                                        command=self.toggle_select_several, style="Compact.TButton")
+        self.toggle_button.pack(side="left")
+        self.file_clear_button = ttk.Button(self.file_selection_actions, text="선택 해제",
+                                            command=self.clear_file_selection, style="Compact.TButton")
+        self.file_clear_button.pack(side="left", padx=(8, 0))
         self.file_all_button = ttk.Button(self.file_selection_actions, text="이 페이지 모두 선택",
                                           command=self.select_all_files, style="Compact.TButton")
-        self.file_all_button.pack(side="left")
+        self.file_all_button.pack(side="left", padx=(8, 0))
         self.delete_button = ttk.Button(self.file_selection_actions, text="선택한 파일 삭제",
                                         command=self.start_deletion, style="Compact.TButton")
         self.delete_button.pack(side="left", padx=(8, 0))
@@ -489,13 +521,19 @@ class HistoryWindow(tk.Toplevel):
         ranking = self.ranking_card = ttk.Frame(stats, style="Card.TFrame", padding=(16, 14))
         ranking.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
         ranking.columnconfigure(0, weight=1)
-        ranking.rowconfigure(1, weight=1)
-        ttk.Label(ranking, text="많이 저장한 작성자", style="CardHeading.TLabel").grid(row=0, column=0, sticky="w")
+        ranking.rowconfigure(3, weight=1)
+        ranking_head = ttk.Frame(ranking, style="Plain.TFrame")
+        ranking_head.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Label(ranking_head, text="작성자", style="CardHeading.TLabel").pack(side="left")
+        author_search = ttk.Entry(ranking_head, textvariable=self.author_query, width=16, font=theme.SMALL)
+        author_search.pack(side="right")
+        ttk.Label(ranking_head, text="찾기", style="CardMuted.TLabel").pack(side="right", padx=(0, 6))
+        self.author_query.trace_add("write", lambda *_: self._fill_authors())
         author_columns = ("rank", "author", "files", "posts", "latest")
-        self.author_tree = ttk.Treeview(ranking, columns=author_columns, show="headings", height=6, selectmode="browse")
+        self.author_tree = ttk.Treeview(ranking, columns=author_columns, show="headings", height=4, selectmode="browse")
         for key, title, width in zip(author_columns, ("순위", "작성자", "파일", "트윗", "최근 게시일"), (42, 120, 52, 52, 90)):
             self.author_tree.heading(key, text=title)
-            sample = {"rank": "20", "author": "@daylight_art", "files": "100,000", "posts": "100,000", "latest": "2026-10-06"}[key]
+            sample = {"rank": "1,000", "author": "@daylight_art", "files": "100,000", "posts": "100,000", "latest": "2026-10-06"}[key]
             width = max(width, int(self.tk.call("font", "measure", theme.SMALL, sample)) + 20)
             self.author_tree.column(key, width=width, minwidth=40, stretch=key == "author",
                                     anchor="w" if key == "author" else "center")
@@ -506,8 +544,16 @@ class HistoryWindow(tk.Toplevel):
         self.author_tree.configure(yscrollcommand=ranking_scroll.set)
         self.author_tree.bind("<Double-1>", lambda _: self.show_ranked_author())
         self.author_tree.bind("<Return>", lambda _: self.show_ranked_author())
-        ttk.Button(ranking, text="이 작성자 파일 보기", style="Compact.TButton",
-                   command=self.show_ranked_author).grid(row=2, column=0, sticky="w")
+        self.author_tree.bind("<<TreeviewSelect>>", self._show_author_samples)
+        ttk.Label(ranking, textvariable=self.sample_text, style="CardMuted.TLabel").grid(
+            row=2, column=0, columnspan=2, sticky="w")
+        self.sample_view = ThumbnailGrid(ranking, on_select=lambda _key: None, on_open=self._open_sample,
+                                         on_context=self._sample_context)
+        # Keep a thumbnail row visible on short screens; scroll for all eight.
+        self.sample_view.canvas.configure(height=TILE[1] + 58)
+        self.sample_view.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(6, 10))
+        ttk.Button(ranking, text="이 작성자 파일 전체 보기", style="Compact.TButton",
+                   command=self.show_ranked_author).grid(row=4, column=0, sticky="w")
         months = self.months_card = ttk.Frame(stats, style="Card.TFrame", padding=(16, 14))
         months.grid(row=0, column=1, sticky="nsew")
         months.columnconfigure(0, weight=1)
@@ -1231,7 +1277,7 @@ class HistoryWindow(tk.Toplevel):
                 # Use one deduplicated catalog snapshot for all totals/charts.
                 # The rescan below verifies files in the background; paging
                 # must not trigger another whole-library filesystem scan.
-                current = store.overview(verify_files=False) if summary is None else dict(summary)
+                current = store.overview(verify_files=False, top=None) if summary is None else dict(summary)
                 current["warnings"] = warnings
                 current["deletion_paging"] = store.deletion_page(deletion_page, page_size)
                 files = store.record_page(page, page_size, kind, query, order=order, period=period, author=author,
@@ -1332,6 +1378,7 @@ class HistoryWindow(tk.Toplevel):
         except queue.Empty:
             pass
         self._poll_previews()
+        self._poll_samples()
         if self.view_mode == "grid":
             self.grid_view.poll()
         if self.winfo_exists():
@@ -1532,9 +1579,11 @@ class HistoryWindow(tk.Toplevel):
 
     def open_file(self):
         row = self.selected()
-        if not row:
-            return
-        path = Path(row["path"]) if row.get("path") else None
+        if row:
+            self._open_path(row.get("path"))
+
+    def _open_path(self, value):
+        path = Path(value) if value else None
         permitted = False
         if path is not None and self.current_storage is not None:
             try:
@@ -1941,10 +1990,13 @@ class HistoryWindow(tk.Toplevel):
     def destroy(self):
         if self._destroyed:
             return
+        self._tree_release()
+        self._sample_token += 1
         self._destroyed = True
         self.delete_stop.set()
         self._preview_loader.close()
         self.grid_view.release()
+        self.sample_view.release()
         self._preview_image = None
         self.selection_text.trace_remove("write", self._selection_trace)
         if self._pager_layout_timer is not None:
@@ -2053,11 +2105,89 @@ class HistoryWindow(tk.Toplevel):
         elif self.tree.selection():
             self.file_selection_text.set("선택한 기록에 파일 위치가 없습니다.")
         else:
-            self.file_selection_text.set("여러 파일은 Ctrl·Shift로 선택하세요.")
+            self.file_selection_text.set("클릭할 때마다 하나씩 고릅니다." if self.select_several else FILE_HINT)
         ready = not self.busy and self.current_storage is not None
         downloading = bool(self.is_downloading()) if self.is_downloading else False
         self.file_all_button.configure(state="normal" if ready and self.rows else "disabled")
+        self.file_clear_button.configure(state="normal" if self.tree.selection() else "disabled")
         self.delete_button.configure(state="normal" if ready and files and not downloading else "disabled")
+
+    def toggle_select_several(self):
+        """Mouse-only multiple selection: each click adds or removes a file."""
+        self.select_several = not self.select_several
+        self.grid_view.toggle_mode = self.select_several
+        self.toggle_button.configure(text="여러 개 선택 끝내기" if self.select_several else "여러 개 선택",
+                                     style="CompactPrimary.TButton" if self.select_several else "Compact.TButton")
+        self._update_file_actions()
+
+    def clear_file_selection(self):
+        self.tree.selection_set(())
+        self.select_record()
+
+    # A press in the table starts a range; dragging extends it to the row under
+    # the pointer, scrolling when the pointer leaves the table.
+    def _tree_press(self, event):
+        self._tree_release()
+        if event.state & 0x0001 or self.tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
+            return None
+        row = self.tree.identify_row(event.y)
+        if not row:
+            return None
+        adding = bool(event.state & 0x0004) or self.select_several
+        self._tree_drag = {"anchor": row, "current": row, "y": event.y, "moved": False,
+                           "base": set(self.tree.selection()) if adding else set()}
+        if self.select_several and not event.state & 0x0004:
+            self.tree.focus_set()
+            self.tree.selection_toggle(row)
+            self.tree.focus(row)
+            return "break"
+        return None
+
+    def _tree_motion(self, event):
+        drag = self._tree_drag
+        if drag is None:
+            return None
+        if not drag["moved"] and abs(event.y - drag["y"]) < 6:
+            return "break"
+        drag["moved"] = True
+        row = self.tree.identify_row(event.y)
+        if row:
+            drag["current"] = row
+        drag["scroll"] = -1 if event.y < 0 else 1 if event.y > self.tree.winfo_height() else 0
+        self._extend_tree_drag()
+        if drag["scroll"] and self._tree_scroll is None:
+            self._tree_scroll = self.after(60, self._scroll_tree_drag)
+        return "break"
+
+    def _scroll_tree_drag(self):
+        self._tree_scroll = None
+        drag = self._tree_drag
+        if drag is None or not drag.get("scroll") or self._destroyed:
+            return
+        self.tree.yview_scroll(drag["scroll"], "units")
+        self.tree.update_idletasks()
+        visible = [row for row in self.tree.get_children() if self.tree.bbox(row)]
+        if visible:
+            drag["current"] = visible[0] if drag["scroll"] < 0 else visible[-1]
+        self._extend_tree_drag()
+        self._tree_scroll = self.after(60, self._scroll_tree_drag)
+
+    def _extend_tree_drag(self):
+        drag = self._tree_drag
+        rows = self.tree.get_children()
+        if drag["anchor"] not in rows or drag["current"] not in rows:
+            return
+        first, last = sorted((rows.index(drag["anchor"]), rows.index(drag["current"])))
+        chosen = drag["base"] | set(rows[first:last + 1])
+        if chosen != set(self.tree.selection()):
+            self.tree.selection_set(tuple(row for row in rows if row in chosen))
+            self.tree.focus(drag["current"])
+
+    def _tree_release(self, _event=None):
+        self._tree_drag = None
+        if self._tree_scroll is not None:
+            self.after_cancel(self._tree_scroll)
+            self._tree_scroll = None
 
     def select_all_files(self, _=None):
         if not self.busy and self.rows:
@@ -2066,6 +2196,106 @@ class HistoryWindow(tk.Toplevel):
                 self.tree.focus(next(iter(self.rows)))
             self.select_record()
         return "break"
+
+    # ----------------------------------------------------------- context menus
+    def _tree_context(self, event, kind):
+        tree = {"files": self.tree, "authors": self.author_tree, "runs": self.run_tree,
+                "missing": self.missing_tree, "deletions": self.deletion_tree}[kind]
+        if tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
+            return "break"
+        key = tree.identify_row(event.y)
+        if not key:
+            return "break"
+        # Right-click on one of several chosen rows keeps the whole selection.
+        if key not in tree.selection():
+            tree.selection_set(key)
+        tree.focus(key)
+        tree.focus_set()
+        if kind == "files":
+            self._tree_release()
+            self.select_record()
+            commands = self._file_menu_commands()
+        elif kind == "authors":
+            self._show_author_samples()
+            row = self.stats_authors.get(key) or {}
+            handle = row.get("author") or ""
+            commands = [("이 작성자 파일 전체 보기", lambda: self.set_author(handle), bool(_HANDLE.fullmatch(handle))),
+                        ("작성자 아이디 복사", lambda: self._copy_text("@" + handle), bool(handle))]
+        elif kind == "missing":
+            self._update_missing_actions()
+            commands = [(label, callback, not button.instate(["disabled"])) for label, callback, button in (
+                ("트윗 열기", self.open_missing_tweet, self.missing_open_button),
+                ("다시 받기", self.retry_missing_files, self.retry_button),
+                ("다시 받지 않기", lambda: self.choose_missing(True), self.ignore_button),
+                ("숨김 해제", lambda: self.choose_missing(False), self.unignore_button),
+                ("이 페이지 모두 선택", self.select_all_missing, self.missing_all_button))]
+        elif kind == "deletions":
+            self.select_deletion()
+            commands = [("트윗 열기", self.open_deletion_tweet, not self.deletion_open_button.instate(["disabled"])),
+                        ("삭제 기록 복사", lambda: self._copy_text(self.deletion_detail.get()), True)]
+        else:
+            self.select_run()
+            commands = [("실행 기록 복사", lambda: self._copy_text(self.run_text.get()), True)]
+        return self._post_context(event, commands)
+
+    def _file_menu_commands(self):
+        self._update_file_actions()
+        self._update_author_button()
+        return [(label, callback, not button.instate(["disabled"]) and
+                 (label != "선택한 파일 경로 복사" or bool(self._selected_files()))) for label, callback, button in (
+            ("파일 열기", self.open_file, self.open_file_button),
+            ("트윗 열기", self.open_tweet, self.open_tweet_button),
+            ("이 작성자 파일 보기", self.filter_selected_author, self.author_button),
+            ("선택한 파일 경로 복사", self._copy_file_paths, self.file_clear_button),
+            ("이 페이지 모두 선택", self.select_all_files, self.file_all_button),
+            ("선택 해제", self.clear_file_selection, self.file_clear_button),
+            ("선택한 파일 삭제", self.start_deletion, self.delete_button))]
+
+    def _gallery_context(self, event, key):
+        if key not in self.rows:
+            return "break"
+        if key not in self.tree.selection():
+            self.tree.selection_set(key)
+        self.tree.focus(key)
+        self.select_record()
+        return self._post_context(event, self._file_menu_commands())
+
+    def _sample_context(self, event, key):
+        row = self.sample_rows.get(key)
+        if row is None:
+            return "break"
+        self.sample_view.select(key)
+        # Snapshot this row; a later author selection must not change the target.
+        value, tweet, author = row.get("path"), str(row.get("tweet_id") or ""), self._sample_author or ""
+        return self._post_context(event, [
+            ("파일 열기", lambda: self._open_path(value), bool(value)),
+            ("트윗 열기", lambda: webbrowser.open(f"https://x.com/i/web/status/{tweet}"), tweet.isdigit()),
+            ("파일 경로 복사", lambda: self._copy_text(value), bool(value)),
+            ("이 작성자 파일 전체 보기", lambda: self.set_author(author), bool(_HANDLE.fullmatch(author)))])
+
+    def _post_context(self, event, commands):
+        if self._context_menu is not None:
+            self._context_menu.destroy()
+        palette = theme.DARK if theme.mode(self) == "dark" else theme.LIGHT
+        menu = self._context_menu = tk.Menu(self, tearoff=False, font=theme.SMALL,
+                                            background=palette["CARD"], foreground=palette["INK"],
+                                            activebackground=palette["BLUE"], activeforeground=palette["PRIMARY_INK"],
+                                            disabledforeground=palette["DISABLED"])
+        for label, callback, enabled in commands:
+            menu.add_command(label=label, command=callback, state="normal" if enabled else "disabled")
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def _copy_text(self, value):
+        if value:
+            self.clipboard_clear()
+            self.clipboard_append(str(value))
+
+    def _copy_file_paths(self):
+        self._copy_text("\n".join(row["path"] for row in self._selected_files()))
 
     def _file_select_all_key(self, event):
         if self.tabs.index("current") != 0 or event.widget.winfo_class() in {
@@ -2178,16 +2408,37 @@ class HistoryWindow(tk.Toplevel):
     def set_author(self, handle):
         """List only this author's files (exact handle, any letter case)."""
         self.author_filter = handle
-        self.author_chip.configure(text=f"@{handle} 만 보는 중 ✕")
-        if not self.author_chip.winfo_manager():
-            self.author_chip.pack(side="left", padx=(8, 0), before=self.search_entry)
+        self.author_choice.set("@" + handle)
         self.tabs.select(0)
         self.search()
 
     def clear_author(self):
         self.author_filter = ""
-        self.author_chip.pack_forget()
+        self.author_choice.set(ALL_AUTHORS)
         self.search()
+
+    def _author_choices(self):
+        """Fill the author list, narrowed to the text typed so far."""
+        typed = self.author_choice.get().strip().lstrip("@").lower()
+        if typed == ALL_AUTHORS.lower() or " · " in typed:
+            typed = ""
+        values = [f"@{row['author']} · {row['files']:,}개" for row in self.stats.get("authors", [])
+                  if _HANDLE.fullmatch(row["author"]) and typed in row["author"].lower()]
+        self.author_combo.configure(values=[ALL_AUTHORS, *values])
+
+    def _choose_author(self):
+        value = self.author_choice.get().strip()
+        handle = value.split(" · ")[0].strip().lstrip("@")
+        if not handle or value == ALL_AUTHORS:
+            if self.author_filter:
+                self.clear_author()
+            else:
+                self.author_choice.set(ALL_AUTHORS)
+        elif _HANDLE.fullmatch(handle):
+            self.set_author(handle)
+        else:
+            self.author_choice.set("@" + self.author_filter if self.author_filter else ALL_AUTHORS)
+            self.status_text.set("작성자 아이디는 영문·숫자·밑줄로 입력해 주세요.")
 
     def show_ranked_author(self):
         selection = self.author_tree.selection()
@@ -2196,19 +2447,97 @@ class HistoryWindow(tk.Toplevel):
             self.set_author(row["author"])
 
     def _show_stats(self, stats):
-        self.stats = stats
+        # A page or search change reuses the same statistics; listing every
+        # author again would only slow the page down.
+        if stats is not self.stats:
+            self.stats = stats
+            self._sample_token += 1
+            self._sample_author = None
+            self.sample_rows = {}
+            self.sample_view.show([], lambda paths: set(), empty_text="")
+            self._fill_authors()
+        self._draw_months()
+
+    def _fill_authors(self):
         selection = self.author_tree.selection()
         previous = self.stats_authors.get(selection[0], {}).get("author") if selection else None
+        typed = self.author_query.get().strip().lstrip("@").lower()
         self.author_tree.delete(*self.author_tree.get_children())
         self.stats_authors = {}
-        for index, row in enumerate(stats.get("authors", [])):
+        for index, row in enumerate(self.stats.get("authors", [])):
+            if typed and typed not in row["author"].lower():
+                continue
             key = str(index)
             self.stats_authors[key] = row
-            self.author_tree.insert("", "end", iid=key, values=(index + 1, "@" + row["author"], f"{row['files']:,}",
+            self.author_tree.insert("", "end", iid=key, values=(f"{index + 1:,}", "@" + row["author"], f"{row['files']:,}",
                                                                 f"{row['posts']:,}", format_day(row.get("latest"))))
             if previous and row["author"].lower() == previous.lower():
                 self.author_tree.selection_set(key)
-        self._draw_months()
+        if not self.author_tree.selection():
+            self._show_author_samples()
+
+    def _show_author_samples(self, _=None):
+        """Thumbnails of the selected author's newest tweets, loaded in the background."""
+        selection = self.author_tree.selection()
+        row = self.stats_authors.get(selection[0]) if selection else None
+        if row is not None and row["author"] == self._sample_author:
+            return  # Includes an in-flight request and a cached empty result.
+        self._sample_token += 1
+        if row is None or not _HANDLE.fullmatch(row["author"]) or self.current_storage is None:
+            self._sample_author = None
+            self.sample_rows = {}
+            self.sample_view.show([], lambda paths: set(), empty_text="")
+            self.sample_text.set(SAMPLE_HINT)
+            return
+        self._sample_author = row["author"]
+        self.sample_rows = {}
+        self.sample_view.show([], lambda paths: set(), empty_text="불러오는 중…")
+        self.sample_text.set(f"@{row['author']} · 최근 게시물을 불러오는 중…")
+        threading.Thread(target=partial(HistoryWindow._samples_worker, self._sample_results),
+                         args=(self._sample_token, self.current_storage, row["author"]), daemon=True).start()
+
+    @staticmethod
+    def _samples_worker(results, token, location, author):
+        store = None
+        try:
+            store = HistoryWindow._store(location)
+            results.put((token, author, store.author_samples(author, 8)))
+        except Exception:
+            results.put((token, author, None))
+        finally:
+            if store is not None:
+                store.close()
+
+    def _poll_samples(self):
+        while True:
+            try:
+                token, author, samples = self._sample_results.get_nowait()
+            except queue.Empty:
+                break
+            if token != self._sample_token:
+                continue
+            if samples is None:
+                self._sample_author = None
+                self.sample_text.set(f"@{author} · 사진을 불러오지 못했습니다.")
+                continue
+            self.sample_rows = {str(index): row for index, row in enumerate(samples)}
+            location = self.current_storage
+
+            def permitted(paths):
+                if location is None:
+                    return set()
+                with closing(HistoryWindow._store(location)) as store:
+                    return {path for path in paths if store.is_media_path(path)}
+
+            self.sample_view.show(list(self.sample_rows.items()), permitted, empty_text="저장된 파일이 없습니다.")
+            self.sample_text.set(f"@{author} · 최근 게시물 {len(samples)}개 · 두 번 클릭하면 열립니다"
+                                 if samples else f"@{author} · 지금 있는 파일이 없습니다.")
+        self.sample_view.poll()
+
+    def _open_sample(self, key):
+        row = self.sample_rows.get(key)
+        if row:
+            self._open_path(row.get("path"))
 
     def _draw_months(self):
         field = next(key for key, label in MONTH_FIELDS.items() if label == self.month_field.get())
@@ -2287,7 +2616,9 @@ class HistoryWindow(tk.Toplevel):
     def open_missing_tweet(self):
         items = self._missing_selection()
         if items:
-            webbrowser.open(f"https://x.com/i/web/status/{items[0]['tweet_id']}")
+            focused = self.missing_rows.get(self.missing_tree.focus())
+            item = focused if focused in items else items[0]
+            webbrowser.open(f"https://x.com/i/web/status/{item['tweet_id']}")
 
     def choose_missing(self, ignored):
         items = [item for item in self._missing_selection() if bool(item.get("ignored")) != ignored]

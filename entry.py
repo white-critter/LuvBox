@@ -53,6 +53,10 @@ def main() -> int:
             root = tk.Tk()
             root.withdraw()
             app = App(root)
+            from xlikesaver.app_icon import asset_directory, install
+            assert (asset_directory() / "xlikesaver.ico").is_file()
+            assert (asset_directory() / "xlikesaver.png").is_file()
+            assert install(root)
             root.update_idletasks()
             from xlikesaver import fonts, theme
             actual_font = tkfont.Font(root=root, font=theme.BODY).actual("family")
@@ -242,6 +246,7 @@ def main() -> int:
                 assert final["type"] == "finished" and final["status"] == "stopped"
                 assert final["saved"] == 0
             report = {"ok": True, "version": __version__, "gallery_dl": version.__version__,
+                      "icon": "transparent-multisize-default",
                       "font": actual_font, "record_pagination": "queried-and-clamped",
                       "appearance": "light-dark-live-switch", "theme_images": theme_images,
                       "local_previews": "photo-video-gif",

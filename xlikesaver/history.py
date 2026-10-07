@@ -1000,7 +1000,7 @@ class HistoryStore:
         return self._summary(*self._file_snapshot(verify_files=verify_files))
 
     @_safe
-    def overview(self, *, verify_files: bool = True, top: int = 20) -> dict:
+    def overview(self, *, verify_files: bool = True, top: int | None = 20) -> dict:
         """Summary, charts and missing files share one snapshot, even during downloads."""
         rows, files, matched, found = self._file_snapshot(verify_files=verify_files)
         result = self._summary(rows, files, matched, found)
@@ -1357,7 +1357,7 @@ class HistoryStore:
                 "updated_at=excluded.updated_at", rows)
 
     @_safe
-    def statistics(self, top: int = 20, *, verify_files: bool = True) -> dict:
+    def statistics(self, top: int | None = 20, *, verify_files: bool = True) -> dict:
         """Current files by author/month, plus independent historical Likes.
 
         Months are Korean-time YYYY-MM. 'liked' counts only Likes whose period
@@ -1366,8 +1366,9 @@ class HistoryStore:
         _, files, *_ = self._file_snapshot(verify_files=verify_files)
         return self._statistics(files, top)
 
-    def _statistics(self, files: list[dict], top: int) -> dict:
-        if isinstance(top, bool) or not isinstance(top, int) or top < 0:
+    def _statistics(self, files: list[dict], top: int | None) -> dict:
+        """``top`` limits the author ranking; None lists every author."""
+        if top is not None and (isinstance(top, bool) or not isinstance(top, int) or top < 0):
             raise HistoryError(_HISTORY_HELP)
         grouped = {}
         for row in files:
@@ -1387,7 +1388,26 @@ class HistoryStore:
         months["liked"] = sorted((month, count) for month, count in self._db.execute(
             "SELECT substr(liked_before,1,7),COUNT(*) FROM likes WHERE liked_after IS NOT NULL GROUP BY 1")
             if isinstance(month, str) and re.fullmatch(r"\d{4}-\d\d", month))
-        return {"authors": authors[:top], "months": months}
+        return {"authors": authors if top is None else authors[:top], "months": months}
+
+    @_safe
+    def author_samples(self, author: str, limit: int = 8) -> list[dict]:
+        """The author's files from their newest tweets, one row per file."""
+        if (not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author)
+                or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100):
+            raise HistoryError(_HISTORY_HELP)
+        samples, seen = [], set()
+        for row in self._db.execute(
+                "SELECT * FROM media WHERE author=? COLLATE NOCASE AND path!='' "
+                "ORDER BY COALESCE(posted_at,'') DESC,tweet_id DESC,num,folder_mode", (author,)):
+            key = self._file_key(row["path"])
+            path = self._media_path(row["path"])
+            if key not in seen and path is not None and path.is_file():
+                seen.add(key)
+                samples.append(dict(row))
+                if len(samples) == limit:
+                    break
+        return samples
 
     @_safe
     def close(self) -> None:
