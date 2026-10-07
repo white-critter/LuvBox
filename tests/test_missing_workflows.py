@@ -235,6 +235,16 @@ class RetryContextTests(unittest.TestCase):
         self.app.history_window.stop_metadata.assert_not_called()
         self.assertIn("기록 복구", self.app.status.get())
 
+    def test_save_refreshes_the_open_library_at_its_own_pace(self):
+        self.app.history_window = Mock(metadata_active=False, choice_active=False, delete_active=False,
+                                       repair_active=False)
+        self.app.history_window.winfo_exists.return_value = True
+        self.app.history_window.auto_refresh_delay.return_value = 4500
+        with patch.object(self.app.root, "after") as later:
+            self.app._schedule_history_refresh()
+            self.app._schedule_history_refresh()
+        later.assert_called_once_with(4500, self.app._refresh_history)
+
     def test_running_state_refreshes_missing_action_buttons(self):
         self.app.history_window = Mock(metadata_active=False, choice_active=False, delete_active=False, repair_active=False)
         self.app.history_window.winfo_exists.return_value = True

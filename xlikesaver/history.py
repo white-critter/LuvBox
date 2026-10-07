@@ -897,7 +897,8 @@ class HistoryStore:
             for key, group in groups.items():
                 # Prefer download metadata to guesses made from an archive or
                 # filename; newer metadata wins when an author changes names.
-                group.sort(key=priority, reverse=True)
+                if len(group) > 1:
+                    group.sort(key=priority, reverse=True)
                 if verify_files:
                     try:
                         path, size, _ = self._file(group[0]["path"])
@@ -921,6 +922,16 @@ class HistoryStore:
         found = set()
         for size, group in present.values():
             matched += len(group)
+            if len(group) == 1:
+                # Most files have one record, which already is its own merge
+                # below; skipping the general path halves a large library's load.
+                item = group[0]
+                found.add(_identity(item))
+                row = dict(item)
+                row["filesize"] = size
+                row["saved_at"] = item["saved_at"] or None
+                files.append(row)
+                continue
             found.update(_identity(item) for item in group)
             group.sort(key=priority, reverse=True)
             row = dict(group[0])
@@ -941,7 +952,13 @@ class HistoryStore:
         return files, matched, found
 
     def _file_snapshot(self, *, verify_files: bool) -> tuple[list[dict], list[dict], int, set]:
-        rows = [dict(row) for row in self._db.execute("SELECT * FROM media")]
+        # Plain tuples zipped with the column names convert a whole library
+        # noticeably faster than sqlite3.Row objects.
+        cursor = self._db.cursor()
+        cursor.row_factory = None
+        cursor.execute("SELECT * FROM media")
+        names = [column[0] for column in cursor.description]
+        rows = [dict(zip(names, values)) for values in cursor]
         files, matched, found = self._unique_files(rows, verify_files=verify_files)
         return rows, files, matched, found
 
@@ -1250,9 +1267,19 @@ class HistoryStore:
                 media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS):
             raise HistoryError(_HISTORY_HELP)
         where, params = self._record_filter(media_type, query, period, author, include_deleted)
+        # The keys include the whole primary key, so both sorts agree exactly.
+        order_by = " ORDER BY " + _ORDERS[order] + ",media.num,media.folder_mode,media.media_type"
+        # Choose the page by row id first and attach Like order and tweet text
+        # to those rows only. Sorting every joined row with its text took most
+        # of each page's time in a large library. Only Like order and a text
+        # search need the other tables while choosing.
+        source = _JOINED if query or order == "liked" else "media"
         rows = self._db.execute("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,"
-                                "tweets.content,tweets.hashtags FROM " + _JOINED + where +
-                                " ORDER BY " + _ORDERS[order] + ",media.num,media.folder_mode,media.media_type LIMIT ? OFFSET ?",
+                                "tweets.content,tweets.hashtags FROM (SELECT media.rowid AS chosen FROM " +
+                                source + where + order_by + " LIMIT ? OFFSET ?) AS page "
+                                "JOIN media ON media.rowid=page.chosen "
+                                "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
+                                "LEFT JOIN tweets ON tweets.tweet_id=media.tweet_id" + order_by,
                                 (*params, limit, offset))
         return [dict(row) for row in rows]
 
@@ -1267,7 +1294,8 @@ class HistoryStore:
     def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None,
                     author="", include_deleted=True) -> dict:
         where, params = self._record_filter(media_type, query, period, author, include_deleted)
-        return self._page(_JOINED + where, params, page, page_size,
+        # Only a text search reads tweets; the joins never change the count.
+        return self._page((_JOINED if query else "media") + where, params, page, page_size,
                           lambda limit, offset: self.records(limit, offset, media_type, query,
                                                              order=order, period=period, author=author,
                                                              include_deleted=include_deleted))
@@ -1350,9 +1378,12 @@ class HistoryStore:
                     "latest": max((row["posted_at"] for row in group if row["posted_at"]), default=None)}
                    for group in grouped.values()]
         authors.sort(key=lambda row: (-row["files"], -row["posts"], row["author"].lower()))
-        months = {name: sorted(Counter(row[field][:7] for row in files
-                                      if isinstance(row[field], str) and re.fullmatch(r"\d{4}-\d\d", row[field][:7])).items())
-                  for name, field in (("posted", "posted_at"), ("saved", "saved_at"))}
+        months = {}
+        for name, field in (("posted", "posted_at"), ("saved", "saved_at")):
+            counts = Counter(row[field][:7] for row in files if isinstance(row[field], str))
+            # Check each distinct month once instead of every file.
+            months[name] = sorted((month, count) for month, count in counts.items()
+                                  if re.fullmatch(r"\d{4}-\d\d", month))
         months["liked"] = sorted((month, count) for month, count in self._db.execute(
             "SELECT substr(liked_before,1,7),COUNT(*) FROM likes WHERE liked_after IS NOT NULL GROUP BY 1")
             if isinstance(month, str) and re.fullmatch(r"\d{4}-\d\d", month))

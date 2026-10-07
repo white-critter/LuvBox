@@ -474,7 +474,7 @@ class App:
     def _schedule_history_refresh(self):
         if not self.history_refresh_pending and self.history_window is not None and self.history_window.winfo_exists():
             self.history_refresh_pending = True
-            self.root.after(2000, self._refresh_history)
+            self.root.after(self.history_window.auto_refresh_delay(), self._refresh_history)
 
     def _update_counts(self):
         self.saved_text.set(f"{self.saved:,}개")

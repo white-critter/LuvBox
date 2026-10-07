@@ -317,6 +317,42 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.previous_button.cget("state")), "normal")
         self.assertEqual(str(self.window.next_button.cget("state")), "disabled")
 
+    def test_page_and_search_changes_reuse_catalog_totals_but_refresh_rebuilds_them(self):
+        self.records(105)
+        self.load()
+        tiles = self.window.tile_values["files"].get()
+        with patch.object(HistoryStore, "overview", side_effect=AssertionError("rebuilt")) as overview:
+            for change in (lambda: self.window.change_page(1),
+                           lambda: (self.window.query.set("104"), self.window.search()),
+                           lambda: self.window.change_page_size()):
+                with patch("xlikesaver.history_gui.threading.Thread") as thread:
+                    change()
+                self.window._load(*thread.call_args.kwargs["args"])
+                self.window._poll()
+            overview.assert_not_called()
+        self.assertEqual(self.window.page_text.get(), "기록 1개 · 1 / 1페이지")
+        self.assertEqual(self.window.tile_values["files"].get(), tiles)
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.refresh()
+        self.assertIsNone(thread.call_args.kwargs["args"][-1])  # data refresh: totals are rebuilt
+
+    def test_refreshes_during_a_save_are_paced_by_the_last_full_load(self):
+        self.records(3)
+        self.load()
+        self.assertEqual(self.window.auto_refresh_delay(), 2000)
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.refresh()  # a full load, e.g. a save's automatic refresh
+        with patch("xlikesaver.history_gui.time.monotonic", return_value=self.window._load_started + 1.5):
+            self.window._load(*thread.call_args.kwargs["args"])
+            self.window._poll()
+        self.assertAlmostEqual(self.window.last_load_seconds, 1.5)
+        self.assertEqual(self.window.auto_refresh_delay(), 4500)
+        self.window.last_load_seconds = 600
+        self.assertEqual(self.window.auto_refresh_delay(), 30000)
+        with patch("xlikesaver.history_gui.threading.Thread"):
+            self.window.change_page_size()  # view-only loads reuse totals and are not measured
+        self.assertIsNone(self.window._load_started)
+
     def test_pending_search_does_not_relabel_previous_page_results(self):
         self.records(105)
         self.load()
@@ -985,7 +1021,7 @@ class HistoryGuiTests(unittest.TestCase):
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.search()
         args = thread.call_args.kwargs["args"]
-        self.assertEqual(args[-4:-1], ("liked", None, ""))
+        self.assertEqual(args[-5:-2], ("liked", None, ""))
         self.window._load(*args)
         self.window._poll()
         self.assertEqual([self.window.rows[key]["tweet_id"] for key in self.window.tree.get_children()], ["101", "100", "102"])
@@ -998,7 +1034,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.period_to.set("20260901")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.search()
-        self.assertEqual(thread.call_args.kwargs["args"][-3], ("saved", "2026-09-01", "2026-09-02"))
+        self.assertEqual(thread.call_args.kwargs["args"][-4], ("saved", "2026-09-01", "2026-09-02"))
         self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("2026-09-01", "2026-09-02"))
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
@@ -1010,7 +1046,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertIn("연-월-일", self.window.status_text.get())
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.clear_period()
-        self.assertIsNone(thread.call_args.kwargs["args"][-3])
+        self.assertIsNone(thread.call_args.kwargs["args"][-4])
         self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("", ""))
 
     def test_grid_view_shows_page_thumbnails_and_follows_selection(self):
@@ -1064,7 +1100,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.author_button.cget("state")), "normal")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.filter_selected_author()
-        self.assertEqual(thread.call_args.kwargs["args"][-2], "alice")
+        self.assertEqual(thread.call_args.kwargs["args"][-3], "alice")
         self.assertIn("@alice", self.window.author_chip.cget("text"))
         self.assertTrue(self.window.author_chip.winfo_manager())
         self.window._load(*thread.call_args.kwargs["args"])
@@ -1072,7 +1108,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.author_button.cget("state")), "disabled")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.clear_author()
-        self.assertEqual(thread.call_args.kwargs["args"][-2], "")
+        self.assertEqual(thread.call_args.kwargs["args"][-3], "")
         self.assertFalse(self.window.author_chip.winfo_manager())
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
@@ -1082,7 +1118,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.author_tree.selection_set("0")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
             self.window.show_ranked_author()
-        self.assertEqual(thread.call_args.kwargs["args"][-2], "alice")
+        self.assertEqual(thread.call_args.kwargs["args"][-3], "alice")
         self.assertEqual(self.window.tabs.index("current"), 0)
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()

@@ -304,7 +304,7 @@ class DeleteGuiTests(unittest.TestCase):
             self.window.go_page(None, deletions=True)
         self.assertEqual(self.window.deletion_page, 1)
         self.assertEqual(self.window.page, 0)
-        refresh.assert_called_once_with()
+        refresh.assert_called_once_with(view_only=True)
         self.window._load(self.window.generation, self.account, "all", "", 0, False, deletion_page=1)
         self.window._poll()
         self.assertEqual(len(self.window.deletion_rows), 5)

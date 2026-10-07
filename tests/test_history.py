@@ -53,6 +53,98 @@ class HistoryTests(unittest.TestCase):
         with closing(HistoryStore(self.account)) as migrated:
             self.assertEqual(migrated.records()[0]["source_url"], "https://x.com/i/web/status/100")
 
+    def test_pages_match_one_sorted_joined_query_for_every_order_and_filter(self):
+        from xlikesaver.history import _JOINED, _ORDERS
+        for index in range(23):
+            tweet = str(1000 + index % 9)  # several media per tweet and layout
+            path = self.file(f"{tweet}_{index}.jpg")
+            for mode in ("flat", "author") if index % 4 == 0 else ("flat",):
+                self.store.record_media(mode, {"tweet_id": tweet, "num": index + 1, "type": "photo",
+                                               "author": {"name": "alice" if index % 2 else "bob"},
+                                               "date": datetime(2020, 1, 1 + index % 5, tzinfo=timezone.utc)}, path)
+        self.store.record_tweets([("1003", "고양이 사진", ["cat"]), ("1004", "강아지", [])])
+        with self.store._db:
+            self.store._db.execute("UPDATE media SET saved_at=NULL WHERE num % 3 = 0")  # ties and fallbacks
+            self.store._db.executemany("INSERT INTO likes VALUES (?,?,NULL,?)",
+                                       [("1001", 5.0, "x"), ("1002", 9.0, "x"), ("1005", 5.0, "x")])
+        cases = [dict(), dict(query="고양이"), dict(query="alice"), dict(media_type="video"),
+                 dict(author="BOB"), dict(period=("posted", "2020-01-02", "2020-01-03"))]
+        for order in _ORDERS:
+            for case in cases:
+                where, params = self.store._record_filter(case.get("media_type", "all"), case.get("query", ""),
+                                                          case.get("period"), case.get("author", ""))
+                expected = [dict(row) for row in self.store._db.execute(
+                    "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,tweets.hashtags "
+                    "FROM " + _JOINED + where + " ORDER BY " + _ORDERS[order] +
+                    ",media.num,media.folder_mode,media.media_type", params)]
+                count = self.store.record_page(0, 4, order=order, **case)["pages"]
+                pages = [self.store.record_page(page, 4, order=order, **case) for page in range(count)]
+                with self.subTest(order=order, case=case):
+                    self.assertEqual([row for page in pages for row in page["rows"]], expected)
+                    self.assertTrue(all(page["total"] == len(expected) for page in pages))
+                    self.assertEqual(bool(expected), case.get("media_type") != "video")  # no video fixtures
+
+    def test_file_view_fast_path_matches_the_general_merge(self):
+        import random
+        from xlikesaver.history import _identity
+
+        def reference(rows):
+            # The merge every group used before single-record files got a fast path.
+            def priority(row):
+                return (row["record_source"] in {"saved", "existing"}, row["updated_at"],
+                        row["folder_mode"], row["tweet_id"], row["num"])
+            groups = {}
+            for row in rows:
+                if row["path"]:
+                    groups.setdefault(self.store._file_key(row["path"]), []).append(row)
+            files, matched, found = [], 0, set()
+            for group in groups.values():
+                group = sorted(group, key=priority, reverse=True)
+                size = next((row["filesize"] for row in group if row["filesize"] is not None), None)
+                if size is None:
+                    continue
+                matched += len(group)
+                found.update(_identity(item) for item in group)
+                row = dict(group[0], filesize=size)
+                author = next((item for item in group if item["author"]), None)
+                if author:
+                    row["author"], row["author_id"] = author["author"], author["author_id"]
+                posted = next((item for item in group if item["posted_source"] == "metadata" and item["posted_at"]),
+                              next((item for item in group if item["posted_at"]), None))
+                if posted:
+                    row["posted_at"], row["posted_source"] = posted["posted_at"], posted["posted_source"]
+                saved = [item["saved_at"] for item in group if item["saved_at"]]
+                row["saved_at"] = min(saved) if saved else None
+                for field in ("metadata_status", "author_metadata_status"):
+                    if any(item[field] == "embedded" for item in group):
+                        row[field] = "embedded"
+                files.append(row)
+            return files, matched, found
+
+        generator = random.Random(7)
+        rows = []
+        for index in range(400):
+            shared = generator.random() < 0.3
+            name = f"{index % 60 if shared else 1000 + index}_1.jpg"
+            rows.append({
+                "folder_mode": generator.choice(["flat", "author", "date"]), "tweet_id": str(index % 60 if shared else 1000 + index),
+                "num": 1, "media_type": "photo", "author": generator.choice(["", "alice", "Bob"]),
+                "author_id": generator.choice(["", "42"]), "filename": name,
+                "posted_at": generator.choice([None, "", "2020-01-02T00:00:00+09:00", "2021-05-06T00:00:00+09:00"]),
+                "posted_source": generator.choice(["", "metadata", "id_estimate"]),
+                "saved_at": generator.choice([None, "", "2026-01-01T00:00:00+09:00", "2025-01-01T00:00:00+09:00"]),
+                "path": "" if generator.random() < 0.1 else str(self.account / (name.upper() if generator.random() < 0.2 else name)),
+                "filesize": generator.choice([None, 10, 20]), "status": "saved",
+                "record_source": generator.choice(["saved", "existing", "archive", "file_scan"]),
+                "updated_at": f"2026-01-0{generator.randint(1, 9)}", "source_url": "",
+                "metadata_status": generator.choice(["pending", "embedded"]),
+                "author_metadata_status": generator.choice(["pending", "embedded", "unknown"]), "last_path": ""})
+        expected = reference([dict(row) for row in rows])
+        actual = self.store._unique_files([dict(row) for row in rows], verify_files=False)
+        key = lambda row: (row["path"].lower(), row["folder_mode"], row["tweet_id"])
+        self.assertEqual(sorted(actual[0], key=key), sorted(expected[0], key=key))
+        self.assertEqual(actual[1:], expected[1:])
+
     def test_gif_without_a_kind_marker_imports_as_an_animation(self):
         self.file("100_1.gif", b"GIF89a" + b"offline-local-animation")
         self.store.import_legacy(refresh=True)

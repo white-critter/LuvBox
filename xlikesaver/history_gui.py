@@ -11,6 +11,7 @@ import queue
 import re
 import sqlite3
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, ttk
 import webbrowser
@@ -151,6 +152,9 @@ class HistoryWindow(tk.Toplevel):
         self.delete_active = False
         # A record repair replaces the catalog file; it is finished, never cut off.
         self.repair_active = False
+        # How long the last full catalog load took; it paces refreshes during a save.
+        self.last_load_seconds = 0.0
+        self._load_started = None
         self.delete_stop = threading.Event()
         self.metadata_stop = threading.Event()
         self.pending = False
@@ -1050,7 +1054,7 @@ class HistoryWindow(tk.Toplevel):
         self.filter_button.configure(text="기간 필터 닫기" if self._filter_open else
                                      "기간 필터 · 적용 중" if self.applied_period else "기간 필터")
         self.page = 0
-        self.refresh()
+        self.refresh(view_only=True)
 
     def clear_period(self):
         self.period_from.set("")
@@ -1059,11 +1063,11 @@ class HistoryWindow(tk.Toplevel):
         if self.applied_period is not None:
             self.applied_period = None
             self.page = 0
-            self.refresh()
+            self.refresh(view_only=True)
 
     def change_page_size(self):
         self.page = self.run_page = self.missing_page = self.deletion_page = 0
-        self.refresh()
+        self.refresh(view_only=True)
 
     def change_page(self, amount, *, runs=False, missing=False, deletions=False):
         current = self.deletion_page if deletions else self.missing_page if missing else self.run_page if runs else self.page
@@ -1076,7 +1080,7 @@ class HistoryWindow(tk.Toplevel):
             page = self.deletion_total_pages - 1 if page is None else min(max(0, page), self.deletion_total_pages - 1)
             if page != self.deletion_page:
                 self.deletion_page = page
-                self.refresh()
+                self.refresh(view_only=True)
             return
         if missing:
             if self.busy or not self.missing_total_pages:
@@ -1099,7 +1103,7 @@ class HistoryWindow(tk.Toplevel):
             self.run_page = page
         else:
             self.page = page
-        self.refresh()
+        self.refresh(view_only=True)
 
     def jump_page(self, *, runs=False, missing=False, deletions=False):
         value = self.deletion_page_input if deletions else self.missing_page_input if missing else self.run_page_input if runs else self.page_input
@@ -1133,7 +1137,14 @@ class HistoryWindow(tk.Toplevel):
             self.go_page(0 if event.keysym == "Home" else None, runs=runs, missing=missing, deletions=deletions)
         return "break"
 
-    def refresh(self, *, import_legacy=False):
+    def refresh(self, *, import_legacy=False, view_only=False):
+        """Load the catalog; ``view_only`` is a page, search or order change.
+
+        Only the shown records depend on those, so the catalog-wide totals,
+        charts and missing list of the last load are reused instead of being
+        rebuilt from every record (seconds in a large library). A deferred
+        refresh, a new location or a rescan always rebuilds them.
+        """
         if self.busy:
             self.pending = True
             self.pending_import = self.pending_import or import_legacy
@@ -1156,6 +1167,7 @@ class HistoryWindow(tk.Toplevel):
         location = directory
         directory = location.record_dir if isinstance(location, StoragePaths) else Path(location)
         if directory != self.current_account_dir:
+            view_only = False
             self.page = self.run_page = self.missing_page = self.deletion_page = 0
             self._delete_next_identity = None
             self._delete_select_first = False
@@ -1184,22 +1196,33 @@ class HistoryWindow(tk.Toplevel):
         if re.fullmatch(r"@[A-Za-z0-9_]{1,15}", query):
             query = query[1:]
         order = next(key for key, label in ORDER_LABELS.items() if label == self.order.get())
+        reuse = (dict(self.current_summary) if view_only and not do_import and "files" in self.current_summary
+                 and directory in self.loaded_locations else None)
+        self._load_started = time.monotonic() if reuse is None and not do_import else None
         threading.Thread(target=partial(HistoryWindow._load_worker, self.results), args=(generation, location, kind, query, self.page, do_import,
                                                  self._page_size(), self.run_page, order, self.applied_period,
-                                                 self.author_filter, self.deletion_page), daemon=True).start()
+                                                 self.author_filter, self.deletion_page, reuse), daemon=True).start()
+
+    def auto_refresh_delay(self) -> int:
+        """Milliseconds until a save's next automatic refresh.
+
+        Two seconds normally; a library that takes long to load is refreshed
+        less often so it is not rebuilt continuously during a long save.
+        """
+        return int(min(30.0, max(2.0, self.last_load_seconds * 3)) * 1000)
 
     @staticmethod
     def _store(location):
         return HistoryStore.for_storage(location) if isinstance(location, StoragePaths) else HistoryStore(location)
 
     def _load(self, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0,
-              order="saved", period=None, author="", deletion_page=0):
+              order="saved", period=None, author="", deletion_page=0, summary=None):
         return self._load_worker(self.results, generation, directory, kind, query, page, do_import, page_size, run_page,
-                                 order, period, author, deletion_page)
+                                 order, period, author, deletion_page, summary)
 
     @staticmethod
     def _load_worker(results, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0,
-                     order="saved", period=None, author="", deletion_page=0):
+                     order="saved", period=None, author="", deletion_page=0, summary=None):
         store = None
         try:
             store = HistoryWindow._store(directory)
@@ -1208,13 +1231,13 @@ class HistoryWindow(tk.Toplevel):
                 # Use one deduplicated catalog snapshot for all totals/charts.
                 # The rescan below verifies files in the background; paging
                 # must not trigger another whole-library filesystem scan.
-                summary = store.overview(verify_files=False)
-                summary["warnings"] = warnings
-                summary["deletion_paging"] = store.deletion_page(deletion_page, page_size)
+                current = store.overview(verify_files=False) if summary is None else dict(summary)
+                current["warnings"] = warnings
+                current["deletion_paging"] = store.deletion_page(deletion_page, page_size)
                 files = store.record_page(page, page_size, kind, query, order=order, period=period, author=author,
                                           include_deleted=False)
                 runs = store.run_page(run_page, page_size)
-                return store.account_dir, summary, files["rows"], runs["rows"], files["page"], files, runs
+                return store.account_dir, current, files["rows"], runs["rows"], files["page"], files, runs
 
             if do_import:
                 # Show what the catalog already holds at once. Re-checking every
@@ -1280,6 +1303,9 @@ class HistoryWindow(tk.Toplevel):
                 elif kind == "loaded":
                     directory, *snapshot = result
                     self.loaded_locations.add(directory)
+                    if self._load_started is not None:
+                        self.last_load_seconds = time.monotonic() - self._load_started
+                        self._load_started = None
                     if not self.pending:
                         self._display(*snapshot)
                 elif kind == "deleted":
