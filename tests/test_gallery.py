@@ -117,6 +117,29 @@ class GalleryDecoderTests(unittest.TestCase):
         self.assertIsNone(self.results.get(timeout=3)[2])
         self.assertIsNotNone(self.results.get(timeout=3)[2])
 
+    def test_failed_unchanged_file_retries_then_caches_success(self):
+        path = self.path("retry.jpg")
+        stamp = (Path(path).stat().st_size, Path(path).stat().st_mtime_ns)
+        for failure in (Thumbnail(None, "temporary failure"), OSError("temporarily busy")):
+            with self.subTest(failure=type(failure).__name__):
+                image = Image.new("RGB", (2, 2))
+                results = queue.Queue(maxsize=240)
+                with patch("xlikesaver.gallery.thumbnail", side_effect=[failure, Thumbnail(image, "ready")]) as decode:
+                    decoder = _GridDecoder(results, decoder=decode)
+                    try:
+                        decoder.request(1, [("one", path)], set)
+                        self.assertIsNone(results.get(timeout=3)[2])
+                        self.assertFalse(decoder.cache)
+                        decoder.request(2, [("one", path)], set)
+                        self.assertIs(results.get(timeout=3)[2], image)
+                        decoder.request(3, [("one", path)], set)
+                        self.assertIs(results.get(timeout=3)[2], image)
+                        self.assertEqual(decode.call_count, 2)
+                        self.assertEqual(len(decoder.cache), 1)
+                        self.assertEqual((Path(path).stat().st_size, Path(path).stat().st_mtime_ns), stamp)
+                    finally:
+                        self.stop(decoder)
+
 
 class GalleryLayoutTests(unittest.TestCase):
     def setUp(self):

@@ -93,6 +93,28 @@ def _publish(location):
             pass   # the next save writes it again
 
 
+def _finish_local_change(store, location, output_guards, account_guard):
+    """Finish local writes and release every lock before reporting completion."""
+    failed = False
+    if store is not None:
+        try:
+            store.close()
+            _publish(location)
+        except Exception:
+            failed = True
+    for guard in reversed(output_guards):
+        try:
+            guard.close()
+        except Exception:
+            failed = True
+    if account_guard is not None:
+        try:
+            account_guard.close()
+        except Exception:
+            failed = True
+    return not failed
+
+
 def liked_period(row: dict) -> str:
     """When the tweet was liked, as far as the app could tell.
 
@@ -1679,8 +1701,11 @@ class HistoryWindow(tk.Toplevel):
     @staticmethod
     def _repair_worker(results, generation, location):
         from .protection import AccountGuard, ProtectionError
-        from .recovery import RecoveryError, repair_history
+        from .recovery import repair_history
         account_guard = output_guard = None
+        kind = "damaged"
+        message = ("기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
+                   "저장 폴더 권한을 확인하고 다시 시도해 주세요.")
         try:
             record_dir = location.record_dir if isinstance(location, StoragePaths) else Path(location)
             account = location.account if isinstance(location, StoragePaths) else record_dir.name
@@ -1692,19 +1717,19 @@ class HistoryWindow(tk.Toplevel):
             result = repair_history(record_dir, account)
             _publish(location)
             counts = result["counts"]
-            results.put((generation, "repaired",
-                         f"기록 복구 완료 · 파일 기록 {counts.get('media', 0):,}개, 실행 기록 {counts.get('runs', 0):,}개를 살렸습니다. "
-                         f"손상된 원본은 {result['kept']}에 보관했습니다."))
+            message = (f"기록 복구 완료 · 파일 기록 {counts.get('media', 0):,}개, 실행 기록 {counts.get('runs', 0):,}개를 살렸습니다. "
+                       f"손상된 원본은 {result['kept']}에 보관했습니다.")
+            kind = "repaired"
         except ProtectionError as exc:
-            results.put((generation, "damaged", str(exc)))
-        except (RecoveryError, OSError, sqlite3.Error, HistoryError):
-            results.put((generation, "damaged", "기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
-                                                "저장 폴더 권한을 확인하고 다시 시도해 주세요."))
+            message = str(exc)
+        except Exception:
+            pass
         finally:
-            if output_guard is not None:
-                output_guard.close()
-            if account_guard is not None:
-                account_guard.close()
+            guards = [output_guard] if output_guard is not None else []
+            if not _finish_local_change(None, location, guards, account_guard):
+                kind = "damaged"
+                message = "기록 복구 정리를 마치지 못했습니다. 다른 실행 중인 작업과 기록 DB 접근 권한을 확인해 주세요."
+        results.put((generation, kind, message))
 
     def _start_local_job(self, stop_text, status):
         """Start one local file job (metadata or GIF conversion) at a time."""
@@ -1775,6 +1800,8 @@ class HistoryWindow(tk.Toplevel):
         output_guards = []
         converted = kept = failed = missing = 0
         recyclable = {}
+        kind = "error"
+        message = "GIF 변환을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."
 
         def report(state):
             return (f"{state} · 바꿈 {converted:,}개 / MP4로 둠 {kept:,}개 / "
@@ -1866,23 +1893,16 @@ class HistoryWindow(tk.Toplevel):
                     converted += 1
             state = "GIF 변환 중단" if stop.is_set() else "GIF 변환 끝"
             recycled = " 바꾼 파일의 원본 MP4는 휴지통에 있습니다." if converted else ""
-            results.put((generation, "converted", report(state) + "." + recycled + " X 요청은 보내지 않았습니다."))
+            kind, message = "converted", report(state) + "." + recycled + " X 요청은 보내지 않았습니다."
         except ProtectionError as exc:
-            results.put((generation, "error", str(exc)))
+            message = str(exc)
         except Exception:
-            results.put((generation, "error", "GIF 변환을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."))
+            pass
         finally:
-            try:
-                if store is not None:
-                    store.close()
-                    _publish(directory)
-            finally:
-                try:
-                    for guard in reversed(output_guards):
-                        guard.close()
-                finally:
-                    if account_guard is not None:
-                        account_guard.close()
+            if not _finish_local_change(store, directory, output_guards, account_guard):
+                kind = "error"
+                message = "GIF 변환 정리를 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."
+        results.put((generation, kind, message))
 
     def _backfill(self, generation, directory):
         return HistoryWindow._backfill_worker(self.results, self.metadata_stop, generation, directory)
@@ -1895,6 +1915,8 @@ class HistoryWindow(tk.Toplevel):
         account_guard = None
         output_guards = []
         success = failed = unavailable = 0
+        kind = "error"
+        message = "메타데이터 기록을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."
         try:
             if isinstance(directory, StoragePaths):
                 # This is a local operation: exclude account record relocation
@@ -1946,23 +1968,17 @@ class HistoryWindow(tk.Toplevel):
                         break
                     offset += len(rows)
             state = "중단" if metadata_stop.is_set() else "종료"
-            results.put((generation, "backfilled", f"출처·작성자 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개. X 요청은 보내지 않았습니다."))
+            kind = "backfilled"
+            message = f"출처·작성자 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개. X 요청은 보내지 않았습니다."
         except ProtectionError as exc:
-            results.put((generation, "error", str(exc)))
+            message = str(exc)
         except Exception:
-            results.put((generation, "error", "메타데이터 기록을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."))
+            pass
         finally:
-            try:
-                if store is not None:
-                    store.close()
-                    _publish(directory)
-            finally:
-                try:
-                    for guard in reversed(output_guards):
-                        guard.close()
-                finally:
-                    if account_guard is not None:
-                        account_guard.close()
+            if not _finish_local_change(store, directory, output_guards, account_guard):
+                kind = "error"
+                message = "메타데이터 기록 정리를 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."
+        results.put((generation, kind, message))
 
     def stop_metadata(self):
         if self.delete_active:

@@ -204,6 +204,66 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual([row["tweet_id"] for row in store.records()], ["99999"])
 
 
+class RecoverySchemaTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def catalog(self, name, tweets):
+        folder = self.root / name
+        with closing(HistoryStore(folder)) as store:
+            for tweet in tweets:
+                path = folder / f"{tweet}_1.jpg"
+                path.write_bytes(b"offline")
+                store.record_media("flat", {"tweet_id": tweet, "num": 1, "type": "photo"}, path)
+            return store.path
+
+    def test_older_backup_rows_use_defaults_and_current_duplicates_win(self):
+        current = self.catalog("current", ["100"])
+        fallback = self.catalog("old-backup", ["100", "200"])
+        with closing(HistoryStore(fallback.parent)) as store:
+            run = store.start_run("flat")
+            store.finish_run(run, "finished", saved=2)
+        with closing(sqlite3.connect(fallback)) as connection:
+            connection.execute("ALTER TABLE media DROP COLUMN last_path")
+            connection.execute("ALTER TABLE runs DROP COLUMN scan_mode")
+            connection.execute("ALTER TABLE runs DROP COLUMN media_signature")
+            connection.commit()
+        before = (current.read_bytes(), fallback.read_bytes())
+        rebuilt = self.root / "rebuilt.sqlite3"
+
+        result = recovery.rebuild_history(current, rebuilt, fallback=fallback)
+
+        self.assertEqual(result["counts"]["media"], 2)
+        self.assertEqual(result["counts"]["runs"], 1)
+        with closing(sqlite3.connect(rebuilt)) as connection:
+            rows = connection.execute("SELECT tweet_id,path,last_path FROM media ORDER BY tweet_id").fetchall()
+            self.assertEqual(rows, [("100", str(current.parent / "100_1.jpg"), ""),
+                                    ("200", str(fallback.parent / "200_1.jpg"), "")])
+            self.assertEqual(connection.execute("SELECT scan_mode,media_signature FROM runs").fetchall(),
+                             [("full", "")])
+        self.assertEqual(recovery._integrity(rebuilt), "ok")
+        self.assertEqual((current.read_bytes(), fallback.read_bytes()), before)
+
+    def test_absent_columns_use_defaults_but_corrupt_nulls_are_not_invented(self):
+        current = self.catalog("current", ["100", "200"])
+        tables = recovery.salvage(current)
+        for _, row in tables["media"]["rows"]:
+            if row["tweet_id"] == "100":
+                row["last_path"] = None
+            else:
+                # Older SQLite rows may lack trailing ALTER TABLE columns
+                # when the damaged table is recovered directly from pages.
+                del row["last_path"]
+        rebuilt = self.root / "rebuilt.sqlite3"
+        with patch("xlikesaver.recovery.salvage", return_value=tables):
+            result = recovery.rebuild_history(current, rebuilt)
+        self.assertEqual(result["counts"]["media"], 1)
+        with closing(sqlite3.connect(rebuilt)) as connection:
+            self.assertEqual(connection.execute("SELECT tweet_id,last_path FROM media").fetchall(), [("200", "")])
+
+
 class RecoveryRecordTests(unittest.TestCase):
     def test_truncated_numbers_are_rejected_instead_of_inventing_values(self):
         for serial, size in enumerate((1, 2, 3, 4, 6, 8, 8), start=1):

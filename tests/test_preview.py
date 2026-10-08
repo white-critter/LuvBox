@@ -162,6 +162,33 @@ class PreviewTests(unittest.TestCase):
         self.assertTrue(late.results.empty())
         self.assertFalse(late.cache)
 
+    def test_loader_retries_failed_unchanged_file_then_caches_success(self):
+        path = self.image()
+        stamp = (path.stat().st_size, path.stat().st_mtime_ns)
+        results = queue.Queue(maxsize=2)
+        ready = Thumbnail(Image.new("RGB", (10, 10)), "ready")
+        with patch("xlikesaver.preview.thumbnail", side_effect=[Thumbnail(None, "temporary failure"), ready]) as decode:
+            loader = PreviewLoader(results, decoder=decode)
+            try:
+                loader.request(1, path, lambda _: True)
+                _, result = results.get(timeout=3)
+                self.assertIsNone(result.image)
+                self.assertFalse(loader.cache)
+                loader.request(2, path, lambda _: True)
+                _, result = results.get(timeout=3)
+                self.assertIs(result, ready)
+                loader.request(3, path, lambda _: True)
+                _, result = results.get(timeout=3)
+                self.assertIs(result, ready)
+                self.assertEqual(decode.call_count, 2)
+                self.assertEqual(len(loader.cache), 1)
+                self.assertEqual((path.stat().st_size, path.stat().st_mtime_ns), stamp)
+            finally:
+                loader.close()
+                if loader.thread is not None:
+                    loader.thread.join(3)
+                    self.assertFalse(loader.thread.is_alive())
+
 
 if __name__ == "__main__":
     unittest.main()

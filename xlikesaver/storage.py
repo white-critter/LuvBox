@@ -410,6 +410,51 @@ def _available_databases(paths: StoragePaths) -> dict[str, Path]:
     return result
 
 
+def _merge_snapshot_copies(files: dict[str, Path], paths: StoragePaths, parent: Path):
+    """Include records received from another PC without changing live ledgers.
+
+    A folder change may happen before the next protected save imports a newly
+    synced snapshot. Merge those records into private copies before publishing
+    the destination, so an unreadable valid snapshot cannot be skipped after
+    the active catalog has already changed.
+    """
+    state = _snapshot_state(paths)
+    temporary = None
+    merged = dict(files)
+    try:
+        for name, original in files.items():
+            shared = paths.snapshot_dir / name
+            if (name == _LEGACY_SYNC or original == shared
+                    or not _legacy_source(shared, paths.output_dir)
+                    or state.get(name) == _file_state(shared)):
+                continue
+            if temporary is None:
+                temporary = tempfile.TemporaryDirectory(prefix=".snapshot-union-", dir=parent)
+            folder = Path(temporary.name)
+            incoming = folder / (name + ".incoming")
+            try:
+                try:
+                    _backup_database(shared, incoming)
+                except (MigrationError, sqlite3.Error) as error:
+                    damaged = isinstance(error, _DamagedDatabase) or (
+                        isinstance(error, sqlite3.DatabaseError) and
+                        (getattr(error, "sqlite_errorcode", 0) or 0) & 0xFF in {11, 26})
+                    if not damaged:
+                        raise
+                    continue  # only a confirmed corrupt shared copy may be skipped
+                copied = folder / name
+                _backup_database(original, copied)
+                _merge_database(name, copied, incoming)
+                merged[name] = copied
+            finally:
+                incoming.unlink(missing_ok=True)
+        return temporary, merged
+    except BaseException:
+        if temporary is not None:
+            temporary.cleanup()
+        raise
+
+
 def _integrity(db: sqlite3.Connection) -> None:
     if db.execute("PRAGMA integrity_check").fetchall() != [("ok",)]:
         raise _DamagedDatabase("기록 파일이 손상되어 옮기지 못했습니다. 이전 파일은 보존했습니다.")
@@ -717,6 +762,7 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
     stage = None
     old_catalog = None
     target_catalog = None
+    snapshot_copies = []
     try:
         account_guard = AccountGuard(source.account, sleep=time.sleep)
         account_guard.acquire(respect_cooldown=False)
@@ -731,6 +777,12 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
         _recover_relocation(destination, protected=True)
         old_files, target_files = _available_databases(source), _available_databases(destination)
         destination.record_dir.parent.mkdir(parents=True, exist_ok=True)
+        old_snapshot, old_files = _merge_snapshot_copies(old_files, source, destination.record_dir.parent)
+        if old_snapshot is not None:
+            snapshot_copies.append(old_snapshot)
+        target_snapshot, target_files = _merge_snapshot_copies(target_files, destination, destination.record_dir.parent)
+        if target_snapshot is not None:
+            snapshot_copies.append(target_snapshot)
         old_catalog, old_files = _archive_only_catalog(old_files, source, destination.record_dir.parent)
         target_catalog, target_files = _archive_only_catalog(target_files, destination, destination.record_dir.parent)
         stage = destination.record_dir.parent / (".relocate-" + destination.record_dir.name + "-" + uuid.uuid4().hex)
@@ -779,7 +831,7 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
         raise MigrationError(_MIGRATION_HELP) from None
     finally:
         try:
-            for catalog in (old_catalog, target_catalog):
+            for catalog in (old_catalog, target_catalog, *snapshot_copies):
                 if catalog is not None:
                     try:
                         catalog.cleanup()

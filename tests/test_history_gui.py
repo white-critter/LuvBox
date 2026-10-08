@@ -1,7 +1,7 @@
 """Local record window workflows without X requests or opening media apps."""
 
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, nullcontext
 from datetime import datetime, timezone
 import json
 import gc
@@ -14,7 +14,7 @@ from tkinter import ttk
 import threading
 import unittest
 import weakref
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 
 from PIL import Image
@@ -25,7 +25,7 @@ from xlikesaver.history_gui import HistoryWindow, NO_SELECTION, NO_RUN_SELECTION
 from xlikesaver.preview import PreviewLoader, Thumbnail
 from xlikesaver import theme
 from xlikesaver.protection import AccountGuard, ProtectionError
-from xlikesaver.storage import OutputGuard, resolve_storage
+from xlikesaver.storage import OutputGuard, StoragePaths, resolve_storage
 from tests.test_gui import destroy_tk, release_tk
 
 
@@ -1667,6 +1667,149 @@ class HistoryGuiTests(unittest.TestCase):
         row = store.records()[0]
         self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "error"))
         self.assertEqual(row["saved_at"], original["saved_at"])
+
+
+class LocalChangeWorkerTests(unittest.TestCase):
+    """Completion must let the UI close or start a save without a live writer."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        self.location = StoragePaths(root, root, root / "records", root / "legacy", "offline", False,
+                                     root / ".xlikesaver" / "offline")
+        self.store = Mock(media_roots=[root])
+        self.store.records.return_value = []
+        self.store.mp4_gif_records.return_value = []
+        self.store.reconcile_deletions.return_value = {"interrupted": 0}
+        self.account_guard, self.output_guard = Mock(), Mock()
+        patchers = [
+            patch("xlikesaver.history_gui.HistoryWindow._store", return_value=self.store),
+            patch("xlikesaver.protection.AccountGuard", return_value=self.account_guard),
+            patch("xlikesaver.history_gui.OutputGuard", return_value=self.output_guard),
+            patch("xlikesaver.metadata.persistent", side_effect=lambda: nullcontext()),
+            patch("xlikesaver.metadata.available", return_value=False),
+            patch("xlikesaver.recovery.repair_history", return_value={"counts": {}, "kept": root / "kept"}),
+            patch("xlikesaver.deletion.HistoryStore.for_storage", return_value=self.store),
+            patch("xlikesaver.deletion.OutputGuard", return_value=self.output_guard),
+            patch("xlikesaver.deletion.AccountGuard", return_value=self.account_guard),
+            patch("xlikesaver.deletion.backup_catalog", return_value=root / "backup"),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def worker(self, operation, results):
+        stop = threading.Event()
+        if operation == "backfilled":
+            HistoryWindow._backfill_worker(results, stop, 23, self.location)
+        elif operation == "converted":
+            HistoryWindow._convert_worker(results, stop, 23, self.location, "original", 200)
+        elif operation == "repaired":
+            HistoryWindow._repair_worker(results, 23, self.location)
+        else:
+            HistoryWindow._delete_worker(results, stop, 23, self.location, [], True)
+
+    def test_completion_waits_for_snapshot_and_releases_locks_before_queueing(self):
+        for operation in ("backfilled", "converted", "repaired", "deleted"):
+            with self.subTest(operation=operation):
+                self.store.reset_mock()
+                self.account_guard.reset_mock()
+                self.output_guard.reset_mock()
+                entered, release = threading.Event(), threading.Event()
+                errors, terminal_state = [], []
+                results = queue.Queue()
+                put = results.put
+
+                def observe_terminal(value):
+                    terminal_state.append((self.account_guard.close.called, self.output_guard.close.called))
+                    put(value)
+
+                results.put = observe_terminal
+
+                def publish(_):
+                    entered.set()
+                    if not release.wait(10):
+                        raise AssertionError("Snapshot test coordination timed out")
+
+                def run():
+                    try:
+                        self.worker(operation, results)
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                target = ("xlikesaver.deletion.publish_snapshot" if operation == "deleted"
+                          else "xlikesaver.history_gui._publish")
+                with patch(target, side_effect=publish):
+                    thread = threading.Thread(target=run)
+                    thread.start()
+                    try:
+                        self.assertTrue(entered.wait(10))
+                        self.assertTrue(results.empty(), "UI released before snapshot finished")
+                        self.output_guard.close.assert_not_called()
+                        self.account_guard.close.assert_not_called()
+                    finally:
+                        release.set()
+                        thread.join(10)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(results.get_nowait()[1], operation)
+                self.assertEqual(terminal_state, [(True, True)])
+                self.assertTrue(results.empty())
+
+    def test_work_errors_wait_for_cleanup_and_keep_exception_details_private(self):
+        secret = "private upstream failure text"
+        for operation in ("backfilled", "converted", "repaired"):
+            with self.subTest(operation=operation):
+                self.account_guard.reset_mock()
+                self.output_guard.reset_mock()
+                entered, release = threading.Event(), threading.Event()
+                results, errors = queue.Queue(), []
+
+                def close():
+                    entered.set()
+                    if not release.wait(10):
+                        raise AssertionError("Cleanup test coordination timed out")
+
+                def run():
+                    try:
+                        self.worker(operation, results)
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                failure = ("xlikesaver.recovery.repair_history" if operation == "repaired"
+                           else "xlikesaver.history_gui.HistoryWindow._store")
+                with patch(failure, side_effect=RuntimeError(secret)), \
+                        patch.object(self.account_guard, "close", side_effect=close):
+                    thread = threading.Thread(target=run)
+                    thread.start()
+                    try:
+                        self.assertTrue(entered.wait(10))
+                        self.assertTrue(results.empty(), "Error released UI while cleanup still ran")
+                    finally:
+                        release.set()
+                        thread.join(10)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                _, kind, message = results.get_nowait()
+                self.assertEqual(kind, "damaged" if operation == "repaired" else "error")
+                self.assertNotIn(secret, message)
+                self.assertTrue(results.empty())
+
+    def test_cleanup_failure_still_releases_other_locks_and_reports_one_safe_error(self):
+        for operation in ("backfilled", "converted"):
+            with self.subTest(operation=operation):
+                self.account_guard.reset_mock()
+                self.output_guard.reset_mock()
+                self.store.close.side_effect = OSError("private close failure")
+                results = queue.Queue()
+                self.worker(operation, results)
+                self.output_guard.close.assert_called_once()
+                self.account_guard.close.assert_called_once()
+                _, kind, message = results.get_nowait()
+                self.assertEqual(kind, "error")
+                self.assertNotIn("private close failure", message)
+                self.assertTrue(results.empty())
 
 
 class HistoryLifecycleTests(unittest.TestCase):

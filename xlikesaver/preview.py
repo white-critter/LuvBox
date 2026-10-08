@@ -111,9 +111,12 @@ class PreviewLoader:
                     result = self.cache.get(key)
                     if result is None:
                         result = self.decoder(path)
-                        self.cache[key] = result
-                        while len(self.cache) > self.cache_size:
-                            self.cache.popitem(last=False)
+                        # A cloud file or busy decoder can fail temporarily
+                        # without changing the file's size or timestamp.
+                        if result.image is not None:
+                            self.cache[key] = result
+                            while len(self.cache) > self.cache_size:
+                                self.cache.popitem(last=False)
                     else:
                         self.cache.move_to_end(key)
             except FileNotFoundError:

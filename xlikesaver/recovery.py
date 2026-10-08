@@ -16,6 +16,7 @@ import sqlite3
 import struct
 from contextlib import closing
 from datetime import datetime
+from itertools import groupby
 from pathlib import Path
 
 
@@ -243,7 +244,6 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
                                     latest[identity] = (rowid, row)
                             records = sorted(latest.values(), key=lambda item: item[0])
                         rows.extend(row for _, row in records)
-                    columns = [name for name in target if any(name in row for row in rows)]
                     if table == "deletion_items":
                         # UUIDs remain stable across folder snapshots. Prefer
                         # a finished/newer receipt to an older pending intent.
@@ -257,13 +257,21 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
                             if ident not in latest or rank(row) > rank(latest[ident]):
                                 latest[ident] = row
                         rows = list(latest.values())
-                    if not rows or not columns:
+                    if not rows:
                         counts[table] = 0
                         continue
-                    statement = (f'INSERT OR IGNORE INTO "{table}" (' + ",".join(f'"{name}"' for name in columns) +
-                                 ") VALUES (" + ",".join("?" for _ in columns) + ")")
                     before = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
-                    connection.executemany(statement, ([row.get(name) for name in columns] for row in rows))
+                    # Old backups (and page-salvaged rows predating ALTER
+                    # TABLE) omit newer columns. Let SQLite apply defaults;
+                    # an explicit corrupt NULL must still fail constraints.
+                    # Batch consecutive equal shapes to retain source order:
+                    # current rows win over duplicate fallback rows.
+                    for columns, batch in groupby(rows, lambda row: tuple(name for name in target if name in row)):
+                        if not columns:
+                            continue
+                        statement = (f'INSERT OR IGNORE INTO "{table}" (' + ",".join(f'"{name}"' for name in columns) +
+                                     ") VALUES (" + ",".join("?" for _ in columns) + ")")
+                        connection.executemany(statement, ([row[name] for name in columns] for row in batch))
                     counts[table] = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] - before
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:

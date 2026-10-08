@@ -108,7 +108,9 @@ class _GridDecoder:
                         with self.condition:
                             if self.closed:
                                 return
-                            if stamp is not None:
+                            # Retry failed reads on the next refresh; restored
+                            # access need not change the file's metadata.
+                            if stamp is not None and image is not None:
                                 self.cache[stamp] = image
                                 while len(self.cache) > _CACHE_SIZE:
                                     self.cache.popitem(last=False)

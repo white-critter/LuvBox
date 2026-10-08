@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import sqlite3
 import tempfile
 import time
@@ -13,7 +14,7 @@ from unittest.mock import patch
 from xlikesaver.history import HistoryStore
 from xlikesaver.protection import AccountGuard, ProtectionError
 from xlikesaver.storage import (MigrationError, OutputGuard, migrate_records,
-                               prepare_storage, resolve_storage)
+                               prepare_storage, publish_snapshot, resolve_storage)
 
 
 class RelocationTests(unittest.TestCase):
@@ -70,6 +71,85 @@ class RelocationTests(unittest.TestCase):
 
     def assert_digests(self, values):
         self.assertEqual({path: hashlib.sha256(path.read_bytes()).hexdigest() for path in values}, values)
+
+    def snapshot_record(self, paths, ident):
+        """Another PC added a file and published it; this PC has not imported it."""
+        file = paths.media_dir / f"{ident}_1.jpg"
+        file.write_bytes(b"synced photo")
+        with closing(HistoryStore(paths.snapshot_dir, media_dir=paths.media_dir,
+                                  output_dir=paths.output_dir)) as store:
+            store.record_media("flat", {"tweet_id": str(ident), "num": 1, "type": "photo"}, file)
+        archive = paths.snapshot_dir / ".xlikesaver-archive.flat.sqlite3"
+        with closing(sqlite3.connect(archive)) as db:
+            db.execute("INSERT INTO archive VALUES (?)", (f"twitter{ident}_1",))
+            db.commit()
+        history = paths.snapshot_dir / ".xlikesaver-history.sqlite3"
+        with closing(sqlite3.connect(history)) as db:
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            db.execute("PRAGMA journal_mode=DELETE")
+        for path in (history, archive):
+            info = path.stat()
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+
+    def test_changed_source_and_destination_snapshots_are_merged_before_publication(self):
+        self.record(self.a, 100)
+        self.record(self.b, 300)
+        publish_snapshot(self.a)
+        publish_snapshot(self.b)
+        self.snapshot_record(self.a, 200)
+        self.snapshot_record(self.b, 400)
+        originals = self.digests(self.a)
+        originals.update({path: hashlib.sha256(path.read_bytes()).hexdigest()
+                          for path in self.a.snapshot_dir.glob("*.sqlite3")})
+        state = (self.a.record_dir / "snapshot.json").read_bytes()
+        # Even if writing the new travel copy fails, the published local
+        # catalog already includes both outputs' received records.
+        with patch("xlikesaver.storage.publish_snapshot", side_effect=MigrationError("sync file lock")):
+            result = migrate_records(self.a, self.b)
+        self.assertEqual(result.media_records, 4)
+        self.assertEqual({row["tweet_id"] for row in self.rows(self.b)[0]}, {"100", "200", "300", "400"})
+        self.assertEqual(self.archived(self.b), {"twitter100_1", "twitter200_1", "twitter300_1", "twitter400_1"})
+        self.assert_digests(originals)
+        self.assertEqual((self.a.record_dir / "snapshot.json").read_bytes(), state)
+        self.assertFalse(list(self.b.record_dir.parent.glob(".snapshot-union-*")))
+
+    def test_unreadable_changed_snapshot_cannot_publish_a_partial_relocation(self):
+        from xlikesaver import storage
+        self.record(self.a, 100)
+        self.record(self.b, 300)
+        for paths, received in ((self.a, 200), (self.b, 400)):
+            publish_snapshot(paths)
+            self.snapshot_record(paths, received)
+        originals = self.digests(self.a) | self.digests(self.b)
+        backup = storage._backup_database
+        for paths in (self.a, self.b):
+            shared = paths.snapshot_dir / ".xlikesaver-archive.flat.sqlite3"
+
+            def unreadable(source, destination):
+                if source == shared:
+                    raise PermissionError("sync file lock")
+                return backup(source, destination)
+
+            with self.subTest(output=paths.output_dir), patch(
+                    "xlikesaver.storage._backup_database", side_effect=unreadable):
+                with self.assertRaises(MigrationError):
+                    migrate_records(self.a, self.b)
+            self.assert_digests(originals)
+            self.assertFalse(list(self.b.record_dir.parent.glob(".snapshot-union-*")))
+            self.assertFalse(list(self.b.record_dir.parent.glob(".relocate-*")))
+
+    def test_confirmed_corrupt_changed_snapshot_keeps_the_live_records(self):
+        self.record(self.a, 100)
+        publish_snapshot(self.a)
+        shared = self.a.snapshot_dir / ".xlikesaver-archive.flat.sqlite3"
+        shared.write_bytes(b"confirmed non-database fixture")
+        originals = self.digests(self.a)
+        originals[shared] = hashlib.sha256(shared.read_bytes()).hexdigest()
+        migrate_records(self.a, self.b)
+        self.assertEqual({row["tweet_id"] for row in self.rows(self.b)[0]}, {"100"})
+        self.assertEqual(self.archived(self.b), {"twitter100_1"})
+        self.assert_digests(originals)
+        self.assertFalse(list(self.b.record_dir.parent.glob(".snapshot-union-*")))
 
     def test_first_change_keeps_old_media_and_original_db_bytes_and_paths(self):
         old = self.record(self.a, 100)
