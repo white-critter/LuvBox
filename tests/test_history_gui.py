@@ -166,6 +166,10 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(self.window.current_summary["duplicate_records"], 1)
         self.assertEqual(len(self.window.tree.get_children()), 3)
         self.assertEqual(self.window.page_text.get(), "기록 3개 · 1 / 1페이지")
+        # The full author list is drawn only once its tab is shown.
+        self.assertEqual(self.window.author_tree.get_children(), ())
+        self.window.tabs.select(2)
+        self.root.update()
         self.assertEqual(self.window.author_tree.item("0", "values")[1:3], ("@alice", "1"))
         self.assertEqual(sum(count for _, count in self.window.month_chart.data), 1)
 
@@ -178,6 +182,26 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(len(self.window.tree.get_children()), 3)
         self.assertEqual(self.window.author_tree.get_children(), ())
         self.assertEqual(self.window.month_chart.data, [])
+
+    def test_hidden_author_list_is_not_redrawn_on_each_refresh(self):
+        self.records(2)
+        self.load()
+        with patch.object(self.window, "_fill_authors", wraps=self.window._fill_authors) as fill:
+            self.load()
+            self.load()
+            fill.assert_not_called()
+            self.assertTrue(self.window._authors_stale)
+            self.window.tabs.select(2)
+            self.root.update()
+            fill.assert_called_once()
+            self.assertEqual(len(self.window.author_tree.get_children()), 1)
+            self.window.tabs.select(0)
+            self.root.update()
+            self.window.tabs.select(2)
+            self.root.update()
+            fill.assert_called_once()   # unchanged statistics are not drawn again
+            self.load()                 # visible: new statistics are drawn at once
+            self.assertGreater(fill.call_count, 1)
 
     def test_changing_history_page_does_not_recheck_every_media_file(self):
         self.records(105)
@@ -414,6 +438,7 @@ class HistoryGuiTests(unittest.TestCase):
             store.record_media("flat", {"tweet_id": str(300 + index), "num": 1, "type": "photo",
                                         "author": {"name": "alice"},
                                         "date": datetime(2020, 1, 1 + index, tzinfo=timezone.utc)}, path)
+        self.window.tabs.select(2)
         self.load()
         self.assertEqual(len(self.window.author_tree.get_children()), 26)  # more than the old top 20
         self.window.author_query.set("ARTIST0")
@@ -435,6 +460,7 @@ class HistoryGuiTests(unittest.TestCase):
 
     def test_repeated_author_selection_reuses_inflight_and_empty_result(self):
         self.records()
+        self.window.tabs.select(2)
         self.load()
         [key] = self.window.author_tree.get_children()
         with patch("xlikesaver.history_gui.threading.Thread") as thread:
@@ -1329,6 +1355,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._poll()
         # Statistics tab: ranking, opening an author, and the monthly chart.
         self.window.tabs.select(2)
+        self.root.update()
         self.assertEqual(self.window.author_tree.item("0", "values")[1:3], ("@alice", "2"))
         self.window.author_tree.selection_set("0")
         with patch("xlikesaver.history_gui.threading.Thread") as thread:

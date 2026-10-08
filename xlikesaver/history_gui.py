@@ -245,6 +245,7 @@ class HistoryWindow(tk.Toplevel):
         self.month_note = tk.StringVar(self, value=MONTH_NOTES["saved"])
         self.stats = {}
         self.stats_authors = {}
+        self._authors_stale = False
         self.page_text = tk.StringVar(self)
         self.run_page_text = tk.StringVar(self)
         self.page_size = tk.StringVar(self, value=str(PAGE_SIZE))
@@ -342,6 +343,7 @@ class HistoryWindow(tk.Toplevel):
         tabs.add(deletions, text="삭제 기록")
         tabs.bind("<<NotebookTabChanged>>", self._reset_scroll, add="+")
         tabs.bind("<<NotebookTabChanged>>", self._queue_pager_layout, add="+")
+        tabs.bind("<<NotebookTabChanged>>", self._show_stale_authors, add="+")
         self._file_page_parent = files
         files.columnconfigure(0, weight=1)
         files.rowconfigure(1, weight=1)
@@ -2462,17 +2464,25 @@ class HistoryWindow(tk.Toplevel):
 
     def _show_stats(self, stats):
         # A page or search change reuses the same statistics; listing every
-        # author again would only slow the page down.
+        # author again would only slow the page down. New statistics arrive
+        # on every refresh during a save, so a hidden list waits for its tab
+        # (tens of thousands of authors take a noticeable fraction of a second).
         if stats is not self.stats:
             self.stats = stats
             self._sample_token += 1
             self._sample_author = None
             self.sample_rows = {}
             self.sample_view.show([], lambda paths: set(), empty_text="")
-            self._fill_authors()
+            self._authors_stale = True
+            self._show_stale_authors()
         self._draw_months()
 
+    def _show_stale_authors(self, _=None):
+        if self._authors_stale and not self._destroyed and self.tabs.index("current") == 2:
+            self._fill_authors()
+
     def _fill_authors(self):
+        self._authors_stale = False
         selection = self.author_tree.selection()
         previous = self.stats_authors.get(selection[0], {}).get("author") if selection else None
         typed = self.author_query.get().strip().lstrip("@").lower()
