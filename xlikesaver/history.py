@@ -196,6 +196,7 @@ class HistoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS media_posted ON media(posted_at);
                 CREATE INDEX IF NOT EXISTS media_type ON media(media_type);
+                CREATE INDEX IF NOT EXISTS media_path ON media(path);
                 CREATE TABLE IF NOT EXISTS runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT, folder_mode TEXT NOT NULL,
                     started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
@@ -247,6 +248,7 @@ class HistoryStore:
                     self._db.execute("DROP TABLE media_old")
                     self._db.execute("CREATE INDEX IF NOT EXISTS media_posted ON media(posted_at)")
                     self._db.execute("CREATE INDEX IF NOT EXISTS media_type ON media(media_type)")
+                    self._db.execute("CREATE INDEX IF NOT EXISTS media_path ON media(path)")
             columns = {row["name"] for row in self._db.execute("PRAGMA table_info(media)")}
             with self._db:
                 if "source_url" not in columns:
@@ -736,6 +738,38 @@ class HistoryStore:
         finally:
             self._folder_cache = None
 
+    def _restore_known_paths(self) -> None:
+        """Reconnect restored files, including exact locations in former roots.
+
+        Former roots are never scanned wholesale. Only a catalog row's saved
+        last location may be probed, after the same folder/link checks used
+        for current media. The conditional update preserves concurrent saves.
+        """
+        restored = []
+        for row in self._db.execute(
+                "SELECT folder_mode,tweet_id,num,media_type,last_path,updated_at FROM media "
+                "WHERE path='' AND last_path!=''").fetchall():
+            if not Path(row["last_path"]).is_absolute():
+                continue
+            for root in self.media_roots:
+                candidate = self._path_in_root(row["last_path"], root)
+                if candidate is not None:
+                    break
+            else:
+                continue
+            try:
+                info = candidate.stat()
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                restored.append((str(candidate), info.st_size, _now(), row["folder_mode"],
+                                 row["tweet_id"], row["num"], row["media_type"],
+                                 row["last_path"], row["updated_at"]))
+        self._write_batches(restored, lambda values: self._db.execute(
+            "UPDATE media SET path=?,filesize=?,updated_at=? "
+            "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+            "AND path='' AND last_path=? AND updated_at=?", values))
+
     def _import_legacy(self, refresh: bool) -> dict:
         before = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
         warnings = []
@@ -758,6 +792,7 @@ class HistoryStore:
                 "UPDATE media SET last_path=CASE WHEN ?='' THEN path ELSE last_path END,path=?,filesize=? "
                 "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
                 (values[0], *values)))
+            self._restore_known_paths()
         archived = []
         for mode, name in _ARCHIVES.items():
             archive = self.account_dir / name

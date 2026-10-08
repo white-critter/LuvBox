@@ -5,7 +5,9 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -122,6 +124,133 @@ class ScheduledRunTests(unittest.TestCase):
         last = scheduled.last_run()
         self.assertEqual((last["busy"], last["failed"]), (True, False))
         self.notify.assert_not_called()
+
+    def test_acknowledgment_matches_only_the_exact_displayed_outcome(self):
+        old = {"finished_at": "2026-10-08T09:00:00+09:00", "status": "error", "message": "old failure",
+               "failed": True, "log": "old.log", "seen": False}
+        new = dict(old, finished_at="2026-10-09T09:00:00+09:00", message="new failure", log="new.log")
+        scheduled._write_last_run(old)
+        before = scheduled.last_run_path().read_bytes()
+        scheduled.mark_last_run_seen(scheduled.last_run())
+        self.assertTrue(scheduled.last_run()["seen"])
+        self.assertEqual(scheduled.last_run_path().read_bytes(), before)
+        scheduled._write_last_run(new)
+        scheduled.mark_last_run_seen(old)
+        self.assertFalse(scheduled.last_run()["seen"])
+        scheduled.mark_last_run_seen(scheduled.last_run())
+        self.assertTrue(scheduled.last_run()["seen"])
+
+    def test_new_result_written_during_acknowledgment_is_preserved_and_unseen(self):
+        old = {"finished_at": "2026-10-08T09:00:00+09:00", "status": "error", "failed": True, "seen": False}
+        new = dict(old, finished_at="2026-10-09T09:00:00+09:00", status="finished", failed=False)
+        scheduled._write_last_run(old)
+        displayed = scheduled.last_run()
+        entered, resume = threading.Event(), threading.Event()
+        errors = []
+        replace = scheduled.os.replace
+
+        def delayed_acknowledgment(source, target):
+            if Path(target) == scheduled._last_run_seen_path(displayed):
+                entered.set()
+                if not resume.wait(3):
+                    raise TimeoutError("acknowledgment fixture did not resume")
+            return replace(source, target)
+
+        def acknowledge():
+            try:
+                scheduled.mark_last_run_seen(displayed)
+            except Exception as error:
+                errors.append(error)
+
+        with patch("xlikesaver.scheduled.os.replace", side_effect=delayed_acknowledgment):
+            worker = threading.Thread(target=acknowledge)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                scheduled._write_last_run(new)
+                before = scheduled.last_run_path().read_bytes()
+            finally:
+                resume.set()
+                worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(scheduled.last_run(), new)
+        self.assertEqual(scheduled.last_run_path().read_bytes(), before)
+        self.assertFalse(list(self.root.rglob("*.tmp")))
+
+    def test_delayed_old_acknowledgment_cannot_erase_the_new_acknowledgment(self):
+        old = {"finished_at": "2026-10-08T09:00:00+09:00", "status": "error", "failed": True, "seen": False}
+        new = dict(old, finished_at="2026-10-09T09:00:00+09:00")
+        scheduled._write_last_run(old)
+        displayed = scheduled.last_run()
+        entered, resume = threading.Event(), threading.Event()
+        errors = []
+        replace = scheduled.os.replace
+
+        def delayed_acknowledgment(source, target):
+            if Path(target) == scheduled._last_run_seen_path(displayed):
+                entered.set()
+                if not resume.wait(3):
+                    raise TimeoutError("acknowledgment fixture did not resume")
+            return replace(source, target)
+
+        def acknowledge():
+            try:
+                scheduled.mark_last_run_seen(displayed)
+            except Exception as error:
+                errors.append(error)
+
+        with patch("xlikesaver.scheduled.os.replace", side_effect=delayed_acknowledgment):
+            worker = threading.Thread(target=acknowledge)
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                scheduled._write_last_run(new)
+                before = scheduled.last_run_path().read_bytes()
+                scheduled.mark_last_run_seen(scheduled.last_run())
+                self.assertTrue(scheduled.last_run()["seen"])
+            finally:
+                resume.set()
+                worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertTrue(scheduled.last_run()["seen"])
+        self.assertEqual(scheduled.last_run()["finished_at"], new["finished_at"])
+        self.assertEqual(scheduled.last_run_path().read_bytes(), before)
+        self.assertFalse(list(self.root.rglob("*.tmp")))
+
+    def test_legacy_seen_field_and_invalid_acknowledgments_remain_compatible(self):
+        outcome = {"finished_at": "2026-10-09T09:00:00+09:00", "status": "error", "seen": True}
+        scheduled._write_last_run(outcome)
+        self.assertTrue(scheduled.last_run()["seen"])
+        scheduled.mark_last_run_seen()
+        self.assertFalse(scheduled._last_run_seen_path(outcome).exists())
+        scheduled._write_last_run(dict(outcome, seen=False))
+        marker = scheduled._last_run_seen_path(outcome)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        for data in ("not json", "[]", '{"outcome": "old"}'):
+            with self.subTest(data=data):
+                marker.write_text(data, encoding="utf-8")
+                self.assertFalse(scheduled.last_run()["seen"])
+
+    def test_identical_fast_runs_with_the_same_timestamp_need_separate_acknowledgments(self):
+        fixed = datetime(2026, 10, 9, 0, 0, 0, tzinfo=timezone.utc)
+        with patch("xlikesaver.scheduled.datetime") as clock:
+            clock.now.return_value = fixed
+            self.run_saved({})
+            first = scheduled.last_run()
+            scheduled.mark_last_run_seen(first)
+            self.assertTrue(scheduled.last_run()["seen"])
+            self.run_saved({})
+            second = scheduled.last_run()
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        self.assertEqual({key: value for key, value in first.items() if key != "run_id"},
+                         {key: value for key, value in second.items() if key != "run_id"})
+        self.assertFalse(second["seen"])
+        scheduled.mark_last_run_seen(first)
+        self.assertFalse(scheduled.last_run()["seen"])
+        scheduled.mark_last_run_seen(second)
+        self.assertTrue(scheduled.last_run()["seen"])
 
 
 class TaskSchedulerTests(unittest.TestCase):

@@ -445,7 +445,7 @@ class GuiTests(unittest.TestCase):
                 patch("xlikesaver.scheduled.mark_last_run_seen") as seen, \
                 patch.object(self.app, "refresh_schedule"):
             self.app._startup_schedule_check()
-        seen.assert_called_once()
+        seen.assert_called_once_with(failed)
         self.assertIn("실패", self.app.status.get())
         self.assertIn("로그인 연결을 다시", self.app.status_detail.get())
 

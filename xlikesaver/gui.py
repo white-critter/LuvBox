@@ -1414,7 +1414,7 @@ class App:
             self.status_detail.set(f"{format_short(last.get('finished_at'))} · {last.get('message') or '실행 기록을 확인해 주세요.'}")
             self._log("지난 자동 저장 실패 · " + str(last.get("message") or "실행 기록을 확인해 주세요."))
             try:
-                mark_last_run_seen()
+                mark_last_run_seen(last)
             except OSError:
                 pass
         self.refresh_schedule(prompt=True)

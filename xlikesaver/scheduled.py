@@ -12,12 +12,14 @@ it can also run on battery and catch up after the PC was off at that time.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -166,19 +168,46 @@ def last_run() -> dict | None:
         data = json.loads(last_run_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    if not data.get("seen"):
+        try:
+            acknowledged = json.loads(_last_run_seen_path(data).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            acknowledged = None
+        if isinstance(acknowledged, dict) and acknowledged.get("outcome") == _outcome_identity(data):
+            data["seen"] = True
+    return data
 
 
-def mark_last_run_seen() -> None:
-    data = last_run()
+def _last_run_seen_path(outcome: dict) -> Path:
+    # Distinct runs get distinct markers: a delayed older window cannot
+    # replace the acknowledgment already written by a newer window.
+    directory = last_run_path().parent / "last-scheduled-seen"
+    return directory / (_outcome_identity(outcome) + ".json")
+
+
+def _outcome_identity(data: dict) -> str:
+    # The legacy seen field describes an acknowledgment, not the run itself.
+    outcome = {key: value for key, value in data.items() if key != "seen"}
+    encoded = json.dumps(outcome, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def mark_last_run_seen(outcome: dict | None = None) -> None:
+    """Acknowledge the displayed run without rewriting a newer run's result."""
+    data = last_run() if outcome is None else outcome
     if data is not None and not data.get("seen"):
-        _write_last_run(dict(data, seen=True))
+        _write_last_run_json(_last_run_seen_path(data), {"outcome": _outcome_identity(data)})
 
 
 def _write_last_run(data: dict) -> None:
-    path = last_run_path()
+    _write_last_run_json(last_run_path(), data)
+
+
+def _write_last_run_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(prefix="last-scheduled-", suffix=".tmp", dir=path.parent)
+    descriptor, name = tempfile.mkstemp(prefix=path.stem + "-", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(data, stream, ensure_ascii=False)
@@ -267,7 +296,8 @@ def run_saved(*, full: bool = False) -> int:
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(_KOREA).strftime("%Y%m%d-%H%M%S")
     path = directory / f"scheduled-{stamp}.log"
-    outcome = {"status": "error", "saved": 0, "message": ""}
+    # Even identical failures within one clock tick need separate acknowledgments.
+    outcome = {"run_id": uuid.uuid4().hex, "status": "error", "saved": 0, "message": ""}
     with path.open("a", encoding="utf-8") as log:
         def write(text: str) -> None:
             log.write(datetime.now(_KOREA).strftime("%H:%M:%S") + "  " + text + "\n")
