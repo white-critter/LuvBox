@@ -925,17 +925,31 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             previous = history.media_record(normalized.folder_mode, kwdict)
                         except HistoryError:
                             raise exception.AbortExtraction("history store unavailable") from None
-                        # A chosen missing file may already be back at its
-                        # place; the existence check below still applies.
-                        known_path = ((previous.get("path") or (media_path if targets else ""))
-                                      if previous is not None else media_path)
+                        # A selected missing file may have been copied to the
+                        # current output since the library was refreshed. Its
+                        # absent former location must not mask that file hit.
+                        known_path = previous.get("path") if previous is not None else media_path
+                        candidates = [known_path]
+                        if targets and media_path and media_path != known_path:
+                            candidates.append(media_path)
                         media_path = ""
-                        if known_path:
+                        for known_path in candidates:
+                            if not known_path:
+                                continue
                             candidate = Path(known_path)
                             if history.is_media_path(candidate) and candidate.is_file():
                                 media_path = str(candidate)
                                 if media_type == "animated_gif":
                                     kwdict["extension"] = candidate.suffix.lstrip(".")
+                                if previous is not None and (
+                                        os.path.normcase(os.path.abspath(previous.get("path") or "")) !=
+                                        os.path.normcase(os.path.abspath(media_path))):
+                                    # Verified tags belong to the old physical
+                                    # file. Retain its author information, but
+                                    # check/embed tags for this different copy.
+                                    previous = dict(previous, metadata_status="pending",
+                                                    author_metadata_status="pending")
+                                break
                     self.last_output = (media_status, media_path)
                     kwdict["_xlikesaver_path"] = media_path
                     media_stat = None

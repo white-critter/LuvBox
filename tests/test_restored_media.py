@@ -10,7 +10,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from xlikesaver.history import HistoryStore
-from xlikesaver.recycling import file_signature
 from xlikesaver.storage import migrate_records, resolve_storage
 
 
@@ -40,7 +39,9 @@ class RestoredMediaTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         self.before_by_mode = {row["folder_mode"]: row for row in self.store.records()}
         self.before = self.store.records()[0]
-        ident = self.store.begin_deletion("offline-review", self.before, True, file_signature(self.original))
+        info = self.original.stat()
+        ident = self.store.begin_deletion("offline-review", self.before, True,
+                                          (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
         self.parked = self.root / "simulated-recycled-file.jpg"
         self.original.rename(self.parked)
         self.store.finish_deletion(ident, "recycled", "offline simulated receipt", str(self.parked))

@@ -495,10 +495,10 @@ class HistoryGuiTests(unittest.TestCase):
         with patch("xlikesaver.history_gui.webbrowser.open") as open_tweet:
             commands["트윗 열기"][0]()
         open_tweet.assert_called_once_with("https://x.com/i/web/status/"+self.window.rows[keys[1]]["tweet_id"])
-        self.assertTrue(commands["선택한 파일 삭제"][1])
+        self.assertNotIn("선택한 파일 삭제", commands)
         self.window.is_downloading = lambda:True
         commands = {label:enabled for label,_,enabled in self.window._file_menu_commands()}
-        self.assertFalse(commands["선택한 파일 삭제"])
+        self.assertNotIn("선택한 파일 삭제", commands)
         with patch.object(self.window,"_post_context"):
             self.window._gallery_context(event,keys[2])
         self.assertEqual(self.window.tree.selection(),(keys[2],))
@@ -1717,10 +1717,6 @@ class LocalChangeWorkerTests(unittest.TestCase):
             patch("xlikesaver.metadata.persistent", side_effect=lambda: nullcontext()),
             patch("xlikesaver.metadata.available", return_value=False),
             patch("xlikesaver.recovery.repair_history", return_value={"counts": {}, "kept": root / "kept"}),
-            patch("xlikesaver.deletion.HistoryStore.for_storage", return_value=self.store),
-            patch("xlikesaver.deletion.OutputGuard", return_value=self.output_guard),
-            patch("xlikesaver.deletion.AccountGuard", return_value=self.account_guard),
-            patch("xlikesaver.deletion.backup_catalog", return_value=root / "backup"),
         ]
         for patcher in patchers:
             patcher.start()
@@ -1734,11 +1730,9 @@ class LocalChangeWorkerTests(unittest.TestCase):
             HistoryWindow._convert_worker(results, stop, 23, self.location, "original", 200)
         elif operation == "repaired":
             HistoryWindow._repair_worker(results, 23, self.location)
-        else:
-            HistoryWindow._delete_worker(results, stop, 23, self.location, [], True)
 
     def test_completion_waits_for_snapshot_and_releases_locks_before_queueing(self):
-        for operation in ("backfilled", "converted", "repaired", "deleted"):
+        for operation in ("backfilled", "converted", "repaired"):
             with self.subTest(operation=operation):
                 self.store.reset_mock()
                 self.account_guard.reset_mock()
@@ -1765,8 +1759,7 @@ class LocalChangeWorkerTests(unittest.TestCase):
                     except BaseException as exc:
                         errors.append(exc)
 
-                target = ("xlikesaver.deletion.publish_snapshot" if operation == "deleted"
-                          else "xlikesaver.history_gui._publish")
+                target = "xlikesaver.history_gui._publish"
                 with patch(target, side_effect=publish):
                     thread = threading.Thread(target=run)
                     thread.start()

@@ -106,7 +106,9 @@ def make_catalog(temporary, account="demo_account", count=168):
             (output / f"{2030000000000000000 + index}_1.jpg").unlink()
         store.set_missing_ignored([(str(2030000000000000000 + gone[-1]), 1, "photo")], True)
         # Deletion history fixtures: native Shell is never invoked by UI QA.
-        from xlikesaver.recycling import file_signature
+        def file_signature(path):
+            info = Path(path).stat()
+            return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
         sample = next(row for row in store.records() if row["path"] and Path(row["path"]).is_file())
         for index in range(112):
             ident = store.begin_deletion("ui-qa", sample, index % 2 == 0, file_signature(sample["path"]))
@@ -149,7 +151,8 @@ def make_contact_sheets(output, screenshots):
         "library-default": ["library-default-files", "library-maximized-files"],
         "library-browse": ["library-files", "library-filters", "library-compact", "library-compact-detail", "library-gallery"],
         "library-history-stats": ["library-runs", "library-stats", "library-stats-compact", "library-tools"],
-        "library-deletion": ["library-delete-selection", "library-gallery-selection", "library-deletions", "library-deletions-compact", "dialog-delete"],
+        "library-selection-missing": ["library-selection", "library-gallery-selection", "library-missing", "library-missing-compact", "library-missing-hidden"],
+        "library-legacy-history": ["library-deletions", "library-deletions-compact"],
     }
     available = {row["name"] for row in screenshots}
     font_path = ROOT / "assets/fonts/Pretendard/Pretendard-Regular.ttf"
@@ -458,7 +461,7 @@ class CaptureSession:
         self.capture(history, f"library-files-{selected}", "1200x860")
         history.tree.selection_set(history.tree.get_children()[:3])
         history.select_record()
-        self.capture(history, f"library-delete-selection-{selected}", "1200x860")
+        self.capture(history, f"library-selection-{selected}", "1200x860")
         history.toggle_filters()
         self.capture(history, f"library-filters-{selected}", "1200x860")
         history.toggle_filters()
@@ -475,6 +478,7 @@ class CaptureSession:
         history.select_run()
         self.capture(history, f"library-runs-{selected}", "1200x860")
         history.tabs.select(2)
+        self.settle(lambda: bool(history.author_tree.get_children()), timeout=8)
         history.author_tree.selection_set(history.author_tree.get_children()[0])
         history._show_author_samples()
         self.settle(lambda: bool(history.sample_rows) and bool(history.sample_view.images), timeout=8)
@@ -502,15 +506,6 @@ class CaptureSession:
 
     def dialogs(self):
         from xlikesaver import dialogs
-        for selected in ("light", "dark"):
-            self.appearance(selected)
-            dialog = dialogs.DeleteDialog(self.root, 3, 7340032,
-                                          ["2030000000000000001_1.jpg", "2030000000000000002_video_1.mp4", "2030000000000000003_gif_1.gif"])
-            try:
-                dialog._place()
-                self.capture(dialog, f"dialog-delete-{selected}")
-            finally:
-                dialog.destroy()
         cases = [
             ("dialog-confirm-light", "light", "이전 저장 폴더 연결 확인",
              "이전 폴더를 찾을 수 없습니다.\n새 폴더에서 저장을 시작할까요?\n\n"

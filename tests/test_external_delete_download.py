@@ -1,7 +1,6 @@
-"""Offline deletion-to-download integration with gallery-dl's real job/archive."""
+"""External deletion and legacy policy with gallery-dl's real job/archive."""
 
 import json
-import threading
 import unittest
 from contextlib import closing, nullcontext
 from dataclasses import replace
@@ -11,13 +10,11 @@ from unittest.mock import patch
 from tests import test_core as core_support
 from tests import test_missing_files as missing_support
 from xlikesaver.core import run_worker
-from xlikesaver.deletion import run_deletion
 from xlikesaver.history import HistoryStore
-from xlikesaver.recycling import file_signature
 from xlikesaver.storage import resolve_storage
 
 
-class DeleteDownloadTests(unittest.TestCase):
+class ExternalDeleteDownloadTests(unittest.TestCase):
     # Import helper modules rather than TestCase class aliases: discovery must
     # collect only these new tests, not another copy of the entire core suite.
     write_cookies = core_support.CoreTests.write_cookies
@@ -42,20 +39,20 @@ class DeleteDownloadTests(unittest.TestCase):
         with closing(HistoryStore.for_storage(self.paths)) as store:
             return next(row for row in store.records() if row["tweet_id"] == tweet and row["num"] == number)
 
-    def mock_recycle(self, path, expected=None):
+    def remove_externally(self, path):
         path = Path(path)
-        self.assertEqual(file_signature(path), tuple(expected))
         destination = self.recycled / path.name
         path.rename(destination)
         return str(destination)
 
     def delete(self, rows, keep):
-        with patch("xlikesaver.deletion.recycle_file", side_effect=self.mock_recycle):
-            result = run_deletion(self.paths, rows, keep, threading.Event(), lambda _: None)
-        self.assertEqual(result["recycled"], len(rows))
-        self.assertEqual((result["failed"], result["cancelled"]), (0, 0))
+        for row in rows:
+            self.remove_externally(row["path"])
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            store.import_legacy(refresh=True)
+            if keep:
+                store.set_missing_ignored([(row["tweet_id"], row["num"], row["media_type"]) for row in rows], True)
         core_support.FakeHttpDownloader.downloaded = []
-        return result
 
     def retry(self, target, tweets):
         missing_support.FakeTweetExtractor.requested = []
@@ -87,7 +84,7 @@ class DeleteDownloadTests(unittest.TestCase):
                                  [f"https://pbs.twimg.com/media/{fresh}_1?format=jpg&name=orig"])
                 self.assertEqual(list(self.output.rglob("100_1.jpg")), [])
 
-    def test_unchecked_keep_deleted_can_be_restored_by_explicit_missing_retry(self):
+    def test_external_deletion_can_be_restored_by_explicit_missing_retry(self):
         self.worker([("100", 1, "photo", "alice")])
         self.delete([self.record()], keep=False)
         # The full scan retains its existing archive semantics. A missing-file
@@ -105,7 +102,7 @@ class DeleteDownloadTests(unittest.TestCase):
                          ["https://pbs.twimg.com/media/100_1?format=jpg&name=orig"])
         self.assertTrue((self.output / "100_1.jpg").exists())
 
-    def test_delete_one_attachment_preserves_other_photos_and_retries_only_chosen_attachment(self):
+    def test_external_deletion_of_one_attachment_preserves_other_photos_and_retries_only_chosen_attachment(self):
         rows = [("100", 1, "photo", "alice"), ("100", 2, "photo", "alice"),
                 ("100", 3, "photo", "alice")]
         self.worker(rows)
@@ -126,8 +123,10 @@ class DeleteDownloadTests(unittest.TestCase):
         self.worker([("100", 1, "photo", "alice")])
         row = self.record()
         with closing(HistoryStore.for_storage(self.paths)) as store:
-            store.begin_deletion("fixture-crash", row, True, file_signature(row["path"]))
-        self.mock_recycle(row["path"], file_signature(row["path"]))
+            info = Path(row["path"]).stat()
+            store.begin_deletion("fixture-crash", row, True,
+                                 (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+        self.remove_externally(row["path"])
         # Library reload refreshes present/missing paths before the next worker
         # settles the intent. This cannot lose the user's keep-deleted choice.
         with closing(HistoryStore.for_storage(self.paths)) as store:

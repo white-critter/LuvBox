@@ -40,7 +40,6 @@ def main() -> int:
             from xlikesaver.media import convert_mp4_to_gif, ffmpeg_path
             from xlikesaver.preview import thumbnail
             from xlikesaver import charts, gallery  # bundled UI modules
-            from xlikesaver import deletion, recycling
             from PIL import Image
 
             importlib.import_module("gallery_dl.extractor.utils.twitter_transaction_id")
@@ -127,8 +126,6 @@ def main() -> int:
                 with Image.open(smaller) as decoded:
                     assert decoded.size == (480, 270) and decoded.n_frames == 12
                 from xlikesaver import dialogs
-                from xlikesaver.media import can_recycle
-                assert isinstance(can_recycle(folder), bool)
                 dialog = dialogs.Dialog(root, "확인", "자체 점검", buttons=(("예", True), ("아니요", False)),
                                         default=1, cancel=False)
                 assert dialog.default_button is dialog.buttons[1]
@@ -209,23 +206,21 @@ def main() -> int:
                     assert retry.targets == ("200_1",)
                     assert charts.bins([("2026-01", 1), ("2026-03", 2)])[0][1] == ("2026-02", 0)
                     assert gallery.TILE == (150, 112)
-                    # Exercise the bundled journal using our disposable fixture.
-                    # This check never deletes a user file or uses the real bin.
+                    # Exercise external removal and restoration with a fixture.
                     disposable = relocated.media_dir / "300_1.jpg"
-                    disposable.write_bytes(b"isolated deletion self-test")
+                    disposable.write_bytes(b"isolated external removal self-test")
                     store.record_media("flat", {"tweet_id": "300", "num": 1, "type": "photo"}, disposable)
-                    candidate = next(row for row in store.records() if row["tweet_id"] == "300")
-                    ident = store.begin_deletion("selftest", candidate, True, recycling.file_signature(disposable))
-                    receipt = disposable.with_name("recycled-selftest.jpg")
+                    receipt = disposable.with_name("externally-moved-selftest.jpg")
                     disposable.rename(receipt)
-                    store.finish_deletion(ident, "recycled", "isolated fixture", str(receipt))
-                    assert store.deletion_page()["rows"][0]["status"] == "recycled"
-                    assert store.record_page(include_deleted=False)["total"] == 3
-                    assert ("300", 1, "photo") in store.ignored_media()
-                    question = dialogs.DeleteDialog(root, 1, 26, [disposable.name])
-                    assert question.keep_deleted.get() and question.default_button.cget("text") == "취소"
-                    question.cancel()
-                    assert question.result is None and callable(deletion.run_deletion)
+                    store.import_legacy(refresh=True)
+                    assert store.summary()["missing_files"] == 1
+                    assert ("300", 1, "photo") not in store.ignored_media()
+                    receipt.rename(disposable)
+                    store.import_legacy(refresh=True)
+                    assert store.summary()["missing_files"] == 0
+                    assert store.summary()["files"] == 2
+                    from xlikesaver.history_gui import HistoryWindow
+                    assert not hasattr(HistoryWindow, "start_deletion")
                     # Damaged-database salvage reads the catalog page by page.
                     from xlikesaver.recovery import salvage
                     assert len(salvage(store.path)["media"]["rows"]) == 4
@@ -255,7 +250,7 @@ def main() -> int:
                       "statistics": "authors-and-months", "catalog_recovery": "salvage-verified",
                       "records": "local-with-folder-snapshot", "progress": "rounded-borderless",
                       "missing_files": "listed-keep-deleted-or-retry-by-tweet",
-                      "deletion": "bundled-journal-choice-and-redownload-policy",
+                      "external_files": "missing-and-restored-without-deletion-controls",
                       "workspace": "sidebar-scrollable-dashboard-three-settings-tabs",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),

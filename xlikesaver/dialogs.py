@@ -185,37 +185,3 @@ def askyesno(title=None, message=None, *, parent=None, default="yes", **_) -> bo
     return bool(Dialog(parent, title, message, icon="question",
                        buttons=(("예", True), ("아니요", False)),
                        default=1 if str(default).lower() == "no" else 0, cancel=False).run())
-
-
-class DeleteDialog(Dialog):
-    """A concrete file summary and a separate redownload choice."""
-
-    def __init__(self, parent, count: int, total_bytes: int, filenames):
-        from .history_gui import format_bytes
-        names = list(filenames)
-        preview = "\n".join("• " + str(name)[:160] for name in names[:5])
-        if len(names) > 5:
-            preview += f"\n외 {len(names) - 5:,}개"
-        message = (f"선택한 파일 {count:,}개 · {format_bytes(total_bytes)}\n\n{preview}\n\n"
-                   "휴지통으로 옮깁니다. 옮길 수 없는 파일은 그대로 둡니다.\n"
-                   "동기화 폴더라면 클라우드에서도 지워질 수 있습니다.")
-        super().__init__(parent, "선택한 파일을 삭제할까요?", message, icon="warning",
-                         buttons=(("취소", None), ("휴지통으로 이동", True)), default=0, cancel=None)
-        self.keep_deleted = tk.BooleanVar(self, value=True)
-        option = ttk.Frame(self.body, style="Plain.TFrame")
-        option.pack(fill="x", before=self.separator, pady=(18, 0))
-        ttk.Checkbutton(option, text="이 계정에서 다시 받지 않기", variable=self.keep_deleted,
-                        style="TCheckbutton").pack(anchor="w")
-        ttk.Label(option, text="다시 받고 싶다면 ‘사라진 파일’에서 ‘다시 받기’를 누르세요.",
-                  style="CardMuted.TLabel", wraplength=440).pack(anchor="w", pady=(6, 0))
-        self.buttons[0].configure(style="TButton")
-        self.buttons[1].configure(style="DialogPrimary.TButton")
-        self._fit()
-
-    def choose(self, value):
-        # False means confirmed with redownload allowed; None means cancelled.
-        super().choose(bool(self.keep_deleted.get()) if value is True else None)
-
-
-def confirm_delete(count: int, total_bytes: int, filenames, *, parent=None) -> bool | None:
-    return DeleteDialog(parent, count, total_bytes, filenames).run()

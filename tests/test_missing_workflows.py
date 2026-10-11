@@ -204,7 +204,7 @@ class RetryContextTests(unittest.TestCase):
     def test_choice_write_blocks_main_start_but_ordinary_history_loading_does_not(self):
         self.source()
         self.session_mock.return_value = True
-        self.app.history_window = Mock(metadata_active=False, choice_active=True, delete_active=False, repair_active=False)
+        self.app.history_window = Mock(metadata_active=False, choice_active=True, repair_active=False)
         self.app.history_window.winfo_exists.return_value = True
         with patch("xlikesaver.gui.threading.Thread") as thread, \
                 patch("xlikesaver.gui.dialogs.showinfo") as notice:
@@ -220,7 +220,7 @@ class RetryContextTests(unittest.TestCase):
     def test_record_repair_blocks_saving_and_delays_app_exit(self):
         self.source()
         self.session_mock.return_value = True
-        self.app.history_window = Mock(metadata_active=False, choice_active=False, delete_active=False,
+        self.app.history_window = Mock(metadata_active=False, choice_active=False,
                                        repair_active=True)
         self.app.history_window.winfo_exists.return_value = True
         with patch("xlikesaver.gui.threading.Thread") as thread, \
@@ -236,7 +236,7 @@ class RetryContextTests(unittest.TestCase):
         self.assertIn("기록 복구", self.app.status.get())
 
     def test_save_refreshes_the_open_library_at_its_own_pace(self):
-        self.app.history_window = Mock(metadata_active=False, choice_active=False, delete_active=False,
+        self.app.history_window = Mock(metadata_active=False, choice_active=False,
                                        repair_active=False)
         self.app.history_window.winfo_exists.return_value = True
         self.app.history_window.auto_refresh_delay.return_value = 4500
@@ -246,7 +246,7 @@ class RetryContextTests(unittest.TestCase):
         later.assert_called_once_with(4500, self.app._refresh_history)
 
     def test_running_state_refreshes_missing_action_buttons(self):
-        self.app.history_window = Mock(metadata_active=False, choice_active=False, delete_active=False, repair_active=False)
+        self.app.history_window = Mock(metadata_active=False, choice_active=False, repair_active=False)
         self.app.history_window.winfo_exists.return_value = True
         self.app.running = True
         self.app._set_running(True)

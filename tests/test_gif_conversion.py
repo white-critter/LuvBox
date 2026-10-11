@@ -1,5 +1,6 @@
 """Real local FFmpeg conversions and resumable worker failure paths."""
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -12,8 +13,10 @@ from unittest.mock import patch
 
 from PIL import Image, ImageSequence
 
-from tests import test_core
+from tests import test_core, test_missing_files
 from xlikesaver import core, media
+from xlikesaver.history import HistoryStore
+from xlikesaver.storage import migrate_records, resolve_storage
 
 
 class GifConversionTests(unittest.TestCase):
@@ -142,15 +145,33 @@ class GifWorkerTests(unittest.TestCase):
         Image.new("RGB", (10, 10), "green").save(output, "GIF")
         return output
 
+    def retry_gif(self, options=None):
+        test_missing_files.FakeTweetExtractor.requested = []
+        events = []
+        with patch("gallery_dl.extractor.find", side_effect=lambda url:
+                   test_missing_files.FakeTweetExtractor(url, {"100": [(1, "animated_gif")]})), \
+                patch("gallery_dl.downloader.find", return_value=test_core.FakeHttpDownloader):
+            code = core.run_worker(replace(options or self.options_all(), targets=("100_animated_gif_1",)),
+                                   events.append)
+        self.assertNotIn(test_core.SECRET, json.dumps(events))
+        self.assertEqual(events[-1]["type"], "finished")
+        self.assertEqual(test_missing_files.FakeTweetExtractor.requested, ["100"])
+        return code, events
+
     def test_new_gif_is_finalized_catalogued_and_archived_once(self):
         posted = test_core.datetime(2020, 1, 1, tzinfo=test_core.timezone.utc)
         rows = [("100", 1, "animated_gif", "alice", posted, 123)]
         with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
             code, events = self.worker(rows, options=self.options_all())
-            self.assertEqual(code, 0)
+            self.assertEqual((code, events[-1]["status"], events[-1]["saved"], events[-1]["skipped"]),
+                             (0, "finished", 1, 0))
             self.assertEqual(self.keys(), {"twitter100_animated_gif_1"})
             row = self.records()[0]
             self.assertEqual(Path(row["path"]).suffix, ".gif")
+            self.assertEqual((row["status"], row["record_source"], row["media_type"]),
+                             ("saved", "saved", "animated_gif"))
+            saved_event = next(event for event in events if event["type"] == "saved")
+            self.assertEqual(saved_event["path"], row["path"])
             self.assertEqual((row["author"], row["author_id"], row["metadata_status"]), ("alice", "123", "embedded"))
             self.assertEqual(self.embed_source.call_args.args[0], row["path"])
             self.assertFalse(list(self.output.rglob("*.part*")))
@@ -162,6 +183,107 @@ class GifWorkerTests(unittest.TestCase):
             self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 0, 1))
             convert.assert_called_once()
         self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 1)
+
+    def test_externally_removed_converted_gif_is_missing_and_selected_retry_restores_it(self):
+        rows = [("100", 1, "animated_gif", "alice")]
+        options = self.options_all()
+        paths = resolve_storage(self.output, "myaccount", options.separate_accounts)
+        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
+            code, events = self.worker(rows, options=options)
+            self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "finished", 1))
+            before = self.records()[0]
+            gif = Path(before["path"])
+            content = gif.read_bytes()
+            with closing(HistoryStore.for_storage(paths)) as store:
+                summary = store.overview(verify_files=False)
+                self.assertEqual((summary["files"], summary["animated_gif"], summary["missing_files"]), (1, 1, 0))
+                self.assertEqual(summary["bytes"], len(content))
+
+            # The output is an ordinary saved GIF. Removing it outside the app
+            # leaves its history and archive key available for selective retry.
+            gif.rename(self.base / "externally-removed.gif")
+            with closing(HistoryStore.for_storage(paths)) as store:
+                store.import_legacy(refresh=True)
+                summary = store.overview(verify_files=False)
+                self.assertEqual((summary["files"], summary["animated_gif"], summary["bytes"],
+                                  summary["missing_files"]), (0, 0, 0, 1))
+                self.assertEqual(summary["stats"]["authors"], [])
+                self.assertEqual(summary["stats"]["months"]["saved"], [])
+                [missing] = summary["missing"]
+                self.assertEqual((missing["archive_key"], missing["media_type"], missing["filename"]),
+                                 ("100_animated_gif_1", "animated_gif", gif.name))
+                retained = store.records()[0]
+                self.assertEqual((retained["saved_at"], retained["source_url"]),
+                                 (before["saved_at"], before["source_url"]))
+            self.assertEqual(self.keys(), {"twitter100_animated_gif_1"})
+
+            # An ordinary run respects the completed archive instead of undoing
+            # an external deletion. Only the chosen retry fetches the source.
+            test_core.FakeHttpDownloader.downloaded = []
+            code, events = self.worker(rows, options=options)
+            self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 0, 1))
+            self.assertEqual(test_core.FakeHttpDownloader.downloaded, [])
+            convert.assert_called_once()
+            self.assertFalse(gif.exists())
+
+            code, events = self.retry_gif(options)
+            self.assertEqual((code, events[-1]["status"], events[-1]["saved"], events[-1]["recovered"]),
+                             (0, "finished", 1, 1))
+            self.assertEqual(test_core.FakeHttpDownloader.downloaded, ["https://video.twimg.com/100_1.mp4"])
+            self.assertEqual(convert.call_count, 2)
+            self.assertEqual(gif.read_bytes(), content)
+            restored = self.records()[0]
+            self.assertEqual((restored["path"], restored["status"]), (str(gif), "saved"))
+            self.assertEqual(next(event["path"] for event in events if event["type"] == "saved"), str(gif))
+            self.assertEqual(self.keys(), {"twitter100_animated_gif_1"})
+            self.assertFalse(list(self.output.rglob("*.part*")))
+            self.assertFalse(list(self.output.rglob("*.mp4")))
+            with closing(HistoryStore.for_storage(paths)) as store:
+                summary = store.overview(verify_files=False)
+                self.assertEqual((summary["files"], summary["animated_gif"], summary["missing_files"]), (1, 1, 0))
+                self.assertEqual(summary["bytes"], len(content))
+                self.assertEqual(summary["missing"], [])
+
+    def test_selected_retry_adopts_existing_gif_at_new_output_when_former_path_disappeared(self):
+        options = self.options_all()
+        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert):
+            code, _ = self.worker([("100", 1, "animated_gif", "alice")], options=options)
+        self.assertEqual(code, 0)
+        old = self.records()[0]
+        original = Path(old["path"])
+        content = original.read_bytes()
+        source = resolve_storage(self.output, "myaccount", options.separate_accounts)
+        destination = resolve_storage(self.base / "new-output", "myaccount", options.separate_accounts)
+        migrate_records(source, destination)
+        original.rename(self.base / "externally-moved.gif")
+        with closing(HistoryStore.for_storage(destination)) as store:
+            store.import_legacy(refresh=True)
+            # Former roots retain their catalog location even while absent.
+            # It must not mask the selected retry's verified current file hit.
+            self.assertEqual(store.records()[0]["path"], str(original))
+            self.assertEqual(store.summary(verify_files=False)["missing_files"], 1)
+            store.set_missing_ignored([("100", 1, "animated_gif")], True)
+        gif = destination.media_dir / "alice" / original.name
+        gif.parent.mkdir(parents=True, exist_ok=True)
+        gif.write_bytes(content)
+        test_core.FakeHttpDownloader.downloaded = []
+        retry_options = replace(options, output_dir=str(destination.output_dir))
+        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+            code, events = self.retry_gif(retry_options)
+        convert.assert_not_called()
+        self.assertEqual((code, events[-1]["status"], events[-1]["saved"], events[-1]["recovered"],
+                          events[-1]["skipped"]), (0, "finished", 0, 1, 1))
+        self.assertEqual(test_core.FakeHttpDownloader.downloaded, [])
+        self.assertEqual(next(event["path"] for event in events if event["type"] == "skipped"), str(gif))
+        self.assertEqual(gif.read_bytes(), content)
+        with closing(HistoryStore.for_storage(destination)) as store:
+            restored = store.records()[0]
+            self.assertEqual((restored["path"], restored["media_type"]), (str(gif), "animated_gif"))
+            self.assertEqual(restored["saved_at"], old["saved_at"])
+            self.assertEqual(store.ignored_media(), set())
+            summary = store.overview(verify_files=False)
+            self.assertEqual((summary["files"], summary["animated_gif"], summary["missing_files"]), (1, 1, 0))
+            self.assertEqual(summary["bytes"], len(content))
 
     def assert_saved_as_original_mp4(self, events, message):
         mp4 = self.output / "myaccount" / "alice" / "100_gif_1.mp4"

@@ -174,7 +174,6 @@ class HistoryWindow(tk.Toplevel):
         self.busy = False
         self.metadata_active = False
         self.choice_active = False
-        self.delete_active = False
         # A record repair replaces the catalog file; it is finished, never cut off.
         self.repair_active = False
         # 'Select several' mode: a plain click adds or removes one file.
@@ -189,7 +188,6 @@ class HistoryWindow(tk.Toplevel):
         # How long the last full catalog load took; it paces refreshes during a save.
         self.last_load_seconds = 0.0
         self._load_started = None
-        self.delete_stop = threading.Event()
         self.metadata_stop = threading.Event()
         self.pending = False
         self.pending_import = False
@@ -214,8 +212,6 @@ class HistoryWindow(tk.Toplevel):
         self.rows = {}
         self.run_rows = {}
         self.deletion_rows = {}
-        self._delete_next_identity = None
-        self._delete_select_first = False
         self.current_account_dir = None
         self.current_account = ""
         self.current_storage = None
@@ -287,7 +283,6 @@ class HistoryWindow(tk.Toplevel):
             self.bind("<" + key + ">", self._page_key, add="+")
         self.bind("<Control-f>", self.focus_search, add="+")
         self.bind("<Control-a>", self._file_select_all_key, add="+")
-        self.bind("<Delete>", self._file_delete_key, add="+")
         self.bind("<Escape>", self._escape, add="+")
         self.protocol("WM_DELETE_WINDOW", self.close)
         self._poll_timer = self.after(100, self._poll)
@@ -340,7 +335,7 @@ class HistoryWindow(tk.Toplevel):
         tabs.add(runs, text="실행 기록")
         tabs.add(stats, text="통계")
         tabs.add(missing, text="사라진 파일")
-        tabs.add(deletions, text="삭제 기록")
+        tabs.add(deletions, text="이전 삭제 기록")
         tabs.bind("<<NotebookTabChanged>>", self._reset_scroll, add="+")
         tabs.bind("<<NotebookTabChanged>>", self._queue_pager_layout, add="+")
         tabs.bind("<<NotebookTabChanged>>", self._show_stale_authors, add="+")
@@ -499,9 +494,6 @@ class HistoryWindow(tk.Toplevel):
         self.file_all_button = ttk.Button(self.file_selection_actions, text="이 페이지 모두 선택",
                                           command=self.select_all_files, style="Compact.TButton")
         self.file_all_button.pack(side="left", padx=(8, 0))
-        self.delete_button = ttk.Button(self.file_selection_actions, text="선택한 파일 삭제",
-                                        command=self.start_deletion, style="Compact.TButton")
-        self.delete_button.pack(side="left", padx=(8, 0))
         selection_bar.bind("<Configure>", self._queue_pager_layout)
         self._pagination(files, row=2)
 
@@ -659,7 +651,7 @@ class HistoryWindow(tk.Toplevel):
     def _build_deletions(self, page):
         page.columnconfigure(0, weight=1)
         page.rowconfigure(1, weight=1)
-        ttk.Label(page, text="휴지통으로 보낸 파일의 처리 기록입니다. 파일 복원은 Windows 휴지통에서 하세요.",
+        ttk.Label(page, text="이전 버전에서 삭제한 파일의 기록입니다. 파일 복원은 Windows 휴지통에서 하세요.",
                   style="Muted.TLabel", wraplength=1000, justify="left").grid(row=0, column=0, sticky="ew", pady=(0, 10))
         columns = ("finished", "status", "filename", "author", "size", "keep")
         self.deletion_tree = tree = self._table(page, columns, row=1)
@@ -709,7 +701,7 @@ class HistoryWindow(tk.Toplevel):
         self.deletion_total_pages = int(paging.get("pages", 0) or 0)
         self.deletion_page_text.set(f"처리 기록 {total:,}개 · {self.deletion_page + 1 if total else 0} / {self.deletion_total_pages:,}페이지")
         self.deletion_page_input.set(str(self.deletion_page + 1))
-        self.tabs.tab(self.deletion_view, text=f"삭제 기록 {total:,}" if total else "삭제 기록")
+        self.tabs.tab(self.deletion_view, text=f"이전 삭제 기록 {total:,}" if total else "이전 삭제 기록")
         if self.deletion_rows:
             self.deletion_message.place_forget()
         else:
@@ -1226,8 +1218,6 @@ class HistoryWindow(tk.Toplevel):
             self.current_storage = None
             self.completion_text = ""
             self.page = self.run_page = self.missing_page = self.deletion_page = 0
-            self._delete_next_identity = None
-            self._delete_select_first = False
             self.location_text.set("")
             self._display({}, [], [])
             self.status_text.set("먼저 메인 화면에 X 아이디와 저장 폴더를 입력해 주세요.")
@@ -1238,8 +1228,6 @@ class HistoryWindow(tk.Toplevel):
         if directory != self.current_account_dir:
             view_only = False
             self.page = self.run_page = self.missing_page = self.deletion_page = 0
-            self._delete_next_identity = None
-            self._delete_select_first = False
             self.completion_text = ""
             # A media identity or run ID is local to its account catalog.
             # Clear the previous catalog before accepting the new snapshot.
@@ -1338,10 +1326,6 @@ class HistoryWindow(tk.Toplevel):
                 generation, kind, result = self.results.get_nowait()
                 if generation != self.generation:
                     continue
-                if kind == "delete-progress":
-                    self.status_text.set(result.get("message") or
-                                         f"휴지통으로 보내는 중 · 완료 {result.get('recycled', 0):,}개 / 실패 {result.get('failed', 0):,}개")
-                    continue
                 if kind in {"metadata-progress", "convert-progress"}:
                     self.status_text.set(result)
                     continue
@@ -1353,9 +1337,8 @@ class HistoryWindow(tk.Toplevel):
                     continue
                 self.busy = False
                 self.choice_active = self.repair_active = False
-                if self.metadata_active or self.delete_active:
+                if self.metadata_active:
                     self.metadata_active = False
-                    self.delete_active = False
                     self.source_stop_button.configure(state="disabled")
                     self.source_stop_button.pack_forget()
                 if self.closing:
@@ -1377,11 +1360,6 @@ class HistoryWindow(tk.Toplevel):
                         self._load_started = None
                     if not self.pending:
                         self._display(*snapshot)
-                elif kind == "deleted":
-                    self._selection_after_deletion(result.get("paths", []))
-                    self.deletion_page = 0
-                    self.completion_text = result.get("message") or "파일 처리를 마쳤습니다. ‘삭제 기록’에서 결과를 확인하세요."
-                    self.status_text.set(self.completion_text)
                 else:
                     self.status_text.set(result)
                     if kind in {"backfilled", "converted", "repaired", "missing-choice"}:
@@ -1393,7 +1371,7 @@ class HistoryWindow(tk.Toplevel):
                     self.pending = False
                     do_import, self.pending_import = self.pending_import, False
                     self.refresh(import_legacy=do_import)
-                elif kind in {"backfilled", "converted", "missing-choice", "deleted"}:
+                elif kind in {"backfilled", "converted", "missing-choice"}:
                     self.refresh()
                 elif kind == "repaired":
                     self.loaded_locations.discard(self.current_account_dir)
@@ -1433,9 +1411,6 @@ class HistoryWindow(tk.Toplevel):
         selected = self.selected()
         selected_identity = self._record_identity(selected) if selected else None
         selected_identities = {self._record_identity(self.rows[key]) for key in self.tree.selection() if key in self.rows}
-        if self._delete_next_identity is not None:
-            selected_identity = self._delete_next_identity
-            selected_identities = {selected_identity}
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
         page_size = file_paging["page_size"] if file_paging else self._page_size()
@@ -1451,16 +1426,11 @@ class HistoryWindow(tk.Toplevel):
             self.tree.insert("", "end", iid=key, values=(posted, media_label, author, filename,
                                                          format_bytes(row.get("filesize")), format_short(row.get("saved_at"))))
         selection = [key for key, row in self.rows.items() if self._record_identity(row) in selected_identities]
-        if not selection and self._delete_select_first and self.rows:
-            selection = [next(iter(self.rows))]
-            selected_identity = self._record_identity(self.rows[selection[0]])
         self.tree.selection_set(selection)
         if selection:
             focus = next((key for key in selection if self._record_identity(self.rows[key]) == selected_identity), selection[0])
             self.tree.focus(focus)
             self.tree.see(focus)
-        self._delete_next_identity = None
-        self._delete_select_first = False
         if records:
             self._show_table_note("")
         elif scanning:
@@ -1983,17 +1953,13 @@ class HistoryWindow(tk.Toplevel):
         results.put((generation, kind, message))
 
     def stop_metadata(self):
-        if self.delete_active:
-            self.delete_stop.set()
-        else:
-            self.metadata_stop.set()
+        self.metadata_stop.set()
         self.source_stop_button.configure(state="disabled")
         self.status_text.set("현재 파일 처리가 끝나면 작업을 멈춥니다…")
 
     def close(self):
         self.metadata_stop.set()
-        self.delete_stop.set()
-        if self.metadata_active or self.delete_active:
+        if self.metadata_active:
             self.closing = True
             self.stop_metadata()
         elif self.choice_active or self.repair_active:
@@ -2009,7 +1975,6 @@ class HistoryWindow(tk.Toplevel):
         self._tree_release()
         self._sample_token += 1
         self._destroyed = True
-        self.delete_stop.set()
         self._preview_loader.close()
         self.grid_view.release()
         self.sample_view.release()
@@ -2123,10 +2088,8 @@ class HistoryWindow(tk.Toplevel):
         else:
             self.file_selection_text.set("클릭할 때마다 하나씩 고릅니다." if self.select_several else FILE_HINT)
         ready = not self.busy and self.current_storage is not None
-        downloading = bool(self.is_downloading()) if self.is_downloading else False
         self.file_all_button.configure(state="normal" if ready and self.rows else "disabled")
         self.file_clear_button.configure(state="normal" if self.tree.selection() else "disabled")
-        self.delete_button.configure(state="normal" if ready and files and not downloading else "disabled")
 
     def toggle_select_several(self):
         """Mouse-only multiple selection: each click adds or removes a file."""
@@ -2264,8 +2227,7 @@ class HistoryWindow(tk.Toplevel):
             ("이 작성자 파일 보기", self.filter_selected_author, self.author_button),
             ("선택한 파일 경로 복사", self._copy_file_paths, self.file_clear_button),
             ("이 페이지 모두 선택", self.select_all_files, self.file_all_button),
-            ("선택 해제", self.clear_file_selection, self.file_clear_button),
-            ("선택한 파일 삭제", self.start_deletion, self.delete_button))]
+            ("선택 해제", self.clear_file_selection, self.file_clear_button))]
 
     def _gallery_context(self, event, key):
         if key not in self.rows:
@@ -2320,95 +2282,10 @@ class HistoryWindow(tk.Toplevel):
             return
         return self.select_all_files()
 
-    def _file_delete_key(self, event):
-        if self.tabs.index("current") != 0 or event.widget.winfo_class() in {
-            "Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"
-        }:
-            return
-        self.start_deletion()
-        return "break"
-
     def _local_context_valid(self, account, location, generation):
         return not (self._destroyed or self.closing or self.busy or self.is_downloading()
                     or generation != self.generation or location != self.current_storage
                     or account != self.current_account)
-
-    def start_deletion(self):
-        files = [dict(row) for row in self._selected_files()]
-        if self.busy or self.current_storage is None or not files:
-            return
-        if self.is_downloading():
-            dialogs.showinfo("저장 진행 중", "저장 작업이 끝난 뒤 파일을 휴지통으로 보내 주세요.", parent=self)
-            return
-        account, location, generation = self.current_account, self.current_storage, self.generation
-        filenames = [row.get("filename") or Path(row["path"]).name for row in files]
-        keep_deleted = dialogs.confirm_delete(len(files), sum(int(row.get("filesize") or 0) for row in files),
-                                               filenames, parent=self)
-        if keep_deleted is None or not self._local_context_valid(account, location, generation):
-            return
-        # The main form can change while a modal dialog processes events. Do
-        # not delete from an older library while showing a different account.
-        try:
-            current_account, current_location = self.get_location()
-        except (ValueError, OSError):
-            current_account = current_location = None
-        if current_account != account or current_location != location:
-            dialogs.showinfo("저장 위치가 바뀜", "계정이나 저장 폴더가 바뀌었습니다. 라이브러리를 새로고침한 뒤 다시 선택해 주세요.", parent=self)
-            return
-        self.completion_text = ""
-        self.busy = self.delete_active = True
-        self.delete_stop.clear()
-        self.generation += 1
-        self.source_stop_button.configure(text="휴지통 보내기 중단", state="normal")
-        self.source_stop_button.pack(side="right", padx=(0, 8))
-        self.status_text.set(f"파일 {len(files):,}개를 휴지통으로 보내는 중입니다…")
-        self._update_controls()
-        threading.Thread(target=partial(HistoryWindow._delete_worker, self.results, self.delete_stop),
-                         args=(self.generation, location, files, bool(keep_deleted)), daemon=True).start()
-
-    @staticmethod
-    def _delete_worker(results, stop, generation, location, rows, keep_deleted):
-        from .deletion import run_deletion
-        completed = False
-
-        def emit(event):
-            nonlocal completed
-            if event.get("type") == "done":
-                completed = True
-                results.put((generation, "deleted", event))
-            elif event.get("type") == "progress":
-                results.put((generation, "delete-progress", event))
-
-        try:
-            run_deletion(location, rows, keep_deleted, stop, emit)
-        except Exception:
-            # A complete result always releases the UI's operation lock. The
-            # persistent journal lets the protected worker reconcile a crash.
-            if not completed:
-                emit({"type": "done", "paths": [], "failed": len(rows), "total": len(rows),
-                      "message": "파일 처리를 마치지 못했습니다. ‘삭제 기록’을 확인하고 다시 시도해 주세요."})
-        if not completed:
-            emit({"type": "done", "paths": [], "total": len(rows),
-                  "message": "파일 처리가 끝났습니다. ‘삭제 기록’에서 결과를 확인해 주세요."})
-
-    def _selection_after_deletion(self, paths):
-        removed = {self._path_key(path) for path in paths}
-        row = self.selected()
-        if row is None or self._path_key(row.get("path")) not in removed:
-            return
-        order = list(self.tree.get_children())
-        focus = self.tree.focus()
-        if focus not in order:
-            selection = self.tree.selection()
-            focus = selection[0] if selection else order[0]
-        position = order.index(focus)
-        # Continue forward first; at the end use the nearest earlier file.
-        for key in order[position + 1:] + list(reversed(order[:position])):
-            candidate = self.rows.get(key)
-            if candidate and candidate.get("path") and self._path_key(candidate["path"]) not in removed:
-                self._delete_next_identity = self._record_identity(candidate)
-                return
-        self._delete_select_first = True
 
     def _update_author_button(self):
         row = self.selected()

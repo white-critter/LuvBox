@@ -21,35 +21,6 @@ class DialogTests(unittest.TestCase):
     def open_dialogs(self):
         return [widget for widget in self.root.winfo_children() if isinstance(widget, dialogs.Dialog)]
 
-    def test_delete_confirmation_distinguishes_cancel_and_redownload_choice(self):
-        dialog = dialogs.DeleteDialog(self.root, 2, 4096, ["first.jpg", "second.mp4"])
-        self.assertTrue(dialog.keep_deleted.get())
-        self.assertIn("2개", dialog.message)
-        self.assertIn("4.0 KiB", dialog.message)
-        self.assertEqual(dialog.default_button.cget("text"), "취소")
-        dialog.cancel()
-        self.assertIsNone(dialog.result)
-        dialog = dialogs.DeleteDialog(self.root, 1, 1024, ["first.jpg"])
-        dialog.keep_deleted.set(False)
-        dialog.buttons[1].invoke()
-        self.assertIs(dialog.result, False)
-        dialog = dialogs.DeleteDialog(self.root, 1, 1024, ["first.jpg"])
-        dialog.buttons[1].invoke()
-        self.assertIs(dialog.result, True)
-
-    def test_delete_confirmation_keeps_controls_on_short_screen(self):
-        with patch.object(tk.Toplevel, "winfo_screenheight", return_value=768):
-            dialog = dialogs.DeleteDialog(self.root, 200, 1048576, ["긴 파일 이름" * 40] * 200)
-            self.addCleanup(lambda: dialog.winfo_exists() and dialog.destroy())
-            dialog.attributes("-alpha", 0)
-            dialog.deiconify()
-            dialog.update()
-            self.assertIn("외 195개", dialog.message)
-            for button in dialog.buttons:
-                top = button.winfo_rooty() - dialog.winfo_rooty()
-                self.assertGreaterEqual(top, 0)
-                self.assertLessEqual(top + button.winfo_height(), dialog.winfo_height())
-
     def test_buttons_return_their_value_and_closing_means_cancel(self):
         dialog = dialogs.Dialog(self.root, "확인", "계속할까요?", icon="question",
                                 buttons=(("예", True), ("아니요", False)), cancel=False)

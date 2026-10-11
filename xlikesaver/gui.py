@@ -1116,6 +1116,7 @@ class App:
             "끌어서 고르거나 ‘여러 개 선택’을 켜고 하나씩 클릭하세요.",
             "통계에서 작성자를 클릭하면 최근 게시물의 대표 이미지를 봅니다.",
             "파일을 고르면 미리보기가 나옵니다. ‘파일 열기’·‘트윗 열기’로 원본을 봅니다.",
+            "파일 삭제는 탐색기에서 합니다. 새로고침 후 ‘사라진 파일’에서 다시 받거나 숨길 수 있습니다.",
             "예전 파일에 출처·작성자를 넣으려면 ‘출처·작성자 기록’을 누르세요.",
         ), "출처·작성자 기록은 파일을 다시 쓰므로 동기화 폴더라면 다시 올라갈 수 있습니다."),
         ("매일 자동 저장", (
@@ -1716,7 +1717,7 @@ class App:
         """A library job that writes records or files has not finished yet."""
         window = self.history_window
         return bool(window is not None and window.winfo_exists() and (
-            window.metadata_active or window.choice_active or window.delete_active or window.repair_active))
+            window.metadata_active or window.choice_active or window.repair_active))
 
     def close(self):
         if self.login_busy:
@@ -1732,7 +1733,7 @@ class App:
             self.stop()
         elif self._library_job_active():
             self.closing = True
-            if self.history_window.metadata_active or self.history_window.delete_active:
+            if self.history_window.metadata_active:
                 self.history_window.stop_metadata()
             elif self.history_window.repair_active:
                 self.status.set("기록 복구를 마친 뒤 종료합니다…")

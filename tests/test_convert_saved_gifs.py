@@ -105,6 +105,60 @@ class ConvertSavedGifTests(unittest.TestCase):
         self.assertEqual(self.row("100")["path"], str(source.resolve()))
         self.assert_no_temporary_files()
 
+    def test_successful_gif_is_counted_and_external_removal_and_restoration_keep_its_identity(self):
+        source = self.movie("100_gif_1.mp4")
+        self.record("100", source)
+        before = self.row("100")
+        destination = source.with_suffix(".gif")
+
+        def recycle_after_committed_gif(path):
+            # A successful GIF and its committed saved record must precede
+            # removal of the source. This callback only removes a temp fixture.
+            with Image.open(destination) as image:
+                self.assertEqual(image.format, "GIF")
+            committed = self.row("100")
+            self.assertEqual((committed["path"], committed["status"], committed["saved_at"]),
+                             (str(destination.resolve()), "saved", before["saved_at"]))
+            return self.recycle(path)
+
+        messages, recycled = self.convert(recycle=recycle_after_committed_gif)
+        self.assertEqual(messages[-1][1], "converted")
+        self.assertIn("바꿈 1개", messages[-1][2])
+        recycled.assert_called_once_with(source)
+        self.assertFalse(source.exists())
+        converted = self.row("100")
+        summary = self.store.overview()
+        self.assertEqual((summary["files"], summary["animated_gif"], summary["mp4_gifs"], summary["missing_files"]),
+                         (1, 1, 0, 0))
+        self.assertEqual(summary["missing"], [])
+        self.assertEqual((converted["author"], converted["author_id"], converted["source_url"], converted["record_source"]),
+                         ("alice", "123", "https://x.com/i/web/status/100", "saved"))
+
+        contents, stamp = destination.read_bytes(), destination.stat().st_mtime_ns
+        destination.unlink()  # Simulate an external removal of this temporary GIF.
+        self.store.import_legacy(refresh=True)
+        summary = self.store.overview()
+        self.assertEqual((summary["files"], summary["animated_gif"], summary["missing_files"]), (0, 0, 1))
+        self.assertEqual(len(summary["missing"]), 1)
+        missing = summary["missing"][0]
+        self.assertEqual((missing["tweet_id"], missing["num"], missing["media_type"], missing["archive_key"]),
+                         ("100", 1, "animated_gif", "100_animated_gif_1"))
+        self.assertEqual((missing["filename"], missing["author"], missing["source_url"], missing["saved_at"]),
+                         (destination.name, "alice", converted["source_url"], before["saved_at"]))
+        self.assertFalse(missing["ignored"])
+
+        destination.write_bytes(contents)
+        os.utime(destination, ns=(stamp, stamp))
+        self.store.import_legacy(refresh=True)
+        restored = self.row("100")
+        summary = self.store.overview()
+        self.assertEqual((summary["files"], summary["animated_gif"], summary["mp4_gifs"], summary["missing_files"]),
+                         (1, 1, 0, 0))
+        self.assertEqual(summary["missing"], [])
+        self.assertEqual((restored["path"], restored["author"], restored["author_id"], restored["source_url"], restored["saved_at"]),
+                         (str(destination.resolve()), "alice", "123", converted["source_url"], before["saved_at"]))
+        self.assert_no_temporary_files()
+
     def test_record_update_failure_keeps_the_mp4_and_continues(self):
         first, second = self.movie("100_gif_1.mp4"), self.movie("101_gif_1.mp4")
         self.record("100", first)
