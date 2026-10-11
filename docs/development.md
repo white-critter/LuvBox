@@ -1,5 +1,12 @@
 # 개발·문제 해결 안내
 
+## 2.5.2 새로고침 디스크 확인 줄이기
+
+- `HistoryStore._file`은 `_media_path`가 경로를 거부했을 때만 `_linked`를 확인합니다. 허용된 경로는 `_path_in_root`가 같은(정규화한) 경로의 링크 검사를 이미 했으므로 결과가 같습니다(링크면 ‘없음’, 폴더 밖이면 `HistoryError`).
+- `_import_legacy(refresh=True)`는 첫 단계에서 있는 것으로 확인한 `_file` 결과를 입력 경로별로 두고, 폴더 검색에서 같은 경로를 만나면 다시 확인하지 않습니다. 없음으로 확인된 경로는 재사용하지 않습니다.
+- `_scan_files`는 정션 여부를 `os.DirEntry.is_junction()`(목록에 들어 있는 reparse tag)으로 판단합니다. Python 3.12의 실제 정션에서 `Path.is_junction()`과 같은 값을 확인했습니다.
+- 측정과 검사는 `docs/review-2.5.2.md`에 있습니다.
+
 ## 2.5.1 경로 포함 검사 속도
 
 `HistoryStore._path_in_root`의 다섯 가지 포함 검사는 `history._within`을 씁니다. Python 3.12의 `PurePath.is_relative_to`는 `other in self.parents`로 상위 경로 객체를 모두 만들어 비교하므로, 파일마다 여러 번 부르는 새로고침에서 CPU 시간의 절반 이상을 차지했습니다. `_within`은 두 경로가 절대 경로일 때 `str(path).lower()` 접두사 비교(pathlib과 같은 대소문자 처리)로 같은 결과를 내고, 그 밖에는 pathlib에 맡깁니다. `tests/test_history.py`의 `WithinTests`가 드라이브 루트·UNC·비슷한 폴더 이름·상대 경로·그리스어 끝 시그마·터키어 İ에서 pathlib과 같은 결과인지 확인합니다. 폴더 검색의 `relative_to(scan_root)`도 `parts` 자르기로 바꿨습니다. 링크 검사(`_linked`)와 파일 `stat`은 그대로입니다. 측정은 `docs/review-2.5.1.md`에 있습니다.

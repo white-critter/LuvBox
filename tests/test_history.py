@@ -800,6 +800,8 @@ class HistoryTests(unittest.TestCase):
         for index in range(30):
             self.file(f"alice/{100 + index}_1.jpg")
         self.store.import_legacy()
+        for index in range(30):
+            self.file(f"alice/{200 + index}_1.jpg")   # only the folder scan finds these
         run = self.store.start_run("author")
         worker = sqlite3.connect(self.store.path, timeout=0.2)
         self.addCleanup(worker.close)
@@ -814,8 +816,37 @@ class HistoryTests(unittest.TestCase):
 
         with patch.object(HistoryStore, "_file", concurrent_write):
             self.store.import_legacy(refresh=True)
-        self.assertGreaterEqual(len(writes), 60)
+        # Recorded files are checked once (the scan reuses that result) and
+        # new files by the scan; a writer succeeds during every check.
+        self.assertEqual(len(writes), 60)
+        self.assertEqual(len({str(path) for path in writes}), 60)
         self.assertEqual(self.store.runs(limit=1)[0]["saved"], len(writes))
+        self.assertEqual(self.store.summary()["files"], 60)
+
+    def test_linked_file_is_missing_and_outside_file_is_refused(self):
+        inside = self.file("alice/100_1.jpg")
+        self.assertEqual(self.store._file(inside), (str(inside.resolve()), len(b"offline-media"), inside.name))
+        is_symlink = Path.is_symlink
+        with patch.object(Path, "is_symlink", lambda candidate: candidate == inside or is_symlink(candidate)):
+            self.assertEqual(self.store._file(inside), ("", None, inside.name))
+        outside = Path(self.temp.name) / "elsewhere" / "101_1.jpg"
+        outside.parent.mkdir()
+        outside.write_bytes(b"offline-media")
+        with self.assertRaises(HistoryError):
+            self.store._file(outside)
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction")
+    def test_folder_scan_skips_a_junction_to_another_folder(self):
+        import _winapi
+        elsewhere = Path(self.temp.name) / "elsewhere"
+        elsewhere.mkdir()
+        (elsewhere / "300_1.jpg").write_bytes(b"offline-media")
+        self.file("alice/100_1.jpg")
+        _winapi.CreateJunction(str(elsewhere), str(self.account / "linked"))
+        self.store.import_legacy(refresh=True)
+        paths = [row["path"] for row in self.store.records()]
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(paths[0].endswith("100_1.jpg"))
 
     def test_import_commits_in_short_batches(self):
         self.archive([f"twitter{100 + index}_1" for index in range(5)])

@@ -436,10 +436,12 @@ class HistoryStore:
         candidate = Path(path)
         # Check both the supplied path and resolved target to avoid importing
         # symlink/junction targets outside the explicitly selected account.
-        if self._linked(candidate):
-            return "", None, candidate.name
+        # An accepted path already passed the link check in _path_in_root;
+        # repeating it for every file doubled a library refresh's disk calls.
         resolved = self._media_path(candidate)
         if resolved is None:
+            if self._linked(candidate):
+                return "", None, candidate.name
             raise HistoryError(_HISTORY_HELP)
         candidate = resolved
         try:
@@ -718,7 +720,11 @@ class HistoryStore:
             with os.scandir(directory) as entries:
                 for entry in entries:
                     path = Path(entry.path)
-                    if entry.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+                    # The listing already carries the reparse tag (no extra
+                    # disk call per file); Path.is_junction asks again.
+                    junction = entry.is_junction() if hasattr(entry, "is_junction") else (
+                        hasattr(path, "is_junction") and path.is_junction())
+                    if entry.is_symlink() or junction:
                         continue
                     if entry.is_dir(follow_symlinks=False):
                         if (entry.name == ".xlikesaver" or (restricted and directory == root and entry.name in account_names)
@@ -788,11 +794,17 @@ class HistoryStore:
     def _import_legacy(self, refresh: bool) -> dict:
         before = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
         warnings = []
+        # Files found present just above need not be checked again by the
+        # folder scan below (the same few seconds, under the same rules).
+        present = {}
         if refresh:
             changed = []
             for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type,path,filesize FROM media WHERE path!=''").fetchall():
                 try:
-                    actual, size, _ = self._file(row["path"])
+                    found = self._file(row["path"])
+                    if found[0]:
+                        present[row["path"]] = found
+                    actual, size, _ = found
                     actual = self._preserve_missing_location(row["path"], actual)
                 except HistoryError:
                     # A copied/moved catalog may contain its old absolute
@@ -846,7 +858,7 @@ class HistoryStore:
             relative = path.parts[len(scan_root.parts):]
             parent = relative[0] if len(relative) > 1 else ""
             mode = "flat" if not parent else "date" if _date_folder(parent) else "author"
-            actual, size, filename = self._file(path)
+            actual, size, filename = present.pop(str(path), None) or self._file(path)
             extension = match[4].lower()
             tag = (match[2] or "").lower()
             media_type = "animated_gif" if tag in {"gif", "animated_gif"} or extension == "gif" else "video" if tag == "video" or extension == "mp4" else "photo"
