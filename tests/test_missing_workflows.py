@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from tests import test_gui, test_history_gui
 from xlikesaver.history import HistoryStore
 from xlikesaver.history_gui import HistoryWindow
-from xlikesaver.protection import AccountGuard
+from xlikesaver.protection import AccountGuard, ProtectionError, _BUSY_HELP
 from xlikesaver.recovery import latest_backup
 from xlikesaver.storage import OutputGuard, publish_snapshot, resolve_storage
 
@@ -166,6 +166,44 @@ class MissingWorkflowTests(unittest.TestCase):
         self.assertFalse(self.window.busy)
         self.assertEqual(self.window.status_text.get(), "다른 작업 중")
 
+    def finish_choice_with_cleanup_error(self, *, closing=False):
+        self.show_items()
+        self.window.current_storage = resolve_storage(self.account, "offline")
+        self.window.select_all_missing()
+        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True), \
+                patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.choose_missing(True)
+        self.assertTrue(self.window.busy)
+        self.assertTrue(self.window.choice_active)
+        if closing:
+            self.window.close()
+            self.assertTrue(self.window.winfo_exists())
+            self.assertTrue(self.window.closing)
+        close_output = OutputGuard.close
+
+        def fail_close(guard):
+            close_output(guard)
+            raise OSError("offline output cleanup failure")
+
+        with patch.object(OutputGuard, "close", fail_close):
+            thread.call_args.kwargs["target"](*thread.call_args.kwargs["args"])
+        self.window._poll()
+
+    def test_choice_cleanup_failure_releases_ui_and_allows_close(self):
+        self.finish_choice_with_cleanup_error()
+        self.assertFalse(self.window.busy)
+        self.assertFalse(self.window.choice_active)
+        self.assertTrue(self.window.winfo_exists())
+        self.assertIn("선택 기록 정리", self.window.status_text.get())
+        self.window.close()
+        self.assertFalse(self.window.winfo_exists())
+
+    def test_choice_cleanup_failure_finishes_an_already_requested_close(self):
+        self.finish_choice_with_cleanup_error(closing=True)
+        self.assertFalse(self.window.busy)
+        self.assertFalse(self.window.choice_active)
+        self.assertFalse(self.window.winfo_exists())
+
 
 class RetryContextTests(unittest.TestCase):
     setUp = test_gui.GuiTests.setUp
@@ -314,6 +352,50 @@ class ChoiceCopyTests(unittest.TestCase):
         self.assertIn("갱신하지 못했습니다", result[2])
         self.assertEqual(self.ignored(), {("100", 1, "photo")})
         self.assertEqual(self.ignored(self.paths.snapshot_dir), set())
+
+    def test_guard_cleanup_errors_still_release_other_guard_and_report_one_result(self):
+        close_output, close_account = OutputGuard.close, AccountGuard.close
+        for failed in ({"output"}, {"account"}, {"output", "account"}):
+            with self.subTest(failed=failed):
+                closed = []
+
+                def finish_output(guard):
+                    closed.append("output")
+                    close_output(guard)
+                    if "output" in failed:
+                        raise OSError("offline output cleanup failure")
+
+                def finish_account(guard):
+                    closed.append("account")
+                    close_account(guard)
+                    if "account" in failed:
+                        raise OSError("offline account cleanup failure")
+
+                results = queue.Queue()
+                with patch.object(OutputGuard, "close", finish_output), \
+                        patch.object(AccountGuard, "close", finish_account):
+                    HistoryWindow._choice_worker(results, 7, self.paths, [("100", 1, "photo")], True)
+                generation, kind, message = results.get_nowait()
+                self.assertEqual((generation, kind), (7, "error"))
+                self.assertIn("선택 기록 정리", message)
+                self.assertEqual(closed, ["output", "account"])
+                self.assertTrue(results.empty())
+                self.assertEqual(self.ignored(), {("100", 1, "photo")})
+                for guard in (AccountGuard(self.paths.account, sleep=lambda *_: None), OutputGuard(self.paths.output_dir)):
+                    try:
+                        guard.acquire()
+                    finally:
+                        guard.close()
+
+    def test_cleanup_error_preserves_an_existing_protection_failure(self):
+        guard = Mock()
+        guard.acquire.side_effect = ProtectionError(_BUSY_HELP)
+        guard.close.side_effect = OSError("offline account cleanup failure")
+        with patch("xlikesaver.protection.AccountGuard", return_value=guard):
+            generation, kind, message = self.choose()
+        self.assertEqual((generation, kind, message), (1, "error", _BUSY_HELP))
+        guard.close.assert_called_once_with()
+        self.assertEqual(self.ignored(), set())
 
 
 if __name__ == "__main__":

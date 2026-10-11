@@ -110,7 +110,7 @@ class HistoryTests(unittest.TestCase):
         from xlikesaver.history import _identity
 
         def reference(rows):
-            # The merge every group used before single-record files got a fast path.
+            # General merge, with author completion scoped to the chosen identity.
             def priority(row):
                 return (row["record_source"] in {"saved", "existing"}, row["updated_at"],
                         row["folder_mode"], row["tweet_id"], row["num"])
@@ -136,9 +136,14 @@ class HistoryTests(unittest.TestCase):
                     row["posted_at"], row["posted_source"] = posted["posted_at"], posted["posted_source"]
                 saved = [item["saved_at"] for item in group if item["saved_at"]]
                 row["saved_at"] = min(saved) if saved else None
-                for field in ("metadata_status", "author_metadata_status"):
-                    if any(item[field] == "embedded" for item in group):
-                        row[field] = "embedded"
+                if any(item["metadata_status"] == "embedded" for item in group):
+                    row["metadata_status"] = "embedded"
+                verified_authors = {(item["author"], item["author_id"]) for item in group
+                                    if item["author_metadata_status"] == "embedded"}
+                if (row["author"], row["author_id"]) in verified_authors:
+                    row["author_metadata_status"] = "embedded"
+                elif row["author_metadata_status"] == "embedded":
+                    row["author_metadata_status"] = "pending"
                 files.append(row)
             return files, matched, found
 
@@ -822,6 +827,64 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(len({str(path) for path in writes}), 60)
         self.assertEqual(self.store.runs(limit=1)[0]["saved"], len(writes))
         self.assertEqual(self.store.summary()["files"], 60)
+
+    def test_refresh_checks_shared_present_paths_once_without_changing_records(self):
+        former = Path(self.temp.name) / "former-output"
+        former.mkdir()
+        paths = []
+        for index, (location, kind) in enumerate(
+                (("current", "photo"), ("current", "animated_gif"),
+                 ("former", "photo"), ("former", "animated_gif"))):
+            tweet = str(100 + index)
+            name = f"{tweet}_1.jpg" if kind == "photo" else f"{tweet}_gif_1.gif"
+            path = self.file("alice/" + name)
+            metadata = self.metadata(ident=tweet, kind=kind, posted=datetime(2020, 1, 1, tzinfo=timezone.utc))
+            metadata["author"]["id"] = 123
+            metadata.update(_xlikesaver_metadata_status="embedded", _xlikesaver_author_metadata_status="embedded")
+            for mode in ("author", "date", "flat"):
+                self.store.record_media(mode, metadata, path)
+            if location == "former":
+                moved = former / name
+                path.rename(moved)
+                path = moved
+                with self.store._db:
+                    self.store._db.execute("UPDATE media SET path=? WHERE tweet_id=?", (str(path), tweet))
+            paths.append(str(path))
+        with self.store._db:
+            self.store._db.execute("INSERT INTO catalog_meta VALUES ('allowed_media_roots',?)",
+                                   (json.dumps([str(former)]),))
+        self.store._media_roots = self.store._read_media_roots()
+        (former / "999_1.jpg").write_bytes(b"unrelated former-root file")
+        original = self.store.records()
+
+        with patch.object(self.store, "_file", wraps=self.store._file) as checked:
+            self.store.import_legacy(refresh=True)
+
+        self.assertEqual(sorted(str(call.args[0]) for call in checked.call_args_list), sorted(paths))
+        self.assertEqual(self.store.records(), original)
+        self.assertEqual((self.store.summary()["files"], self.store.summary()["record_count"]), (4, 12))
+
+    def test_refresh_rechecks_missing_shared_gif_paths_and_preserves_history(self):
+        path = self.file("100_gif_1.gif")
+        metadata = self.metadata(kind="animated_gif", posted=datetime(2020, 1, 1, tzinfo=timezone.utc))
+        metadata.update(_xlikesaver_metadata_status="embedded", _xlikesaver_author_metadata_status="embedded")
+        for mode in ("author", "date", "flat"):
+            self.store.record_media(mode, metadata, path)
+        original = {row["folder_mode"]: row for row in self.store.records()}
+        path.unlink()
+
+        with patch.object(self.store, "_file", wraps=self.store._file) as checked:
+            self.store.import_legacy(refresh=True)
+
+        self.assertEqual([str(call.args[0]) for call in checked.call_args_list], [str(path)] * 3)
+        for row in self.store.records():
+            self.assertEqual((row["path"], row["last_path"], row["filesize"]), ("", str(path), None))
+            for field in ("author", "posted_at", "saved_at", "metadata_status", "author_metadata_status"):
+                self.assertEqual(row[field], original[row["folder_mode"]][field])
+        [missing] = self.store.missing_media()
+        self.assertEqual((missing["tweet_id"], missing["media_type"], missing["folder_modes"]),
+                         ("100", "animated_gif", ["author", "date", "flat"]))
+        self.assertEqual(self.store.summary()["files"], 0)
 
     def test_linked_file_is_missing_and_outside_file_is_refused(self):
         inside = self.file("alice/100_1.jpg")

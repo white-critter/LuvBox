@@ -1,5 +1,13 @@
 # 개발·문제 해결 안내
 
+## 2.5.3 메타데이터 입력·숨김 완료·중복 기록
+
+- 상주 ExifTool 입력은 세션마다 하나의 writer가 맡고, 입력 쓰기·flush와 종료 요청에도 기존 deadline을 적용합니다. 시간 초과 때 프로세스를 종료하고 파이프 소유 스레드가 정리하도록 합니다.
+- `_choice_worker`도 공통 `_finish_local_change`로 모든 잠금 해제를 시도한 뒤 결과를 전달합니다. 정리 실패가 GUI의 작업 중 상태를 남기지 않습니다.
+- 새로고침은 동일 경로의 양성 파일 검사 결과를 기록 간에도 재사용합니다. 누락·오류 결과는 재사용하지 않으며 행별 조건부 UPDATE는 유지합니다.
+- 중복 파일 통계는 합쳐진 작성자 이름·ID와 일치하는 행의 완료 상태만 적용합니다.
+- 검토와 검증 근거는 `docs/review-2.5.3.md`에 있습니다.
+
 ## 2.5.2 새로고침 디스크 확인 줄이기
 
 - `HistoryStore._file`은 `_media_path`가 경로를 거부했을 때만 `_linked`를 확인합니다. 허용된 경로는 `_path_in_root`가 같은(정규화한) 경로의 링크 검사를 이미 했으므로 결과가 같습니다(링크면 ‘없음’, 폴더 밖이면 `HistoryError`).
@@ -93,9 +101,9 @@ VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니
 | `xlikesaver/login.py` | 입력 토큰 검증·Windows DPAPI 암호화 보관 |
 | `xlikesaver/settings.py` | 화면·예약 실행이 함께 쓰는 사용자 설정 |
 | `xlikesaver/scheduled.py` | 작업 스케줄러용 무인 실행·실행 기록 |
-| `build.ps1`, `tools/package_release.py` | 버전이 붙은 단일 exe·소스 포함 ZIP 제작 |
+| `build.ps1`, `tools/package_release.py` | 버전이 붙은 앱 폴더·소스 포함 ZIP 제작 |
 
-`build.ps1`은 `--onefile --windowed`로 빌드합니다. Python/Tk, Pillow, Pretendard Regular/Bold, 최소 FFmpeg 및 전체 ExifTool 런타임을 포함하며 실행 시 임시 폴더에 풉니다. worker는 부모 앱이 살아 있는 동안 같은 임시 도구를 사용합니다. 사용자 사진과 기록, 설정, 인증정보는 실행 파일 밖에 남습니다. [PyInstaller 배포 방식](https://pyinstaller.org/en/stable/operating-mode.html)
+`build.ps1`은 `--onedir --windowed`로 빌드합니다. Python/Tk, Pillow, Pretendard Regular/Bold, 최소 FFmpeg 및 전체 ExifTool 런타임을 앱 폴더의 `_internal`에 포함합니다. worker도 같은 폴더의 도구를 사용하므로 앱 폴더 전체를 함께 보관합니다. 사용자 사진과 기록, 설정, 인증정보는 실행 파일 밖에 남습니다. [PyInstaller 배포 방식](https://pyinstaller.org/en/stable/operating-mode.html)
 
 worker는 gallery-dl의 비공개 함수 몇 개(`TwitterExtractor._extract_media`, `DownloadJob.handle_url`, `HttpDownloader.receive` 등)를 감싸서 동작합니다. `core.check_gallery_hooks()`가 요청을 보내기 전에 이 함수들의 이름과 매개변수를 확인하고, 다르면 바로 중단합니다. 자체 점검(`--self-test`)도 같은 검사를 합니다. X 변경 때문에 gallery-dl을 올릴 때는 이 검사와 `tests/test_media.py`의 실제 추출 함수 테스트가 통과하는지 먼저 확인하세요.
 

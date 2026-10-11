@@ -2587,10 +2587,10 @@ class HistoryWindow(tk.Toplevel):
         except Exception:
             kind, message = "error", "선택을 기록하지 못했습니다. 저장 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."
         finally:
-            if output_guard is not None:
-                output_guard.close()
-            if account_guard is not None:
-                account_guard.close()
+            guards = [output_guard] if output_guard is not None else []
+            if not _finish_local_change(None, location, guards, account_guard) and kind != "error":
+                kind = "error"
+                message = "선택 기록 정리를 마치지 못했습니다. 기록을 새로고침하고 다른 실행 중인 작업을 확인해 주세요."
         results.put((generation, kind, message))
 
     def retry_missing_files(self):

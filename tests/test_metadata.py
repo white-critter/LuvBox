@@ -2,10 +2,12 @@
 
 import base64
 import importlib.util
+import io
 import json
 import os
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -13,7 +15,7 @@ import unittest
 import zipfile
 from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from xlikesaver import metadata
 
@@ -232,6 +234,33 @@ class MetadataTransactionTests(unittest.TestCase):
         self.assertLessEqual(kwargs["timeout"], 10)
         self.assertEqual(kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
+    def test_last_resident_borrower_cleanup_does_not_extend_fallback_deadline(self):
+        clock = [100.0]
+        session = Mock()
+
+        def failed_command(arguments, deadline):
+            # The outer persistent context exits while this command still
+            # owns a borrow. Its final release must retire the failed tool.
+            metadata._release_session(session)
+            raise metadata._SessionUnavailable("offline EOF")
+
+        def delayed_cleanup():
+            clock[0] = 102.0
+
+        session.execute.side_effect = failed_command
+        session.close.side_effect = delayed_cleanup
+        with patch.object(metadata, "_session", session), \
+                patch.object(metadata, "_session_users", 1), \
+                patch.object(metadata.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(metadata, "_tool_command", return_value=(["offline-tool"], {})), \
+                patch.object(metadata.subprocess, "run") as fallback:
+            with self.assertRaises(TimeoutError):
+                metadata._run(["-ver"], 101.0)
+            self.assertIsNone(metadata._session)
+            self.assertEqual(metadata._session_users, 0)
+        session.close.assert_called_once_with()
+        fallback.assert_not_called()
+
     def test_reader_returns_only_canonical_source_and_hides_failures(self):
         with patch.object(metadata, "available", return_value=True), patch.object(metadata, "_read_tags", return_value={"XMP-dc:Source": "https://invalid.example/?token=" + SECRET}):
             self.assertEqual(metadata.read_source(self.path), "")
@@ -260,6 +289,161 @@ class MetadataTransactionTests(unittest.TestCase):
             self.assertEqual(captured["-XMP-dc:Description-x-default"], expected)
             self.assertEqual(captured["-ItemList:Comment"], expected)
             self.assertEqual(path.read_bytes(), b"offline-container")
+
+
+class ResidentStdinTests(unittest.TestCase):
+    """A stalled stdin must share the metadata deadline and retire safely."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.path = self.root / "한글 원본.jpg"
+        self.path.write_bytes(JPEG)
+        os.utime(self.path, ns=(946684800000000000, 946684800123456700))
+        self.mtime = self.path.stat().st_mtime_ns
+        self.sessions, self.callers = [], []
+        self.addCleanup(self.cleanup_sessions)
+
+    def cleanup_sessions(self):
+        # Even a pre-fix regression must fail promptly instead of leaving the
+        # test blocked inside a full stdin pipe or its command lock.
+        for session in self.sessions:
+            if session._process.poll() is None:
+                session._process.kill()
+                session._process.wait(timeout=3)
+        for caller in self.callers:
+            caller.join(timeout=3)
+        for session in self.sessions:
+            session.close(force=True)
+
+    def sleeping_session(self):
+        command = [sys.executable, "-c", "import time; time.sleep(30)"]
+        with patch.object(metadata, "_tool_command", return_value=(command, {})):
+            session = metadata._ExifToolSession()
+        self.sessions.append(session)
+        return session
+
+    def run_embed(self, session):
+        markers = [f"xlikesaver:x-author:old{index:011d}" for index in range(2000)]
+        self.assertTrue(all(metadata._identity_marker(marker) for marker in markers))
+        results = []
+        with patch.object(metadata, "available", return_value=True), \
+                patch.object(metadata, "TIMEOUT_SECONDS", 0.1), \
+                patch.object(metadata, "_read_tags", return_value={"XMP-xmp:Identifier": markers}), \
+                patch.object(metadata.subprocess, "run", side_effect=AssertionError("expired command retried")):
+            caller = threading.Thread(target=lambda: results.append(metadata.embed_source(self.path, "100", "alice")),
+                                      daemon=True)
+            self.callers.append(caller)
+            started = time.monotonic()
+            caller.start()
+            caller.join(timeout=2)
+            self.assertFalse(caller.is_alive(), "metadata stdin ignored its command deadline")
+            self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertNotIn(SECRET, str(results))
+        self.assertEqual(self.path.read_bytes(), JPEG)
+        self.assertEqual(self.path.stat().st_mtime_ns, self.mtime)
+        self.assertEqual(list(self.root.iterdir()), [self.path])
+        self.assertIsNotNone(session._process.poll())
+        self.assertFalse(session._writer.is_alive())
+        self.assertTrue(session._process.stdin.closed)
+        self.assertTrue(all(not reader.is_alive() for reader in session._readers))
+
+    def test_large_metadata_stalled_write_expires_without_changing_source_or_starting_fallback(self):
+        session = self.sleeping_session()
+        with patch.object(metadata, "_borrow_session", return_value=session), \
+                patch.object(metadata, "_release_session"):
+            self.run_embed(session)
+
+    @unittest.skipUnless(metadata.available(), "Prepare bundled ExifTool for one-shot recovery.")
+    def test_later_metadata_command_recovers_with_one_shot_after_stdin_timeout(self):
+        session = self.sleeping_session()
+        with patch.object(metadata, "_ExifToolSession", return_value=session):
+            with metadata.persistent():
+                self.run_embed(session)
+                self.assertIs(metadata._session, session)
+                real_run = subprocess.run
+                with patch.object(metadata.subprocess, "run", side_effect=real_run) as fallback:
+                    result = metadata.embed_source(self.path, "100", "alice", "12345")
+                self.assertEqual((result["status"], result["author_status"]), ("embedded", "embedded"))
+                self.assertEqual(fallback.call_count, 3)
+        self.assertIsNone(metadata._session)
+        self.assertEqual(metadata.read_source(self.path), URL)
+        self.assertEqual(metadata.read_author(self.path)["author"], "alice")
+        self.assertEqual(self.path.stat().st_mtime_ns, self.mtime)
+
+    def flushing_session(self):
+        class Input:
+            closed = False
+            close_thread = None
+
+            def __init__(self):
+                self.entered, self.release = threading.Event(), threading.Event()
+
+            def write(self, payload):
+                return len(payload)
+
+            def flush(self):
+                self.entered.set()
+                if not self.release.wait(timeout=10):
+                    raise AssertionError("test failed to release blocked flush")
+                raise BrokenPipeError(SECRET)
+
+            def close(self):
+                self.close_thread = threading.get_ident()
+                self.closed = True
+
+        class Process:
+            returncode = None
+
+            def __init__(self):
+                self.stdin = Input()
+                self.stdout, self.stderr = io.BytesIO(), io.BytesIO()
+
+            def poll(self):
+                return self.returncode
+
+            def kill(self):
+                self.returncode = -9
+                self.stdin.release.set()
+
+            def wait(self, timeout):
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("offline fixture", timeout)
+                return self.returncode
+
+        process = Process()
+        with patch.object(metadata, "_tool_command", return_value=(["offline-tool"], {})), \
+                patch.object(metadata.subprocess, "Popen", return_value=process):
+            session = metadata._ExifToolSession()
+        self.sessions.append(session)
+        return session
+
+    def test_blocked_flush_expires_and_stream_closes_on_its_writer_thread(self):
+        session = self.flushing_session()
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            session.execute(["-j", "fixture.jpg"], time.monotonic() + 0.1)
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(session._process.stdin.entered.is_set())
+        self.assertIsNotNone(session._process.poll())
+        self.assertFalse(session._writer.is_alive())
+        self.assertTrue(session._process.stdin.closed)
+        self.assertEqual(session._process.stdin.close_thread, session._writer.ident)
+        self.assertNotEqual(session._process.stdin.close_thread, threading.get_ident())
+
+    def test_graceful_stop_also_bounds_a_blocked_flush_before_killing_tool(self):
+        session = self.flushing_session()
+        started = time.monotonic()
+        with patch.object(metadata, "_SHUTDOWN_TIMEOUT", 0.1):
+            session.close()
+        self.assertLess(time.monotonic() - started, 1)
+        self.assertTrue(session._process.stdin.entered.is_set())
+        self.assertIsNotNone(session._process.poll())
+        self.assertFalse(session._writer.is_alive())
+        self.assertTrue(session._process.stdin.closed)
+        self.assertEqual(session._process.stdin.close_thread, session._writer.ident)
 
 
 @unittest.skipUnless(os.name == "nt" and metadata.available(), "Prepare the bundled Windows ExifTool with setup.ps1.")

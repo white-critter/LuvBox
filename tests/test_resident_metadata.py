@@ -17,6 +17,16 @@ from xlikesaver import metadata
 
 
 class ResidentShutdownTests(unittest.TestCase):
+    def start_writer(self, session, process):
+        closed_by = []
+        process.stdin.close.side_effect = lambda: closed_by.append(threading.get_ident())
+        session._writes = queue.Queue()
+        session._writer = threading.Thread(target=session._send,
+                                           args=(process.stdin, session._writes), daemon=True)
+        session._writer.start()
+        self.addCleanup(session.close, force=True)
+        return closed_by
+
     def test_shutdown_never_closes_a_pipe_held_by_another_reader(self):
         class ReaderPipe:
             def close(self):
@@ -28,8 +38,12 @@ class ResidentShutdownTests(unittest.TestCase):
         process.poll.return_value = 0
         process.stdout, process.stderr = ReaderPipe(), ReaderPipe()
         session._process = process
+        closed_by = self.start_writer(session, process)
         session.close(force=True)
         process.stdin.close.assert_called_once()
+        self.assertEqual(closed_by, [session._writer.ident])
+        self.assertNotEqual(session._writer.ident, threading.get_ident())
+        self.assertFalse(session._writer.is_alive())
 
     def test_reader_closes_its_own_stream_after_eof(self):
         stream, lines = io.BytesIO(b"one line\n"), queue.Queue()
@@ -40,13 +54,20 @@ class ResidentShutdownTests(unittest.TestCase):
     def test_broken_resident_pipe_stops_the_writer_before_fallback(self):
         session = metadata._ExifToolSession.__new__(metadata._ExifToolSession)
         session._lock, session._counter = threading.RLock(), 0
+        session._readers = []
         session._process = Mock()
         session._process.poll.return_value = None
+        session._process.kill.side_effect = lambda: setattr(session._process.poll, "return_value", -9)
+        session._process.wait.return_value = -9
+        closed_by = self.start_writer(session, session._process)
         with patch.object(session, "_collect", side_effect=metadata._SessionUnavailable("offline EOF")), \
-                patch.object(session, "close") as close:
+                patch.object(session, "close", wraps=session.close) as close:
             with self.assertRaises(metadata._SessionUnavailable):
                 session.execute(["-ver"], time.monotonic() + 2)
             close.assert_called_once_with(force=True)
+        session._process.kill.assert_called_once()
+        self.assertEqual(closed_by, [session._writer.ident])
+        self.assertFalse(session._writer.is_alive())
 
     def test_older_or_nonwindows_runtime_retains_executable_compatibility(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -71,6 +92,8 @@ class BundledWriterTests(unittest.TestCase):
             session.execute(["-ver"], time.monotonic())
         self.assertLess(time.monotonic() - started, 6)
         self.assertIsNotNone(session._process.poll())
+        self.assertFalse(session._writer.is_alive())
+        self.assertTrue(session._process.stdin.closed)
         self.assertTrue(all(not reader.is_alive() for reader in session._readers))
         self.assertTrue(session._process.stdout.closed)
         self.assertTrue(session._process.stderr.closed)
@@ -100,6 +123,8 @@ class BundledWriterTests(unittest.TestCase):
                 with self.assertRaises(TimeoutError):
                     session.execute(["-ver"], time.monotonic())
                 self.assertIsNotNone(session._process.poll())
+                self.assertFalse(session._writer.is_alive())
+                self.assertTrue(session._process.stdin.closed)
                 self.assertTrue(all(not reader.is_alive() for reader in session._readers))
                 # The later fallback also starts Perl directly, not a launcher.
                 result = metadata._run(["-j", str(media)], time.monotonic() + 20)

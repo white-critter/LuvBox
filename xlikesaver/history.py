@@ -794,14 +794,14 @@ class HistoryStore:
     def _import_legacy(self, refresh: bool) -> dict:
         before = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
         warnings = []
-        # Files found present just above need not be checked again by the
-        # folder scan below (the same few seconds, under the same rules).
+        # Reuse successful checks for duplicate layout rows and the scan.
+        # Missing/unreadable paths stay uncached and may become available later.
         present = {}
         if refresh:
             changed = []
             for row in self._db.execute("SELECT folder_mode,tweet_id,num,media_type,path,filesize FROM media WHERE path!=''").fetchall():
                 try:
-                    found = self._file(row["path"])
+                    found = present.get(row["path"]) or self._file(row["path"])
                     if found[0]:
                         present[row["path"]] = found
                     actual, size, _ = found
@@ -1009,9 +1009,14 @@ class HistoryStore:
                 row["posted_at"], row["posted_source"] = posted["posted_at"], posted["posted_source"]
             saved = [item["saved_at"] for item in group if item["saved_at"]]
             row["saved_at"] = min(saved) if saved else None
-            for field in ("metadata_status", "author_metadata_status"):
-                if any(item[field] == "embedded" for item in group):
-                    row[field] = "embedded"
+            if any(item["metadata_status"] == "embedded" for item in group):
+                row["metadata_status"] = "embedded"
+            author_identity = (row["author"], row["author_id"])
+            if any(item["author_metadata_status"] == "embedded" and
+                   (item["author"], item["author_id"]) == author_identity for item in group):
+                row["author_metadata_status"] = "embedded"
+            elif row["author_metadata_status"] == "embedded":
+                row["author_metadata_status"] = "pending"
             files.append(row)
         return files, matched, found
 

@@ -79,6 +79,53 @@ class FileStatisticsTests(unittest.TestCase):
         self.assertEqual((summary["files"], summary["embedded_sources"], summary["embedded_authors"]), (1, 1, 1))
         self.assertEqual(len(self.store.records()), 2)
 
+    def test_shared_file_author_completion_requires_the_selected_name_and_id(self):
+        cases = (("OldName", "12345", "NewName", "12345", False),
+                 ("alice", "12345", "alice", "67890", False),
+                 ("Writer", "12345", "writer", "12345", False),
+                 ("alice", "12345", "alice", "12345", True))
+        for index, (old_name, old_id, new_name, new_id, complete) in enumerate(cases):
+            with self.subTest(old=(old_name, old_id), new=(new_name, new_id)):
+                tweet = str(100 + index)
+                path = self.file(f"{tweet}_1.jpg")
+                old = self.metadata(tweet=tweet, author=old_name, embedded=True)
+                old["author"]["id"] = old_id
+                self.store.record_media("author", old, path)
+                with self.store._db:
+                    self.store._db.execute("UPDATE media SET updated_at='2020-01-01' WHERE tweet_id=?", (tweet,))
+                new = self.metadata(tweet=tweet, author=new_name)
+                new["author"]["id"] = new_id
+                self.store.record_media("flat", new, path, status="existing")
+                original = self.store.records()
+
+                for verify in (False, True):
+                    _, files, *_ = self.store._file_snapshot(verify_files=verify)
+                    [row] = [row for row in files if row["tweet_id"] == tweet]
+                    self.assertEqual((row["author"], row["author_id"]), (new_name, new_id))
+                    self.assertEqual(row["author_metadata_status"], "embedded" if complete else "pending")
+                    summary = self.store.overview(verify_files=verify)
+                    self.assertEqual(summary["embedded_authors"], int(complete))
+                    self.assertEqual(summary["embedded_sources"], index + 1)
+                self.assertEqual(self.store.records(), original)
+
+    def test_shared_file_completion_does_not_follow_replaced_author_information(self):
+        path = self.file("100_1.jpg")
+        self.record(path, "author")
+        with self.store._db:
+            self.store._db.execute("UPDATE media SET updated_at='2020-01-01'")
+        unknown = self.metadata(embedded=True)
+        unknown["author"] = {}
+        self.store.record_media("flat", unknown, path, status="existing")
+        original = self.store.records()
+
+        for verify in (False, True):
+            _, [row], *_ = self.store._file_snapshot(verify_files=verify)
+            self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]),
+                             ("alice", "12345", "pending"))
+            summary = self.store.summary(verify_files=verify)
+            self.assertEqual((summary["files"], summary["embedded_authors"], summary["embedded_sources"]), (1, 0, 1))
+        self.assertEqual(self.store.records(), original)
+
     def test_latest_author_of_the_same_file_is_ranked_once(self):
         path = self.file("100_1.jpg")
         self.record(path, "author", author="old_name")

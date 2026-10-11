@@ -20,6 +20,7 @@ from pathlib import Path
 
 SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4"})
 TIMEOUT_SECONDS = 20
+_SHUTDOWN_TIMEOUT = 5
 _ID = re.compile(r"[0-9]{1,20}\Z", re.ASCII)
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z", re.ASCII)
 _URL = re.compile(r"https://x\.com/i/web/status/[0-9]{1,20}\Z", re.ASCII)
@@ -103,6 +104,13 @@ class _ExifToolSession:
              "-common_args", "-charset", "filename=UTF8"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options)
+        # A stuck tool can stop reading while a large metadata argument list
+        # fills stdin. The writer owns this buffered stream, including close,
+        # so neither sending nor retiring the process can block the caller.
+        self._writes = queue.Queue()
+        self._writer = threading.Thread(target=self._send,
+                                        args=(self._process.stdin, self._writes), daemon=True)
+        self._writer.start()
         self._lines = {"stdout": queue.Queue(), "stderr": queue.Queue()}
         self._readers = []
         for name in self._lines:
@@ -110,6 +118,42 @@ class _ExifToolSession:
                                       args=(getattr(self._process, name), self._lines[name]), daemon=True)
             self._readers.append(reader)
             reader.start()
+
+    @staticmethod
+    def _send(stream, writes):
+        try:
+            while True:
+                command = writes.get()
+                if command is None:
+                    break
+                payload, completed, errors = command
+                try:
+                    stream.write(payload)
+                    stream.flush()
+                except (OSError, ValueError):
+                    errors.append(True)
+                finally:
+                    completed.set()
+                if errors:
+                    break
+        finally:
+            # Like a BufferedReader, a BufferedWriter must be closed by its
+            # owning thread after the pending operation releases its mutex.
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
+
+    def _write(self, payload: bytes, deadline: float) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("metadata timeout")
+        completed, errors = threading.Event(), []
+        self._writes.put((payload, completed, errors))
+        if not completed.wait(timeout=max(0, deadline - time.monotonic())):
+            raise TimeoutError("metadata timeout")
+        if errors:
+            raise _SessionUnavailable("exiftool pipe failed")
 
     @staticmethod
     def _pump(stream, lines):
@@ -166,8 +210,7 @@ class _ExifToolSession:
             ready, finished = f"{{ready{number}}}", f"{{finished{number} "
             payload = "\n".join([*arguments, "-echo4", finished + "${status}}", f"-execute{number}"]) + "\n"
             try:
-                self._process.stdin.write(payload.encode("utf-8"))
-                self._process.stdin.flush()
+                self._write(payload.encode("utf-8"), deadline)
                 stdout, _ = self._collect("stdout", lambda line: line.rstrip("\r\n") == ready, deadline)
                 stderr, marker = self._collect("stderr", lambda line: line.startswith(finished), deadline)
                 status = int(marker[len(finished):].strip().rstrip("}"))
@@ -189,10 +232,10 @@ class _ExifToolSession:
             process = self._process
             if process.poll() is None and not force:
                 try:
-                    process.stdin.write(b"-stay_open\nFalse\n")
-                    process.stdin.flush()
-                    process.wait(timeout=5)
-                except (OSError, subprocess.TimeoutExpired):
+                    deadline = time.monotonic() + _SHUTDOWN_TIMEOUT
+                    self._write(b"-stay_open\nFalse\n", deadline)
+                    process.wait(timeout=max(0, deadline - time.monotonic()))
+                except (OSError, _SessionUnavailable, subprocess.TimeoutExpired):
                     pass
             if process.poll() is None:
                 try:
@@ -200,12 +243,9 @@ class _ExifToolSession:
                     process.wait(timeout=5)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
-            try:
-                process.stdin.close()
-            except (OSError, ValueError):
-                pass
+            self._writes.put(None)
             deadline = time.monotonic() + 0.5
-            for reader in self._readers:
+            for reader in [self._writer, *self._readers]:
                 reader.join(timeout=max(0, deadline - time.monotonic()))
 
 
@@ -282,6 +322,9 @@ def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
         finally:
             _release_session(session)
     command, options = _tool_command()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("metadata timeout")
     return subprocess.run(
         [*command, "-config", "", "-charset", "filename=UTF8", "-@", "-"],
         input="\n".join(arguments) + "\n", capture_output=True, text=True,
