@@ -92,6 +92,21 @@ def _safe(method):
     return call
 
 
+def _within(path: Path, folder: Path) -> bool:
+    """``path.is_relative_to(folder)`` for absolute paths, by string prefix.
+
+    Python 3.12 builds and compares every parent folder; with several checks
+    per file that dominated refreshing a large library. The comparison stays
+    lexical and case-insensitive on Windows, exactly like pathlib's.
+    """
+    child, parent = str(path), str(folder)
+    if not (os.path.isabs(child) and os.path.isabs(parent)):
+        return path.is_relative_to(folder)
+    if os.name == "nt":
+        child, parent = child.lower(), parent.lower()
+    return child == parent or child.startswith(parent if parent.endswith(os.sep) else parent + os.sep)
+
+
 def _now() -> str:
     return datetime.now(_KOREA).isoformat(timespec="microseconds")
 
@@ -348,7 +363,7 @@ class HistoryStore:
     def _path_in_root(self, path: Path | str, root: Path) -> Path | None:
         try:
             supplied = Path(os.path.abspath(path))
-            if not supplied.is_relative_to(root) or self._linked(supplied):
+            if not _within(supplied, root) or self._linked(supplied):
                 return None
             cache = self._folder_cache
             if cache is None:
@@ -356,7 +371,7 @@ class HistoryStore:
                 if not self._real_folders(supplied.parent):
                     return None
                 candidate = Path(path).resolve()
-                if not candidate.is_relative_to(root):
+                if not _within(candidate, root):
                     return None
             else:
                 # A whole-folder rescan only records paths; it checks each
@@ -364,14 +379,14 @@ class HistoryStore:
                 key = (supplied.parent, root)
                 if key not in cache:
                     folder = supplied.parent.resolve() if self._real_folders(supplied.parent) else None
-                    cache[key] = folder if folder is not None and folder.is_relative_to(root) else None
+                    cache[key] = folder if folder is not None and _within(folder, root) else None
                 if cache[key] is None:
                     return None
                 candidate = cache[key] / supplied.name
             record_roots = getattr(self, "_media_roots", (self.output_dir,))
-            if self._isolated_records and any(candidate.is_relative_to(parent / ".xlikesaver") for parent in record_roots):
+            if self._isolated_records and any(_within(candidate, parent / ".xlikesaver") for parent in record_roots):
                 return None
-            if any(candidate.is_relative_to(folder) for folder in self._app_data):
+            if any(_within(candidate, folder) for folder in self._app_data):
                 return None
             return candidate
         except (OSError, RuntimeError, ValueError):
@@ -826,8 +841,10 @@ class HistoryStore:
             number = int(match[3])
             if not 1 <= number <= 10000:
                 continue
-            relative = path.relative_to(scan_root)
-            parent = relative.parts[0] if len(relative.parts) > 1 else ""
+            # The walk joined these names onto scan_root (relative_to would
+            # rebuild every parent folder of every file).
+            relative = path.parts[len(scan_root.parts):]
+            parent = relative[0] if len(relative) > 1 else ""
             mode = "flat" if not parent else "date" if _date_folder(parent) else "author"
             actual, size, filename = self._file(path)
             extension = match[4].lower()

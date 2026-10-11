@@ -1,5 +1,9 @@
 # 개발·문제 해결 안내
 
+## 2.5.1 경로 포함 검사 속도
+
+`HistoryStore._path_in_root`의 다섯 가지 포함 검사는 `history._within`을 씁니다. Python 3.12의 `PurePath.is_relative_to`는 `other in self.parents`로 상위 경로 객체를 모두 만들어 비교하므로, 파일마다 여러 번 부르는 새로고침에서 CPU 시간의 절반 이상을 차지했습니다. `_within`은 두 경로가 절대 경로일 때 `str(path).lower()` 접두사 비교(pathlib과 같은 대소문자 처리)로 같은 결과를 내고, 그 밖에는 pathlib에 맡깁니다. `tests/test_history.py`의 `WithinTests`가 드라이브 루트·UNC·비슷한 폴더 이름·상대 경로·그리스어 끝 시그마·터키어 İ에서 pathlib과 같은 결과인지 확인합니다. 폴더 검색의 `relative_to(scan_root)`도 `parts` 자르기로 바꿨습니다. 링크 검사(`_linked`)와 파일 `stat`은 그대로입니다. 측정은 `docs/review-2.5.1.md`에 있습니다.
+
 ## 2.5.0 일반 삭제 제거·외부 파일·GIF 기록
 
 일반 삭제 버튼·메뉴·단축키·worker·확인창과 `deletion.py`/`recycling.py`를 제거했습니다. 옛 DB의 `deletion_items`·`missing_choices`와 병합·복구·중단 정리는 호환성을 위해 유지합니다. 이 코드는 실제 파일을 삭제하지 않습니다. 이전 삭제 기록 조회와 사라진 파일 다시 받기·숨김·숨김 해제는 유지합니다.

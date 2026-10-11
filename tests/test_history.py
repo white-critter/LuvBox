@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from xlikesaver.history import HistoryError, HistoryStore
+from xlikesaver.history import HistoryError, HistoryStore, _within
 
 
 SECRET = "offline-cookie-never-store-in-history"
@@ -21,6 +21,27 @@ KST = timezone(timedelta(hours=9))
 
 def tweet_id(posted):
     return str((int(posted.timestamp() * 1000) - 1_288_834_974_657) << 22)
+
+
+class WithinTests(unittest.TestCase):
+    def test_prefix_check_matches_pathlib(self):
+        here = Path.cwd()
+        folders = [here, here / "Media", here / "media" / "Likes", Path(here.anchor), here / "Med",
+                   Path("relative"), Path(".")]
+        children = [here / "Media" / "a.jpg", here / "MEDIA" / "Likes" / "b.jpg", here / "Media2" / "c.jpg",
+                    here / "Med" / "d.jpg", here, Path(here.anchor), here / "media", Path("relative") / "e.jpg",
+                    Path("other.jpg")]
+        if os.name == "nt":
+            unc = Path(r"\\server\share")
+            folders += [unc, unc / "Media", Path("D:/")]
+            children += [unc / "media" / "f.jpg", unc / "Mediax" / "g.jpg", Path("D:/h.jpg"), Path("d:/Media/i.jpg")]
+            # Case mapping that changes with context or length (final sigma, dotted I).
+            folders += [here / "ΑΣ", here / "ας", here / "İstanbul", here / "i\u0307stanbul"]
+            children += [here / "ΑΣ" / "j.jpg", here / "ΑΣΑ" / "k.jpg", here / "İstanbul" / "l.jpg"]
+        for child in children:
+            for folder in folders:
+                with self.subTest(child=str(child), folder=str(folder)):
+                    self.assertEqual(_within(child, folder), child.is_relative_to(folder))
 
 
 class HistoryTests(unittest.TestCase):
