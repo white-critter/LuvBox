@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "XlikeSaver 앱",
+      "name": "LuvBox 앱",
       "type": "debugpy",
       "request": "launch",
       "program": "${workspaceFolder}/entry.py",

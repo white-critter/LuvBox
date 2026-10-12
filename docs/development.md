@@ -122,7 +122,7 @@ Windows ExifTool 런처만 종료하면 실제 Perl 작성 프로세스가 파�
 
 Windows 64비트, Python 3.12 + Tkinter, gallery-dl 1.32.15, PyInstaller 6.22.3을 사용합니다. 실행에 Node.js나 별도 서버, X 개발자 API 키는 필요하지 않습니다. `setup.ps1`은 가상환경과 고정된 ExifTool 13.59 Windows 패키지를 준비합니다.
 
-VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니다. 인터프리터는 `.venv/Scripts/python.exe`입니다. F5의 **XlikeSaver 앱**, **오프라인 테스트** 실행 구성을 사용할 수 있습니다. 소스 수정 후 앱을 닫았다가 다시 열면 반영됩니다.
+VS Code에서 프로젝트 폴더를 열고 추천 Python 확장을 설치합니다. 인터프리터는 `.venv/Scripts/python.exe`입니다. F5의 **LuvBox 앱**, **오프라인 테스트** 실행 구성을 사용할 수 있습니다. 소스 수정 후 앱을 닫았다가 다시 열면 반영됩니다.
 
 | 파일 | 역할 |
 | --- | --- |
@@ -206,7 +206,7 @@ HTTP 429와 계정 정지는 별개입니다. 잠금·보안 확인이 뜨면 X�
 
 ## 배포
 
-실행에는 `release/XlikeSaver-<버전>/XlikeSaver-<버전>.exe`와 같은 폴더의 `_internal`이 함께 필요합니다. 앱 폴더째 보관합니다. 이름에 버전이 붙어 있어 이전 exe를 실행 중이어도 새로 빌드할 수 있습니다. 재배포에는 `XlikeSaver-<버전>.zip`의 소스·라이선스도 함께 제공합니다. 사용자 세션이나 cookies.txt를 배포하지 마세요. ExifTool/Perl 전체 도구와 의존성 라이선스를 포함합니다. [의존성 안내](../THIRD_PARTY_NOTICES.md)
+실행에는 `release/LuvBox-<버전>/LuvBox-<버전>.exe`와 같은 폴더의 `_internal`이 함께 필요합니다. 앱 폴더째 보관합니다. 이름에 버전이 붙어 있어 이전 exe를 실행 중이어도 새로 빌드할 수 있습니다. 재배포에는 `LuvBox-<버전>.zip`의 소스·라이선스도 함께 제공합니다. 사용자 세션이나 cookies.txt를 배포하지 마세요. ExifTool/Perl 전체 도구와 의존성 라이선스를 포함합니다. [의존성 안내](../THIRD_PARTY_NOTICES.md)
 
 `build/`는 PyInstaller 중간 파일이며 지워도 됩니다. 예약 실행은 등록한 exe 경로를 그대로 실행하므로, 새 버전을 처음 열면 앱이 예약을 그 버전으로 바꿀지 묻습니다.
 
