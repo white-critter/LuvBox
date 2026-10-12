@@ -77,11 +77,13 @@ class PreviewLoader:
         self.closed = False
         self.thread = None
 
-    def request(self, token, path, permitted):
+    def request(self, token, path, permitted, *, remember=None, recall=None):
+        """``remember(image)`` keeps a decoded preview; ``recall()`` returns a
+        kept one when the file itself cannot be read. Both run on this thread."""
         with self.condition:
             if self.closed:
                 return
-            self.pending = (token, Path(path), permitted)
+            self.pending = (token, Path(path), permitted, remember, recall)
             if self.thread is None:
                 self.thread = Thread(target=self._work, daemon=True, name="local-media-preview")
                 self.thread.start()
@@ -100,7 +102,7 @@ class PreviewLoader:
                 self.condition.wait_for(lambda: self.closed or self.pending is not None)
                 if self.closed:
                     return
-                token, path, permitted = self.pending
+                token, path, permitted, remember, recall = self.pending
                 self.pending = None
             try:
                 if not permitted(path):
@@ -123,6 +125,15 @@ class PreviewLoader:
                 result = Thumbnail(None, "파일이 이동되었거나 삭제되었습니다.")
             except Exception:
                 result = Thumbnail(None, "미리보기를 읽지 못했습니다. 파일 열기로 확인해 주세요.")
+            try:
+                if result.image is not None and remember is not None:
+                    remember(result.image)
+                elif result.image is None and recall is not None:
+                    kept = recall()
+                    if kept is not None:
+                        result = Thumbnail(kept, "저장해 둔 작은 미리보기 · " + result.note)
+            except Exception:
+                pass
             with self.condition:
                 if self.closed:
                     self.cache.clear()

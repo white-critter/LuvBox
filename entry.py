@@ -98,6 +98,15 @@ def main() -> int:
                 assert metadata.read_author(target) == author
                 local_preview = thumbnail(target)
                 assert local_preview.image is not None and local_preview.image.size == (2, 2)
+                # Previews kept for files deleted later: WebP must be bundled.
+                from xlikesaver import thumbcache
+                previews = thumbcache.Cache("example")
+                try:
+                    previews.put(("100", 1, "photo"), local_preview.image)
+                    assert previews.get(("100", 1, "photo")).startswith(b"RIFF")
+                finally:
+                    previews.close()
+                assert thumbcache.recall("example", ("100", 1, "photo")) is not None
                 executable = ffmpeg_path()
                 assert executable is not None and executable.is_file()
                 video = Path(folder) / "GIF 원본 확인.mp4"
@@ -251,6 +260,7 @@ def main() -> int:
                       "records": "local-with-folder-snapshot", "progress": "rounded-borderless",
                       "missing_files": "listed-keep-deleted-or-retry-by-tweet",
                       "external_files": "missing-and-restored-without-deletion-controls",
+                      "missing_previews": "webp-kept-on-this-pc",
                       "workspace": "sidebar-scrollable-dashboard-three-settings-tabs",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
                       "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),

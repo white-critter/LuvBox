@@ -553,6 +553,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     output_guard = None
     previous_output_guards = []
     history = None
+    previews = None
     run_id = None
     likes = None
     targets = frozenset()
@@ -969,6 +970,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             history.record_media(normalized.folder_mode, kwdict, media_path, status=media_status)
                         except HistoryError:
                             raise exception.AbortExtraction("history store unavailable") from None
+                        if media_status == "saved":
+                            previews.add((kwdict.get("tweet_id"), kwdict.get("num"), kwdict.get("type", "photo")),
+                                         media_path)
                         if targets:
                             recovered[kwdict["_xlikesaver_archive_key"]] = media_status
                     if media_status == "saved":
@@ -1267,6 +1271,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         with tempfile.TemporaryFile(dir=account_dir):
             pass
         history = HistoryStore.for_storage(storage, protected=True)
+        from .thumbcache import Recorder
+        # A small preview on this PC still shows a file deleted later.
+        previews = Recorder(normalized.account)
         # Previously saved files may still be tagged at their old location.
         # Exclude another account writing into those same selected roots too.
         for previous_root in history.media_roots[1:]:
@@ -1428,6 +1435,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             except HistoryError:
                 status, exit_code, message = "error", 1, _HISTORY_ERROR
             finally:
+                if previews is not None:
+                    previews.close()
                 try:
                     history.close()
                 except HistoryError:

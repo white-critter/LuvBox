@@ -276,6 +276,9 @@ class HistoryStore:
                     self._db.execute("ALTER TABLE media ADD COLUMN author_metadata_status TEXT NOT NULL DEFAULT 'pending'")
                 if "last_path" not in columns:
                     self._db.execute("ALTER TABLE media ADD COLUMN last_path TEXT NOT NULL DEFAULT ''")
+                if "missing_since" not in columns:
+                    # When this PC first found the file gone ('' if unknown).
+                    self._db.execute("ALTER TABLE media ADD COLUMN missing_since TEXT NOT NULL DEFAULT ''")
                 # Write only when an old row needs it. An UPDATE always waits
                 # for the write lock, so every open (even a file opened from
                 # the library while a save writes) used to wait up to 5 s.
@@ -312,8 +315,9 @@ class HistoryStore:
 
     @classmethod
     @_safe
-    def for_storage(cls, paths: StoragePaths, *, protected: bool = False) -> "HistoryStore":
-        prepare_storage(paths, protected=protected)
+    def for_storage(cls, paths: StoragePaths, *, protected: bool = False,
+                    create_media: bool = True) -> "HistoryStore":
+        prepare_storage(paths, protected=protected, create_media=create_media)
         return cls(paths.record_dir, media_dir=paths.media_dir, output_dir=paths.output_dir,
                    legacy_dir=paths.legacy_dir)
 
@@ -642,8 +646,15 @@ class HistoryStore:
         actual, size, _ = self._file(row.get("path") or "")
         actual = self._preserve_missing_location(row.get("path") or "", actual)
         with self._db:
-            self._db.execute("UPDATE media SET metadata_status=?,source_url=?,path=?,filesize=?,updated_at=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                             (status, "https://x.com/i/web/status/" + row["tweet_id"], actual, size, _now(), row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
+            # A file removed during the job keeps its last location, so a
+            # restore can reconnect it like any other missing file.
+            stamp = _now()
+            self._db.execute("UPDATE media SET metadata_status=?,source_url=?,"
+                             "last_path=CASE WHEN ?='' AND path!='' THEN path ELSE last_path END,"
+                             "missing_since=CASE WHEN ?='' AND path!='' THEN ? ELSE missing_since END,"
+                             "path=?,filesize=?,updated_at=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                             (status, "https://x.com/i/web/status/" + row["tweet_id"], actual, actual, stamp,
+                              actual, size, stamp, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
             if author_status is not None:
                 self._db.execute("UPDATE media SET author_metadata_status=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
                                  (author_status, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
@@ -787,7 +798,7 @@ class HistoryStore:
                                  row["tweet_id"], row["num"], row["media_type"],
                                  row["last_path"], row["updated_at"]))
         self._write_batches(restored, lambda values: self._db.execute(
-            "UPDATE media SET path=?,filesize=?,updated_at=? "
+            "UPDATE media SET path=?,filesize=?,updated_at=?,missing_since='' "
             "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
             "AND path='' AND last_path=? AND updated_at=?", values))
 
@@ -815,10 +826,13 @@ class HistoryStore:
                     changed.append((actual, size, row["folder_mode"], row["tweet_id"], row["num"],
                                     row["media_type"], row["path"]))
             # The final path condition leaves rows a download changed meanwhile.
+            # A file found gone keeps its last location and the time noticed.
+            stamp = _now()
             self._write_batches(changed, lambda values: self._db.execute(
-                "UPDATE media SET last_path=CASE WHEN ?='' THEN path ELSE last_path END,path=?,filesize=? "
+                "UPDATE media SET last_path=CASE WHEN ?='' THEN path ELSE last_path END,"
+                "missing_since=CASE WHEN ?='' THEN ? ELSE '' END,path=?,filesize=? "
                 "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
-                (values[0], *values)))
+                (values[0], values[0], stamp, *values)))
             self._restore_known_paths()
         archived = []
         for mode, name in _ARCHIVES.items():
@@ -1078,6 +1092,13 @@ class HistoryStore:
         return result
 
     @_safe
+    def present_files(self) -> list[dict]:
+        """Recorded current files, one per physical file, newest save first."""
+        _, files, *_ = self._file_snapshot(verify_files=False)
+        files.sort(key=lambda row: row["saved_at"] or "", reverse=True)
+        return files
+
+    @_safe
     def missing_media(self, *, verify_files: bool = True) -> list[dict]:
         rows, _, _, found = self._file_snapshot(verify_files=verify_files)
         return self._missing(rows, found)
@@ -1109,6 +1130,8 @@ class HistoryStore:
             saved = [row["saved_at"] for row in group if row["saved_at"]]
             item["saved_at"] = min(saved) if saved else None
             item["folder_modes"] = sorted({row["folder_mode"] for row in group})
+            item["last_path"] = next((row["last_path"] for row in group if row.get("last_path")), "")
+            item["missing_since"] = max((row.get("missing_since") or "" for row in group), default="")
             item["ignored"] = identity in ignored
             item["archive_key"] = archive_key(*identity)
             items.append(item)
@@ -1221,9 +1244,10 @@ class HistoryStore:
                 identities.add((row["tweet_id"], row["num"], row["media_type"]))
                 self._db.execute(
                     "UPDATE media SET last_path=CASE WHEN path='' THEN last_path ELSE path END,"
+                    "missing_since=CASE WHEN path='' THEN missing_since ELSE ? END,"
                     "path='',filesize=NULL,updated_at=? "
                     "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
-                    (stamp, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row["path"]))
+                    (stamp, stamp, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row["path"]))
         for identity in identities:
             self._db.execute(
                 "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,?,?) "

@@ -123,13 +123,18 @@ def resolve_storage(output_dir: str | Path, account: str, separate_accounts: boo
                         account, separate_accounts, snapshot)
 
 
-def prepare_storage(paths: StoragePaths, *, protected: bool = False) -> None:
-    """Create storage and copy old account records once, preserving originals."""
+def prepare_storage(paths: StoragePaths, *, protected: bool = False, create_media: bool = True) -> None:
+    """Create storage and copy old account records once, preserving originals.
+
+    Browsing passes ``create_media=False``: a moved or disconnected media
+    folder must not be replaced by an empty one just because records opened.
+    """
     # Resolve again immediately before filesystem writes to reject junctions
     # introduced after a settings preview was rendered.
     checked = resolve_storage(paths.output_dir, paths.account, paths.separate_accounts)
     _recover_relocation(checked, protected=protected)
-    checked.media_dir.mkdir(parents=True, exist_ok=True)
+    if create_media:
+        checked.media_dir.mkdir(parents=True, exist_ok=True)
     checked.record_dir.mkdir(parents=True, exist_ok=True)
     for name in _DATABASES:
         destination = checked.record_dir / name
@@ -182,6 +187,34 @@ def prepare_storage(paths: StoragePaths, *, protected: bool = False) -> None:
         _write_snapshot_state(checked, state)
     if protected:
         _merge_changed_snapshot(checked)
+
+
+def saved_media_missing(paths: StoragePaths) -> bool:
+    """Records were saved for this media folder, but the folder is gone.
+
+    A folder moved or renamed in Explorer, or a drive that is not connected,
+    looks exactly like every file having been deleted. Callers warn instead.
+    """
+    if paths.media_dir.is_dir():
+        return False
+    history = paths.record_dir / ".xlikesaver-history.sqlite3"
+    if _linked(history) or not history.is_file():
+        return False
+    try:
+        with closing(sqlite3.connect(history.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+            return db.execute("SELECT 1 FROM media LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
+
+
+def missing_media_help(paths: StoragePaths) -> str:
+    """Name the likely cause: a disconnected drive or a moved folder."""
+    anchor = Path(paths.media_dir.anchor) if paths.media_dir.anchor else None
+    if anchor is not None and not anchor.exists():
+        return (f"저장 폴더가 있는 드라이브({paths.media_dir.drive or anchor})가 연결되어 있지 않습니다. "
+                "외장·네트워크 드라이브를 연결한 뒤 다시 시도해 주세요.")
+    return (f"저장 폴더를 찾을 수 없습니다: {paths.media_dir}\n"
+            "폴더를 옮기거나 이름을 바꿨다면 메인 화면의 ‘저장 폴더’에서 새 위치를 골라 주세요.")
 
 
 def _file_state(path: Path) -> list[int]:

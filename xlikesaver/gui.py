@@ -24,7 +24,7 @@ from . import __version__, dialogs, theme
 from .core import QUICK_STOP_AFTER, JobOptions, _normal_account
 from .login import clear_session, has_session, save_auth_token
 from .settings import load_settings, settings_path
-from .storage import StoragePaths, resolve_storage
+from .storage import StoragePaths, missing_media_help, resolve_storage, saved_media_missing
 
 
 def _file_label(event) -> str:
@@ -1493,6 +1493,8 @@ class App:
         # by itself; chosen files are picked again from the refreshed list.
         if not self._ensure_storage(None if targets else "start"):
             return False
+        if not self._confirm_missing_media(options):
+            return False
         self.record_locations[options.account] = options.output_dir
         self.account.set(options.account)
         self.folder.set(options.output_dir)
@@ -1523,6 +1525,29 @@ class App:
             self._log("설정을 기억하지 못했지만 다운로드는 계속 진행합니다.")
         threading.Thread(target=self._run_process, args=(options,), daemon=True).start()
         return True
+
+    def _confirm_missing_media(self, options) -> bool:
+        """A moved or disconnected media folder looks like a new, empty one.
+
+        Saving there would quietly start a second, separate library, so ask.
+        """
+        try:
+            paths = resolve_storage(options.output_dir, options.account, options.separate_accounts)
+            if not saved_media_missing(paths):
+                return True
+        except (ValueError, OSError):
+            return True   # the worker reports an unusable path itself
+        message = missing_media_help(paths)
+        anchor = Path(paths.media_dir.anchor) if paths.media_dir.anchor else None
+        if anchor is not None and not anchor.exists():
+            dialogs.showinfo("저장 폴더를 찾을 수 없음", message, parent=self.root)
+        elif dialogs.askyesno("저장 폴더를 찾을 수 없음",
+                              message + "\n\n이 위치에 새 폴더를 만들고 저장할까요?\n이미 받은 파일은 다시 받지 않습니다.",
+                              parent=self.root, default="no"):
+            return True
+        self.status.set("저장 폴더를 찾을 수 없어 시작하지 않았습니다")
+        self.status_detail.set("드라이브를 연결하거나 ‘저장 폴더’에서 새 위치를 골라 주세요.")
+        return False
 
     def _set_running(self, value):
         if value:

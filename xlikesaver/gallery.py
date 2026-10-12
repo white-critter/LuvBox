@@ -44,13 +44,16 @@ class _GridDecoder:
         self.closed = False
         self.thread = None
 
-    def request(self, token, jobs, permitted):
+    def request(self, token, jobs, permitted, *, remember=None, recall=None):
+        """jobs: (key, path) or (key, path, identity). ``remember(identity,
+        image)`` keeps a decoded preview; ``recall(identity)`` returns a kept
+        one when the file itself cannot be read. Both run on this thread."""
         with self.condition:
             if self.closed:
                 return
             self.stop.set()
             self.stop = threading.Event()
-            self.pending = (token, self.stop, jobs, permitted) if jobs else None
+            self.pending = (token, self.stop, jobs, permitted, remember, recall) if jobs else None
             self._clear_results()
             if jobs and self.thread is None:
                 self.thread = threading.Thread(target=self._work, daemon=True, name="local-gallery-thumbnails")
@@ -79,16 +82,19 @@ class _GridDecoder:
                 self.condition.wait_for(lambda: self.closed or self.pending is not None)
                 if self.closed:
                     return
-                token, stop, jobs, permitted = self.pending
+                token, stop, jobs, permitted, remember, recall = self.pending
                 self.pending = None
             try:
-                allowed = set(permitted([path for _, path in jobs]))
+                allowed = set(permitted([job[1] for job in jobs]))
             except Exception:
                 allowed = set()
-            for key, path in jobs:
+            for job in jobs:
+                key, path = job[0], job[1]
+                identity = job[2] if len(job) > 2 else None
                 if stop.is_set():
                     break
                 image = None
+                decoded = False
                 if path in allowed:
                     try:
                         status = os.stat(path)
@@ -105,6 +111,7 @@ class _GridDecoder:
                             image = self.decoder(Path(path), TILE).image
                         except Exception:
                             image = None
+                        decoded = image is not None
                         with self.condition:
                             if self.closed:
                                 return
@@ -114,6 +121,14 @@ class _GridDecoder:
                                 self.cache[stamp] = image
                                 while len(self.cache) > _CACHE_SIZE:
                                     self.cache.popitem(last=False)
+                if identity is not None:
+                    try:
+                        if decoded and remember is not None:
+                            remember(identity, image)
+                        elif image is None and recall is not None:
+                            image = recall(identity)
+                    except Exception:
+                        pass
                 with self.condition:
                     if self.closed:
                         return
@@ -173,9 +188,10 @@ class ThumbnailGrid(ttk.Frame):
             self._bind_pointer(widget, None)
 
     # -------------------------------------------------------------- contents
-    def show(self, rows, permitted, *, empty_text="표시할 파일이 없습니다."):
+    def show(self, rows, permitted, *, empty_text="표시할 파일이 없습니다.", remember=None, recall=None):
         """rows: [(key, record)] in display order. permitted(paths) runs on
-        the decoding thread and returns the subset that may be read."""
+        the decoding thread and returns the subset that may be read.
+        remember/recall keep and reuse previews by media identity."""
         if self._released:
             return
         if self._drag is not None:
@@ -214,7 +230,9 @@ class ThumbnailGrid(ttk.Frame):
                 self._captions[key] = caption
                 self.tiles[key].configure(text=self._tile_text(key))
             if row.get("path"):
-                jobs.append((key, row["path"]))
+                identity = ((row["tweet_id"], row["num"], row["media_type"])
+                            if all(row.get(name) for name in ("tweet_id", "num", "media_type")) else None)
+                jobs.append((key, row["path"], identity))
         self.empty.configure(text="" if rows else empty_text)
         # Keep surviving selections on refresh without transferring a selected
         # position to an unrelated record on the next page.
@@ -222,7 +240,7 @@ class ThumbnailGrid(ttk.Frame):
         self._layout()
         if relayout:
             self.canvas.yview_moveto(0)
-        self._decoder.request(self._token, jobs, permitted)
+        self._decoder.request(self._token, jobs, permitted, remember=remember, recall=recall)
 
     def poll(self, limit=24):
         """Attach decoded thumbnails; called from the window's UI loop."""

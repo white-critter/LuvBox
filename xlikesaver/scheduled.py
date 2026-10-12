@@ -232,6 +232,14 @@ def _options_from_settings(settings: dict, full: bool):
             # The window moves an account's records when its folder changes.
             # Never start in a folder whose records have not been moved yet.
             raise ValueError("저장 폴더 변경이 끝나지 않았습니다. 앱에서 저장 폴더를 확인한 뒤 다시 시도해 주세요.")
+    from .storage import missing_media_help, resolve_storage, saved_media_missing
+    try:
+        paths = resolve_storage(output, account, settings.get("separate_accounts", False) is True)
+    except ValueError:
+        paths = None   # JobOptions.validate below names the invalid setting
+    if paths is not None and saved_media_missing(paths):
+        # Never start a second, empty library in place of a moved folder.
+        raise ValueError("자동 저장을 건너뛰었습니다. " + missing_media_help(paths))
     size = settings.get("max_video_mb", 200)
     folder_mode = settings.get("folder_mode", "flat")
     return JobOptions(

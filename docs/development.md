@@ -1,5 +1,14 @@
 # 개발·문제 해결 안내
 
+## 2.6.0 사라진 파일 대비
+
+- `xlikesaver/thumbcache.py`: 계정별 SQLite(`state_directory().parent / "thumbnails" / <계정>.sqlite3`)에 (tweet_id, num, media_type)마다 150×112 WebP(실패 시 JPEG)를 둡니다. 300 MB(`LIMIT_BYTES`)를 넘으면 오래된 것부터 지웁니다. `cloud_only`는 `FILE_ATTRIBUTE_OFFLINE/RECALL_ON_OPEN/RECALL_ON_DATA_ACCESS` 파일을 읽지 않습니다. `remember`/`recall`은 예외를 내지 않습니다.
+- 만드는 곳: 저장 worker가 새로 저장한 파일마다(`Recorder`, DB 오류가 나면 그 실행 동안 끔), 갤러리·작성자 사진·파일 미리보기가 디코딩에 성공할 때(`remember`), 파일 관리의 ‘작은 미리보기 저장’(`_previews_worker`). 갤러리·미리보기는 파일을 읽지 못하면 `recall`로 저장해 둔 미리보기를 보여 줍니다.
+- `media.missing_since`(새 열, 기본 ''): 새로고침이 있던 파일을 없음으로 바꿀 때, `mark_metadata`가 사라진 파일의 경로를 지울 때, 옛 삭제 기록 정리 때 시각을 남깁니다. `_restore_known_paths`는 다시 연결할 때 지웁니다. `_missing` 항목에 `last_path`와 함께 들어갑니다.
+- `storage.saved_media_missing(paths)`: 기록 DB에 파일 기록이 있는데 미디어 폴더가 없을 때 True. 라이브러리(`HistoryWindow._store`, 선택 작업)는 `for_storage(..., create_media=False)`로 폴더를 만들지 않고, `_load_worker`는 이때 파일 재확인(`import_legacy(refresh=True)`)을 건너뛰며 `media_offline` 안내를 넣습니다. 라이브러리의 사본 저장(`_publish`, 선택 작업)도 출력 폴더가 없으면 건너뜁니다. 메인 화면 `start`는 `_confirm_missing_media`로 묻고, 예약 실행은 `_options_from_settings`에서 ValueError로 건너뜁니다. 저장 폴더 이전(`migrate_records`)은 그대로 새 폴더를 만듭니다.
+- ‘사라진 파일’의 `missing_all`은 모든 페이지 선택 상태입니다. 표 선택이 현재 페이지 전체와 달라지면 풀리고, 새로고침·숨김 보기 전환 때도 풀립니다.
+- 자세한 검토와 측정은 `docs/review-2.6.0.md`에 있습니다.
+
 ## 2.5.3 메타데이터 입력·숨김 완료·중복 기록
 
 - 상주 ExifTool 입력은 세션마다 하나의 writer가 맡고, 입력 쓰기·flush와 종료 요청에도 기존 deadline을 적용합니다. 시간 초과 때 프로세스를 종료하고 파이프 소유 스레드가 정리하도록 합니다.
