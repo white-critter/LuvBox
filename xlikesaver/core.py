@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from datetime import datetime as _Datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 from urllib.parse import urlsplit
 
 from .protection import API_INTERVAL, MEDIA_INTERVAL, AccountGuard, ProtectionError
@@ -32,6 +32,16 @@ from .media import move_without_overwrite as _move_without_overwrite
 
 
 EventSink = Callable[[dict], None]
+
+
+class SaveReview(Protocol):
+    """A manual run's live option and cancellable, secret-free preview prompt."""
+
+    def enabled(self) -> bool: ...
+
+    def ask(self, path: Path, media: dict, check_stop: Callable[[], None]) -> str: ...
+
+
 _ACCOUNT = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
 _ROUTES = {"i", "home", "explore", "search", "settings", "notifications",
            "messages", "compose", "intent", "login", "logout", "signup",
@@ -58,6 +68,8 @@ _SNAPSHOT_ERROR = "저장 폴더에 기록 사본을 쓰지 못했습니다. 기
 _DATE_MOVE_ERROR = "저장 완료일 폴더로 옮기지 못했습니다. 기존 파일 위치와 중복 방지 기록은 보존했습니다."
 _LOCAL_WRITE_ERROR = ("파일을 쓰지 못해 멈췄습니다. 폴더 쓰기 권한, 디스크 공간, 파일을 쓰는 다른 프로그램을 "
                       "확인한 뒤 다시 실행해 주세요. 받은 파일은 그대로 있습니다.")
+_REVIEW_ERROR = ("저장 여부 확인을 완료하지 못해 멈췄습니다. 다시 실행해 주세요. "
+                 "받은 임시 파일은 보존했습니다.")
 
 
 def _save_day() -> date:
@@ -86,6 +98,26 @@ def _mark_gif_source_complete(source: Path) -> None:
         os.replace(temporary, str(source) + ".xlikesaver-complete")
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _review_file_signature(path: Path) -> tuple[int, int, int, int]:
+    """Identify an ordinary temporary file before and after a preview wait."""
+    details = path.lstat()
+    if (not stat.S_ISREG(details.st_mode) or
+            getattr(details, "st_file_attributes", 0) & 0x400):
+        raise OSError("unsafe review temporary file")
+    return details.st_dev, details.st_ino, details.st_size, details.st_mtime_ns
+
+
+def _review_path(value: str) -> Path:
+    # gallery-dl writes through Windows extended paths; the catalog's allowed
+    # roots and the GUI use their ordinary drive/UNC spelling.
+    if os.name == "nt":
+        if value.startswith("\\\\?\\UNC\\"):
+            value = "\\\\" + value[8:]
+        elif value.startswith("\\\\?\\"):
+            value = value[4:]
+    return Path(value)
 
 
 def _media_details(metadata: dict) -> dict:
@@ -250,6 +282,8 @@ class JobOptions:
     targets: tuple = ()
     # One run's explicit confirmation; never restored from saved settings.
     allow_recreate_media: bool = False
+    # Manual GUI runs can change this preference live through SaveReview.
+    confirm_each: bool = False
 
     @property
     def media_signature(self) -> str:
@@ -273,6 +307,8 @@ class JobOptions:
             raise ValueError("계정별 폴더 설정을 확인해 주세요.")
         if type(self.allow_recreate_media) is not bool:
             raise ValueError("사라진 저장 폴더를 새로 만드는 선택을 확인해 주세요.")
+        if type(self.confirm_each) is not bool:
+            raise ValueError("파일마다 저장 여부 확인 설정을 확인해 주세요.")
         if (not isinstance(self.gif_format, str) or self.gif_format not in {"gif", "mp4"} or
                 not isinstance(self.gif_size, str) or self.gif_size not in GIF_SIZES):
             raise ValueError("움직이는 GIF 저장 형식과 GIF 크기를 다시 선택해 주세요.")
@@ -529,7 +565,8 @@ def _configure_gallery(options: JobOptions, archive_path: Path, account_folder: 
     config.set(("downloader", "http"), "retry-codes", [])
 
 
-def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | None = None) -> int:
+def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | None = None,
+               *, review: SaveReview | None = None) -> int:
     """Download available liked media and emit structured, secret-free events.
 
     A successful traversal covers the list X exposes to this authenticated
@@ -540,7 +577,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     from requests.exceptions import RequestException
     from .metadata import available, embed_source, persistent
 
-    saved = skipped = size_skipped = 0
+    saved = skipped = size_skipped = review_skipped = 0
     metadata_failed = 0
     metadata_available = False
     metadata_warned = False
@@ -564,6 +601,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     ignored = set()
     recovered = {}
     size_limited = set()
+    review_declined = set()
     unavailable_tweets = absent_files = 0
     tweet_texts = []
     visited_ids = set()
@@ -695,6 +733,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     class SizeLimit(exception.ControlException):
         default = "media size exceeded"
 
+    class ReviewSkip(exception.ControlException):
+        default = "user declined media"
+
     class EventsOutput(output.NullOutput):
         def success(self, path):
             active_job.last_output = ("saved", str(path))
@@ -714,6 +755,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.size_exceeded = False
             self.gif_source = self.gif_temporary = None
             self.gif_finalize = None
+            self.review_finalize = None
             self.photo_positions = {}
             self.photo_counts = {}
             extract_media = getattr(self.extractor, "_extract_media", None)
@@ -818,7 +860,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 raise exception.AbortExtraction("download archive unavailable")
 
         def handle_url(self, url, kwdict):
-            nonlocal stop_reason, saved, skipped, size_skipped, existing_streak
+            nonlocal stop_reason, saved, skipped, size_skipped, review_skipped, existing_streak
             check_stop()
             media_type = kwdict.get("type")
             if media_type not in {"photo", "video", "animated_gif"}:
@@ -860,6 +902,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.size_exceeded = False
             self.gif_source = self.gif_temporary = None
             self.gif_finalize = None
+            self.review_finalize = None
             if normalized.folder_mode == "date":
                 kwdict = dict(kwdict, _xlikesaver_date=_save_day().isoformat())
             self.current_media = kwdict
@@ -881,6 +924,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 raise exception.AbortExtraction("permissionerror unsafe media output")
             try:
                 super().handle_url(url, kwdict)
+            except ReviewSkip:
+                review_skipped += 1
+                review_declined.add(kwdict["_xlikesaver_archive_key"])
+                existing_streak = 0
+                self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
+                emit({"type": "review-skipped", "path": "", **_media_details(kwdict)})
             except SizeLimit:
                 size_skipped += 1
                 if targets:
@@ -986,6 +1035,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if self.gif_finalize is not None:
                     self.pathfmt.finalize = self.gif_finalize
                     self.gif_finalize = None
+                if self.review_finalize is not None:
+                    self.pathfmt.finalize = self.review_finalize
+                    self.review_finalize = None
                 if self.gif_temporary is not None:
                     self.gif_temporary.unlink(missing_ok=True)
                     self.gif_temporary = None
@@ -1042,7 +1094,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             # and returns False. Re-raise a protection failure before its parent
             # attempts other image sizes or the next photo.
             is_gif = self.current_media.get("type") == "animated_gif"
-            if is_gif:
+            if is_gif or review is not None:
                 # A conversion failure must never leave a completed-looking
                 # MP4 that gallery-dl would archive as a success on the next run.
                 self.pathfmt.part_enable()
@@ -1069,6 +1121,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 # fallback image size and removes the resumable .part file. A
                 # completed download is left to finalize and be archived.
                 check_stop()
+            if result and review is not None and self.pathfmt.temppath:
+                self.review_download()
             if result and is_gif and self.pathfmt.temppath:
                 source = Path(self.pathfmt.temppath)
                 self.gif_source = source
@@ -1128,6 +1182,70 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 emit({"type": "converting", "stage": "finished", "message": "GIF 변환을 마쳤습니다.",
                       **_media_details(self.current_media)})
             return result
+
+        def review_download(self):
+            """Preview the completed transfer before conversion or archiving."""
+            check_stop()
+            source = _review_path(self.pathfmt.temppath)
+            destination = _review_path(self.pathfmt.realpath)
+            # A downloader may change paths. Only this run's .part file can be
+            # displayed, discarded, or finalized; a pre-existing file is never
+            # the subject of a prompt or of the user's discard operation.
+            if (not self.pathfmt.part or source != Path(str(destination) + ".part") or
+                    not history.is_download_path(source) or not history.is_download_path(destination)):
+                guard.failure = _REVIEW_ERROR
+                raise exception.AbortExtraction(guard.failure)
+            try:
+                signature = _review_file_signature(source)
+                marker = Path(str(source) + ".xlikesaver-complete")
+                marker_signature = None
+                if marker.exists() and _gif_source_complete(source):
+                    marker_signature = _review_file_signature(marker)
+                enabled = review.enabled()
+                if type(enabled) is not bool:
+                    raise ValueError("invalid review state")
+                decision = review.ask(source, {**_media_details(self.current_media),
+                                              "type": self.current_media.get("type", "")}, check_stop) if enabled else "save"
+                check_stop()
+                if decision not in {"save", "skip"}:
+                    raise ValueError("invalid review response")
+                if (not history.is_download_path(source) or
+                        _review_file_signature(source) != signature):
+                    raise OSError("review temporary file changed")
+                if decision == "skip":
+                    if marker_signature is not None and (
+                            not history.is_download_path(marker) or
+                            _review_file_signature(marker) != marker_signature):
+                        raise OSError("review completion marker changed")
+                    source.unlink()
+                    if marker_signature is not None:
+                        marker.unlink()
+                    raise ReviewSkip()
+            except exception.ControlException:
+                raise
+            except Exception:
+                guard.failure = _REVIEW_ERROR
+                raise exception.AbortExtraction(guard.failure) from None
+
+            original_finalize = self.pathfmt.finalize
+            self.review_finalize = original_finalize
+
+            def finalize_reviewed():
+                check_stop()
+                try:
+                    if (not history.is_download_path(source) or not history.is_download_path(destination) or
+                            _review_file_signature(source) != signature):
+                        raise OSError("review temporary file changed")
+                    _move_without_overwrite(source, destination)
+                except OSError:
+                    guard.failure = _LOCAL_WRITE_ERROR
+                    raise exception.AbortExtraction(guard.failure) from None
+                self.pathfmt.part = False
+                self.pathfmt.temppath = self.pathfmt.realpath
+                self.pathfmt.set_mtime()
+                return True
+
+            self.pathfmt.finalize = finalize_reviewed
 
         def get_downloader(self, scheme):
             instance = super().get_downloader(scheme)
@@ -1262,6 +1380,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
     try:
         normalized = options.validate()
+        if normalized.confirm_each and review is None:
+            raise ValueError("파일마다 저장 여부 확인은 프로그램에서 직접 저장을 시작할 때 사용할 수 있습니다.")
         handler.mode = normalized.auth_mode
         check_gallery_hooks()
         check_stop()
@@ -1353,7 +1473,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # A stop while this tweet was handled is not its outcome.
                     check_stop()
                     # Files over the size limit are reported as size-skipped.
-                    left = [key for key in keys if key not in recovered and key not in size_limited]
+                    left = [key for key in keys if key not in recovered and key not in size_limited and
+                            key not in review_declined]
                     if not left:
                         continue
                     if tweet_id in visited_ids:
@@ -1388,7 +1509,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             status = "finished"
             message = (f"새 Like 확인을 마쳤습니다. {saved:,}개를 저장했고, 이미 저장한 파일이 "
                        f"{QUICK_STOP_AFTER}개 이어져 멈췄습니다.")
-        elif not saved and not skipped and not size_skipped:
+        elif not saved and not skipped and not size_skipped and not review_skipped:
             exit_code = 1
             message = ("저장할 미디어를 찾지 못했습니다. 본인 계정으로 로그인했는지, "
                        "좋아요에 사진·영상이 있는지 확인해 주세요.")
@@ -1396,6 +1517,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             message = ("X가 보여 주는 좋아요 목록을 모두 확인했습니다. "
                        "삭제된 게시물이나 X가 더는 보여 주지 않는 오래된 좋아요는 빠질 수 있습니다.")
             status = "finished"
+        if review_skipped:
+            message += (f" 저장하지 않기로 고른 파일 {review_skipped:,}개는 " +
+                        ("‘다시 받기’에서 다시 선택할 수 있습니다." if targets else "다음 실행에서 다시 확인합니다."))
     except exception.StopExtraction:
         status, exit_code = "stopped", 0
         message = "저장을 중단했습니다."
@@ -1438,6 +1562,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 flush_tweet_texts()
                 if run_id is not None:
                     run_status = "limited" if stop_reason == "limit" and status == "finished" else status
+                    if review_skipped and run_status == "finished":
+                        # A declined file must not disappear behind a later
+                        # saved-file streak. The next quick run scans all Likes.
+                        run_status = "partial"
                     history.finish_run(run_id, run_status, saved=saved, skipped=skipped, size_skipped=size_skipped,
                                        visited=len(visited_ids), last_tweet_id=last_tweet_id,
                                        last_posted_at=last_posted_at, message=message)
@@ -1489,7 +1617,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     if status == "error":
         emit({"type": "log", "level": "error", "message": message})
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,
-          "size_skipped": size_skipped, "metadata_failed": metadata_failed, "author_deferred": author_deferred,
+          "size_skipped": size_skipped, "review_skipped": review_skipped,
+          "metadata_failed": metadata_failed, "author_deferred": author_deferred,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,
           "last_posted_at": last_posted_at,
           "scan_mode": "retry" if targets else "quick" if quick_scan else "full",

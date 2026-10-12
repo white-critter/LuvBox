@@ -1272,6 +1272,8 @@ class WorkerEventReaderTests(unittest.TestCase):
 
         app = App.__new__(App)
         app.events, app.stopping, app.stop_path, app.process = queue.Queue(), False, None, None
+        from xlikesaver.review import ReviewControl
+        app.review_control = ReviewControl(False)
         command = lambda request, events, stop: [sys.executable, "-c", _SPLIT_WRITER, str(request), str(events), str(stop)]
         with tempfile.TemporaryDirectory() as folder, patch("xlikesaver.gui.worker_command", command):
             app._run_process(JobOptions(account="example", output_dir=folder))

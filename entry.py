@@ -123,6 +123,39 @@ def main() -> int:
                 assert metadata.read_source(animated) == "https://x.com/i/web/status/102"
                 assert metadata.read_author(animated) == author
                 assert thumbnail(video).image is not None and thumbnail(animated).image is not None
+                # Playback reads only our temporary fixtures. Keep its frame
+                # buffer bounded and wait for handles before continuing.
+                from xlikesaver.review_preview import ReviewPreview
+                for preview_path, kind in ((video, "video"), (animated, "animated_gif")):
+                    playback = ReviewPreview(preview_path, kind, size=(160, 120))
+                    try:
+                        for _ in range(2):
+                            frame = playback.frames.get(timeout=8)
+                            assert frame.image is not None and frame.duration_ms > 0
+                            frame.image.close()
+                    finally:
+                        playback.close()
+                        assert playback.finished.wait(8) and not playback.release_error
+                # Source/frozen review window: no real account or downloader.
+                # Cancel the app's startup/scheduler polls before pumping Tk.
+                for timer in root.tk.call("after", "info"):
+                    root.tk.call("after", "cancel", timer)
+                from xlikesaver.review_gui import ReviewWindow
+                import time as _time
+                choices = []
+                chooser = ReviewWindow(root, {"path": str(target), "media_type": "photo",
+                                              "filename": target.name, "author": "Example_Author"},
+                                       choices.append, lambda path: Path(path) == target)
+                deadline = _time.monotonic() + 8
+                while chooser._photo is None and _time.monotonic() < deadline:
+                    root.update()
+                    _time.sleep(.01)
+                assert chooser._photo is not None and chooser.grab_current() is not chooser
+                chooser.choose("save")
+                while not choices and _time.monotonic() < deadline:
+                    root.update()
+                    _time.sleep(.01)
+                assert choices == ["save"] and not chooser.winfo_exists()
                 # Smaller GIF preset: fitted size and an exact capped frame count.
                 wide = Path(folder) / "GIF 크기 확인.mp4"
                 generated = subprocess.run(
@@ -305,6 +338,7 @@ def main() -> int:
                       "missing_files": "listed-keep-deleted-or-retry-by-tweet",
                       "external_files": "missing-and-restored",
                       "library_deletion": "mock-recycle-journal-and-gif-restoration",
+                      "interactive_save": "muted-video-gif-playback-and-nonmodal-choice",
                       "missing_previews": "webp-kept-on-this-pc",
                       "workspace": "sidebar-scrollable-dashboard-three-settings-tabs",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],
@@ -334,7 +368,10 @@ def main() -> int:
                 from xlikesaver.core import JobOptions, run_worker
 
                 options = JobOptions(**json.loads(request_path.read_text(encoding="utf-8")))
-                return run_worker(options, emit, stop_path)
+                from xlikesaver.review import CONTROL_NAME, ReviewChannel
+                control_path = request_path.parent / CONTROL_NAME
+                review = ReviewChannel(control_path, emit) if control_path.exists() else None
+                return run_worker(options, emit, stop_path, review=review)
             except Exception as exc:
                 # Do not serialize exception contents: they may contain a URL
                 # with credentials supplied by an upstream library.

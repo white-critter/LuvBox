@@ -1,0 +1,235 @@
+"""Playback checks use generated local media and never access an account."""
+
+from io import BytesIO
+from pathlib import Path
+import queue
+import subprocess
+import tempfile
+from threading import Event
+import time
+import unittest
+from unittest.mock import Mock, patch
+
+from PIL import Image
+
+from xlikesaver.review_preview import FRAME_QUEUE_SIZE, ReviewFrame, ReviewPreview
+
+
+class FakeProcess:
+    def __init__(self, data=b"", *, blocked=False):
+        self.killed = Event()
+        self.stdout = BytesIO(data)
+        if blocked:
+            self.stdout = Mock()
+            self.stdout.read.side_effect = lambda _size: (self.killed.wait(3) and b"") or b""
+        self.returncode = None
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = 0
+        self.killed.set()
+
+    def wait(self, timeout=None):
+        self.killed.wait(timeout)
+        return self.returncode
+
+
+class ReviewPreviewTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+
+    def preview(self, path, kind="photo", **kwargs):
+        preview = ReviewPreview(path, kind, **kwargs)
+        self.addCleanup(self.close_preview, preview)
+        return preview
+
+    @staticmethod
+    def close_preview(preview):
+        preview.close()
+        if not preview.finished.wait(5):
+            raise AssertionError("preview did not release file handles")
+
+    def photo(self, filename="확인할 사진.part", size=(900, 600)):
+        path = self.root / filename
+        Image.new("RGB", size, "red").save(path, "JPEG")
+        return path
+
+    def test_photo_part_file_is_bounded_and_local_without_modifying_input(self):
+        path = self.photo()
+        before = (path.read_bytes(), path.stat().st_mtime_ns)
+        with patch("requests.Session.request") as network:
+            preview = self.preview(path)
+            result = preview.frames.get(timeout=3)
+            self.assertTrue(preview.finished.wait(3))
+        network.assert_not_called()
+        self.assertEqual(result.image.size, (600, 400))
+        self.assertEqual(result.image.mode, "RGBA")
+        self.assertIn("사진", result.note)
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertEqual(list(self.root.iterdir()), [path])
+        result.image.close()
+
+    def test_photo_orientation_is_applied_before_rendering(self):
+        path = self.root / "rotated.part"
+        exif = Image.Exif()
+        exif[274] = 6
+        Image.new("RGB", (400, 800), "blue").save(path, "JPEG", exif=exif)
+        preview = self.preview(path)
+        result = preview.frames.get(timeout=3)
+        self.assertGreater(result.image.width, result.image.height)
+        result.image.close()
+
+    def test_missing_corrupt_cloud_only_and_large_photos_return_notices(self):
+        corrupt = self.root / "corrupt.part"
+        corrupt.write_bytes(b"not an image")
+        for path in (self.root / "missing.part", corrupt):
+            with self.subTest(path=path.name):
+                result = self.preview(path).frames.get(timeout=3)
+                self.assertIsNone(result.image)
+                self.assertIn("미리보기", result.note)
+        with patch("xlikesaver.review_preview.cloud_only", return_value=True), \
+                patch("xlikesaver.review_preview.Image.open") as image:
+            result = self.preview(self.photo()).frames.get(timeout=3)
+            self.assertIsNone(result.image)
+            image.assert_not_called()
+        with patch("xlikesaver.review_preview.MAX_PIXELS", 100):
+            result = self.preview(self.photo()).frames.get(timeout=3)
+            self.assertIsNone(result.image)
+            self.assertIn("커서", result.note)
+
+    def test_changed_photo_is_not_displayed_as_the_original_selection(self):
+        path = self.photo()
+        real_signature = (path.stat().st_dev, path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns)
+        with patch("xlikesaver.review_preview._signature", side_effect=[real_signature, (0, 0, 0, 0)]):
+            result = self.preview(path).frames.get(timeout=3)
+        self.assertIsNone(result.image)
+        self.assertIn("변경", result.note)
+
+    def test_media_type_drives_part_file_video_and_frames_are_strictly_bounded(self):
+        path = self.root / "video.part"
+        path.write_bytes(b"offline mp4")
+        processes = []
+
+        encoded = BytesIO()
+        Image.new("RGB", (16, 16), (80, 100, 120)).save(encoded, "BMP")
+
+        def launch(*_args, **_kwargs):
+            process = FakeProcess(encoded.getvalue() * 10)
+            processes.append(process)
+            return process
+
+        with patch("xlikesaver.media.ffmpeg_path", return_value=Path("bundled.exe")), \
+                patch("xlikesaver.review_preview.subprocess.Popen", side_effect=launch) as popen:
+            preview = self.preview(path, "video", size=(16, 16))
+            result = preview.frames.get(timeout=3)
+            self.assertEqual(result.image.getpixel((1, 1)), (80, 100, 120))
+            self.assertEqual(result.duration_ms, 83)
+            self.assertIn("소리 없이", result.note)
+            # Back pressure retains only three frames, even when no UI reads.
+            deadline = time.monotonic() + 2
+            while preview.frames.qsize() < FRAME_QUEUE_SIZE and time.monotonic() < deadline:
+                preview.stop.wait(.01)
+            self.assertEqual(preview.frames.qsize(), FRAME_QUEUE_SIZE)
+            self.assertEqual(len(processes), 1)
+            self.close_preview(preview)
+            self.assertTrue(processes[0].killed.is_set())
+            self.assertTrue(processes[0].stdout.closed)
+            self.assertTrue(preview.frames.empty())
+        args = popen.call_args.args[0]
+        self.assertEqual(args[args.index("-protocol_whitelist") + 1], "file,pipe")
+        self.assertEqual(args[args.index("-f") + 1], "mov")
+        self.assertIn("-an", args)
+        self.assertIn("-sn", args)
+        self.assertIn("-dn", args)
+        self.assertIn("-max_alloc", args)
+        self.assertEqual(args[args.index("-threads") + 1], "1")
+        self.assertEqual(args[args.index("-t") + 1], "30")
+        self.assertEqual(popen.call_args.kwargs["stderr"], subprocess.DEVNULL)
+        self.assertEqual(popen.call_args.kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        result.image.close()
+
+    def test_stalled_decoder_times_out_and_releases_its_file(self):
+        path = self.root / "stall.part"
+        path.write_bytes(b"offline mp4")
+        process = FakeProcess(blocked=True)
+        with patch("xlikesaver.media.ffmpeg_path", return_value=Path("bundled.exe")), \
+                patch("xlikesaver.review_preview.DECODER_TIMEOUT", .15), \
+                patch("xlikesaver.review_preview.subprocess.Popen", return_value=process):
+            preview = self.preview(path, "video", size=(16, 16))
+            result = preview.frames.get(timeout=3)
+            self.assertIsNone(result.image)
+            self.assertIn("재생", result.note)
+            self.assertTrue(preview.finished.wait(3))
+        self.assertTrue(process.killed.is_set())
+        process.stdout.close.assert_called_once()
+
+    def test_closing_while_process_starts_kills_late_process(self):
+        path = self.root / "startup.part"
+        path.write_bytes(b"offline mp4")
+        entered, release = Event(), Event()
+        process = FakeProcess()
+
+        def launch(*_args, **_kwargs):
+            entered.set()
+            release.wait(3)
+            return process
+
+        with patch("xlikesaver.media.ffmpeg_path", return_value=Path("bundled.exe")), \
+                patch("xlikesaver.review_preview.subprocess.Popen", side_effect=launch):
+            preview = self.preview(path, "video", size=(16, 16))
+            self.assertTrue(entered.wait(3))
+            started = time.monotonic()
+            preview.close()
+            self.assertLess(time.monotonic() - started, .25)
+            release.set()
+            self.assertTrue(preview.finished.wait(3))
+        self.assertTrue(process.killed.is_set())
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(preview.frames.empty())
+
+    def test_missing_decoder_and_unsupported_type_are_safe_notices(self):
+        path = self.photo()
+        with patch("xlikesaver.media.ffmpeg_path", return_value=None):
+            result = self.preview(path, "video").frames.get(timeout=3)
+            self.assertIsNone(result.image)
+            self.assertIn("도구", result.note)
+        result = self.preview(path, "unknown").frames.get(timeout=3)
+        self.assertIsNone(result.image)
+        self.assertIn("지원", result.note)
+
+    def test_preview_rejects_unbounded_sizes_before_starting_threads(self):
+        for size in ((0, 400), (640, 0), (99999, 400), (640, 99999)):
+            with self.subTest(size=size), self.assertRaises(ValueError):
+                ReviewPreview(self.root / "missing.part", "photo", size=size)
+
+    def test_real_video_and_gif_play_multiple_frames_and_close_handles(self):
+        from xlikesaver.media import ffmpeg_path
+        executable = ffmpeg_path()
+        if executable is None:
+            self.skipTest("Bundled FFmpeg is not installed")
+        video = self.root / "확인 영상.part"
+        generated = subprocess.run([str(executable), "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                                    "testsrc2=size=160x96:rate=12", "-t", "0.5", "-an", "-c:v", "mpeg4",
+                                    "-f", "mp4", str(video)], capture_output=True, timeout=10,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self.assertEqual(generated.returncode, 0, generated.stderr.decode("utf-8", errors="replace"))
+        gif = self.root / "확인 GIF.part"
+        Image.new("RGB", (160, 96), "red").save(gif, "GIF", save_all=True,
+                    append_images=[Image.new("RGB", (160, 96), "blue")], duration=200, loop=0)
+        for path, kind in ((video, "video"), (gif, "animated_gif")):
+            with self.subTest(kind=kind), patch("requests.Session.request") as network:
+                before = (path.read_bytes(), path.stat().st_mtime_ns)
+                preview = self.preview(path, kind, size=(160, 96))
+                frames = [preview.frames.get(timeout=5) for _ in range(8)]
+                self.assertTrue(all(frame.image is not None for frame in frames))
+                self.assertGreater(len({frame.image.tobytes() for frame in frames}), 1)
+                self.close_preview(preview)
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+                for frame in frames:
+                    frame.image.close()
+                path.unlink()  # Windows succeeds only after native source handles close.
+            network.assert_not_called()

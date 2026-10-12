@@ -24,6 +24,7 @@ from . import __version__, dialogs, theme
 from .core import JobOptions, _normal_account
 from .login import clear_session, has_session, save_auth_token
 from .settings import load_settings, settings_path
+from .review import CONTROL_NAME, ReviewControl
 from .storage import StoragePaths, missing_media_help, resolve_storage, saved_media_missing
 
 
@@ -101,6 +102,11 @@ class App:
         self.saved = 0
         self.skipped = 0
         self.size_skipped = 0
+        self.review_skipped = 0
+        self.review_window = None
+        self._review_candidate = None
+        self._review_context = None
+        self._review_auto_from_toggle = False
         self.history_window = None
         self.connect_window = None
         self.login_cancel = threading.Event()
@@ -154,6 +160,9 @@ class App:
         gif_size = settings.get("gif_size", "original")
         self.gif_size = tk.StringVar(value=next((k for k, v in GIF_SIZES.items() if v == gif_size), next(iter(GIF_SIZES))))
         self.detailed_progress = tk.BooleanVar(value=settings.get("detailed_progress", False) is True)
+        self.confirm_each = tk.BooleanVar(root, value=settings.get("confirm_each", False) is True)
+        self.review_control = ReviewControl(self.confirm_each.get())
+        self.review_summary = tk.StringVar(root)
         try:
             from .scheduled import normal_time
             schedule_time = normal_time(settings.get("schedule_time", "09:00"))
@@ -186,8 +195,9 @@ class App:
         for variable in (self.account, self.folder, self.folder_mode, self.separate_accounts):
             variable.trace_add("write", lambda *_: self._preview_location())
         for variable in (self.folder_mode, self.separate_accounts, self.include_videos, self.include_gifs,
-                         self.max_video_mb, self.scan_mode, self.limited, self.gif_format, self.gif_size):
+                         self.max_video_mb, self.scan_mode, self.limited, self.gif_format, self.gif_size, self.confirm_each):
             variable.trace_add("write", lambda *_: self._update_option_summary())
+        self.confirm_each.trace_add("write", lambda *_: self._review_mode_changed())
         self._auth_changed()
         self._preview_location()
         self._update_option_summary()
@@ -203,6 +213,7 @@ class App:
     def _release_ui(self, event):
         if event.widget is self.root:
             self.login_cancel.set()
+            self._destroy_review()
             theme.release_variables(self)
             self.inputs.clear()
 
@@ -317,6 +328,11 @@ class App:
         self.start_button = ttk.Button(self.work_actions, text="저장 시작", style="Primary.TButton", command=self.start)
         self.start_button.pack(side="left")
         self.stop_button = ttk.Button(self.work_actions, text="중단", style="Ghost.TButton", command=self.stop, state="disabled")
+        self.review_toggle = ttk.Checkbutton(hero, text="저장 전에 하나씩 확인", variable=self.confirm_each,
+                                            style="Plain.TCheckbutton")
+        self.review_toggle.pack(anchor="w", pady=(0, 6))
+        self._wrapping_label(hero, textvariable=self.review_summary, style="CardMuted.TLabel",
+                             wraplength=800).pack(fill="x", pady=(0, 10))
         self._wrapping_label(hero, textvariable=self.status, style="CardStatus.TLabel", wraplength=800).pack(fill="x")
         self._wrapping_label(hero, textvariable=self.status_detail, style="CardMuted.TLabel", wraplength=800).pack(fill="x", pady=(4, 16))
         tiles = ttk.Frame(hero, style="Plain.TFrame")
@@ -438,7 +454,8 @@ class App:
         test = " · 시험 20개" if self.limited.get() else ""
         self._sync_option_controls()
         description = f"{layout} · {'·'.join(media)}{limit}"
-        self.option_summary.set(f"{description} · {scan}{test}")
+        review = " · 하나씩 확인" if self.confirm_each.get() else ""
+        self.option_summary.set(f"{description} · {scan}{test}{review}")
         self.scheduled_option_summary.set(f"{description} · 새 Like만")
 
     def _gif_options(self):
@@ -511,6 +528,105 @@ class App:
         self.skipped_text.set(f"{self.skipped:,}개")
         self.size_text.set(f"{self.size_skipped:,}개")
         self.counts.set(f"이번 저장 {self.saved:,}개 · 이미 저장됨 {self.skipped:,}개 · 용량 초과 {self.size_skipped:,}개")
+        self._update_review_summary()
+
+    def _update_review_summary(self):
+        text = "사진·영상·GIF를 보고 선택합니다 · 예약 자동 저장은 확인 없이 진행합니다." if self.confirm_each.get() else "켜면 사진·영상·GIF를 보고 저장 여부를 선택합니다."
+        if self.review_skipped:
+            text += f" · 선택으로 건너뜀 {self.review_skipped:,}개"
+        self.review_summary.set(text)
+
+    def _review_mode_changed(self):
+        enabled = self.confirm_each.get()
+        window = self.review_window
+        try:
+            # Stop the decoder before letting the child move its open source.
+            if not enabled and window is not None and window.winfo_exists():
+                self._review_auto_from_toggle = True
+                window.choose("auto")
+            else:
+                self.review_control.set_enabled(enabled)
+        except OSError:
+            self._log("확인 옵션을 적용하지 못해 작업을 멈춥니다.")
+            self.stop()
+        self._update_review_summary()
+        if self.options_window is None:
+            try:
+                data = load_settings()
+                data["confirm_each"] = enabled
+                self._write_settings(data)
+            except OSError:
+                self._log("확인 옵션을 기억하지 못했습니다. 다음 실행에서 다시 선택해 주세요.")
+
+    def _destroy_review(self):
+        window, self.review_window = self.review_window, None
+        self._review_candidate = None
+        self._review_auto_from_toggle = False
+        if window is not None and window.winfo_exists():
+            window.destroy()
+
+    def _show_review(self, event):
+        if not self.running or self.stopping or self.closing:
+            return
+        ident = event.get("id")
+        if not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{32}", ident):
+            self.stop()
+            return
+        if not self.confirm_each.get():
+            self.review_control.respond(ident, "save", enabled=False)
+            return
+        if self.review_window is not None:
+            # The child has only one outstanding request; duplicated events
+            # must never replace a candidate that still has an open decoder.
+            if (self._review_candidate or {}).get("id") != ident:
+                self.stop()
+            return
+        context = self._review_context
+        if context is None:
+            self.stop()
+            return
+        root = context.media_dir.resolve()
+        signature = event.get("signature")
+
+        def permitted(path):
+            from .recycling import file_signature
+            try:
+                return (isinstance(signature, list) and len(signature) == 4 and
+                        Path(path).resolve().is_relative_to(root) and
+                        list(file_signature(path)) == signature)
+            except (OSError, RuntimeError):
+                return False
+
+        if not isinstance(event.get("path"), str) or not permitted(event["path"]):
+            self._log("미리보기 파일 위치가 바뀌어 저장을 멈춥니다.")
+            self.stop()
+            return
+        from .review_gui import ReviewWindow
+        self._review_candidate = event
+        self.progress.stop()
+        self.status.set("저장할지 골라 주세요")
+        self.status_detail.set("‘저장’을 누르면 보관하고, ‘건너뛰기’를 누르면 다음 파일을 보여줍니다.")
+        self.review_window = ReviewWindow(self.root, event,
+                                         lambda action: self._review_decision(ident, action), permitted)
+
+    def _review_decision(self, ident, action):
+        if (self._review_candidate or {}).get("id") != ident:
+            return
+        from_toggle = self._review_auto_from_toggle
+        self._destroy_review()
+        if action == "stop":
+            self.stop()
+        if action == "auto" and not from_toggle:
+            self.confirm_each.set(False)
+        try:
+            self.review_control.respond(ident, "save" if action == "auto" else action,
+                                        enabled=self.confirm_each.get())
+        except (OSError, ValueError):
+            self._log("저장 선택을 전달하지 못해 작업을 멈춥니다.")
+            self.stop()
+        if not self.stopping:
+            self.status.set("저장을 이어가고 있습니다…")
+            self.status_detail.set("선택에 따라 다음 파일을 처리합니다.")
 
     def _update_progress(self, event):
         from .history_gui import format_bytes, format_date, MEDIA_LABELS
@@ -784,7 +900,7 @@ class App:
         window.resizable(True, True)
         self._option_snapshot = {name: getattr(self, name).get() for name in (
             "folder_mode", "separate_accounts", "include_videos", "include_gifs", "max_video_mb",
-            "gif_format", "gif_size", "scan_mode", "limited")}
+            "gif_format", "gif_size", "scan_mode", "limited", "confirm_each")}
         heading = ttk.Frame(window, style="Plain.TFrame", padding=(28, 24, 28, 8))
         heading.pack(fill="x")
         ttk.Label(heading, text="저장 설정", style="CardTitle.TLabel").pack(anchor="w")
@@ -862,6 +978,10 @@ class App:
         ttk.Checkbutton(advanced, text="이번에는 20개만 시험 저장", variable=self.limited).pack(anchor="w")
         self._wrapping_label(advanced, text="새 파일 20개를 저장한 뒤 멈춥니다. 이번 실행에만 적용됩니다.",
                              style="CardMuted.TLabel", wraplength=560).pack(fill="x", padx=(56, 0), pady=(4, 0))
+        ttk.Separator(advanced).pack(fill="x", pady=(18, 16))
+        ttk.Checkbutton(advanced, text="저장 전에 하나씩 확인", variable=self.confirm_each).pack(anchor="w")
+        self._wrapping_label(advanced, text="사진·동영상·GIF를 보고 저장하거나 건너뜁니다. 메인 화면에서 진행 중에도 바꿀 수 있습니다. 예약 자동 저장에는 적용하지 않습니다.",
+                             style="CardMuted.TLabel", wraplength=560).pack(fill="x", padx=(32, 0), pady=(4, 0))
         window.protocol("WM_DELETE_WINDOW", lambda: self._close_options(save=False, restore=True))
         window.bind("<Escape>", lambda _: self._close_options(save=False, restore=True))
         self._sync_option_controls()
@@ -902,7 +1022,8 @@ class App:
         data.update({"folder_mode": FOLDER_MODES[self.folder_mode.get()], "scan_mode": SCAN_MODES[self.scan_mode.get()],
                      "separate_accounts": self.separate_accounts.get(), "include_videos": self.include_videos.get(),
                      "include_gifs": self.include_gifs.get(), "max_video_mb": self._video_limit(),
-                     "gif_format": GIF_FORMATS[self.gif_format.get()], "gif_size": GIF_SIZES[self.gif_size.get()]})
+                     "gif_format": GIF_FORMATS[self.gif_format.get()], "gif_size": GIF_SIZES[self.gif_size.get()],
+                     "confirm_each": self.confirm_each.get()})
         self._write_settings(data)
 
     def _close_options(self, *, save=True, restore=False):
@@ -948,6 +1069,7 @@ class App:
                 "max_video_mb": size, "separate_accounts": self.separate_accounts.get(),
                 "gif_format": GIF_FORMATS[self.gif_format.get()], "gif_size": GIF_SIZES[self.gif_size.get()],
                 "detailed_progress": self.detailed_progress.get(),
+                "confirm_each": self.confirm_each.get(),
                 "appearance": self.appearance.get(),
                 "schedule_time": self.schedule_time.get(), "schedule_prompted": self.schedule_prompted,
                 "record_locations": self.record_locations}
@@ -1126,6 +1248,13 @@ class App:
             "동영상·GIF를 받을지와 영상 하나의 최대 크기(기본 200MB)를 정합니다.",
             "평소에는 ‘새 Like만 확인’, 예전 Like까지 다시 보려면 ‘전체 목록 다시 확인’을 고릅니다.",
         ), None),
+        ("보고 골라 저장하기", (
+            "메인 화면의 ‘저장 전에 하나씩 확인’을 켜고 저장을 시작합니다. 진행 중에도 켜고 끌 수 있습니다.",
+            "사진은 크게, 동영상·GIF는 소리 없이 처음 30초를 반복합니다. 저장하거나 이번에는 건너뜁니다.",
+            "‘이후 자동 저장’은 지금 파일부터 확인 없이 저장합니다. 확인창을 닫으면 전체 작업을 중단합니다.",
+            "미리보기용 임시 파일을 먼저 받으므로 인터넷 데이터가 사용됩니다. 동기화 폴더에서는 임시 파일도 동기화될 수 있습니다.",
+            "건너뛴 새 파일은 다음 실행에서 다시 확인합니다. ‘사라진 파일’의 다시 받기에서 건너뛴 파일은 필요하면 다시 선택합니다.",
+        ), "예약 자동 저장은 이 옵션과 관계없이 확인창 없이 진행합니다."),
         ("기록 · 통계", (
             "받은 파일을 목록이나 갤러리로 보고, 작성자·내용으로 찾습니다.",
             "끌어서 여러 개를 고르거나 ‘여러 개 선택’을 켜고 하나씩 클릭합니다.",
@@ -1457,7 +1586,8 @@ class App:
                           scan_mode="quick" if scheduled else SCAN_MODES[self.scan_mode.get()],
                           include_videos=self.include_videos.get(), include_gifs=self.include_gifs.get(),
                           max_video_mb=self._video_limit(), separate_accounts=self.separate_accounts.get(),
-                          gif_format=GIF_FORMATS[self.gif_format.get()], gif_size=GIF_SIZES[self.gif_size.get()]).validate()
+                          gif_format=GIF_FORMATS[self.gif_format.get()], gif_size=GIF_SIZES[self.gif_size.get()],
+                          confirm_each=False if scheduled else self.confirm_each.get()).validate()
 
     def retry_missing(self, targets, account, location) -> bool:
         """Download chosen missing files again (from the library window)."""
@@ -1519,7 +1649,9 @@ class App:
         self.record_locations[options.account] = options.output_dir
         self.account.set(options.account)
         self.folder.set(options.output_dir)
-        self.saved = self.skipped = self.size_skipped = 0
+        self.saved = self.skipped = self.size_skipped = self.review_skipped = 0
+        self._review_context = resolve_storage(options.output_dir, options.account, options.separate_accounts)
+        self.review_control.set_enabled(self.confirm_each.get())
         self.received_final = False
         self.final_status = None
         self.running = True
@@ -1601,6 +1733,7 @@ class App:
                 request, events, stop = (directory / name for name in ("request.json", "events.jsonl", "stop.flag"))
                 request.write_text(json.dumps(asdict(options), ensure_ascii=False), encoding="utf-8")
                 events.touch()
+                self.review_control.attach(directory / CONTROL_NAME)
                 self.stop_path = stop
                 if self.stopping:
                     stop.touch()
@@ -1613,7 +1746,11 @@ class App:
                     with events.open("rb") as stream:
                         partial = b""
                         stop_at = None
+                        heartbeat_at = time.monotonic()
                         while True:
+                            if time.monotonic() - heartbeat_at >= 1:
+                                self.review_control.heartbeat()
+                                heartbeat_at = time.monotonic()
                             chunk = stream.read()
                             if chunk:
                                 partial += chunk
@@ -1640,9 +1777,11 @@ class App:
                                 return_code = process.returncode
                                 break
                             time.sleep(0.1)
+                self.review_control.detach()
         except Exception as exc:
             self.events.put({"type": "log", "level": "error", "message": f"작업 프로세스를 실행하지 못했습니다 ({type(exc).__name__})."})
         finally:
+            self.review_control.detach()
             self.process = None
             self.stop_path = None
             self.events.put({"type": "process_exit", "code": return_code})
@@ -1651,6 +1790,12 @@ class App:
         if not self.running or self.stopping or self.received_final:
             return
         self.stopping = True
+        if self.stop_path:
+            try:
+                self.stop_path.touch(exist_ok=True)
+            except OSError:
+                pass
+        self._destroy_review()
         self.status.set("중단하는 중입니다…")
         self.status_detail.set("지금 받는 파일을 정리하고 멈춥니다. 이미 받은 파일은 다음 실행에서 건너뜁니다.")
         self.stop_button.configure(state="disabled")
@@ -1681,6 +1826,16 @@ class App:
                 self._update_progress(event)
             elif kind == "converting":
                 self._update_conversion(event)
+            elif kind == "review-request":
+                try:
+                    self._show_review(event)
+                except (OSError, tk.TclError):
+                    self._log("미리보기 창을 열지 못해 작업을 멈춥니다.")
+                    self.stop()
+            elif kind == "review-skipped":
+                self.review_skipped += 1
+                self._log("선택으로 건너뜀 · " + _file_label(event), event)
+                self._update_counts()
             elif kind in ("saved", "skipped", "size-skipped"):
                 if kind == "saved":
                     self.saved += 1
@@ -1710,6 +1865,7 @@ class App:
                 self.saved = int(event.get("saved", self.saved))
                 self.skipped = int(event.get("skipped", self.skipped))
                 self.size_skipped = int(event.get("size_skipped", self.size_skipped))
+                self.review_skipped = int(event.get("review_skipped", self.review_skipped))
                 self._update_counts()
                 message = str(event.get("message", "작업이 종료되었습니다."))
                 headline = self.FINISH_HEADLINES.get(self.final_status, message)
@@ -1724,7 +1880,9 @@ class App:
                 if event.get("retry_at"):
                     self._log("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))
             elif kind == "process_exit":
+                self._destroy_review()
                 self.running = False
+                self._review_context = None
                 self.limited.set(False)
                 self.progress.stop()
                 completed = self.received_final and self.final_status == "finished" and event.get("code", 0) == 0

@@ -272,6 +272,8 @@ def _options_from_settings(settings: dict, full: bool):
         separate_accounts=settings.get("separate_accounts", False) is True,
         gif_format=settings.get("gif_format", "gif"),
         gif_size=settings.get("gif_size", "original"),
+        # This worker is unattended; GUI confirmation preferences never apply.
+        confirm_each=False,
     ).validate()
 
 
