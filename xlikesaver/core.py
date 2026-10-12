@@ -26,7 +26,7 @@ from urllib.parse import urlsplit
 
 from .protection import API_INTERVAL, MEDIA_INTERVAL, AccountGuard, ProtectionError
 from .history import CatalogDamaged, HistoryError, HistoryStore, _author_fields
-from .storage import OutputGuard, resolve_storage
+from .storage import OutputGuard, missing_media_help, resolve_storage, saved_media_missing
 from .media import GIF_SIZES, ConversionError, ConversionSizeLimit, convert_mp4_to_gif
 from .media import move_without_overwrite as _move_without_overwrite
 
@@ -248,6 +248,8 @@ class JobOptions:
     # Archive keys (history.archive_key) of missing files to download again by
     # tweet instead of walking the Like list. Empty for a normal save.
     targets: tuple = ()
+    # One run's explicit confirmation; never restored from saved settings.
+    allow_recreate_media: bool = False
 
     @property
     def media_signature(self) -> str:
@@ -269,6 +271,8 @@ class JobOptions:
             raise ValueError("동영상과 GIF 저장 여부를 확인해 주세요.")
         if type(self.separate_accounts) is not bool:
             raise ValueError("계정별 폴더 설정을 확인해 주세요.")
+        if type(self.allow_recreate_media) is not bool:
+            raise ValueError("사라진 저장 폴더를 새로 만드는 선택을 확인해 주세요.")
         if (not isinstance(self.gif_format, str) or self.gif_format not in {"gif", "mp4"} or
                 not isinstance(self.gif_size, str) or self.gif_size not in GIF_SIZES):
             raise ValueError("움직이는 GIF 저장 형식과 GIF 크기를 다시 선택해 주세요.")
@@ -1266,6 +1270,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         output_guard = OutputGuard(normalized.output_dir)
         output_guard.acquire()
         storage = resolve_storage(normalized.output_dir, normalized.account, normalized.separate_accounts)
+        # The folder can disappear after the window or scheduler checks it.
+        # Recheck while owning the write guards, before creating an empty copy.
+        if not normalized.allow_recreate_media and saved_media_missing(storage):
+            raise ValueError(missing_media_help(storage))
         account_dir = storage.media_dir
         account_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=account_dir):
@@ -1297,6 +1305,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             scan_note = {
                 "ready": f"새 Like만 확인합니다. 이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다.",
                 "settings-changed": "동영상·GIF·용량 설정이 바뀌어 이번만 전체 목록을 확인합니다.",
+                "records-changed": "다른 계정의 저장 기록을 합쳐 이번만 전체 목록을 확인합니다.",
             }.get(readiness, "이전 확인이 끝까지 되지 않아(첫 실행·중단·오류·시험 저장) 이번만 전체 목록을 확인합니다.")
         run_id = history.start_run(normalized.folder_mode,
                                    scan_mode="retry" if targets else "quick" if quick_scan else "full",

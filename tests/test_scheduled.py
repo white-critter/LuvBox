@@ -90,6 +90,14 @@ class ScheduledRunTests(unittest.TestCase):
         settings = dict(self.settings, record_locations={"offline_test": str(self.output)})
         self.assertEqual(self.run_saved(settings)[0], 0)
 
+    def test_saved_preferences_never_restore_missing_folder_confirmation(self):
+        with patch("xlikesaver.protection.state_directory", return_value=self.root / "state"), \
+                patch("xlikesaver.storage.saved_media_missing", return_value=False):
+            for full in (False, True):
+                with self.subTest(full=full):
+                    options = scheduled._options_from_settings(dict(self.settings, allow_recreate_media=True), full)
+                    self.assertFalse(options.allow_recreate_media)
+
     def test_only_recent_logs_are_kept(self):
         logs = self.root / "logs"
         logs.mkdir()

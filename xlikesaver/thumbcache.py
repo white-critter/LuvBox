@@ -11,9 +11,12 @@ LIMIT_BYTES the oldest previews are dropped.
 from __future__ import annotations
 
 import io
+import os
 import re
 import sqlite3
+import tempfile
 import threading
+import uuid
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +34,8 @@ _PRUNE_EVERY = 200
 
 # Identities already stored, per cache file: the gallery need not ask again.
 _known: dict[str, set] = {}
+_known_files: dict[str, tuple] = {}
+_prune_writes: dict[str, int] = {}
 _known_lock = threading.Lock()
 
 
@@ -47,13 +52,54 @@ def identity(tweet_id, num, media_type) -> tuple[str, int, str]:
     return tweet_id, num, media_type
 
 
-def cloud_only(path: Path | str) -> bool:
+def cloud_only(path: Path | str, *, status=None) -> bool:
     """Whether reading this file would first download it from a cloud service."""
     try:
-        attributes = getattr(Path(path).stat(), "st_file_attributes", 0)
+        attributes = getattr(status if status is not None else Path(path).stat(), "st_file_attributes", 0)
     except OSError:
         return False
     return bool(attributes & _CLOUD_ATTRIBUTES)
+
+
+def _safe_path(path: Path) -> None:
+    """Reject redirected cache directories, databases and SQLite sidecars."""
+    for current in (path, *path.parents):
+        if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
+            raise OSError("linked preview cache")
+    for current in (path, *(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm", "-journal", ".epoch"))):
+        if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
+            raise OSError("linked preview cache")
+        try:
+            if current.stat().st_nlink > 1:
+                raise OSError("linked preview cache")
+        except FileNotFoundError:
+            pass
+
+
+def _file_identity(path: Path) -> tuple | None:
+    try:
+        status = path.stat()
+        try:
+            epoch = path.with_name(path.name + ".epoch").stat()
+            changed = (epoch.st_dev, epoch.st_ino, epoch.st_mtime_ns)
+        except FileNotFoundError:
+            changed = None
+        return status.st_dev, status.st_ino, changed
+    except OSError:
+        return None
+
+
+def _mark_pruned(path: Path) -> None:
+    """Invalidate known rows in other app/worker processes after eviction."""
+    _safe_path(path)
+    descriptor, filename = tempfile.mkstemp(prefix=".preview-", suffix=".epoch", dir=path.parent)
+    staged = Path(filename)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(uuid.uuid4().bytes)
+        os.replace(staged, path.with_name(path.name + ".epoch"))
+    finally:
+        staged.unlink(missing_ok=True)
 
 
 def encode(image) -> bytes:
@@ -102,19 +148,21 @@ class Cache:
         self.account = account
         self.path = directory() / (account + ".sqlite3")
         self._db = None
-        self._writes = 0
-        if self.path.is_symlink():
-            raise OSError("linked preview cache")
+        _safe_path(self.path)
         if not create and not self.path.is_file():
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(self.path, timeout=2)
+        if create:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        _safe_path(self.path)
+        db = (sqlite3.connect(self.path, timeout=2) if create else
+              sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=2))
         try:
             db.execute("PRAGMA busy_timeout=2000")
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("CREATE TABLE IF NOT EXISTS previews (tweet_id TEXT NOT NULL, num INTEGER NOT NULL, "
-                       "media_type TEXT NOT NULL, image BLOB NOT NULL, saved_at TEXT NOT NULL, "
-                       "PRIMARY KEY(tweet_id,num,media_type))")
+            if create:
+                db.execute("PRAGMA journal_mode=WAL")
+                db.execute("CREATE TABLE IF NOT EXISTS previews (tweet_id TEXT NOT NULL, num INTEGER NOT NULL, "
+                           "media_type TEXT NOT NULL, image BLOB NOT NULL, saved_at TEXT NOT NULL, "
+                           "PRIMARY KEY(tweet_id,num,media_type))")
         except BaseException:
             db.close()
             raise
@@ -145,8 +193,14 @@ class Cache:
             self._db.execute("INSERT OR REPLACE INTO previews(tweet_id,num,media_type,image,saved_at) VALUES (?,?,?,?,?)",
                              (*key, data, datetime.now(timezone.utc).isoformat(timespec="seconds")))
         _note(self.path, {key})
-        self._writes += 1
-        if self._writes % _PRUNE_EVERY == 0:
+        # Gallery callbacks open one cache per image, and short save runs also
+        # reopen it. Share the counter by file, checking an existing cache on
+        # the first write in this process as well as every later batch.
+        with _known_lock:
+            path = str(self.path)
+            writes = _prune_writes.get(path, 0) + 1
+            _prune_writes[path] = writes
+        if writes == 1 or writes % _PRUNE_EVERY == 0:
             self.prune()
 
     def total_bytes(self) -> int:
@@ -154,8 +208,10 @@ class Cache:
             return 0
         return int(self._db.execute("SELECT COALESCE(SUM(length(image)),0) FROM previews").fetchone()[0])
 
-    def prune(self, limit: int = LIMIT_BYTES) -> int:
+    def prune(self, limit: int | None = None) -> int:
         """Drop the oldest previews once the cache is larger than ``limit``."""
+        if limit is None:
+            limit = LIMIT_BYTES
         total = self.total_bytes()
         if total <= limit:
             return 0
@@ -169,6 +225,7 @@ class Cache:
                 self._db.execute("DELETE FROM previews WHERE rowid=?", (rowid,))
                 total -= size
                 removed += 1
+        _mark_pruned(self.path)
         with _known_lock:
             _known.pop(str(self.path), None)
         return removed
@@ -181,14 +238,27 @@ class Cache:
 
 def _note(path: Path, keys) -> None:
     if keys:
+        stamp = _file_identity(path)
         with _known_lock:
-            _known.setdefault(str(path), set()).update(keys)
+            name = str(path)
+            if _known_files.get(name) != stamp:
+                _known.pop(name, None)
+                _prune_writes.pop(name, None)
+                _known_files[name] = stamp
+            _known.setdefault(name, set()).update(keys)
 
 
 def known(account: str, key) -> bool:
-    path = str(directory() / (account + ".sqlite3"))
+    path = directory() / (account + ".sqlite3")
+    stamp = _file_identity(path)
     with _known_lock:
-        return key in _known.get(path, ())
+        name = str(path)
+        if stamp is None or _known_files.get(name) != stamp:
+            _known.pop(name, None)
+            _known_files.pop(name, None)
+            _prune_writes.pop(name, None)
+            return False
+        return key in _known.get(name, ())
 
 
 def remember(account: str, key, image) -> None:

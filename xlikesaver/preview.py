@@ -11,6 +11,8 @@ import warnings
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from .thumbcache import cloud_only
+
 
 PREVIEW_SIZE = (220, 168)
 MAX_PIXELS = 60_000_000
@@ -25,6 +27,8 @@ class Thumbnail:
 def thumbnail(path: Path, size=PREVIEW_SIZE) -> Thumbnail:
     """Decode one image/frame, with bounded output and no external protocols."""
     path = Path(path)
+    if cloud_only(path):
+        return Thumbnail(None, "파일이 클라우드에만 있습니다. 탐색기에서 내려받은 뒤 다시 확인해 주세요.")
     if not path.is_file():
         return Thumbnail(None, "파일이 이동되었거나 삭제되었습니다.")
     try:
@@ -112,7 +116,8 @@ class PreviewLoader:
                     key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
                     result = self.cache.get(key)
                     if result is None:
-                        result = self.decoder(path)
+                        result = (Thumbnail(None, "파일이 클라우드에만 있습니다. 탐색기에서 내려받은 뒤 다시 확인해 주세요.")
+                                  if cloud_only(path, status=stat) else self.decoder(path))
                         # A cloud file or busy decoder can fail temporarily
                         # without changing the file's size or timestamp.
                         if result.image is not None:

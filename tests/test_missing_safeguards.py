@@ -117,13 +117,16 @@ class MovedFolderTests(StateTestCase):
         options = SimpleNamespace(output_dir=str(self.paths.output_dir), account="offline", separate_accounts=False)
         with patch("xlikesaver.gui.dialogs.askyesno", return_value=False) as ask:
             self.assertFalse(App._confirm_missing_media(fake, options))
+        self.assertFalse(fake._allow_recreate_media)
         self.assertEqual(ask.call_args.kwargs["default"], "no")
         self.assertIn("시작하지 않았습니다", texts["status"][-1])
         with patch("xlikesaver.gui.dialogs.askyesno", return_value=True):
             self.assertTrue(App._confirm_missing_media(fake, options))
+        self.assertTrue(fake._allow_recreate_media)
         self.paths.media_dir.mkdir()
         with patch("xlikesaver.gui.dialogs.askyesno") as ask:
             self.assertTrue(App._confirm_missing_media(fake, options))
+        self.assertFalse(fake._allow_recreate_media)
         ask.assert_not_called()
 
 

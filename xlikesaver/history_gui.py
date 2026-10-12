@@ -23,7 +23,7 @@ from .charts import MonthlyBars
 from .gallery import TILE, ThumbnailGrid
 from .history import CatalogDamaged, HistoryError, HistoryStore
 from .preview import PreviewLoader
-from .storage import (MigrationError, OutputGuard, StoragePaths, merge_account_records, missing_media_help,
+from .storage import (MigrationError, OutputGuard, StoragePaths, merge_accounts_records, missing_media_help,
                       other_account_records, publish_snapshot, saved_media_missing)
 
 
@@ -313,7 +313,8 @@ class HistoryWindow(tk.Toplevel):
         while widgets:
             widget = widgets.pop()
             if (isinstance(widget, ttk.Label) and int(widget.cget("wraplength") or 0)
-                    and not str(widget).startswith(str(self.preview_card) + ".")):
+                    and not any(str(widget).startswith(str(card) + ".")
+                                for card in (self.preview_card, self.missing_card))):
                 self.wrapping_labels.append(widget)
             widgets.extend(widget.winfo_children())
         self.bind("<Configure>", self._resize_text, add="+")
@@ -667,7 +668,7 @@ class HistoryWindow(tk.Toplevel):
         self.missing_tree = tree = self._table(missing_body, columns, row=0)
         tree.configure(selectmode="extended")
         # What the chosen file looked like, where it was and when it vanished.
-        detail = ttk.Frame(missing_body, style="Card.TFrame", padding=12)
+        self.missing_card = detail = ttk.Frame(missing_body, style="Card.TFrame", padding=12)
         detail.grid(row=0, column=1, sticky="ns", padx=(10, 0))
         box = ttk.Frame(detail, style="Plain.TFrame", width=TILE[0], height=TILE[1])
         box.grid_propagate(False)
@@ -1876,11 +1877,7 @@ class HistoryWindow(tk.Toplevel):
             account_guard.acquire(respect_cooldown=False)
             output_guard = OutputGuard(location.output_dir)
             output_guard.acquire()
-            totals = {"records": 0, "added": 0, "keys": 0}
-            for name in accounts:
-                counts = merge_account_records(location, name)
-                for key in totals:
-                    totals[key] += counts[key]
+            totals = merge_accounts_records(location, accounts)
             _publish(location)
             try:
                 backup_catalog(location.record_dir, location.account)

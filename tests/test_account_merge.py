@@ -2,8 +2,12 @@
 account's records into the current one. gallery-dl runs offline."""
 
 import queue
+import hashlib
+import json
+import os
 import shutil
 import sqlite3
+import tempfile
 import tkinter as tk
 import unittest
 from contextlib import closing
@@ -18,8 +22,8 @@ from xlikesaver.core import JobOptions, run_worker
 from xlikesaver.history import HistoryStore
 from xlikesaver.history_gui import HistoryWindow
 from xlikesaver.recovery import _catalog_backups
-from xlikesaver.storage import (MigrationError, OutputGuard, merge_account_records, other_account_records,
-                                resolve_storage)
+from xlikesaver.storage import (MigrationError, OutputGuard, merge_account_records, merge_accounts_records,
+                                other_account_records, publish_snapshot, resolve_storage, saved_media_missing)
 
 
 class AccountMergeTests(unittest.TestCase):
@@ -110,6 +114,278 @@ class AccountMergeTests(unittest.TestCase):
         for name in ("new_account", "nobody", "bad name!"):
             with self.subTest(name=name), self.assertRaises(MigrationError):
                 merge_account_records(paths, name)
+
+
+class AccountMergeStorageTests(unittest.TestCase):
+    """Pure database/file fixtures; no account, Tk window or network access."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        guard = patch("xlikesaver.protection.state_directory", return_value=self.root / "state" / "locks")
+        guard.start()
+        self.addCleanup(guard.stop)
+        self.output = self.root / "Likes"
+        self.output.mkdir()
+        self.target = resolve_storage(self.output, "current")
+        self.a = resolve_storage(self.output, "old_a")
+        self.b = resolve_storage(self.output, "old_b")
+
+    def record(self, paths, tweet, kind="photo"):
+        metadata = {"tweet_id": str(tweet), "num": 1, "type": kind, "author": {"name": "artist", "id": "42"},
+                    "date": "2026-10-01T00:00:00+09:00", "_xlikesaver_metadata_status": "embedded"}
+        with closing(HistoryStore.for_storage(paths)) as store:
+            filename = f"{tweet}_animated_gif_1.gif" if kind == "animated_gif" else f"{tweet}_1.jpg"
+            file = paths.media_dir / filename
+            file.write_bytes(b"offline-media")
+            store.record_media("flat", metadata, file)
+            return store.media_record("flat", metadata)
+
+    def archive(self, directory, ids, mode="flat", kind="photo"):
+        with closing(sqlite3.connect(directory / f".xlikesaver-archive.{mode}.sqlite3")) as db, db:
+            db.execute("CREATE TABLE IF NOT EXISTS archive(entry TEXT PRIMARY KEY) WITHOUT ROWID")
+            prefix = "animated_gif_" if kind == "animated_gif" else ""
+            db.executemany("INSERT OR IGNORE INTO archive VALUES (?)", ((f"twitter{tweet}_{prefix}1",) for tweet in ids))
+
+    def digest(self, directory):
+        return {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in directory.iterdir()
+                if path.name.endswith(".sqlite3") or path.name == "snapshot.json"}
+
+    def rows(self, paths):
+        with closing(HistoryStore(paths.record_dir, media_dir=paths.media_dir, output_dir=paths.output_dir)) as store:
+            return store.records(limit=100), store
+
+    def shared_record(self, paths, tweet, *, former=None):
+        folder = former or paths.media_dir
+        folder.mkdir(parents=True, exist_ok=True)
+        file = folder / f"{tweet}_1.jpg"
+        file.write_bytes(b"received media")
+        with closing(HistoryStore(paths.snapshot_dir, media_dir=folder, output_dir=folder)) as store:
+            store.record_media("flat", {"tweet_id": str(tweet), "num": 1, "type": "photo"}, file)
+        history = paths.snapshot_dir / ".xlikesaver-history.sqlite3"
+        if former:
+            with closing(sqlite3.connect(history)) as db, db:
+                db.execute("INSERT OR REPLACE INTO catalog_meta VALUES ('allowed_media_roots',?)",
+                           (json.dumps([str(former)]),))
+        self.archive(paths.snapshot_dir, [tweet])
+        for path in (history, paths.snapshot_dir / ".xlikesaver-archive.flat.sqlite3"):
+            info = path.stat()
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+        return file
+
+    def test_bad_late_archive_keeps_all_accounts_and_changed_target_snapshot_unpublished(self):
+        for paths, tweet in ((self.target, 400), (self.a, 100), (self.b, 200)):
+            self.record(paths, tweet)
+            self.archive(paths.record_dir, [tweet])
+        publish_snapshot(self.target)
+        self.shared_record(self.target, 401)
+        (self.b.record_dir / ".xlikesaver-archive.date.sqlite3").write_bytes(b"not a database")
+        before = self.digest(self.target.record_dir)
+        source = [self.digest(paths.record_dir) for paths in (self.a, self.b)]
+        with self.assertRaises(MigrationError):
+            merge_accounts_records(self.target, ["old_a", "old_b"])
+        self.assertEqual(self.digest(self.target.record_dir), before)
+        self.assertEqual([self.digest(paths.record_dir) for paths in (self.a, self.b)], source)
+        self.assertEqual({row["tweet_id"] for row in self.rows(self.target)[0]}, {"400"})
+        self.assertFalse(list(self.target.record_dir.parent.glob(".relocate-*")))
+        self.assertFalse(list(self.target.record_dir.parent.glob(".snapshot-union-*")))
+
+    def test_single_merge_failure_does_not_create_an_empty_target_catalog(self):
+        self.record(self.a, 100)
+        (self.a.record_dir / ".xlikesaver-archive.date.sqlite3").write_bytes(b"not a database")
+        with self.assertRaises(MigrationError):
+            merge_account_records(self.target, "old_a")
+        self.assertFalse(self.target.record_dir.exists())
+
+    def test_changed_source_and_target_snapshot_union_preserves_former_roots_and_sources(self):
+        for paths, tweet in ((self.target, 400), (self.a, 100)):
+            self.record(paths, tweet)
+            self.archive(paths.record_dir, [tweet])
+            publish_snapshot(paths)
+        self.shared_record(self.target, 401)
+        former = self.root / "former-output"
+        old_file = self.shared_record(self.a, 101, former=former)
+        local_before, shared_before = self.digest(self.a.record_dir), self.digest(self.a.snapshot_dir)
+        result = merge_account_records(self.target, "old_a")
+        self.assertEqual(result, {"records": 2, "added": 2, "keys": 2})
+        with closing(HistoryStore(self.target.record_dir, media_dir=self.target.media_dir,
+                                  output_dir=self.target.output_dir)) as store:
+            store.import_legacy(refresh=True)
+            self.assertEqual({row["tweet_id"] for row in store.present_files()}, {"100", "101", "400", "401"})
+            self.assertIn(former, store.media_roots)
+            self.assertTrue(store.is_media_path(old_file))
+            other = former / "999_1.jpg"
+            other.write_bytes(b"unrelated")
+            self.assertFalse(store.is_media_path(other))
+        self.assertEqual(self.digest(self.a.record_dir), local_before)
+        self.assertEqual(self.digest(self.a.snapshot_dir), shared_before)
+        self.assertEqual(merge_account_records(self.target, "old_a"), {"records": 2, "added": 0, "keys": 0})
+
+    def test_unreadable_valid_snapshot_and_publication_error_leave_target_unchanged(self):
+        from xlikesaver import storage
+        self.record(self.target, 400)
+        self.record(self.a, 100)
+        self.archive(self.a.record_dir, [100])
+        publish_snapshot(self.a)
+        self.shared_record(self.a, 101)
+        before = self.digest(self.target.record_dir)
+        original = storage._backup_database
+
+        def unreadable(source, destination):
+            if source == self.a.snapshot_dir / ".xlikesaver-history.sqlite3":
+                raise PermissionError("private sync lock fixture")
+            return original(source, destination)
+
+        with patch("xlikesaver.storage._backup_database", side_effect=unreadable), self.assertRaises(MigrationError):
+            merge_account_records(self.target, "old_a")
+        self.assertEqual(self.digest(self.target.record_dir), before)
+        with patch("xlikesaver.storage._publish_records", side_effect=PermissionError("private publish fixture")), \
+                self.assertRaises(MigrationError):
+            merge_account_records(self.target, "old_a")
+        self.assertEqual(self.digest(self.target.record_dir), before)
+        self.assertEqual(merge_account_records(self.target, "old_a")["added"], 2)
+
+    def test_batch_is_idempotent_keeps_missing_gif_policy_metadata_and_run_watermark(self):
+        self.record(self.target, 400)
+        self.archive(self.target.record_dir, [400])
+        for paths in (self.a, self.b):
+            self.record(paths, 100)
+            self.archive(paths.record_dir, [100])
+        gif = self.record(self.b, 101, "animated_gif")
+        self.archive(self.b.record_dir, [101], kind="animated_gif")
+        Path(gif["path"]).unlink()
+        with closing(HistoryStore.for_storage(self.b)) as store:
+            store.import_legacy(refresh=True)
+            store.set_missing_ignored([("101", 1, "animated_gif")], True)
+        with closing(HistoryStore.for_storage(self.target)) as store:
+            run = store.start_run("flat")
+            store.finish_run(run, "finished", saved=1, visited=1)
+        self.assertEqual(merge_accounts_records(self.target, ["@OLD_A", "old_a", "old_b"]),
+                         {"records": 3, "added": 2, "keys": 2})
+        with closing(HistoryStore.for_storage(self.target)) as store:
+            row = store.media_record("flat", {"tweet_id": "101", "num": 1, "type": "animated_gif"})
+            self.assertEqual((row["path"], row["last_path"], row["saved_at"], row["metadata_status"]),
+                             ("", gif["path"], gif["saved_at"], gif["metadata_status"]))
+            self.assertIn(("101", 1, "animated_gif"), store.ignored_media())
+            self.assertEqual(len(store.runs()), 1)
+        with closing(sqlite3.connect(self.target.record_dir / ".xlikesaver-history.sqlite3")) as db:
+            marker = db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone()[0]
+            self.assertEqual(marker, str(run))
+        self.assertEqual(merge_accounts_records(self.target, ["old_a", "old_b"]),
+                         {"records": 3, "added": 0, "keys": 0})
+        with closing(sqlite3.connect(self.target.record_dir / ".xlikesaver-history.sqlite3")) as db:
+            self.assertEqual(db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone()[0], marker)
+
+    def test_successful_publication_survives_private_snapshot_cleanup_error(self):
+        from xlikesaver import storage
+        self.record(self.target, 400)
+        self.record(self.a, 100)
+        self.archive(self.a.record_dir, [100])
+        publish_snapshot(self.a)
+        self.shared_record(self.a, 101)
+        union = storage._merge_snapshot_copies
+
+        def cleanup_fails(*args):
+            temporary, files = union(*args)
+            if temporary is not None:
+                original = temporary.cleanup
+
+                def cleanup():
+                    original()
+                    raise PermissionError("private cleanup fixture")
+
+                temporary.cleanup = cleanup
+            return temporary, files
+
+        with patch("xlikesaver.storage._merge_snapshot_copies", side_effect=cleanup_fails):
+            self.assertEqual(merge_account_records(self.target, "old_a")["added"], 2)
+        self.assertEqual({row["tweet_id"] for row in self.rows(self.target)[0]}, {"100", "101", "400"})
+
+    def test_snapshot_union_preserves_pending_quick_scans_without_importing_cleared_run_ids(self):
+        from xlikesaver import storage
+
+        def runs(paths, count, month):
+            with closing(HistoryStore.for_storage(paths)) as store:
+                for day in range(1, count + 1):
+                    run = store.start_run("flat", media_signature="same")
+                    with store._db:
+                        store._db.execute("UPDATE runs SET started_at=? WHERE id=?",
+                                          (f"2026-{month:02d}-{day:02d}T00:00:00+09:00", run))
+                    store.finish_run(run, "finished", visited=1)
+
+        def marker(paths, value):
+            if value is not None:
+                with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-history.sqlite3")) as db, db:
+                    db.execute("INSERT INTO catalog_meta VALUES ('quick_scan_merge_run',?)", (str(value),))
+
+        cases = (("source_pending", None, 1, 1, 11, "records-changed"),
+                 ("no_source_runs", None, 0, 0, 9, "records-changed"),
+                 ("target_pending", 5, None, 1, 9, "records-changed"),
+                 ("both_cleared", 4, 1, 2, 9, "ready"))
+        for index, (name, target_marker, source_marker, source_runs, source_month, expected) in enumerate(cases):
+            with self.subTest(case=name):
+                target = resolve_storage(self.output, "target_" + str(index))
+                source = resolve_storage(self.output, "source_" + str(index))
+                self.record(target, 400)
+                self.record(source, 100)
+                runs(target, 5, 10)
+                runs(source, source_runs, source_month)
+                marker(target, target_marker)
+                marker(source, source_marker)
+                original = self.digest(source.record_dir)
+                storage._merge_database(".xlikesaver-history.sqlite3",
+                                        target.record_dir / ".xlikesaver-history.sqlite3",
+                                        source.record_dir / ".xlikesaver-history.sqlite3")
+                with closing(HistoryStore.for_storage(target)) as store:
+                    self.assertEqual(store.quick_scan_readiness("flat", "same"), expected)
+                    self.assertEqual(len(store.runs()), 5 + source_runs)
+                    if expected == "ready":
+                        value = store._db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone()[0]
+                        self.assertEqual(value, "4")
+                    else:
+                        run = store.start_run("flat", media_signature="same")
+                        with store._db:
+                            store._db.execute("UPDATE runs SET started_at='2026-12-01T00:00:00+09:00' WHERE id=?", (run,))
+                        store.finish_run(run, "finished", visited=1)
+                        self.assertEqual(store.quick_scan_readiness("flat", "same"), "ready")
+                self.assertEqual(self.digest(source.record_dir), original)
+                # Re-importing the same snapshot must not revive a cleared
+                # marker from the other PC or require another complete scan.
+                if expected == "ready":
+                    storage._merge_database(".xlikesaver-history.sqlite3",
+                                            target.record_dir / ".xlikesaver-history.sqlite3",
+                                            source.record_dir / ".xlikesaver-history.sqlite3")
+                    with closing(HistoryStore.for_storage(target)) as store:
+                        self.assertEqual(store.quick_scan_readiness("flat", "same"), "ready")
+
+    def test_never_used_account_subfolder_is_not_missing_but_whole_missing_output_is(self):
+        source = resolve_storage(self.output, "old_a", True)
+        target = resolve_storage(self.output, "current", True)
+        self.record(source, 100)
+        merge_account_records(target, "old_a")
+        self.assertFalse(target.media_dir.exists())
+        self.assertFalse(saved_media_missing(target))
+        moved = self.root / "Likes-moved"
+        self.assertTrue(self.output.resolve().is_relative_to(self.root.resolve()))
+        self.assertTrue(moved.resolve().is_relative_to(self.root.resolve()))
+        self.output.rename(moved)
+        self.assertTrue(saved_media_missing(target))
+
+    def test_own_subfolder_missing_uses_last_path_but_not_former_output_records(self):
+        paths = resolve_storage(self.output, "current", True)
+        row = self.record(paths, 100)
+        Path(row["path"]).unlink()
+        with closing(HistoryStore.for_storage(paths)) as store:
+            store.import_legacy(refresh=True)
+            self.assertEqual(store.media_record("flat", {"tweet_id": "100", "num": 1})["path"], "")
+        paths.media_dir.rmdir()
+        self.assertTrue(saved_media_missing(paths))
+        other = resolve_storage(self.root / "new-output", "current", True)
+        other.output_dir.mkdir()
+        other.record_dir.mkdir(parents=True)
+        shutil.copy2(paths.record_dir / ".xlikesaver-history.sqlite3", other.record_dir / ".xlikesaver-history.sqlite3")
+        self.assertFalse(saved_media_missing(other))
 
 
 class AccountMergeWindowTests(unittest.TestCase):

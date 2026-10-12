@@ -20,6 +20,7 @@ from PIL import ImageTk
 
 from . import theme
 from .preview import thumbnail
+from .thumbcache import cloud_only
 
 
 TILE = (150, 112)
@@ -100,7 +101,7 @@ class _GridDecoder:
                         status = os.stat(path)
                         stamp = (path, status.st_mtime_ns, status.st_size)
                     except OSError:
-                        stamp = None
+                        status = stamp = None
                     with self.condition:
                         hit = stamp is not None and stamp in self.cache
                         if hit:
@@ -108,7 +109,8 @@ class _GridDecoder:
                             image = self.cache[stamp]
                     if not hit:
                         try:
-                            image = self.decoder(Path(path), TILE).image
+                            if status is None or not cloud_only(path, status=status):
+                                image = self.decoder(Path(path), TILE).image
                         except Exception:
                             image = None
                         decoded = image is not None

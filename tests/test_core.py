@@ -7,7 +7,7 @@ import tempfile
 import time
 import unittest
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -218,6 +218,49 @@ class CoreTests(unittest.TestCase):
                 JobOptions("me", str(self.output), photo_limit=limit).validate()
         with self.assertRaises(ValueError):
             JobOptions("me", str(self.cookie_file)).validate()
+
+    def test_missing_folder_confirmation_is_a_boolean_per_run_option(self):
+        self.assertFalse(self.options.validate().allow_recreate_media)
+        for invalid in (None, "true", "false", 0, 1):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                replace(self.options, allow_recreate_media=invalid).validate()
+        accepted = replace(self.options, allow_recreate_media=True).validate()
+        request = json.loads(json.dumps(asdict(accepted)))
+        self.assertTrue(JobOptions(**request).validate().allow_recreate_media)
+
+    def test_folder_removed_after_validation_stops_worker_before_auth_or_requests(self):
+        options = replace(self.options, folder_mode="flat", separate_accounts=False)
+        self.assertEqual(self.worker([("100", 1, "photo", "alice")], options=options)[0], 0)
+        selected = replace(options, auth_mode="managed", cookies_file="").validate()
+        before_runs = self.runs()
+        moved = self.base / "renamed-photos"
+        self.output.rename(moved)
+        events = []
+        with patch("xlikesaver.login.load_session_cookies") as login, \
+                patch("gallery_dl.extractor.find") as find:
+            result = run_worker(selected, events.append)
+        self.assertEqual(result, 1)
+        self.assertEqual((events[-1]["status"], events[-1]["saved"]), ("error", 0))
+        self.assertIn("저장 폴더를 찾을 수 없습니다", events[-1]["message"])
+        self.assertFalse(self.output.exists())
+        self.assertTrue((moved / "100_1.jpg").is_file())
+        self.assertEqual(self.runs(), before_runs)
+        login.assert_not_called()
+        find.assert_not_called()
+
+    def test_confirmed_recreation_preserves_archive_and_accepts_only_new_files(self):
+        options = replace(self.options, folder_mode="flat", separate_accounts=False)
+        self.assertEqual(self.worker([("100", 1, "photo", "alice")], options=options)[0], 0)
+        moved = self.base / "renamed-photos"
+        self.output.rename(moved)
+        code, events = self.worker([("101", 1, "photo", "alice"), ("100", 1, "photo", "alice")],
+                                  options=replace(options, allow_recreate_media=True))
+        self.assertEqual(code, 0)
+        self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (1, 1))
+        self.assertTrue((moved / "100_1.jpg").is_file())
+        self.assertTrue((self.output / "101_1.jpg").is_file())
+        self.assertFalse((self.output / "100_1.jpg").exists())
+        self.assertEqual(len(FakeHttpDownloader.downloaded), 2)
 
     def test_validates_layout_and_scan_mode(self):
         for value in ("other", "", None, "new", "all"):
@@ -557,6 +600,59 @@ class CoreTests(unittest.TestCase):
         self.worker(rows)
         code, events = self.worker(rows, options=replace(self.options, scan_mode="quick", folder_mode="flat"))
         self.assertEqual(events[-1]["scan_mode"], "full")
+
+    def test_merging_new_archive_keys_requires_one_full_scan_before_the_saved_streak(self):
+        from xlikesaver.history import HistoryStore
+        from xlikesaver.storage import merge_account_records
+
+        baseline = [("400", 1, "photo", "bob")]
+        combined = [("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")]
+        self.assertEqual(self.worker(baseline)[0], 0)
+        self.assertEqual(self.worker(combined, options=replace(self.options, account="otheraccount"))[0], 0)
+        paths = resolve_storage(self.output, "myaccount", True)
+        merged = merge_account_records(paths, "otheraccount")
+        self.assertEqual((merged["added"], merged["keys"]), (2, 2))
+        rows = combined + [("300", 1, "photo", "charlie")] + baseline
+        quick = replace(self.options, scan_mode="quick")
+        with closing(HistoryStore.for_storage(paths, create_media=False)) as store:
+            self.assertEqual(store.quick_scan_readiness(quick.folder_mode, quick.media_signature), "records-changed")
+        with patch("xlikesaver.core.QUICK_STOP_AFTER", 2):
+            code, events = self.worker(rows, options=quick)
+            self.assertEqual(code, 0)
+            self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["visited"]),
+                             ("full", 1, 4))
+            self.assertTrue((self.output / "myaccount" / "charlie" / "300_1.jpg").is_file())
+            self.assertTrue(any("기록을 합쳐" in event.get("message", "") for event in events))
+            # Repeating an unchanged merge must not invalidate the full scan.
+            again = merge_account_records(paths, "otheraccount")
+            self.assertEqual((again["added"], again["keys"]), (0, 0))
+            code, events = self.worker(rows, options=quick)
+            self.assertEqual((code, events[-1]["scan_mode"], events[-1]["saved"], events[-1]["visited"]),
+                             (0, "quick", 0, 2))
+
+    def test_merge_watermark_is_cleared_by_each_layouts_completed_scan_and_never_by_retry(self):
+        from xlikesaver.history import HistoryStore
+
+        with closing(HistoryStore.for_storage(resolve_storage(self.output, "myaccount", True))) as store:
+            signature = self.options.media_signature
+            for mode in ("author", "flat"):
+                run = store.start_run(mode, media_signature=signature)
+                store.finish_run(run, "finished")
+            with store._db:
+                store._db.execute("INSERT INTO catalog_meta(key,value) VALUES ('quick_scan_merge_run',?)",
+                                  (str(run),))
+            self.assertEqual(store.quick_scan_readiness("author", signature), "records-changed")
+            self.assertEqual(store.quick_scan_readiness("flat", signature), "records-changed")
+            retry = store.start_run("author", scan_mode="retry", media_signature=signature)
+            store.finish_run(retry, "finished")
+            self.assertEqual(store.quick_scan_readiness("author", signature), "records-changed")
+            failed = store.start_run("author", media_signature=signature)
+            store.finish_run(failed, "error")
+            self.assertEqual(store.quick_scan_readiness("author", signature), "incomplete")
+            completed = store.start_run("author", media_signature=signature)
+            store.finish_run(completed, "finished")
+            self.assertEqual(store.quick_scan_readiness("author", signature), "ready")
+            self.assertEqual(store.quick_scan_readiness("flat", signature), "records-changed")
 
     def test_all_mode_ignores_legacy_corrupt_sync_database_and_uses_photo_archive(self):
         account = self.output / "myaccount"

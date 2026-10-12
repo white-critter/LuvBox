@@ -533,15 +533,25 @@ class HistoryStore:
         normal end with the same media settings: everything older than the
         point where saved files resume was then covered by that run (or, by
         induction, by the complete runs before it). Returns 'ready',
-        'settings-changed' or 'incomplete'.
+        'settings-changed', 'records-changed' or 'incomplete'.
         """
         # Re-downloading chosen files does not walk the Like list, so it never
         # serves as a complete scan.
         row = self._db.execute(
-            "SELECT status,media_signature FROM runs WHERE folder_mode=? AND status!='running' "
+            "SELECT id,status,media_signature FROM runs WHERE folder_mode=? AND status!='running' "
             "AND scan_mode!='retry' ORDER BY started_at DESC,id DESC LIMIT 1", (self._mode(folder_mode),)).fetchone()
         if row is None or row["status"] != "finished":
             return "incomplete"
+        merged = self._db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone()
+        if merged is not None:
+            try:
+                watermark = int(merged[0])
+            except (TypeError, ValueError, OverflowError):
+                watermark = -1
+            if row["id"] <= watermark:
+                # Newly combined archives are known files, but they do not
+                # mark where this account's previous Like traversal ended.
+                return "records-changed"
         return "ready" if row["media_signature"] == media_signature else "settings-changed"
 
     def _run_values(self, fields: dict) -> dict:

@@ -203,8 +203,22 @@ def saved_media_missing(paths: StoragePaths) -> bool:
         return False
     try:
         with closing(sqlite3.connect(history.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-            return db.execute("SELECT 1 FROM media LIMIT 1").fetchone() is not None
-    except sqlite3.Error:
+            # Merged or relocated records can all belong to another account's
+            # subfolder or a former output. They do not prove this media_dir
+            # ever existed. If the whole output disappeared, include every
+            # known location below it, including merged account subfolders.
+            root = paths.media_dir if paths.output_dir.is_dir() else paths.output_dir
+            columns = _columns(db, "media")
+            locations = [name for name in ("path", "last_path") if name in columns]
+            if not locations:
+                return False
+            for row in db.execute("SELECT " + ",".join(locations) + " FROM media"):
+                for value in row:
+                    if (isinstance(value, str) and value and Path(value).is_absolute()
+                            and Path(os.path.abspath(value)).is_relative_to(root)):
+                        return True
+            return False
+    except (OSError, sqlite3.Error, ValueError):
         return False
 
 
@@ -478,7 +492,16 @@ def _merge_snapshot_copies(files: dict[str, Path], paths: StoragePaths, parent: 
                     continue  # only a confirmed corrupt shared copy may be skipped
                 copied = folder / name
                 _backup_database(original, copied)
+                roots = []
+                if name == _HISTORY_DB:
+                    for catalog in (copied, incoming):
+                        with closing(sqlite3.connect(catalog.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                            roots.extend(_valid_roots(db, paths.output_dir))
                 _merge_database(name, copied, incoming)
+                if roots:
+                    with closing(sqlite3.connect(copied, timeout=1)) as db, db:
+                        db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",
+                                   (json.dumps(sorted(set(roots)), ensure_ascii=False),))
                 merged[name] = copied
             finally:
                 incoming.unlink(missing_ok=True)
@@ -634,6 +657,27 @@ def _merge_media(previous: dict, incoming: dict) -> dict:
 
 
 def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> None:
+    def quick_boundary(db):
+        tables = _tables(db)
+        stored = db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone() \
+            if "catalog_meta" in tables else None
+        try:
+            watermark = int(stored[0]) if stored else -1
+        except (ValueError, TypeError, OverflowError):
+            watermark = -1
+        if watermark < 0:
+            return None, False
+        latest = {}
+        runs = _rows(db, "runs") if "runs" in tables else []
+        for row in sorted(runs, key=lambda row: (row["started_at"], row["id"]), reverse=True):
+            if row["status"] != "running" and row.get("scan_mode") != "retry":
+                latest.setdefault(row["folder_mode"], row)
+        pending = not latest or any(row["status"] != "finished" or row["id"] <= watermark
+                                    for row in latest.values())
+        return watermark, pending
+
+    _, target_pending = quick_boundary(target)
+    _, source_pending = quick_boundary(source)
     source_tables = _tables(source)
     if "media" in source_tables:
         _prepare_table(target, source, "media")
@@ -711,8 +755,17 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
             previous[row["id"]] = row
     if "catalog_meta" in source_tables:
         _prepare_table(target, source, "catalog_meta")
-        for key, value in source.execute("SELECT key,value FROM catalog_meta WHERE key != 'allowed_media_roots'"):
+        for key, value in source.execute("SELECT key,value FROM catalog_meta WHERE key NOT IN ('allowed_media_roots','quick_scan_merge_run')"):
             target.execute("INSERT OR IGNORE INTO catalog_meta(key,value) VALUES (?,?)", (key, value))
+    if target_pending or source_pending:
+        _prepare_table(target, source, "catalog_meta")
+        maximum = target.execute("SELECT COALESCE(MAX(id),0) FROM runs").fetchone()[0] \
+            if "runs" in _tables(target) else 0
+        # Appending an old finished run from another PC does not complete a
+        # full scan that either catalog still required. Cleared source markers
+        # have no pending work and must not be imported as foreign run IDs.
+        target.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('quick_scan_merge_run',?)",
+                       (str(maximum),))
 
 
 def _merge_database(name: str, target_path: Path, source_path: Path) -> None:
@@ -949,83 +1002,149 @@ def _count(path: Path, table: str) -> int:
 
 
 def merge_account_records(paths: StoragePaths, account: str) -> dict:
-    """Combine another account's records for this output into this account.
+    """Combine one account's records; see merge_accounts_records."""
+    return merge_accounts_records(paths, [account])
+
+
+def merge_accounts_records(paths: StoragePaths, accounts) -> dict:
+    """Combine selected accounts in one verified directory publication.
 
     File records, download keys (per folder layout, as for one account),
     hidden choices, tweet texts and old deletion receipts are combined, so
-    this account's library manages that account's files too and does not
-    download them again. That account's Like timeline and runs stay its own.
-    Its records are only read; no media file is touched. A copy of this
+    this account's library manages their files too and does not download them
+    again. Like timelines and runs stay with their accounts. Source local
+    records and changed shared snapshots are united only in private copies;
+    no source record or media file is changed. A copy of this
     account's records is kept first. The caller holds this account's and
-    the output's locks.
+    the output's locks. Every selected account must succeed before publication.
     """
     from .history import HistoryStore
     from .recovery import _catalog_backups
 
     checked = resolve_storage(paths.output_dir, paths.account, paths.separate_accounts)
-    account = account.strip().lstrip("@").lower() if isinstance(account, str) else ""
-    if not _ACCOUNT_NAME.fullmatch(account) or account == checked.account:
+    if accounts is None or isinstance(accounts, str):
         raise MigrationError("합칠 계정을 확인해 주세요.")
-    source = _account_ledgers(checked, account)
-    if source is None:
-        raise MigrationError("합칠 기록을 찾지 못했습니다. 기록 창을 새로고침한 뒤 다시 시도해 주세요.")
-    prepare_storage(checked, protected=True, create_media=False)
-    HistoryStore(checked.record_dir, media_dir=checked.media_dir, output_dir=checked.output_dir,
-                 legacy_dir=checked.legacy_dir).close()
+    selected = []
+    for value in accounts:
+        account = value.strip().lstrip("@").lower() if isinstance(value, str) else ""
+        if not _ACCOUNT_NAME.fullmatch(account) or account == checked.account:
+            raise MigrationError("합칠 계정을 확인해 주세요.")
+        if account not in selected:
+            selected.append(account)
+    if not selected:
+        raise MigrationError("합칠 계정을 확인해 주세요.")
+    sources = []
+    for account in selected:
+        source = _account_ledgers(checked, account)
+        if source is None or source == checked.record_dir:
+            raise MigrationError("합칠 기록을 찾지 못했습니다. 기록 창을 새로고침한 뒤 다시 시도해 주세요.")
+        sources.append(resolve_storage(checked.output_dir, account, checked.separate_accounts))
+    _recover_relocation(checked, protected=True)
     _record_files(checked.record_dir)
+    checked.record_dir.parent.mkdir(parents=True, exist_ok=True)
     target = checked.record_dir / _HISTORY_DB
     # Never replace an earlier pre-merge copy, even within the same second.
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     backups = _catalog_backups(checked.account, checked.record_dir)
     backups.mkdir(parents=True, exist_ok=True)
-    _backup_database(target, backups / f"before-merge-{account}-{stamp}.sqlite3")
+    backup = backups / f"before-merge-{selected[0]}-{stamp}.sqlite3"
+    if target.is_file():
+        _backup_database(target, backup)
     result = {"records": 0, "added": 0, "keys": 0}
-    with tempfile.TemporaryDirectory(prefix=".account-merge-", dir=checked.record_dir.parent) as temporary:
-        folder = Path(temporary)
-        incoming = folder / _HISTORY_DB
-        _backup_database(source / _HISTORY_DB, incoming)
-        with closing(sqlite3.connect(incoming, timeout=1)) as db:
+    stage = checked.record_dir.parent / (".relocate-" + checked.record_dir.name + "-" + uuid.uuid4().hex)
+    snapshot_copies = []
+    try:
+        stage.mkdir()
+        files = _available_databases(checked)
+        copied, files = _merge_snapshot_copies(files, checked, checked.record_dir.parent)
+        if copied is not None:
+            snapshot_copies.append(copied)
+        for name, original in files.items():
+            _backup_database(original, stage / name)
+        state = checked.record_dir / _SNAPSHOT_STATE
+        if state.is_file():
+            shutil.copy2(state, stage / state.name)
+        staged_history = stage / _HISTORY_DB
+        HistoryStore(stage, media_dir=checked.media_dir, output_dir=checked.output_dir,
+                     legacy_dir=checked.legacy_dir).close()
+        if not target.is_file():
+            _backup_database(staged_history, backup)
+        before_records = _count(staged_history, "media")
+        with closing(sqlite3.connect(staged_history, timeout=1)) as db:
             roots = _valid_roots(db, checked.output_dir)
-            with db:
-                tables = _tables(db)
-                # Likes and runs describe that account's own list; the merge
-                # marker and roots are written for this account below.
-                for table in ("likes", "runs", "catalog_meta"):
-                    if table in tables:
-                        db.execute('DELETE FROM "' + table + '"')
-            result["records"] = db.execute("SELECT COUNT(*) FROM media").fetchone()[0] if "media" in tables else 0
-        before = _count(target, "media")
-        _merge_database(_HISTORY_DB, target, incoming)
-        result["added"] = _count(target, "media") - before
-        with closing(sqlite3.connect(target, timeout=1)) as db:
-            roots = sorted(set(_valid_roots(db, checked.output_dir) + roots))
             stored = db.execute("SELECT value FROM catalog_meta WHERE key='merged_accounts'").fetchone()
             try:
                 merged = json.loads(stored[0]) if stored else []
-            except ValueError:
+            except (ValueError, TypeError):
                 merged = []
-            merged = sorted({*[name for name in merged if isinstance(name, str)], account})
+            merged = {name for name in merged if isinstance(name, str)} if isinstance(merged, list) else set()
+        with tempfile.TemporaryDirectory(prefix=".account-merge-", dir=checked.record_dir.parent) as temporary:
+            folder = Path(temporary)
+            for source_paths in sources:
+                files = _available_databases(source_paths)
+                copied, files = _merge_snapshot_copies(files, source_paths, checked.record_dir.parent)
+                if copied is not None:
+                    snapshot_copies.append(copied)
+                incoming = folder / _HISTORY_DB
+                _backup_database(files[_HISTORY_DB], incoming)
+                with closing(sqlite3.connect(incoming, timeout=1)) as db:
+                    roots.extend(_valid_roots(db, checked.output_dir))
+                    with db:
+                        tables = _tables(db)
+                        for table in ("likes", "runs", "catalog_meta"):
+                            if table in tables:
+                                db.execute('DELETE FROM "' + table + '"')
+                    result["records"] += _count(incoming, "media")
+                _merge_database(_HISTORY_DB, staged_history, incoming)
+                incoming.unlink()
+                merged.add(source_paths.account)
+                for name, original in files.items():
+                    if name in {_HISTORY_DB, _LEGACY_SYNC}:
+                        continue
+                    copy = folder / name
+                    _backup_database(original, copy)
+                    ledger = stage / name
+                    before = _count(ledger, "archive")
+                    if ledger.is_file():
+                        _merge_database(name, ledger, copy)
+                    else:
+                        _backup_database(copy, ledger)
+                    result["keys"] += _count(ledger, "archive") - before
+                    copy.unlink()
+        result["added"] = _count(staged_history, "media") - before_records
+        with closing(sqlite3.connect(staged_history, timeout=1)) as db:
             with db:
                 db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",
-                           (json.dumps(roots, ensure_ascii=False),))
+                           (json.dumps(sorted(set(roots)), ensure_ascii=False),))
                 db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('merged_accounts',?)",
-                           (json.dumps(merged),))
-        for name in _DATABASES:
-            if name in {_HISTORY_DB, _LEGACY_SYNC}:
-                continue
-            other = source / name
-            if _linked(other) or not other.is_file():
-                continue
-            copy = folder / name
-            _backup_database(other, copy)
-            ledger = checked.record_dir / name
-            before = _count(ledger, "archive")
-            if ledger.is_file():
-                _merge_database(name, ledger, copy)
-            else:
-                _backup_database(copy, ledger)
-            result["keys"] += _count(ledger, "archive") - before
-    return result
+                           (json.dumps(sorted(merged)),))
+                if result["added"] or result["keys"]:
+                    run = db.execute("SELECT COALESCE(MAX(id),0) FROM runs").fetchone()[0]
+                    db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('quick_scan_merge_run',?)",
+                               (str(run),))
+            _integrity(db)
+        _publish_records(checked, stage)
+        stage = None
+        return result
+    except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
+        raise MigrationError(_MIGRATION_HELP) from None
+    finally:
+        for copied in snapshot_copies:
+            try:
+                copied.cleanup()
+            except OSError:
+                pass
+        if stage is not None and stage.exists() and not _journal_path(checked).exists():
+            try:
+                if _linked(stage.parent):
+                    raise MigrationError(_MIGRATION_HELP)
+                _owned_directory(stage.parent, stage.name, ".relocate-" + checked.record_dir.name + "-")
+                for child in stage.iterdir():
+                    if _linked(child) or not child.is_file():
+                        raise MigrationError(_MIGRATION_HELP)
+                shutil.rmtree(stage)
+            except OSError:
+                pass
 
 
 class OutputGuard:

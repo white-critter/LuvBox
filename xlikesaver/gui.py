@@ -1495,6 +1495,7 @@ class App:
             return False
         if not self._confirm_missing_media(options):
             return False
+        options = replace(options, allow_recreate_media=getattr(self, "_allow_recreate_media", False))
         self.record_locations[options.account] = options.output_dir
         self.account.set(options.account)
         self.folder.set(options.output_dir)
@@ -1531,6 +1532,9 @@ class App:
 
         Saving there would quietly start a second, separate library, so ask.
         """
+        # Approval applies only to this start. The worker checks again after
+        # taking its locks, including when the folder disappears after here.
+        self._allow_recreate_media = False
         try:
             paths = resolve_storage(options.output_dir, options.account, options.separate_accounts)
             if not saved_media_missing(paths):
@@ -1544,6 +1548,7 @@ class App:
         elif dialogs.askyesno("저장 폴더를 찾을 수 없음",
                               message + "\n\n이 위치에 새 폴더를 만들고 저장할까요?\n이미 받은 파일은 다시 받지 않습니다.",
                               parent=self.root, default="no"):
+            self._allow_recreate_media = True
             return True
         self.status.set("저장 폴더를 찾을 수 없어 시작하지 않았습니다")
         self.status_detail.set("드라이브를 연결하거나 ‘저장 폴더’에서 새 위치를 골라 주세요.")
