@@ -23,8 +23,8 @@ from .charts import MonthlyBars
 from .gallery import TILE, ThumbnailGrid
 from .history import CatalogDamaged, HistoryError, HistoryStore
 from .preview import PreviewLoader
-from .storage import (MigrationError, OutputGuard, StoragePaths, missing_media_help, publish_snapshot,
-                      saved_media_missing)
+from .storage import (MigrationError, OutputGuard, StoragePaths, merge_account_records, missing_media_help,
+                      other_account_records, publish_snapshot, saved_media_missing)
 
 
 MEDIA_LABELS = {"all": "전체", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF"}
@@ -257,6 +257,9 @@ class HistoryWindow(tk.Toplevel):
         # The media folder is gone (moved, renamed or drive disconnected).
         self.offline_text = tk.StringVar(self)
         self.media_offline = False
+        # Other accounts that saved into this same output folder.
+        self.accounts_text = tk.StringVar(self)
+        self.other_accounts = []
         # 'All pages' selection in the missing-files list, and its detail.
         self.missing_all = False
         self._missing_base_text = ""
@@ -361,6 +364,12 @@ class HistoryWindow(tk.Toplevel):
         self.media_counts_label = ttk.Label(overview_notes, textvariable=self.media_counts, style="Muted.TLabel",
                                             wraplength=1000, justify="left")
         self.media_counts_label.pack(anchor="w")
+        self.accounts_notice = ttk.Frame(overview_notes)
+        ttk.Label(self.accounts_notice, textvariable=self.accounts_text, style="Muted.TLabel", wraplength=860,
+                  justify="left").pack(side="left", fill="x", expand=True)
+        self.accounts_notice_button = ttk.Button(self.accounts_notice, text="기록 합치기", style="Compact.TButton",
+                                                 command=self.merge_accounts)
+        self.accounts_notice_button.pack(side="right", padx=(10, 0))
 
         tabs = self.tabs = ttk.Notebook(body)
         tabs.grid(row=4, column=0, sticky="nsew")
@@ -554,6 +563,10 @@ class HistoryWindow(tk.Toplevel):
         self.previews_button = ttk.Button(tools, text="작은 미리보기 저장", command=lambda: self._run_tool(self.save_previews))
         self.previews_button.pack(fill="x")
         ttk.Label(tools, text="파일을 지워도 ‘사라진 파일’에서 어떤 그림이었는지 보입니다.",
+                  style="CardMuted.TLabel").pack(anchor="w", pady=(6, 18))
+        self.merge_button = ttk.Button(tools, text="다른 계정 기록 합치기", command=lambda: self._run_tool(self.merge_accounts))
+        self.merge_button.pack(fill="x")
+        ttk.Label(tools, text="같은 저장 폴더를 쓰던 다른 계정의 기록을 이 계정으로 합칩니다.",
                   style="CardMuted.TLabel").pack(anchor="w", pady=(6, 18))
         ttk.Label(tools, text="X에 요청하지 않는 작업입니다.", style="CardMuted.TLabel").pack(anchor="w")
         ttk.Button(tools, text="닫기", command=self._tools_window.withdraw, style="Compact.TButton").pack(anchor="e", pady=(14, 0))
@@ -1115,6 +1128,8 @@ class HistoryWindow(tk.Toplevel):
         self.export_button.configure(state="normal" if ready else "disabled")
         self.backfill_button.configure(state="normal" if ready else "disabled")
         self.previews_button.configure(state="normal" if ready and self.current_summary.get("files") else "disabled")
+        self.merge_button.configure(state="normal" if ready and self.other_accounts else "disabled")
+        self.accounts_notice_button.configure(state="normal" if ready else "disabled")
         mp4_gifs = int(self.current_summary.get("mp4_gifs", 0) or 0)
         self.convert_button.configure(text=f"MP4 GIF {mp4_gifs:,}개를 GIF로" if mp4_gifs else "MP4 GIF를 GIF로",
                                       state="normal" if ready and mp4_gifs else "disabled")
@@ -1363,6 +1378,10 @@ class HistoryWindow(tk.Toplevel):
                 current = store.overview(verify_files=False, top=None) if summary is None else dict(summary)
                 current["warnings"] = warnings
                 current["media_offline"] = missing_media_help(directory) if offline else ""
+                if summary is None and isinstance(directory, StoragePaths):
+                    merged = store.merged_accounts()
+                    current["other_accounts"] = [dict(item, merged=item["account"] in merged)
+                                                 for item in other_account_records(directory)]
                 current["deletion_paging"] = store.deletion_page(deletion_page, page_size)
                 files = store.record_page(page, page_size, kind, query, order=order, period=period, author=author,
                                           include_deleted=False)
@@ -1435,7 +1454,8 @@ class HistoryWindow(tk.Toplevel):
                         self._display(*snapshot)
                 else:
                     self.status_text.set(result)
-                    if kind in {"backfilled", "converted", "repaired", "missing-choice", "previews-saved"}:
+                    if kind in {"backfilled", "converted", "repaired", "missing-choice", "previews-saved",
+                                "accounts-merged"}:
                         self.completion_text = result
                     if kind == "previews-saved":
                         self._missing_focus = None
@@ -1449,6 +1469,9 @@ class HistoryWindow(tk.Toplevel):
                     self.refresh(import_legacy=do_import)
                 elif kind in {"backfilled", "converted", "missing-choice"}:
                     self.refresh()
+                elif kind == "accounts-merged":
+                    # The other account's files are known now; check them on disk.
+                    self.refresh(import_legacy=True)
                 elif kind == "repaired":
                     self.loaded_locations.discard(self.current_account_dir)
                     self.refresh(import_legacy=True)
@@ -1472,6 +1495,16 @@ class HistoryWindow(tk.Toplevel):
         else:
             self.offline_text.set("")
             self.offline_label.pack_forget()
+        self.other_accounts = summary.get("other_accounts") or []
+        pending = [item for item in self.other_accounts if not item.get("merged")]
+        if pending and not offline:
+            names = ", ".join(f"@{item['account']}(기록 {item['records']:,}개)" for item in pending)
+            self.accounts_text.set(f"이 저장 폴더에는 다른 계정 {names}의 기록도 있습니다. 합치면 그 계정이 받은 파일도 "
+                                   "이 계정에서 관리하고 다시 받지 않습니다.")
+            self.accounts_notice.pack(anchor="w", fill="x", pady=(0, 6), before=self.media_counts_label)
+        else:
+            self.accounts_text.set("")
+            self.accounts_notice.pack_forget()
         files = summary.get("files", 0) or 0
         values = {"files": files, "posts": summary.get("posts", 0) or 0, "photo": summary.get("photo", 0) or 0,
                   "video": summary.get("video", 0) or 0, "animated_gif": summary.get("animated_gif", 0) or 0}
@@ -1795,6 +1828,77 @@ class HistoryWindow(tk.Toplevel):
             if not _finish_local_change(None, location, guards, account_guard):
                 kind = "damaged"
                 message = "기록 복구 정리를 마치지 못했습니다. 다른 실행 중인 작업과 기록 DB 접근 권한을 확인해 주세요."
+        results.put((generation, kind, message))
+
+    def merge_accounts(self):
+        """Combine records of other accounts that saved into this same folder."""
+        location = self.current_storage
+        pending = [item for item in self.other_accounts if not item.get("merged")] or list(self.other_accounts)
+        if self.busy or not isinstance(location, StoragePaths) or not pending:
+            return
+        if self._offline_blocked("다른 계정 기록 합치기"):
+            return
+        if self.is_downloading():
+            dialogs.showinfo("저장 진행 중", "저장 작업이 끝난 뒤 기록을 합쳐 주세요.", parent=self)
+            return
+        account, generation = self.current_account, self.generation
+        lines = "\n".join(f"· @{item['account']} · 기록 {item['records']:,}개" +
+                          (" (합친 적 있음 · 그 뒤 기록만 더함)" if item.get("merged") else "") for item in pending)
+        if not dialogs.askyesno(
+                "다른 계정 기록 합치기",
+                f"같은 저장 폴더를 쓰던 다른 계정의 기록을 지금 계정(@{location.account})에 합칩니다.\n\n{lines}\n\n"
+                "· 그 계정이 받은 파일도 이 계정의 기록 창·통계·사라진 파일에서 관리합니다.\n"
+                "· 그 계정이 이미 받은 게시물은 같은 폴더 방식으로 저장할 때 다시 받지 않습니다.\n"
+                "· ‘Like한 달’ 통계와 실행 기록은 계정마다 따로 둡니다.\n"
+                "· 파일과 그 계정의 원래 기록은 바꾸지 않고, 합치기 전 기록을 백업해 둡니다.\n"
+                "· X에 요청하지 않습니다.\n\n계속할까요?", parent=self):
+            return
+        if not self._local_context_valid(account, location, generation):
+            return
+        self.completion_text = ""
+        self.busy = True
+        self.choice_active = True
+        self._update_controls()
+        self.generation += 1
+        self.status_text.set("다른 계정의 기록을 합치는 중입니다…")
+        threading.Thread(target=partial(HistoryWindow._merge_worker, self.results),
+                         args=(self.generation, location, [item["account"] for item in pending]), daemon=True).start()
+
+    @staticmethod
+    def _merge_worker(results, generation, location, accounts):
+        from .protection import AccountGuard, ProtectionError
+        from .recovery import backup_catalog
+        account_guard = output_guard = None
+        kind = "error"
+        message = "기록을 합치지 못했습니다. 지금 계정의 기록은 그대로입니다. 다른 실행 중인 작업을 확인한 뒤 다시 시도해 주세요."
+        try:
+            account_guard = AccountGuard(location.account, sleep=lambda *_: None)
+            account_guard.acquire(respect_cooldown=False)
+            output_guard = OutputGuard(location.output_dir)
+            output_guard.acquire()
+            totals = {"records": 0, "added": 0, "keys": 0}
+            for name in accounts:
+                counts = merge_account_records(location, name)
+                for key in totals:
+                    totals[key] += counts[key]
+            _publish(location)
+            try:
+                backup_catalog(location.record_dir, location.account)
+            except (OSError, sqlite3.Error, ValueError):
+                pass
+            message = (", ".join("@" + name for name in accounts) +
+                       f" 기록을 합쳤습니다 · 파일 기록 {totals['records']:,}개 (새로 더함 {totals['added']:,}개), "
+                       f"다시 받지 않을 목록 {totals['keys']:,}개 추가. 파일은 그대로이며 X 요청은 보내지 않았습니다.")
+            kind = "accounts-merged"
+        except ProtectionError as exc:
+            message = str(exc)
+        except Exception:
+            pass
+        finally:
+            guards = [output_guard] if output_guard is not None else []
+            if not _finish_local_change(None, location, guards, account_guard) and kind != "error":
+                kind = "error"
+                message = "기록 합치기 정리를 마치지 못했습니다. 기록을 새로고침하고 다른 실행 중인 작업을 확인해 주세요."
         results.put((generation, kind, message))
 
     def save_previews(self):
@@ -2143,7 +2247,7 @@ class HistoryWindow(tk.Toplevel):
         elif self.choice_active or self.repair_active:
             self.closing = True
             self.status_text.set("기록 복구를 마친 뒤 창을 닫습니다…" if self.repair_active else
-                                 "선택을 기록한 뒤 창을 닫습니다…")
+                                 "기록을 저장한 뒤 창을 닫습니다…")
         else:
             self.destroy()
 

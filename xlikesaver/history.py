@@ -1092,6 +1092,16 @@ class HistoryStore:
         return result
 
     @_safe
+    def merged_accounts(self) -> set[str]:
+        """Other accounts whose records were combined into this one."""
+        row = self._db.execute("SELECT value FROM catalog_meta WHERE key='merged_accounts'").fetchone()
+        try:
+            values = json.loads(row[0]) if row else []
+        except (ValueError, TypeError):
+            return set()
+        return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
+
+    @_safe
     def present_files(self) -> list[dict]:
         """Recorded current files, one per physical file, newest save first."""
         _, files, *_ = self._file_snapshot(verify_files=False)

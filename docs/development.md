@@ -1,5 +1,13 @@
 # 개발·문제 해결 안내
 
+## 2.7.0 다른 계정 기록 합치기
+
+- 기록은 `records/<출력 키>/<계정>`에 계정마다 따로 있고, 다운로드 archive도 계정·폴더 방식마다 따로입니다. 한 출력 폴더를 함께 쓰면 gallery-dl의 같은 경로 skip만 계정 사이 중복을 막습니다(저장일별은 경로가 달라 막지 못함). 공유 폴더 검색은 `restricted`라 다른 계정만 받은 파일은 이 계정 기록에 들어오지 않습니다.
+- `storage.other_account_records(paths)`: 같은 출력 키의 다른 계정 기록(이 PC, 없으면 출력 폴더의 `.xlikesaver/<계정>` 사본)과 기록 수.
+- `storage.merge_account_records(paths, account)`: 호출자가 계정·출력 잠금을 잡은 상태에서 실행합니다. 지금 기록을 `backups/catalog/<계정>/catalog-*/before-merge-<계정>-<시각>.sqlite3`로 남기고, 상대 기록을 백업 API로 임시 복사해 `likes`·`runs`·`catalog_meta`를 비운 뒤 `_merge_history`로 합칩니다(파일 기록·숨김 선택·트윗 본문·옛 삭제 기록). 허용 루트는 두 계정의 것을 합치고 `catalog_meta.merged_accounts`에 계정을 남깁니다. archive는 같은 이름(폴더 방식)끼리 `INSERT OR IGNORE`로 합치거나 없으면 복사합니다. 상대 계정의 원본과 미디어 파일은 읽기만 합니다. 다시 실행해도 결과가 같습니다.
+- 기록 창은 전체 불러오기 때 합치지 않은 다른 계정을 찾아 알림과 **기록 합치기**를 보여 주고, `_merge_worker`가 끝나면 폴더를 다시 확인합니다. 저장 폴더가 없거나 저장 중이면 시작하지 않습니다.
+- 검사는 `tests/test_account_merge.py`에 있습니다.
+
 ## 2.6.0 사라진 파일 대비
 
 - `xlikesaver/thumbcache.py`: 계정별 SQLite(`state_directory().parent / "thumbnails" / <계정>.sqlite3`)에 (tweet_id, num, media_type)마다 150×112 WebP(실패 시 JPEG)를 둡니다. 300 MB(`LIMIT_BYTES`)를 넘으면 오래된 것부터 지웁니다. `cloud_only`는 `FILE_ATTRIBUTE_OFFLINE/RECALL_ON_OPEN/RECALL_ON_DATA_ACCESS` 파일을 읽지 않습니다. `remember`/`recall`은 예외를 내지 않습니다.

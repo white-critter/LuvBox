@@ -24,6 +24,7 @@ import time
 import uuid
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 
@@ -883,6 +884,148 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
         finally:
             for guard in reversed(guards):
                 guard.close()
+
+
+
+_ACCOUNT_NAME = re.compile(r"[a-z0-9_]{1,15}")
+
+
+def _account_folder(account: str) -> str:
+    return ("_" if account in _RESERVED else "") + account
+
+
+def _folder_account(name: str) -> str | None:
+    account = name[1:] if name.startswith("_") and name[1:] in _RESERVED else name
+    return account if _ACCOUNT_NAME.fullmatch(account) else None
+
+
+def _account_ledgers(paths: StoragePaths, account: str) -> Path | None:
+    """Another account's records for this same output: this PC first, then
+    the copy in the output folder (records saved on another PC)."""
+    folder = _account_folder(account)
+    for directory in (paths.record_dir.parent / folder, paths.output_dir / ".xlikesaver" / folder):
+        history = directory / _HISTORY_DB
+        if not _linked(directory) and not _linked(history) and history.is_file():
+            return directory
+    return None
+
+
+def other_account_records(paths: StoragePaths) -> list[dict]:
+    """Other X accounts whose saves went into this same output folder.
+
+    Each account keeps its own records, so in a shared folder one account's
+    library cannot tell another account's files apart from unrelated ones.
+    """
+    found = {}
+    for parent in (paths.record_dir.parent, paths.output_dir / ".xlikesaver"):
+        try:
+            if _linked(parent) or not parent.is_dir():
+                continue
+            children = sorted(parent.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            account = _folder_account(child.name)
+            if account is None or account == paths.account or account in found:
+                continue
+            history = child / _HISTORY_DB
+            try:
+                if _linked(child) or _linked(history) or not history.is_file():
+                    continue
+                with closing(sqlite3.connect(history.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                    records = db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+            except (OSError, sqlite3.Error):
+                continue
+            if records:
+                found[account] = records
+    return [{"account": account, "records": records} for account, records in sorted(found.items())]
+
+
+def _count(path: Path, table: str) -> int:
+    if not path.is_file():
+        return 0
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+        return db.execute('SELECT COUNT(*) FROM "' + table + '"').fetchone()[0] if table in _tables(db) else 0
+
+
+def merge_account_records(paths: StoragePaths, account: str) -> dict:
+    """Combine another account's records for this output into this account.
+
+    File records, download keys (per folder layout, as for one account),
+    hidden choices, tweet texts and old deletion receipts are combined, so
+    this account's library manages that account's files too and does not
+    download them again. That account's Like timeline and runs stay its own.
+    Its records are only read; no media file is touched. A copy of this
+    account's records is kept first. The caller holds this account's and
+    the output's locks.
+    """
+    from .history import HistoryStore
+    from .recovery import _catalog_backups
+
+    checked = resolve_storage(paths.output_dir, paths.account, paths.separate_accounts)
+    account = account.strip().lstrip("@").lower() if isinstance(account, str) else ""
+    if not _ACCOUNT_NAME.fullmatch(account) or account == checked.account:
+        raise MigrationError("합칠 계정을 확인해 주세요.")
+    source = _account_ledgers(checked, account)
+    if source is None:
+        raise MigrationError("합칠 기록을 찾지 못했습니다. 기록 창을 새로고침한 뒤 다시 시도해 주세요.")
+    prepare_storage(checked, protected=True, create_media=False)
+    HistoryStore(checked.record_dir, media_dir=checked.media_dir, output_dir=checked.output_dir,
+                 legacy_dir=checked.legacy_dir).close()
+    _record_files(checked.record_dir)
+    target = checked.record_dir / _HISTORY_DB
+    # Never replace an earlier pre-merge copy, even within the same second.
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    backups = _catalog_backups(checked.account, checked.record_dir)
+    backups.mkdir(parents=True, exist_ok=True)
+    _backup_database(target, backups / f"before-merge-{account}-{stamp}.sqlite3")
+    result = {"records": 0, "added": 0, "keys": 0}
+    with tempfile.TemporaryDirectory(prefix=".account-merge-", dir=checked.record_dir.parent) as temporary:
+        folder = Path(temporary)
+        incoming = folder / _HISTORY_DB
+        _backup_database(source / _HISTORY_DB, incoming)
+        with closing(sqlite3.connect(incoming, timeout=1)) as db:
+            roots = _valid_roots(db, checked.output_dir)
+            with db:
+                tables = _tables(db)
+                # Likes and runs describe that account's own list; the merge
+                # marker and roots are written for this account below.
+                for table in ("likes", "runs", "catalog_meta"):
+                    if table in tables:
+                        db.execute('DELETE FROM "' + table + '"')
+            result["records"] = db.execute("SELECT COUNT(*) FROM media").fetchone()[0] if "media" in tables else 0
+        before = _count(target, "media")
+        _merge_database(_HISTORY_DB, target, incoming)
+        result["added"] = _count(target, "media") - before
+        with closing(sqlite3.connect(target, timeout=1)) as db:
+            roots = sorted(set(_valid_roots(db, checked.output_dir) + roots))
+            stored = db.execute("SELECT value FROM catalog_meta WHERE key='merged_accounts'").fetchone()
+            try:
+                merged = json.loads(stored[0]) if stored else []
+            except ValueError:
+                merged = []
+            merged = sorted({*[name for name in merged if isinstance(name, str)], account})
+            with db:
+                db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",
+                           (json.dumps(roots, ensure_ascii=False),))
+                db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('merged_accounts',?)",
+                           (json.dumps(merged),))
+        for name in _DATABASES:
+            if name in {_HISTORY_DB, _LEGACY_SYNC}:
+                continue
+            other = source / name
+            if _linked(other) or not other.is_file():
+                continue
+            copy = folder / name
+            _backup_database(other, copy)
+            ledger = checked.record_dir / name
+            before = _count(ledger, "archive")
+            if ledger.is_file():
+                _merge_database(name, ledger, copy)
+            else:
+                _backup_database(copy, ledger)
+            result["keys"] += _count(ledger, "archive") - before
+    return result
 
 
 class OutputGuard:
