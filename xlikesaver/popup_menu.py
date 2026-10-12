@@ -53,6 +53,25 @@ def _round_corners(window) -> None:
         pass
 
 
+def _set_owner(window, owner) -> None:
+    """Let Windows treat the menu as the library window's own popup.
+
+    Tk sets no owner for a borderless window, so closing the menu could hand
+    activation to another program instead of back to the library window.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.SetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t)
+        user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+        user32.SetWindowLongPtrW(int(window.wm_frame(), 16), -8, int(owner.winfo_toplevel().wm_frame(), 16))
+    except (OSError, AttributeError, ValueError, tk.TclError):
+        pass
+
+
 class PopupMenu(tk.Toplevel):
     """Rows of (label, callback, enabled) at a screen point.
 
@@ -98,11 +117,13 @@ class PopupMenu(tk.Toplevel):
         x = max(left, min(int(x_root), right - width))
         y = int(y_root) if int(y_root) + height <= bottom else max(top, int(y_root) - height)
         self.geometry(f"+{x}+{y}")
-        try:
-            self.transient(owner.winfo_toplevel())
-        except tk.TclError:
-            pass
+        _set_owner(self, owner)
         _round_corners(self)
+        # Keyboard shortcuts of the library keep working after the menu.
+        try:
+            self._return_focus = owner.focus_get()
+        except (KeyError, tk.TclError):
+            self._return_focus = None
         self.deiconify()
         self.lift()
         try:
@@ -155,7 +176,7 @@ class PopupMenu(tk.Toplevel):
         except (KeyError, tk.TclError):
             inside = False
         if not inside:
-            self.close()
+            self.close(restore_focus=False)
 
     def invoke(self, index):
         if self.closed or index is None or not 0 <= index < len(self.rows):
@@ -171,18 +192,25 @@ class PopupMenu(tk.Toplevel):
             pass
         return "break"
 
-    def close(self):
+    def close(self, *, restore_focus=True):
         if self.closed:
             return
         self.closed = True
+        target = self._return_focus if restore_focus else None
         try:
             self.grab_release()
         except tk.TclError:
             pass
         self.destroy()
+        try:
+            if target is not None and target.winfo_exists():
+                target.focus_force()
+        except tk.TclError:
+            pass
 
     def destroy(self):
         self.closed = True
         self.owner = None
+        self._return_focus = None
         self.rows = []
         super().destroy()

@@ -3,6 +3,7 @@
 import tkinter as tk
 from types import SimpleNamespace
 import unittest
+import unittest.mock
 
 from tests.test_gui import destroy_tk
 from xlikesaver import theme
@@ -88,6 +89,30 @@ class PopupMenuTests(unittest.TestCase):
         self.assertFalse(menu.winfo_exists())
         self.settle()
         self.assertEqual(self.calls, [])
+
+    def test_keyboard_focus_returns_to_the_window_after_the_menu(self):
+        # Otherwise Delete, Ctrl+A and page keys did nothing until a click.
+        entry = tk.Entry(self.root)
+        entry.pack()
+        self.root.focus_force()
+        entry.focus_set()
+        self.settle()
+        for close in ("close", "invoke", "elsewhere"):
+            with self.subTest(close=close):
+                menu = self.menu()
+                if close == "close":
+                    menu.close()
+                elif close == "invoke":
+                    menu.invoke(0)
+                else:
+                    menu._press_elsewhere(SimpleNamespace(x_root=menu.winfo_rootx() - 40,
+                                                          y_root=menu.winfo_rooty() - 40))
+                self.settle()
+                self.assertIs(self.root.focus_get(), entry)
+        menu = self.menu()
+        with unittest.mock.patch.object(entry, "focus_force") as focus:
+            menu.close(restore_focus=False)  # another program became active
+        focus.assert_not_called()
 
     def test_menu_stays_on_screen_near_the_bottom_right_corner(self):
         right, bottom = self.root.winfo_screenwidth(), self.root.winfo_screenheight()

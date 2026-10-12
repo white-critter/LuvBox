@@ -1600,16 +1600,27 @@ class HistoryStore:
                                            or not 1 <= limit <= 100))):
             raise HistoryError(_HISTORY_HELP)
         samples, seen = [], set()
-        for row in self._db.execute(
-                "SELECT * FROM media WHERE author=? COLLATE NOCASE AND path!='' "
-                "ORDER BY COALESCE(posted_at,'') DESC,tweet_id DESC,num,folder_mode", (author,)):
-            key = self._file_key(row["path"])
-            path = self._media_path(row["path"])
-            if key not in seen and path is not None and path.is_file():
-                seen.add(key)
-                samples.append(dict(row))
-                if len(samples) == limit:
-                    break
+        # Listing every file of a prolific author checks each folder once,
+        # as a library rescan does; each file itself is still checked.
+        own_cache = self._folder_cache is None
+        if own_cache:
+            self._folder_cache = {}
+        try:
+            for row in self._db.execute(
+                    "SELECT * FROM media WHERE author=? COLLATE NOCASE AND path!='' "
+                    "ORDER BY COALESCE(posted_at,'') DESC,tweet_id DESC,num,folder_mode", (author,)):
+                key = self._file_key(row["path"])
+                if key in seen:
+                    continue
+                path = self._media_path(row["path"])
+                if path is not None and path.is_file():
+                    seen.add(key)
+                    samples.append(dict(row))
+                    if len(samples) == limit:
+                        break
+        finally:
+            if own_cache:
+                self._folder_cache = None
         return samples
 
     @_safe

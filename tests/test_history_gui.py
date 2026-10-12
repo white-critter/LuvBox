@@ -457,7 +457,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertIn("@alice · 파일 10개", self.window.sample_text.get())
         self.assertFalse(self.window.sample_more_button.winfo_manager())
         with patch("xlikesaver.history_gui.os.startfile") as start:
-            self.window._open_sample("0")
+            self.window._open_sample(next(iter(self.window.sample_rows)))
         start.assert_called_once_with(str(self.account / "309_1.jpg"))
 
     def author_gallery(self, count=10):
@@ -492,6 +492,30 @@ class HistoryGuiTests(unittest.TestCase):
                          [str(309 - index) for index in range(10)])
         self.assertFalse(self.window.sample_more_button.winfo_manager())
         self.assertNotIn("최근", self.window.sample_text.get())
+
+    def test_author_gallery_keeps_its_tiles_and_length_when_the_library_refreshes(self):
+        # A save refreshes the library every few seconds; the gallery the user
+        # is looking through must not empty itself or fall back to the top.
+        with patch("xlikesaver.history_gui.SAMPLE_STEP", 4):
+            self.author_gallery(10)
+            self.window.more_samples()
+            tiles = dict(self.window.sample_view.tiles)
+            self.assertEqual(len(tiles), 8)
+            (self.account / "305_1.jpg").unlink()  # Only this test's fixture.
+            with patch("xlikesaver.history_gui.threading.Thread") as thread:
+                self.load()
+                self.window._show_author_samples()
+            self.assertEqual(self.window.sample_view.tiles, tiles)
+            calls = [call for call in thread.call_args_list if "_samples_worker" in repr(call.kwargs.get("target"))]
+            self.window._samples_worker(self.window._sample_results, *calls[-1].kwargs["args"])
+            self.window._poll_samples()
+        shown = [row["tweet_id"] for row in self.window.sample_rows.values()]
+        self.assertEqual(shown, ["309", "308", "307", "306", "304", "303", "302", "301"])
+        # Files that are still there keep their tile.
+        for key, tile in tiles.items():
+            if key in self.window.sample_view.tiles:
+                self.assertIs(self.window.sample_view.tiles[key], tile)
+        self.assertIn("파일 9개 중 최근 8개", self.window.sample_text.get())
 
     def test_author_gallery_files_can_be_sent_to_the_recycle_bin(self):
         self.author_gallery(10)

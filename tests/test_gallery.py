@@ -387,9 +387,10 @@ class GalleryLayoutTests(unittest.TestCase):
         # The box stops at the gallery's visible edge; that side has no line.
         left, top, width, height = self.grid._band.area
         self.assertEqual(top + height, self.grid.canvas.winfo_rooty() + self.grid.canvas.winfo_height())
-        lines = [self.grid._band.canvas.coords(item) for item in self.grid._band.canvas.find_all()]
-        self.assertEqual(len(lines), 3)
-        self.assertNotIn([0.0, float(height - 2), float(width), float(height)], lines)
+        band = self.grid._band
+        shown = [line for line in band.lines if band.canvas.itemcget(line, "state") != "hidden"]
+        self.assertEqual(len(shown), 3)
+        self.assertEqual(band.canvas.itemcget(band.lines[3], "state"), "hidden")
         first, chosen = self.grid.canvas.yview()[0], len(self.grid.selected_keys)
         for _ in range(10):
             self.grid._scroll_drag()
@@ -411,7 +412,20 @@ class GalleryLayoutTests(unittest.TestCase):
         self.assertEqual(set(self.grid.inner.winfo_children()), children)
         self.assertEqual(self.grid._band.window.wm_overrideredirect(), True)
         self.assertEqual(self.root.focus_get(), focus)
+        # One window the size of the visible gallery: moving the box never
+        # resizes it (a new size first shows up blank, which looked like a
+        # blinking white box).
+        band = self.grid._band
+        size = (band.window.winfo_width(), band.window.winfo_height())
+        self.assertEqual(size, (self.grid.canvas.winfo_width(), self.grid.canvas.winfo_height()))
+        with patch.object(band.window, "geometry", wraps=band.window.geometry) as geometry:
+            for key in ("4", "10", "1", "6"):
+                self.grid._drag_motion(self.pointer(key))
+        geometry.assert_not_called()
+        self.assertTrue(band.revealed or band._reveal_job is not None)
         self.grid._release_drag(self.pointer("0"))
+        self.assertFalse(band.visible or band.revealed)
+        self.assertEqual(float(band.window.attributes("-alpha")), 0.0)
         self.grid.release()
         self.assertIsNone(self.grid._band.window)
 

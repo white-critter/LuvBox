@@ -154,29 +154,45 @@ class DragBox:
     crossed was repainted, so a fast drag left several boxes behind.
     Windows composes a separate window without repainting what is below.
     The window never takes focus, so the drag keeps the mouse.
+
+    The window covers the visible gallery for the whole drag and only its
+    four lines move. Resizing it on every mouse move made Windows show each
+    new size blank (white) for a moment before it was drawn, so the box
+    blinked. It also appears only after its first drawing is finished.
     """
+
+    REVEAL_MS = 30
 
     def __init__(self, parent):
         # A weak link: the gallery owns this box, never the other way round.
         self._parent = weakref.ref(parent)
         self.window = None
         self.canvas = None
+        self.lines = []
         self.visible = False
+        self.revealed = False
         self.area = None
+        self._viewport = None
+        self._reveal_job = None
 
     def _create(self):
         parent = self._parent()
         window = tk.Toplevel(parent)
         window.withdraw()
         window.overrideredirect(True)
+        window.configure(background=_SEE_THROUGH)
         try:
-            window.transient(parent.winfo_toplevel())
             window.attributes("-transparentcolor", _SEE_THROUGH)
+            window.attributes("-alpha", 0.0)
         except tk.TclError:
             pass
         self.canvas = tk.Canvas(window, background=_SEE_THROUGH, highlightthickness=0, borderwidth=0,
                                 width=1, height=1)
         self.canvas.pack(fill="both", expand=True)
+        # Left, top, right and bottom sides; a side cut off by the gallery's
+        # edge is hidden.
+        self.lines = [self.canvas.create_rectangle(0, 0, 0, 0, outline="", fill=theme.BLUE, state="hidden")
+                      for _ in range(4)]
         window.update_idletasks()
         if os.name == "nt":
             try:
@@ -196,35 +212,74 @@ class DragBox:
                 pass
         self.window = window
 
-    def show(self, left, top, right, bottom, edges):
-        """Screen rectangle; ``edges`` (left, top, right, bottom) are the
-        sides of the box inside the visible gallery, which get a line."""
+    def show(self, viewport, box, edges):
+        """``viewport`` is the visible gallery and ``box`` the part of the drag
+        box inside it, both (left, top, right, bottom) on the screen.
+        ``edges`` say which sides of the box are real (not cut off)."""
         if self.window is None:
             self._create()
-        width, height = max(2, right - left), max(2, bottom - top)
-        self.area = (left, top, width, height)
-        canvas = self.canvas
-        canvas.delete("all")
-        canvas.configure(width=width, height=height)
-        for drawn, line in zip(edges, ((0, 0, 2, height), (0, 0, width, 2),
-                                       (width - 2, 0, width, height), (0, height - 2, width, height))):
+        window, canvas = self.window, self.canvas
+        left, top, right, bottom = viewport
+        if viewport != self._viewport:
+            # Only when the drag starts, or the window itself was resized.
+            self._viewport = viewport
+            self._conceal()
+            canvas.configure(width=max(1, right - left), height=max(1, bottom - top))
+            window.geometry(f"{max(1, right - left)}x{max(1, bottom - top)}+{left}+{top}")
+        x0, y0, x1, y1 = box[0] - left, box[1] - top, box[2] - left, box[3] - top
+        self.area = (box[0], box[1], box[2] - box[0], box[3] - box[1])
+        for line, drawn, coords in zip(self.lines, edges, ((x0, y0, x0 + 2, y1), (x0, y0, x1, y0 + 2),
+                                                           (x1 - 2, y0, x1, y1), (x0, y1 - 2, x1, y1))):
             if drawn:
-                canvas.create_rectangle(*line, outline="", fill=theme.BLUE)
-        self.window.geometry(f"{width}x{height}+{left}+{top}")
+                canvas.coords(line, *coords)
+                canvas.itemconfigure(line, state="normal", fill=theme.BLUE)
+            else:
+                canvas.itemconfigure(line, state="hidden")
         if not self.visible:
-            self.window.deiconify()
+            window.deiconify()
+            window.lift()
             self.visible = True
-        self.window.lift()
+        if not self.revealed and self._reveal_job is None:
+            self._reveal_job = window.after(self.REVEAL_MS, self._reveal)
+
+    def _reveal(self):
+        self._reveal_job = None
+        if self.window is not None and self.visible:
+            try:
+                self.window.attributes("-alpha", 1.0)
+            except tk.TclError:
+                pass
+            self.revealed = True
+
+    def _conceal(self):
+        """Invisible until drawn again: a new size first shows up blank."""
+        if self._reveal_job is not None:
+            self.window.after_cancel(self._reveal_job)
+            self._reveal_job = None
+        if self.revealed:
+            try:
+                self.window.attributes("-alpha", 0.0)
+            except tk.TclError:
+                pass
+            self.revealed = False
 
     def hide(self):
-        if self.window is not None and self.visible:
-            self.window.withdraw()
+        if self.window is not None:
+            self._conceal()
+            if self.visible:
+                for line in self.lines:
+                    self.canvas.itemconfigure(line, state="hidden")
+                self.window.withdraw()
         self.visible = False
         self.area = None
+        self._viewport = None
 
     def destroy(self):
+        if self.window is not None and self._reveal_job is not None:
+            self.window.after_cancel(self._reveal_job)
+            self._reveal_job = None
         window, self.window = self.window, None
-        self.visible = False
+        self.visible = self.revealed = False
         if window is not None:
             try:
                 window.destroy()
@@ -495,8 +550,9 @@ class ThumbnailGrid(ttk.Frame):
         box = (left + x0, top + y0, max(left + x1, left + x0 + 2), max(top + y1, top + y0 + 2))
         shown = (max(box[0], view_left), max(box[1], view_top), min(box[2], view_right), min(box[3], view_bottom))
         if shown[0] < shown[2] and shown[1] < shown[3]:
-            self._band.show(*shown, edges=(box[0] >= view_left, box[1] >= view_top,
-                                           box[2] <= view_right, box[3] <= view_bottom))
+            self._band.show((view_left, view_top, view_right, view_bottom), shown,
+                            edges=(box[0] >= view_left, box[1] >= view_top,
+                                   box[2] <= view_right, box[3] <= view_bottom))
         else:
             self._band.hide()
         hits = set()

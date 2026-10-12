@@ -212,6 +212,8 @@ class HistoryWindow(tk.Toplevel):
         self._sample_token = 0
         self._sample_author = None
         self._sample_results = queue.Queue()
+        # (author, tiles shown, scroll) kept while a refresh reads files again.
+        self._sample_resume = None
         self.sample_rows = {}
         self._sample_list = []
         self._sample_shown = 0
@@ -2706,11 +2708,13 @@ class HistoryWindow(tk.Toplevel):
         if stats is not self.stats:
             self.stats = stats
             self._sample_token += 1
+            # The author's files are read again (a save or deletion may have
+            # changed them). Keep showing the current tiles, and later how far
+            # the user scrolled, instead of emptying the gallery every refresh.
+            if self._sample_author is not None:
+                self._sample_resume = (self._sample_author, self._sample_shown,
+                                       self.sample_view.canvas.yview()[0])
             self._sample_author = None
-            self.sample_rows = {}
-            self._sample_list, self._sample_shown = [], 0
-            self.sample_view.show([], lambda paths: set(), empty_text="")
-            self.sample_more_button.pack_forget()
             self._authors_stale = True
             self._show_stale_authors()
         self._draw_months()
@@ -2745,8 +2749,9 @@ class HistoryWindow(tk.Toplevel):
         if row is not None and row["author"] == self._sample_author:
             return  # Includes an in-flight request and a cached empty result.
         self._sample_token += 1
+        resume = self._sample_resume
         if row is None or not _HANDLE.fullmatch(row["author"]) or self.current_storage is None:
-            self._sample_author = None
+            self._sample_author = self._sample_resume = None
             self.sample_rows = {}
             self._sample_list, self._sample_shown = [], 0
             self.sample_view.show([], lambda paths: set(), empty_text="")
@@ -2755,12 +2760,14 @@ class HistoryWindow(tk.Toplevel):
             self._update_sample_actions()
             return
         self._sample_author = row["author"]
-        self.sample_rows = {}
-        self._sample_list, self._sample_shown = [], 0
-        self.sample_view.show([], lambda paths: set(), empty_text="불러오는 중…")
-        self.sample_text.set(f"@{row['author']} · 파일을 불러오는 중…")
-        self.sample_more_button.pack_forget()
-        self._update_sample_actions()
+        if resume is None or resume[0] != row["author"]:
+            self._sample_resume = None
+            self.sample_rows = {}
+            self._sample_list, self._sample_shown = [], 0
+            self.sample_view.show([], lambda paths: set(), empty_text="불러오는 중…")
+            self.sample_text.set(f"@{row['author']} · 파일을 불러오는 중…")
+            self.sample_more_button.pack_forget()
+            self._update_sample_actions()
         threading.Thread(target=partial(HistoryWindow._samples_worker, self._sample_results),
                          args=(self._sample_token, self.current_storage, row["author"]), daemon=True).start()
 
@@ -2784,19 +2791,31 @@ class HistoryWindow(tk.Toplevel):
                 break
             if token != self._sample_token:
                 continue
+            resume, self._sample_resume = self._sample_resume, None
             if samples is None:
                 self._sample_author = None
+                self.sample_rows = {}
+                self._sample_list, self._sample_shown = [], 0
+                self.sample_view.show([], lambda paths: set(), empty_text="")
+                self.sample_more_button.pack_forget()
                 self.sample_text.set(f"@{author} · 사진을 불러오지 못했습니다.")
+                self._update_sample_actions()
                 continue
             self._sample_list = samples
-            self._sample_shown = min(len(samples), SAMPLE_STEP)
+            shown = min(len(samples), SAMPLE_STEP)
+            again = resume is not None and resume[0] == author
+            if again:
+                shown = min(len(samples), max(shown, resume[1]))
+            self._sample_shown = shown
             self._render_samples()
+            if again and resume[2] > 0:
+                self.sample_view.canvas.yview_moveto(resume[2])
         self.sample_view.poll()
 
     def _render_samples(self):
         author, samples = self._sample_author or "", self._sample_list
         shown = self._sample_shown
-        self.sample_rows = {str(index): row for index, row in enumerate(samples[:shown])}
+        self.sample_rows = {self._path_key(row["path"]): row for row in samples[:shown]}
         location = self.current_storage
 
         def permitted(paths):
