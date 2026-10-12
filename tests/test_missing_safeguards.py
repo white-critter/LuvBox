@@ -358,6 +358,39 @@ class MissingTabTests(StateTestCase):
             thread.assert_not_called()
         self.assertFalse(self.paths.media_dir.exists())
 
+    def test_library_basics_for_new_users(self):
+        from xlikesaver.history_gui import format_bytes
+        self.assertEqual(format_bytes(1536), "1.5 KB")
+        self.assertEqual(format_bytes(5 * 1024 * 1024), "5.0 MB")
+        self.saved(1)
+        with patch("xlikesaver.history_gui.threading.Thread"):
+            self.load()
+        # Nothing was ever deleted in this library: the old deletion tab hides.
+        self.assertEqual(self.window.tabs.tab(self.window.deletion_view, "state"), "hidden")
+        self.assertEqual(self.window.tile_values["bytes"].get().split()[-1], "KB")
+        with patch("xlikesaver.history_gui.os.startfile") as opened:
+            self.window.open_media_folder()
+        opened.assert_called_once_with(str(self.paths.media_dir))
+        self.paths.media_dir.rename(self.base / "Likes-moved")
+        with patch("xlikesaver.history_gui.os.startfile") as opened, \
+                patch("xlikesaver.history_gui.dialogs.showinfo") as info:
+            self.window.open_media_folder()
+        opened.assert_not_called()
+        info.assert_called_once()
+        self.assertFalse(self.paths.media_dir.exists())
+
+    def test_status_suggests_recording_sources_only_for_old_files(self):
+        self.saved(2)
+        with patch("xlikesaver.history_gui.threading.Thread"):
+            self.load()
+        self.assertIn("출처가 기록되지 않은 예전 파일 2개", self.window.status_text.get())
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            for row in store.records():
+                store.mark_metadata(row, "embedded")
+        with patch("xlikesaver.history_gui.threading.Thread"):
+            self.load()
+        self.assertNotIn("출처가 기록되지 않은", self.window.status_text.get())
+
     def test_preview_job_keeps_local_files_and_skips_cloud_only_ones(self):
         files = self.saved(3)
         results = queue.Queue()

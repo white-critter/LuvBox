@@ -9,7 +9,7 @@ if ($LASTEXITCODE -ne 0) { throw '번들 GIF 변환 도구 확인에 실패했�
 
 $version = (& $taskPython -c "from xlikesaver import __version__; print(__version__)" | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw '버전을 읽지 못했습니다. xlikesaver\__init__.py를 확인하세요.' }
-$name = "XlikeSaver-$version"
+$name = "LuvBox-$version"
 # A versioned name lets an older running build stay open. The same version
 # cannot be replaced while it runs, so stop with a clear message instead.
 $target = Join-Path $PSScriptRoot "release\$name\$name.exe"
@@ -23,7 +23,7 @@ if (Test-Path -LiteralPath $target) {
 # A folder build starts in well under a second; a one-file exe unpacked about
 # 40MB to a temporary folder on every launch, including each save's worker.
 & $taskPython -m PyInstaller --noconfirm --clean --windowed --onedir --name $name `
-    --icon 'assets\icons\xlikesaver.ico' --add-data 'assets\icons;assets/icons' `
+    --icon 'assets\icons\luvbox.ico' --add-data 'assets\icons;assets/icons' `
     --distpath release --workpath build\onedir `
     --collect-all gallery_dl --collect-binaries PIL --collect-data PIL --exclude-module imageio_ffmpeg `
     --copy-metadata pillow --copy-metadata requests --copy-metadata urllib3 `

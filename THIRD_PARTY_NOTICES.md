@@ -1,6 +1,6 @@
 # Third-party components
 
-XlikeSaver is provided under GNU GPL version 2. The license text is in LICENSE. The release ZIP includes corresponding application source, build scripts and the gallery-dl Python sources under source/, plus dependency metadata and license texts under licenses/.
+LuvBox (러브박스, formerly XlikeSaver) is provided under GNU GPL version 2. The license text is in LICENSE. The release ZIP includes corresponding application source, build scripts and the gallery-dl Python sources under source/, plus dependency metadata and license texts under licenses/.
 
 - gallery-dl 1.32.15 by Mike Fährmann: GPL-2.0-only. https://codeberg.org/mikf/gallery-dl
 - Requests and its HTTP dependencies retain their own licenses in the included package metadata. https://github.com/psf/requests

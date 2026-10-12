@@ -15,7 +15,8 @@ sys.path.insert(0, str(ROOT))
 from xlikesaver import __version__  # noqa: E402
 
 SOURCE_FILES = (
-    "assets/icons/xlikesaver.png", "assets/icons/xlikesaver.ico", "assets/icons/README.md", "tools/build_icon.py",
+    "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
+    "tools/draw_icon.py",
     "entry.py", "setup.ps1", "build.ps1", "run.bat", "requirements.txt",
     "requirements-dev.txt", "requirements-lock.txt", "README.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "XlikeSaver.code-workspace",
@@ -41,11 +42,11 @@ def package() -> None:
     output.mkdir(exist_ok=True)
     # Versioned names: a running older executable never blocks a new build.
     # The application is a folder: the exe and its _internal runtime.
-    application = output / f"XlikeSaver-{__version__}"
-    executable = application / f"XlikeSaver-{__version__}.exe"
+    application = output / f"LuvBox-{__version__}"
+    executable = application / f"LuvBox-{__version__}.exe"
     if not executable.is_file():
         raise FileNotFoundError("Build the application first")
-    destination = output / f"XlikeSaver-{__version__}.zip"
+    destination = output / f"LuvBox-{__version__}.zip"
     descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".zip", dir=output)
     os.close(descriptor)
     staged = Path(filename)
@@ -67,8 +68,11 @@ def package() -> None:
                     archive.write(path, "source/tools/ffmpeg/runtime/" + path.relative_to(ROOT / "tools/ffmpeg/runtime").as_posix())
             for name in SOURCE_FILES:
                 archive.write(ROOT / name, "source/" + name)
-            for folder, pattern in (("xlikesaver", "*.py"), ("tests", "*.py"),
-                                    ("docs", "*"), (".vscode", "*.json")):
+            # Development review notes stay in the repository; users get
+            # the guide and the developer notes.
+            for name in ("docs/사용안내.txt", "docs/development.md"):
+                archive.write(ROOT / name, "source/" + name)
+            for folder, pattern in (("xlikesaver", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):
                 for path in sorted((ROOT / folder).glob(pattern)):
                     if path.is_file():
                         archive.write(path, "source/" + path.relative_to(ROOT).as_posix())

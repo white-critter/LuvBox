@@ -53,8 +53,8 @@ def main() -> int:
             root.withdraw()
             app = App(root)
             from xlikesaver.app_icon import asset_directory, install
-            assert (asset_directory() / "xlikesaver.ico").is_file()
-            assert (asset_directory() / "xlikesaver.png").is_file()
+            assert (asset_directory() / "luvbox.ico").is_file()
+            assert (asset_directory() / "luvbox.png").is_file()
             assert install(root)
             root.update_idletasks()
             from xlikesaver import fonts, theme

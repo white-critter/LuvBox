@@ -6,7 +6,7 @@ from pathlib import Path
 import tkinter as tk
 
 
-APP_ID = "XlikeSaver.Desktop"
+APP_ID = "LuvBox.Desktop"
 
 
 def asset_directory() -> Path:
@@ -22,7 +22,7 @@ def install(root: tk.Tk) -> bool:
             identify.argtypes = (ctypes.c_wchar_p,)
             identify.restype = ctypes.c_long
             identify(APP_ID)
-            icon = str(asset_directory() / "xlikesaver.ico")
+            icon = str(asset_directory() / "luvbox.ico")
             root.iconbitmap(icon)
             root.iconbitmap(default=icon)
             # Tk/Windows can keep its stock class icon on independently mapped
@@ -34,7 +34,7 @@ def install(root: tk.Tk) -> bool:
                 root.bind_class("Toplevel", "<Map>", mapped, add="+")
                 root._xlikesaver_icon_binding = True
         else:
-            image = tk.PhotoImage(master=root, file=str(asset_directory() / "xlikesaver.png"))
+            image = tk.PhotoImage(master=root, file=str(asset_directory() / "luvbox.png"))
             root.iconphoto(True, image)
         return True
     except (OSError, AttributeError, tk.TclError):

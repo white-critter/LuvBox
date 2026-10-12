@@ -1,6 +1,6 @@
 """Unattended save with the app's saved settings, for Windows Task Scheduler.
 
-`XlikeSaver-<version>.exe --run-saved` checks only new likes (quick scan) and falls back
+`LuvBox-<version>.exe --run-saved` checks only new likes (quick scan) and falls back
 to a complete scan by itself when the previous run did not finish. It uses the
 encrypted token connection only; a cookies.txt path is never stored. Output
 goes to a log file because a windowed executable has no console.
@@ -26,7 +26,9 @@ from pathlib import Path
 from .settings import app_directory, load_settings
 
 
-TASK_NAME = "XlikeSaver 자동 저장"
+TASK_NAME = "LuvBox 자동 저장"
+# Builds before the LuvBox name registered the same task under this name.
+_LEGACY_TASKS = ("XlikeSaver 자동 저장",)
 _KEEP_LOGS = 30
 _KOREA = timezone(timedelta(hours=9))
 _TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])\Z")
@@ -91,14 +93,22 @@ def _powershell(script: str, **values: str) -> str:
 
 
 _STATUS_SCRIPT = r"""
-$task = Get-ScheduledTask -TaskName $env:XLS_TASK -ErrorAction SilentlyContinue
+$name = $env:XLS_TASK
+$task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+if (-not $task) {
+    foreach ($candidate in ($env:XLS_LEGACY -split '\|')) {
+        if ($candidate) { $task = Get-ScheduledTask -TaskName $candidate -ErrorAction SilentlyContinue }
+        if ($task) { $name = $candidate; break }
+    }
+}
 if (-not $task) { '{"registered": false}'; exit 0 }
-$info = Get-ScheduledTaskInfo -TaskName $env:XLS_TASK
+$info = Get-ScheduledTaskInfo -TaskName $name
 $action = $task.Actions | Select-Object -First 1
 $trigger = $task.Triggers | Select-Object -First 1
 function Stamp($value) { if ($value -and $value.Year -gt 2000) { $value.ToString('s') } else { '' } }
 [pscustomobject]@{
     registered = $true
+    name = $name
     program = [string]$action.Execute
     arguments = [string]$action.Arguments
     start = [string]$trigger.StartBoundary
@@ -121,11 +131,19 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatt
     -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12)
 Register-ScheduledTask -TaskName $env:XLS_TASK -Action $action -Trigger $trigger -Settings $settings `
     -Description $env:XLS_DESCRIPTION -Force | Out-Null
+# One daily task: remove the one registered under the app's former name.
+foreach ($old in ($env:XLS_LEGACY -split '\|')) {
+    if ($old -and (Get-ScheduledTask -TaskName $old -ErrorAction SilentlyContinue)) {
+        Unregister-ScheduledTask -TaskName $old -Confirm:$false
+    }
+}
 """
 
 _UNREGISTER_SCRIPT = r"""
-if (Get-ScheduledTask -TaskName $env:XLS_TASK -ErrorAction SilentlyContinue) {
-    Unregister-ScheduledTask -TaskName $env:XLS_TASK -Confirm:$false
+foreach ($name in @($env:XLS_TASK) + ($env:XLS_LEGACY -split '\|')) {
+    if ($name -and (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) {
+        Unregister-ScheduledTask -TaskName $name -Confirm:$false
+    }
 }
 """
 
@@ -133,7 +151,7 @@ if (Get-ScheduledTask -TaskName $env:XLS_TASK -ErrorAction SilentlyContinue) {
 def task_status() -> dict:
     """What is registered: program, daily time, and whether it is this app."""
     try:
-        data = json.loads(_powershell(_STATUS_SCRIPT, task=TASK_NAME) or "{}")
+        data = json.loads(_powershell(_STATUS_SCRIPT, task=TASK_NAME, legacy="|".join(_LEGACY_TASKS)) or "{}")
     except ValueError:
         raise ScheduleError(_SCHEDULE_HELP) from None
     if not isinstance(data, dict) or not data.get("registered"):
@@ -144,7 +162,8 @@ def task_status() -> dict:
     registered = str(data.get("program") or "")
     return {"registered": True, "program": registered,
             "current": os.path.normcase(registered) == os.path.normcase(program) and
-                       str(data.get("arguments") or "") == arguments,
+                       str(data.get("arguments") or "") == arguments and
+                       str(data.get("name") or TASK_NAME) == TASK_NAME,
             "time": f"{found[1]}:{found[2]}" if found else "",
             "enabled": bool(data.get("enabled")), "catch_up": bool(data.get("catch_up")),
             "on_battery": bool(data.get("on_battery")),
@@ -155,11 +174,12 @@ def register_task(time_of_day: str) -> None:
     """Register or replace the daily task for this executable."""
     program, arguments = launch_parts()
     _powershell(_REGISTER_SCRIPT, task=TASK_NAME, program=program, arguments=arguments,
-                time=normal_time(time_of_day), description="XlikeSaver: 새 Like를 매일 저장합니다.")
+                time=normal_time(time_of_day), description="러브박스(LuvBox): 새 Like를 매일 저장합니다.",
+                legacy="|".join(_LEGACY_TASKS))
 
 
 def unregister_task() -> None:
-    _powershell(_UNREGISTER_SCRIPT, task=TASK_NAME)
+    _powershell(_UNREGISTER_SCRIPT, task=TASK_NAME, legacy="|".join(_LEGACY_TASKS))
 
 
 def last_run() -> dict | None:
@@ -285,7 +305,7 @@ def _notify_failure(outcome: dict) -> None:
         except (OSError, ValueError, tk.TclError):
             pass
         dialog = dialogs.Dialog(
-            root, "XlikeSaver 자동 저장 실패",
+            root, "러브박스 자동 저장 실패",
             f"{outcome['finished_at'][:16].replace('T', ' ')} 자동 저장을 마치지 못했습니다.\n\n{outcome['message']}\n\n"
             "자세한 내용은 앱의 ‘자동 저장 → 실행 기록’에 있습니다.",
             icon="warning", buttons=(("앱 열기", "open"), ("닫기", None)))

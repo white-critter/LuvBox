@@ -132,6 +132,21 @@ class ThumbCacheStabilityTests(unittest.TestCase):
                 self.assertIsNone(thumbcache.recall("offline", self.key))
         self.assertEqual(list(destination.iterdir()), [])
 
+    @unittest.skipUnless(os.name == "nt", "Windows junction fixture")
+    def test_appdata_moved_with_a_junction_above_the_app_folder_still_works(self):
+        destination = self.root / "moved-appdata"
+        destination.mkdir()
+        linked = self.root / "appdata-junction"
+        completed = subprocess.run(["cmd.exe", "/c", "mklink", "/J", str(linked), str(destination)],
+                                   capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if completed.returncode:
+            self.skipTest("Cannot create private junction fixture")
+        self.addCleanup(os.rmdir, linked)
+        directory = linked / "XlikeSaver" / "thumbnails"
+        with patch.object(thumbcache, "directory", return_value=directory):
+            thumbcache.remember("offline", self.key, self.image)
+            self.assertIsNotNone(thumbcache.recall("offline", self.key))
+
     def test_hardlinked_database_and_sidecars_are_not_written(self):
         self.directory.mkdir()
         outside = self.root / "outside.sqlite3"

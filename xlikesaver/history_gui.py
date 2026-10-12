@@ -31,7 +31,7 @@ MEDIA_LABELS = {"all": "전체", "photo": "사진", "video": "동영상", "anima
 STATUS_LABELS = {"running": "진행 중", "finished": "완료", "stopped": "직접 중단", "error": "오류", "interrupted": "비정상 종료", "limited": "시험 저장 완료", "partial": "일부만 완료", "cancelled": "취소됨"}
 METADATA_LABELS = {"embedded": "파일에 출처 기록됨", "pending": "출처 기록 전", "failed": "파일 출처 기록 실패", "unsupported": "메타데이터 미지원 형식"}
 AUTHOR_METADATA_LABELS = {"embedded": "작성자 기록됨", "pending": "작성자 기록 전", "error": "작성자 기록 실패", "unknown": "작성자 정보 없음"}
-TILES = {"files": "현재 파일", "posts": "기록된 트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "확인된 용량"}
+TILES = {"files": "현재 파일", "posts": "기록된 트윗", "photo": "사진", "video": "동영상", "animated_gif": "움직이는 GIF", "bytes": "용량"}
 PAGE_SIZE = 100
 PAGE_SIZES = (50, 100, 200)
 ORDER_LABELS = {"saved": "저장한 순", "liked": "Like한 순", "posted": "게시일 최신순", "posted_oldest": "게시일 오래된 순"}
@@ -61,8 +61,8 @@ def format_bytes(value: int | float | None) -> str:
     if value is None:
         return "알 수 없음"
     size = max(0, float(value))
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if size < 1024 or unit == "TiB":
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
             return f"{size:,.1f} {unit}" if unit != "B" else f"{size:,.0f} B"
         size /= 1024
     return ""
@@ -174,7 +174,7 @@ class HistoryWindow(tk.Toplevel):
                  get_gif_options=lambda: ("original", 200), retry_missing=None):
         super().__init__(parent)
         theme.apply_style(self)
-        self.title("XlikeSaver · 라이브러리")
+        self.title("러브박스 · 라이브러리")
         width = min(1500, max(1, self.winfo_screenwidth() - 80))
         height = min(1100, max(1, self.winfo_screenheight() - 100))
         self.geometry(f"{width}x{height}")
@@ -338,7 +338,7 @@ class HistoryWindow(tk.Toplevel):
         ttk.Label(heading, text="라이브러리", style="PageTitle.TLabel").pack(side="left")
         self.refresh_button = ttk.Button(heading, text="새로고침", command=lambda: self.refresh(import_legacy=True))
         self.refresh_button.pack(side="right")
-        ttk.Button(heading, text="기록 위치", style="Ghost.TButton", command=self.show_locations).pack(side="right", padx=8)
+        ttk.Button(heading, text="폴더 열기", style="Ghost.TButton", command=self.open_media_folder).pack(side="right", padx=8)
         self.source_stop_button = ttk.Button(heading, text="출처·작성자 기록 중단", command=self.stop_metadata, state="disabled")
         self.repair_button = ttk.Button(heading, text="기록 복구", style="Primary.TButton", command=self.repair_records)
         ttk.Label(body, textvariable=self.location_text, style="Muted.TLabel", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(4, 16))
@@ -570,6 +570,7 @@ class HistoryWindow(tk.Toplevel):
         ttk.Label(tools, text="같은 저장 폴더를 쓰던 다른 계정의 기록을 이 계정으로 합칩니다.",
                   style="CardMuted.TLabel").pack(anchor="w", pady=(6, 18))
         ttk.Label(tools, text="X에 요청하지 않는 작업입니다.", style="CardMuted.TLabel").pack(anchor="w")
+        ttk.Button(tools, text="기록 보관 위치", command=self.show_locations, style="Ghost.TButton").pack(anchor="w", pady=(10, 0))
         ttk.Button(tools, text="닫기", command=self._tools_window.withdraw, style="Compact.TButton").pack(anchor="e", pady=(14, 0))
 
         run_columns = ("started", "ended", "status", "saved", "skipped", "size", "visited", "last")
@@ -779,7 +780,14 @@ class HistoryWindow(tk.Toplevel):
         self.deletion_total_pages = int(paging.get("pages", 0) or 0)
         self.deletion_page_text.set(f"처리 기록 {total:,}개 · {self.deletion_page + 1 if total else 0} / {self.deletion_total_pages:,}페이지")
         self.deletion_page_input.set(str(self.deletion_page + 1))
-        self.tabs.tab(self.deletion_view, text=f"이전 삭제 기록 {total:,}" if total else "이전 삭제 기록")
+        if total:
+            self.tabs.add(self.deletion_view)   # restores a hidden tab in place
+            self.tabs.tab(self.deletion_view, text=f"이전 삭제 기록 {total:,}")
+        else:
+            self.tabs.tab(self.deletion_view, text="이전 삭제 기록")
+            if self.tabs.select() == str(self.deletion_view):
+                self.tabs.select(0)
+            self.tabs.hide(self.deletion_view)
         if self.deletion_rows:
             self.deletion_message.place_forget()
         else:
@@ -1514,7 +1522,7 @@ class HistoryWindow(tk.Toplevel):
         self.tile_values["bytes"].set(format_bytes(summary.get("bytes", 0)))
         self.summary_text.set(
             f"현재 파일 {files:,}개 · 기록된 트윗 {values['posts']:,}개 · 사진 {values['photo']:,}개 / 동영상 {values['video']:,}개 / "
-            f"움직이는 GIF {values['animated_gif']:,}개 · 확인된 용량 {format_bytes(summary.get('bytes', 0))}")
+            f"움직이는 GIF {values['animated_gif']:,}개 · 용량 {format_bytes(summary.get('bytes', 0))}")
         self.media_counts.set(f"사진 {values['photo']:,} · 동영상 {values['video']:,} · GIF {values['animated_gif']:,}")
         oldest, newest = summary.get("oldest_posted_at"), summary.get("newest_posted_at")
         notes = []
@@ -1592,8 +1600,11 @@ class HistoryWindow(tk.Toplevel):
         self._queue_pager_layout()
         self._update_controls()
         warning = " ".join(summary.get("warnings", []))
-        self.status_text.set((self.completion_text + "\n" if self.completion_text else "") + (warning + "\n" if warning else "") +
-                             f"출처 기록 {summary.get('embedded_sources', 0):,}개 · 작성자 기록 {summary.get('embedded_authors', 0):,}개")
+        unmarked = max(0, files - (summary.get("embedded_sources", 0) or 0))
+        hint = (f"출처가 기록되지 않은 예전 파일 {unmarked:,}개 · ‘파일 관리 → 파일에 출처·작성자 기록’으로 넣을 수 있습니다."
+                if unmarked and not offline else "")
+        self.status_text.set(((self.completion_text + "\n" if self.completion_text else "") +
+                              (warning + "\n" if warning else "") + hint).strip())
         self._show_stats(summary.get("stats") or {})
         self.missing_items = summary.get("missing") or []
         self.missing_all = False
@@ -1726,20 +1737,32 @@ class HistoryWindow(tk.Toplevel):
     def show_locations(self):
         if self.current_account_dir is None:
             return
-        archives = self.current_summary.get("archivepaths", [])
-        archive_text = "\n".join(map(str, archives)) or "아직 다운로드 기록 파일이 없습니다."
         snapshot = (str(self.current_storage.snapshot_dir) if isinstance(self.current_storage, StoragePaths)
                     else "저장 폴더의 .xlikesaver")
         media_dir = self.current_storage.media_dir if isinstance(self.current_storage, StoragePaths) else self.current_account_dir
-        dialogs.showinfo("기록 저장 위치", f"저장 폴더:\n{media_dir}\n\n이 PC의 기록·통계:\n{self.current_account_dir / '.xlikesaver-history.sqlite3'}\n\n"
-                         f"이 PC의 중복 방지 기록:\n{archive_text}\n\n저장 폴더에 두는 사본:\n{snapshot}\n\n"
-                         "기록은 이 PC에 두고, 저장할 때마다 저장 폴더의 .xlikesaver에 사본을 둡니다. "
-                         "다른 PC나 새로 설치한 앱은 이 사본에서 기록을 가져옵니다.", parent=self)
+        dialogs.showinfo("기록 보관 위치", f"저장 폴더:\n{media_dir}\n\n이 PC의 기록:\n{self.current_account_dir}\n\n"
+                         f"저장 폴더 안 기록 사본:\n{snapshot}\n\n"
+                         "기록은 이 PC에 두고, 저장할 때마다 저장 폴더 안에 사본을 둡니다. "
+                         "다른 PC나 새로 설치한 앱도 이 사본으로 기록을 이어 씁니다.", parent=self)
+
+    def open_media_folder(self):
+        """Open the save folder in Explorer; never create a missing one."""
+        location = self.current_storage
+        folder = location.media_dir if isinstance(location, StoragePaths) else self.current_account_dir
+        if folder is None:
+            return
+        if not Path(folder).is_dir():
+            dialogs.showinfo("폴더 열기", "저장 폴더를 찾을 수 없습니다. 메인 화면의 ‘저장 폴더’를 확인해 주세요.", parent=self)
+            return
+        try:
+            os.startfile(str(folder))
+        except OSError:
+            dialogs.showinfo("폴더 열기", "폴더를 열지 못했습니다. 탐색기에서 직접 열어 주세요.", parent=self)
 
     def export(self):
         if self.busy or self.current_account_dir is None:
             return
-        destination = filedialog.asksaveasfilename(parent=self, title="전체 저장 기록 CSV 내보내기", defaultextension=".csv", initialfile="XlikeSaver-records.csv", filetypes=[("CSV 파일", "*.csv")])
+        destination = filedialog.asksaveasfilename(parent=self, title="전체 저장 기록 CSV 내보내기", defaultextension=".csv", initialfile="LuvBox-records.csv", filetypes=[("CSV 파일", "*.csv")])
         if not destination:
             return
         self.busy = True

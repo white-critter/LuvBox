@@ -10,10 +10,10 @@ SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
 def build():
-    with Image.open(DIRECTORY / "xlikesaver.png") as image:
+    with Image.open(DIRECTORY / "luvbox.png") as image:
         if image.mode != "RGBA" or image.width != image.height or image.getextrema()[3][0] != 0:
             raise ValueError("A square RGBA image with a transparent background is required")
-        image.save(DIRECTORY / "xlikesaver.ico", sizes=[(size, size) for size in SIZES])
+        image.save(DIRECTORY / "luvbox.ico", sizes=[(size, size) for size in SIZES])
 
 
 if __name__ == "__main__":

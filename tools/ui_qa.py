@@ -579,7 +579,7 @@ def main():
             stack.enter_context(patch("xlikesaver.history._now", return_value=STAMP))
             scheduled_info = {"registered": True, "current": True, "time": "22:00", "enabled": True,
                               "catch_up": True, "on_battery": True, "next_run": "2026-10-07T22:00:00",
-                              "program": f"XlikeSaver-{__version__}.exe"}
+                              "program": f"LuvBox-{__version__}.exe"}
             stack.enter_context(patch.object(scheduled, "task_status", side_effect=lambda: dict(scheduled_info)))
             stack.enter_context(patch.object(scheduled, "last_run", return_value={
                 "finished_at": STAMP, "status": "finished", "saved": 24, "failed": False}))

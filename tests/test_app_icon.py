@@ -10,10 +10,10 @@ from xlikesaver import app_icon
 
 class AppIconTests(unittest.TestCase):
     def test_transparency_is_preserved_at_every_windows_icon_size(self):
-        with Image.open(app_icon.asset_directory() / "xlikesaver.png") as image:
+        with Image.open(app_icon.asset_directory() / "luvbox.png") as image:
             self.assertEqual(image.mode, "RGBA")
             self.assertEqual(image.getpixel((0, 0))[3], 0)
-        with Image.open(app_icon.asset_directory() / "xlikesaver.ico") as image:
+        with Image.open(app_icon.asset_directory() / "luvbox.ico") as image:
             self.assertEqual(image.ico.sizes(), {(n,n) for n in (16,24,32,48,64,128,256)})
             for size in image.ico.sizes():
                 self.assertEqual(image.ico.getimage(size).getpixel((0,0))[3], 0)

@@ -62,10 +62,18 @@ def cloud_only(path: Path | str, *, status=None) -> bool:
 
 
 def _safe_path(path: Path) -> None:
-    """Reject redirected cache directories, databases and SQLite sidecars."""
+    """Reject redirected cache directories, databases and SQLite sidecars.
+
+    Folders up to the app's own data folder are checked. Above it, a user may
+    have moved AppData itself with a junction; records work there, so do
+    previews.
+    """
+    boundary = directory().parent
     for current in (path, *path.parents):
         if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
             raise OSError("linked preview cache")
+        if current == boundary:
+            break
     for current in (path, *(path.with_name(path.name + suffix) for suffix in ("-wal", "-shm", "-journal", ".epoch"))):
         if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
             raise OSError("linked preview cache")

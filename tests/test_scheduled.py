@@ -326,6 +326,26 @@ class TaskSchedulerTests(unittest.TestCase):
         with self.powershell(b"not json"), self.assertRaises(scheduled.ScheduleError):
             scheduled.task_status()
 
+    def test_task_under_the_former_app_name_is_found_and_replaced(self):
+        data = {"registered": True, "name": "XlikeSaver 자동 저장", "program": self.PROGRAM,
+                "arguments": "--run-saved", "start": "2026-10-06T07:30:00+09:00", "enabled": True,
+                "catch_up": True, "on_battery": True, "last_run": "", "next_run": ""}
+        with self.powershell(json.dumps(data, ensure_ascii=False).encode("utf-8")) as run:
+            status = scheduled.task_status()
+        self.assertTrue(status["registered"])
+        self.assertFalse(status["current"])   # offers to renew it under the new name
+        environment = run.call_args.kwargs["env"]
+        self.assertEqual(environment["XLS_TASK"], "LuvBox 자동 저장")
+        self.assertEqual(environment["XLS_LEGACY"], "XlikeSaver 자동 저장")
+        with self.powershell() as run:
+            scheduled.register_task("07:30")
+        script = self.script(run.call_args)
+        self.assertIn("Unregister-ScheduledTask -TaskName $old", script)
+        self.assertEqual(run.call_args.kwargs["env"]["XLS_LEGACY"], "XlikeSaver 자동 저장")
+        with self.powershell() as run:
+            scheduled.unregister_task()
+        self.assertIn("$env:XLS_LEGACY", self.script(run.call_args))
+
     def test_entry_point_accepts_only_known_run_saved_arguments(self):
         with patch("xlikesaver.scheduled.run_saved", return_value=0) as run:
             for argv, code, full in ((["--run-saved"], 0, False), (["--run-saved", "--full"], 0, True)):

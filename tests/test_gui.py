@@ -487,6 +487,24 @@ class GuiTests(unittest.TestCase):
         self.app.folder_mode.set("저장일별 폴더")
         self.assertEqual(self.app.destination_preview.get(), str(directory / "offline_test" / "YYYY-MM-DD"))
 
+    def test_extra_save_location_line_appears_only_when_it_adds_a_subfolder(self):
+        self.app.account.set("offline_test")
+        self.app.folder.set(self.temp.name)
+        self.app.folder_mode.set("구분 없이 저장")
+        self.app.separate_accounts.set(False)
+        self.assertEqual(self.app.destination_text.get(), "")
+        self.assertFalse(self.app.preview_label.winfo_manager())
+        self.app.folder_mode.set("작성자별 폴더")
+        self.assertIn(str(Path(self.temp.name).resolve() / "작성자"), self.app.destination_text.get())
+        self.assertTrue(self.app.preview_label.winfo_manager())
+
+    def test_help_tells_what_to_do_without_internal_rules(self):
+        text = " ".join(" ".join((title, *items, note or "")) for title, items, note in App.HELP_SECTIONS)
+        for internal in ("API", "토큰을", "DB", "archive", "개 이어지면", "다음 한 번은 전체"):
+            self.assertNotIn(internal, text)
+        self.assertIn("사라진 파일", text)
+        self.assertIn("자동 저장", text)
+
     def test_account_folder_option_reaches_worker_and_is_remembered(self):
         self.app.account.set("offline_test")
         self.app.folder.set(self.temp.name)

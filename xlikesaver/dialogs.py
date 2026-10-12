@@ -24,7 +24,7 @@ class Dialog(tk.Toplevel):
         owner = (parent or tk._get_default_root()).winfo_toplevel()
         super().__init__(owner)
         self.withdraw()
-        self.title(title or "XlikeSaver")
+        self.title(title or "러브박스")
         self.resizable(False, False)
         # A dialog of a hidden window would be hidden with it on Windows.
         if owner.winfo_viewable():

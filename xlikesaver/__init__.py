@@ -1,3 +1,3 @@
 """XlikeSaver: a personal, local X media backup app."""
 
-__version__ = "2.7.1"
+__version__ = "1.0.0"

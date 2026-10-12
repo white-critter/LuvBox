@@ -21,7 +21,7 @@ from tkinter import filedialog, ttk
 import webbrowser
 
 from . import __version__, dialogs, theme
-from .core import QUICK_STOP_AFTER, JobOptions, _normal_account
+from .core import JobOptions, _normal_account
 from .login import clear_session, has_session, save_auth_token
 from .settings import load_settings, settings_path
 from .storage import StoragePaths, missing_media_help, resolve_storage, saved_media_missing
@@ -54,8 +54,8 @@ GIF_FORMAT_HINTS = {
 GIF_SIZES = {"원본 크기": "original", "최대 720px · 초당 15장 (용량 절약)": "720",
              "최대 480px · 초당 12장 (가장 작게)": "480"}
 SCAN_HINTS = {
-    "quick": f"이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다. 평소에 쓰세요.",
-    "full": "오래된 Like까지 처음부터 확인합니다. 오래 걸립니다.",
+    "quick": "지난번 이후 새로 누른 Like만 빠르게 받습니다. 평소에 쓰세요.",
+    "full": "오래된 Like까지 처음부터 다시 확인합니다. 오래 걸립니다.",
 }
 TOKEN_STEPS = ("1. 크롬·엣지에서 x.com에 로그인합니다.\n"
                "2. F12 → Application(애플리케이션) → Cookies → https://x.com\n"
@@ -74,7 +74,7 @@ def worker_command(request: Path, events: Path, stop: Path) -> list[str]:
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title(f"XlikeSaver {__version__}")
+        root.title(f"러브박스 (LuvBox) {__version__}")
         width = min(1440, max(760, root.winfo_screenwidth() - 80))
         height = min(1320, max(360, root.winfo_screenheight() - 100))
         x = max(0, (root.winfo_screenwidth() - width) // 2)
@@ -135,7 +135,7 @@ class App:
         except ValueError:
             pass
         self.account = tk.StringVar(value=str(settings.get("account", "")))
-        self.folder = tk.StringVar(value=str(settings.get("output_dir", Path.home() / "Pictures" / "XlikeSaver")))
+        self.folder = tk.StringVar(value=str(settings.get("output_dir", Path.home() / "Pictures" / "LuvBox")))
         mode = settings.get("auth_mode", "managed")
         self.auth = tk.StringVar(value=next((k for k, v in AUTH_MODES.items() if v == mode), next(iter(AUTH_MODES))))
         self.cookies = tk.StringVar()
@@ -144,6 +144,8 @@ class App:
         self.folder_mode = tk.StringVar(value=next((k for k, v in FOLDER_MODES.items() if v == layout), "구분 없이 저장"))
         self.separate_accounts = tk.BooleanVar(value=settings.get("separate_accounts", False) is True)
         self.destination_preview = tk.StringVar()
+        # Shown only when files go below the chosen folder (author/date/account).
+        self.destination_text = tk.StringVar()
         self.include_videos = tk.BooleanVar(value=settings.get("include_videos", True) is not False)
         self.include_gifs = tk.BooleanVar(value=settings.get("include_gifs", True) is not False)
         self.max_video_mb = tk.StringVar(value=str(settings.get("max_video_mb", 200)))
@@ -215,8 +217,20 @@ class App:
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.columnconfigure(0, weight=1)
         self.sidebar.rowconfigure(5, weight=1)
-        ttk.Label(self.sidebar, text="XlikeSaver", style="SidebarTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(self.sidebar, text="나만의 미디어 보관함", style="SidebarMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(6, 32))
+        brand = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
+        brand.grid(row=0, column=0, sticky="w")
+        try:
+            from PIL import Image, ImageTk
+            from .app_icon import asset_directory
+            with Image.open(asset_directory() / "luvbox.png") as picture:
+                self._brand_icon = ImageTk.PhotoImage(picture.resize((34, 34), Image.Resampling.LANCZOS),
+                                                      master=self.root)
+            ttk.Label(brand, image=self._brand_icon, style="Sidebar.TLabel").pack(side="left", padx=(0, 10))
+        except (OSError, tk.TclError):
+            self._brand_icon = None
+        ttk.Label(brand, text="러브박스", style="SidebarTitle.TLabel").pack(side="left")
+        ttk.Label(self.sidebar, text="LuvBox · 나만의 미디어 보관함", style="SidebarMuted.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(6, 32))
         ttk.Label(self.sidebar, text="작업 공간", style="SidebarEyebrow.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 10))
         navigation = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
         navigation.grid(row=3, column=0, sticky="ew")
@@ -235,7 +249,7 @@ class App:
                                        style="Nav.TButton")
         self.theme_button.pack(fill="x")
         ttk.Button(footer, text="사용 방법", command=self.help, style="Nav.TButton").pack(fill="x", pady=(4, 18))
-        ttk.Label(footer, text=f"VERSION {__version__}", style="SidebarEyebrow.TLabel").pack(anchor="w")
+        ttk.Label(footer, text=f"버전 {__version__}", style="SidebarEyebrow.TLabel").pack(anchor="w")
         ttk.Label(footer, text="Ctrl+Enter · 저장 시작", style="SidebarMuted.TLabel").pack(anchor="w", pady=(6, 0))
 
         self.content_view = theme.ScrollableContent(self.workspace, padding=(30, 24))
@@ -281,7 +295,7 @@ class App:
         browse.grid(row=0, column=1, padx=(8, 0))
         ttk.Button(folder_row, text="열기", command=self.open_folder, style="Ghost.TButton", width=5).grid(row=0, column=2, padx=(6, 0))
         self.inputs.extend((folder, browse))
-        self.preview_label = self._wrapping_label(form, textvariable=self.destination_preview,
+        self.preview_label = self._wrapping_label(form, textvariable=self.destination_text,
                                                   style="CardMuted.TLabel", wraplength=700)
         self.preview_label.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 14))
         summary = ttk.Frame(form, style="Plain.TFrame")
@@ -345,8 +359,6 @@ class App:
         self.log.tag_configure("time", foreground=theme.MUTED)
         self.log.tag_configure("error", foreground=theme.RED)
         self.log.tag_configure("warning", foreground=theme.ORANGE)
-        self._wrapping_label(shell, text="요청 한도 안내가 나오면 알려 준 시각 이후에 다시 저장하세요.",
-                             style="Muted.TLabel", wraplength=800).pack(fill="x", pady=(0, 4))
         if self.detailed_progress.get():
             self._toggle_progress()
         self.root.bind("<Configure>", self._layout_dashboard, add="+")
@@ -452,9 +464,20 @@ class App:
             account = _normal_account(self.account.get()) if self.account.get().strip() else "my_account"
             paths = resolve_storage(self.folder.get(), account, self.separate_accounts.get())
             suffix = {"author": "작성자", "date": "YYYY-MM-DD", "flat": ""}[FOLDER_MODES[self.folder_mode.get()]]
-            self.destination_preview.set(str(paths.media_dir / suffix) if suffix else str(paths.media_dir))
+            preview = str(paths.media_dir / suffix) if suffix else str(paths.media_dir)
+            self.destination_preview.set(preview)
+            chosen = os.path.normcase(os.path.abspath(os.path.expanduser(self.folder.get().strip())))
+            same = os.path.normcase(os.path.abspath(preview)) == chosen
+            self.destination_text.set("" if same else "실제 저장 위치  " + preview)
         except (ValueError, OSError):
             self.destination_preview.set("아이디와 저장 폴더를 확인하세요.")
+            self.destination_text.set(self.destination_preview.get())
+        label = getattr(self, "preview_label", None)
+        if label is not None:
+            if self.destination_text.get():
+                label.grid()
+            else:
+                label.grid_remove()
 
     def show_history(self):
         if not self._ensure_storage("history"):
@@ -835,9 +858,7 @@ class App:
             ttk.Radiobutton(advanced, text=caption, value=key, variable=self.scan_mode).pack(anchor="w")
             self._wrapping_label(advanced, text=SCAN_HINTS[value], style="CardMuted.TLabel",
                                  wraplength=560).pack(fill="x", padx=(32, 0), pady=(4, 16))
-        self._wrapping_label(advanced, text="직전 실행이 중단되거나 미디어 설정을 바꾸면 다음 한 번은 전체를 확인합니다.",
-                             style="CardMuted.TLabel", wraplength=580).pack(fill="x")
-        ttk.Separator(advanced).pack(fill="x", pady=(20, 18))
+        ttk.Separator(advanced).pack(fill="x", pady=(4, 18))
         ttk.Checkbutton(advanced, text="이번에는 20개만 시험 저장", variable=self.limited).pack(anchor="w")
         self._wrapping_label(advanced, text="새 파일 20개를 저장한 뒤 멈춥니다. 이번 실행에만 적용됩니다.",
                              style="CardMuted.TLabel", wraplength=560).pack(fill="x", padx=(56, 0), pady=(4, 0))
@@ -1092,43 +1113,38 @@ class App:
     # -------------------------------------------------------------------- help
     HELP_SECTIONS = (
         ("처음 시작하기", (
-            "1. ‘내 X 아이디’에 본인 아이디를 입력합니다.",
-            "2. ‘로그인 연결’로 X 로그인을 연결합니다(처음 한 번).",
+            "1. ‘내 X 아이디’에 내 아이디를 입력합니다.",
+            "2. ‘로그인 연결 → Edge에서 X 로그인’을 누르고 열린 창에서 로그인합니다(처음 한 번).",
             "3. 저장할 폴더를 고르고 ‘저장 시작’을 누릅니다.",
-        ), "이미 저장한 파일은 다음부터 자동으로 건너뜁니다."),
-        ("로그인 연결 방법", (
-            "‘로그인 연결 → Edge에서 X 로그인’을 누릅니다.",
-            "열린 Edge 창에서 본인 계정에 로그인하면 자동 연결됩니다.",
-            "연결이 안 되면 ‘토큰 직접 입력’이나 cookies.txt 파일을 사용하세요.",
-        ), "연결 정보는 이 Windows 계정에 암호화해 저장합니다. 만료되면 다시 연결하세요."),
+        ), "한 번 받은 파일은 건너뛰고, 다음부터는 새 Like만 받습니다."),
+        ("로그인이 안 될 때", (
+            "Edge 창에서 연결되지 않으면 ‘로그인 연결’의 ‘토큰 직접 입력’을 펼쳐 안내대로 넣습니다.",
+            "연결이 끊기면 같은 방법으로 다시 연결합니다.",
+        ), "로그인 정보는 이 PC에만 보관합니다."),
         ("저장 설정", (
-            f"새 Like만 빠르게: 이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다. 평소에 쓰세요.",
-            "전체 다시 확인: 오래된 Like까지 처음부터 확인합니다. 오래 걸립니다.",
-            "직전 실행이 중단됐거나 설정을 바꾸면 다음 한 번은 전체를 확인합니다.",
-        ), "폴더 정리, 동영상·GIF, 영상 최대 크기는 ‘저장 설정’에서 바꿉니다."),
-        ("저장되는 파일", (
-            "사진은 원본, 동영상은 최고 화질 MP4, 움직이는 GIF는 .gif로 저장합니다.",
-            "영상이 최대 크기(기본 200MB)보다 크면 건너뜁니다. 늘리면 다음에 받습니다.",
-            "새로 받은 파일 안에는 트윗 주소와 작성자 아이디가 기록됩니다.",
+            "폴더 정리: 한 폴더에 모두, 작성자별, 저장한 날짜별 중에서 고릅니다.",
+            "동영상·GIF를 받을지와 영상 하나의 최대 크기(기본 200MB)를 정합니다.",
+            "평소에는 ‘새 Like만 확인’, 예전 Like까지 다시 보려면 ‘전체 목록 다시 확인’을 고릅니다.",
         ), None),
         ("기록 · 통계", (
-            "현재 파일 수와 과거 저장 기록·실행 기록을 봅니다.",
-            "끌어서 고르거나 ‘여러 개 선택’을 켜고 하나씩 클릭하세요.",
-            "통계에서 작성자를 클릭하면 최근 게시물의 대표 이미지를 봅니다.",
-            "파일을 고르면 미리보기가 나옵니다. ‘파일 열기’·‘트윗 열기’로 원본을 봅니다.",
-            "파일 삭제는 탐색기에서 합니다. 새로고침 후 ‘사라진 파일’에서 다시 받거나 숨길 수 있습니다.",
-            "예전 파일에 출처·작성자를 넣으려면 ‘출처·작성자 기록’을 누르세요.",
-        ), "출처·작성자 기록은 파일을 다시 쓰므로 동기화 폴더라면 다시 올라갈 수 있습니다."),
+            "받은 파일을 목록이나 갤러리로 보고, 작성자·내용으로 찾습니다.",
+            "끌어서 여러 개를 고르거나 ‘여러 개 선택’을 켜고 하나씩 클릭합니다.",
+            "통계에서 작성자를 누르면 그 작성자의 최근 사진이 나옵니다.",
+        ), None),
+        ("파일을 지웠을 때", (
+            "파일은 탐색기에서 지웁니다. 기록 창에서 ‘새로고침’을 누르면 ‘사라진 파일’에 모입니다.",
+            "지운 파일은 자동으로 다시 받지 않습니다. 필요하면 골라서 ‘다시 받기’를 누릅니다.",
+            "‘사라진 파일’에서 고르면 작은 미리보기와 원래 폴더를 볼 수 있습니다.",
+            "저장 폴더를 옮겼다면 메인 화면의 ‘저장 폴더’에서 새 위치를 고릅니다.",
+        ), None),
         ("매일 자동 저장", (
-            "메뉴에서 ‘자동 저장’을 열어 시각을 고르고 ‘예약 켜기’를 누릅니다.",
-            "매일 그 시각에 저장된 계정과 설정으로 새 Like만 저장합니다.",
-            "PC가 꺼져 있던 날은 다음에 켤 때 실행하고, 배터리일 때도 실행합니다.",
-            "실패하면 알림이 뜨고, 결과는 ‘실행 기록’에 남습니다.",
-        ), "브라우저 로그인으로 연결했을 때, Windows에 로그인해 있는 동안 실행됩니다."),
-        ("주의할 점", (
-            "X 공식 API가 아닌 방식이라 천천히 요청해도 계정이 제한될 수 있습니다.",
-            "‘요청 한도’ 안내가 나오면 알려 준 시각까지 기다렸다가 다시 시작하세요.",
-            "중단하거나 오류가 나도 이미 받은 파일은 그대로 남습니다.",
+            "‘자동 저장’에서 시각을 고르고 ‘예약 켜기’를 누르면 매일 새 Like를 저장합니다.",
+            "PC가 꺼져 있던 날은 다음에 켤 때 저장하고, 실패하면 알려 줍니다.",
+        ), "‘Edge에서 X 로그인’으로 연결했을 때 쓸 수 있습니다."),
+        ("알아 두세요", (
+            "X 공식 기능이 아니어서, 천천히 받아도 계정이 제한될 수 있습니다.",
+            "‘요청 한도’ 안내가 나오면 알려 준 시각 이후에 다시 시작합니다.",
+            "멈추거나 오류가 나도 이미 받은 파일은 그대로 남습니다.",
         ), None),
     )
 
@@ -1138,7 +1154,7 @@ class App:
             window.lift()
             return
         popup = self.help_window = tk.Toplevel(self.root)
-        popup.title("XlikeSaver 사용 방법")
+        popup.title("러브박스 사용 방법")
         width = min(800, max(600, self.root.winfo_screenwidth() - 80))
         height = min(800, max(480, self.root.winfo_screenheight() - 120))
         popup.geometry(f"{width}x{height}")
