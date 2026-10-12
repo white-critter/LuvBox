@@ -39,7 +39,8 @@ class SaveReview(Protocol):
 
     def enabled(self) -> bool: ...
 
-    def ask(self, path: Path, media: dict, check_stop: Callable[[], None]) -> str: ...
+    def ask(self, path: Path, media: dict, check_stop: Callable[[], None]) -> str:
+        """'save', 'skip' (this run only) or 'never' (do not ask again)."""
 
 
 _ACCOUNT = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
@@ -577,7 +578,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     from requests.exceptions import RequestException
     from .metadata import available, embed_source, persistent
 
-    saved = skipped = size_skipped = review_skipped = 0
+    saved = skipped = size_skipped = review_skipped = review_never = 0
     metadata_failed = 0
     metadata_available = False
     metadata_warned = False
@@ -599,9 +600,17 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     likes = None
     targets = frozenset()
     ignored = set()
+    ignored_encountered = False
     recovered = {}
     size_limited = set()
     review_declined = set()
+    # Files skipped in an earlier review: (tweet_id, num, type). A quick scan
+    # continues until it reaches them; resolved ones are then forgotten.
+    review_pending = set()
+    review_reached = set()
+    review_resolved = set()
+    review_declined_ids = set()
+    review_unknown = False
     unavailable_tweets = absent_files = 0
     tweet_texts = []
     visited_ids = set()
@@ -736,6 +745,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     class ReviewSkip(exception.ControlException):
         default = "user declined media"
 
+    class ReviewNever(ReviewSkip):
+        default = "user chose not to save media"
+        path = None
+
     class EventsOutput(output.NullOutput):
         def success(self, path):
             active_job.last_output = ("saved", str(path))
@@ -860,7 +873,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 raise exception.AbortExtraction("download archive unavailable")
 
         def handle_url(self, url, kwdict):
-            nonlocal stop_reason, saved, skipped, size_skipped, review_skipped, existing_streak
+            nonlocal stop_reason, saved, skipped, size_skipped, review_skipped, review_never, existing_streak
+            nonlocal ignored_encountered
             check_stop()
             media_type = kwdict.get("type")
             if media_type not in {"photo", "video", "animated_gif"}:
@@ -887,12 +901,18 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 kwdict["extension"] = "mp4"
                 kwdict["_xlikesaver_filename_part"] = f"{kind}_{kwdict['num']}"
                 kwdict["_xlikesaver_archive_key"] = f"{tweet_id}_{media_type}_{kwdict['num']}"
+            identity = (tweet_id, kwdict["num"], media_type)
+            if identity in review_pending:
+                review_reached.add(identity)
             if targets:
                 # Only the chosen files; the tweet's other media are untouched.
                 if kwdict["_xlikesaver_archive_key"] not in targets:
                     return
-            elif (tweet_id, kwdict["num"], media_type) in ignored:
+            elif identity in ignored:
                 # The user deleted this file on purpose, in whichever layout.
+                ignored_encountered = True
+                if identity in review_pending:
+                    review_resolved.add(identity)
                 return
             self.current_media = kwdict
             self.last_output = None
@@ -924,14 +944,36 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 raise exception.AbortExtraction("permissionerror unsafe media output")
             try:
                 super().handle_url(url, kwdict)
+            except ReviewNever as declined:
+                review_never += 1
+                review_declined.add(kwdict["_xlikesaver_archive_key"])
+                existing_streak = 0
+                if identity in review_pending:
+                    review_resolved.add(identity)
+                try:
+                    if targets:
+                        # A chosen missing file keeps its record and archive entry.
+                        history.set_missing_ignored([identity], True)
+                    else:
+                        # Like a file deleted with 'do not download again': known
+                        # to the archive, listed with the hidden missing files.
+                        history.record_declined(normalized.folder_mode, kwdict, declined.path)
+                        self.archive.add(kwdict)
+                except (HistoryError, sqlite3.Error):
+                    raise exception.AbortExtraction("history store unavailable") from None
+                self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
+                emit({"type": "review-never", "path": "", **_media_details(kwdict)})
             except ReviewSkip:
                 review_skipped += 1
                 review_declined.add(kwdict["_xlikesaver_archive_key"])
+                review_declined_ids.add(identity)
                 existing_streak = 0
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
                 emit({"type": "review-skipped", "path": "", **_media_details(kwdict)})
             except SizeLimit:
                 size_skipped += 1
+                if identity in review_pending:
+                    review_resolved.add(identity)
                 if targets:
                     size_limited.add(kwdict["_xlikesaver_archive_key"])
                 if self.pathfmt.temppath:
@@ -940,6 +982,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 emit({"type": "size-skipped", "path": "", "max_video_mb": normalized.max_video_mb,
                       **_media_details(kwdict)})
             else:
+                if self.last_output and identity in review_pending:
+                    # Saved now, or already known: no longer waiting for a choice.
+                    review_resolved.add(identity)
                 if self.last_output:
                     media_status, media_path = self.last_output
                     previous = None
@@ -1051,7 +1096,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 # Size-limited and failed files are neither saved nor known,
                 # so they neither extend nor break the already-saved streak.
                 existing_streak = 0 if self.last_output[0] == "saved" else existing_streak + 1
-                if existing_streak >= QUICK_STOP_AFTER:
+                # A file skipped earlier is not known yet; look until it is reached.
+                if existing_streak >= QUICK_STOP_AFTER and review_pending <= review_reached:
                     stop_reason = "caught-up"
                     raise exception.StopExtraction()
 
@@ -1207,12 +1253,27 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 decision = review.ask(source, {**_media_details(self.current_media),
                                               "type": self.current_media.get("type", "")}, check_stop) if enabled else "save"
                 check_stop()
-                if decision not in {"save", "skip"}:
+                if decision not in {"save", "skip", "never"}:
                     raise ValueError("invalid review response")
                 if (not history.is_download_path(source) or
                         _review_file_signature(source) != signature):
                     raise OSError("review temporary file changed")
-                if decision == "skip":
+                if decision in {"skip", "never"}:
+                    if marker_signature is not None and (
+                            not history.is_download_path(marker) or
+                            _review_file_signature(marker) != marker_signature):
+                        raise OSError("review completion marker changed")
+                    if decision == "never" and previews is not None:
+                        # What the file looked like, for the hidden missing list.
+                        previews.add((self.current_media.get("tweet_id"), self.current_media.get("num"),
+                                      self.current_media.get("type", "photo")), source, suffix=destination.suffix)
+                    # Creating a kept preview may decode a video for several
+                    # seconds. A stop or an outside edit in that interval must
+                    # not discard a different file or record a new choice.
+                    check_stop()
+                    if (not history.is_download_path(source) or
+                            _review_file_signature(source) != signature):
+                        raise OSError("review temporary file changed")
                     if marker_signature is not None and (
                             not history.is_download_path(marker) or
                             _review_file_signature(marker) != marker_signature):
@@ -1220,7 +1281,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     source.unlink()
                     if marker_signature is not None:
                         marker.unlink()
-                    raise ReviewSkip()
+                    if decision == "skip":
+                        raise ReviewSkip()
+                    declined = ReviewNever()
+                    # The name it would have been saved under.
+                    declined.path = (destination.with_suffix(".gif")
+                                     if self.current_media.get("type") == "animated_gif" and
+                                     normalized.gif_format == "gif" else destination)
+                    raise declined
             except exception.ControlException:
                 raise
             except Exception:
@@ -1415,18 +1483,26 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         history.reconcile_deletions()
         targets = frozenset(normalized.targets)
         ignored = history.ignored_media()
+        if not targets:
+            remembered = history.review_pending()
+            review_unknown = remembered is None
+            review_pending = remembered or set()
         scan_note = ""
         if targets:
             scan_note = (f"사라진 파일 {len(targets):,}개(트윗 {len(_retry_groups(normalized.targets)):,}개)를 다시 받습니다. "
                          "Like 목록 대신 트윗마다 X 요청을 1번씩 보냅니다.")
         elif normalized.scan_mode == "quick":
             readiness = history.quick_scan_readiness(normalized.folder_mode, normalized.media_signature)
+            if readiness == "ready" and review_unknown:
+                readiness = "incomplete"
             quick_scan = readiness == "ready"
             scan_note = {
                 "ready": f"새 Like만 확인합니다. 이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다.",
                 "settings-changed": "동영상·GIF·용량 설정이 바뀌어 이번만 전체 목록을 확인합니다.",
                 "records-changed": "다른 계정의 저장 기록을 합쳐 이번만 전체 목록을 확인합니다.",
             }.get(readiness, "이전 확인이 끝까지 되지 않아(첫 실행·중단·오류·시험 저장) 이번만 전체 목록을 확인합니다.")
+            if quick_scan and review_pending:
+                scan_note += f" 지난번에 건너뛴 파일 {len(review_pending):,}개가 나올 때까지는 이어서 확인합니다."
         run_id = history.start_run(normalized.folder_mode,
                                    scan_mode="retry" if targets else "quick" if quick_scan else "full",
                                    media_signature=normalized.media_signature)
@@ -1509,7 +1585,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             status = "finished"
             message = (f"새 Like 확인을 마쳤습니다. {saved:,}개를 저장했고, 이미 저장한 파일이 "
                        f"{QUICK_STOP_AFTER}개 이어져 멈췄습니다.")
-        elif not saved and not skipped and not size_skipped and not review_skipped:
+        elif not saved and not skipped and not size_skipped and not review_skipped and not review_never and not ignored_encountered:
             exit_code = 1
             message = ("저장할 미디어를 찾지 못했습니다. 본인 계정으로 로그인했는지, "
                        "좋아요에 사진·영상이 있는지 확인해 주세요.")
@@ -1518,8 +1594,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                        "삭제된 게시물이나 X가 더는 보여 주지 않는 오래된 좋아요는 빠질 수 있습니다.")
             status = "finished"
         if review_skipped:
-            message += (f" 저장하지 않기로 고른 파일 {review_skipped:,}개는 " +
-                        ("‘다시 받기’에서 다시 선택할 수 있습니다." if targets else "다음 실행에서 다시 확인합니다."))
+            message += (f" 이번엔 건너뛴 파일 {review_skipped:,}개는 " +
+                        ("‘다시 받기’에서 다시 선택할 수 있습니다." if targets else "다음 저장 때 다시 보여 드립니다."))
+        if review_never:
+            message += (f" ‘저장 안 함’으로 고른 파일 {review_never:,}개는 다시 묻지 않습니다. "
+                        "필요하면 ‘사라진 파일’의 숨긴 파일에서 다시 받을 수 있습니다.")
     except exception.StopExtraction:
         status, exit_code = "stopped", 0
         message = "저장을 중단했습니다."
@@ -1561,11 +1640,18 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     likes.flush()
                 flush_tweet_texts()
                 if run_id is not None:
-                    run_status = "limited" if stop_reason == "limit" and status == "finished" else status
-                    if review_skipped and run_status == "finished":
+                    if not targets:
                         # A declined file must not disappear behind a later
-                        # saved-file streak. The next quick run scans all Likes.
-                        run_status = "partial"
+                        # saved-file streak: remember it for the next quick run.
+                        remaining = review_pending - review_resolved
+                        if status == "finished" and stop_reason in {"", "caught-up"}:
+                            # The whole list was walked, or every remembered
+                            # file was reached; unreached ones are not Liked now.
+                            remaining &= review_reached
+                        remaining |= review_declined_ids
+                        if review_unknown or remaining != review_pending:
+                            history.set_review_pending(remaining)
+                    run_status = "limited" if stop_reason == "limit" and status == "finished" else status
                     history.finish_run(run_id, run_status, saved=saved, skipped=skipped, size_skipped=size_skipped,
                                        visited=len(visited_ids), last_tweet_id=last_tweet_id,
                                        last_posted_at=last_posted_at, message=message)
@@ -1617,7 +1703,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     if status == "error":
         emit({"type": "log", "level": "error", "message": message})
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,
-          "size_skipped": size_skipped, "review_skipped": review_skipped,
+          "size_skipped": size_skipped, "review_skipped": review_skipped, "review_never": review_never,
           "metadata_failed": metadata_failed, "author_deferred": author_deferred,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,
           "last_posted_at": last_posted_at,

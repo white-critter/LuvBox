@@ -124,7 +124,8 @@ class InteractiveSaveTests(unittest.TestCase):
         self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 2)
         self.assertEqual(len(review.requests), 2)
         self.assertEqual([event["num"] for event in events if event["type"] == "review-skipped"], [1])
-        self.assertEqual(self.runs()[-1]["status"], "partial")
+        self.assertEqual(self.runs()[-1]["status"], "finished")
+        self.assertEqual(self.pending(), {("100", 1, "photo")})
         self.assertFalse(list(self.output.rglob("*.part*")))
 
     def test_all_declined_is_a_successful_choice_run_and_next_run_asks_again(self):
@@ -137,13 +138,13 @@ class InteractiveSaveTests(unittest.TestCase):
         self.assertEqual(self.records(), [])
         second = Review(("save",))
         result, events = self.worker(rows, review=second, options=replace(self.options, scan_mode="quick"))
-        self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"]), (0, "full", 1))
+        self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"]), (0, "quick", 1))
         self.assertEqual(len(second.requests), 1)
         self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 2)
 
     def test_declined_old_like_after_saved_streak_is_revisited_by_next_quick_run(self):
-        # Only a full run may establish the checkpoint; refusing its oldest
-        # entry must invalidate that checkpoint even after many archived files.
+        # The quick run continues past the saved-file streak until it reaches
+        # the file refused in the previous run, without scanning everything.
         known = [(str(number), 1, "photo", "alice") for number in range(150, 100, -1)]
         with patch("xlikesaver.core.QUICK_STOP_AFTER", 4):
             self.worker(known)
@@ -154,8 +155,273 @@ class InteractiveSaveTests(unittest.TestCase):
             second = Review(("save",))
             result, events = self.worker(known + [older], review=second,
                                          options=replace(self.options, scan_mode="quick"))
-        self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"]), (0, "full", 1))
+        self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"]), (0, "quick", 1))
         self.assertEqual(second.requests[0][1]["tweet_id"], "99")
+
+    def pending(self):
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as database:
+            row = database.execute("SELECT value FROM catalog_meta WHERE key='review_pending'").fetchone()
+        return {tuple(item) for item in json.loads(row[0])} if row else set()
+
+    def test_skipped_file_keeps_quick_runs_quick_and_is_forgotten_once_saved(self):
+        # A skip must not turn every later quick run into a full scan: only
+        # reaching the remembered file is required before the usual stop.
+        known = [(str(number), 1, "photo", "alice") for number in range(150, 100, -1)]
+        older = ("99", 1, "photo", "alice")
+        quick = replace(self.options, scan_mode="quick")
+        with patch("xlikesaver.core.QUICK_STOP_AFTER", 4):
+            self.worker(known)
+            self.worker(known + [older], review=Review(("skip",)))
+            self.assertEqual(self.pending(), {("99", 1, "photo")})
+            again = Review(("skip",))
+            result, events = self.worker(known + [older], review=again, options=quick)
+            self.assertEqual((result, events[-1]["scan_mode"], events[-1]["review_skipped"]), (0, "quick", 1))
+            self.assertIn("건너뛴 파일 1개", next(event["message"] for event in events
+                                              if event.get("type") == "log" and "새 Like만" in event.get("message", "")))
+            self.assertEqual(self.pending(), {("99", 1, "photo")})
+            # An unattended run (no review channel) saves it as before.
+            result, events = self.worker(known + [older], options=quick)
+            self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"]), (0, "quick", 1))
+            self.assertEqual(self.pending(), set())
+            result, events = self.worker(known + [older], options=quick)
+        self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"]), (0, "quick", 0))
+        self.assertEqual(events[-1]["visited"], 4)
+        self.assertEqual(self.runs()[-1]["status"], "finished")
+
+    def test_skipped_file_no_longer_liked_is_forgotten_after_a_complete_pass(self):
+        known = [(str(number), 1, "photo", "alice") for number in range(110, 100, -1)]
+        quick = replace(self.options, scan_mode="quick")
+        with patch("xlikesaver.core.QUICK_STOP_AFTER", 3):
+            self.worker(known + [("99", 1, "photo", "alice")], review=Review(["save"] * 10 + ["skip"]))
+            self.assertEqual(self.pending(), {("99", 1, "photo")})
+            # The Like was removed: the run looks through the list once.
+            result, events = self.worker(known, options=quick)
+            self.assertEqual((result, events[-1]["scan_mode"], events[-1]["visited"]), (0, "quick", 10))
+            self.assertEqual(self.pending(), set())
+            result, events = self.worker(known, options=quick)
+        self.assertEqual((events[-1]["scan_mode"], events[-1]["visited"]), ("quick", 3))
+
+    def test_stopped_run_keeps_skipped_files_it_did_not_reach(self):
+        known = [(str(number), 1, "photo", "alice") for number in range(110, 100, -1)]
+        self.worker(known + [("99", 1, "photo", "alice")], review=Review(["save"] * 10 + ["skip"]))
+        stop_file = self.base / "stop.flag"
+
+        def before_row(extractor, row):
+            if row[0] == "105":
+                stop_file.touch()
+
+        result, events = self.worker(known + [("99", 1, "photo", "alice")], before_row=before_row,
+                                     stop_file=stop_file, options=replace(self.options, scan_mode="quick"))
+        self.assertEqual(events[-1]["status"], "stopped")
+        self.assertEqual(self.pending(), {("99", 1, "photo")})
+
+    def test_damaged_skip_memory_makes_the_quick_run_check_everything(self):
+        rows = [("100", 1, "photo", "alice")]
+        self.worker(rows)
+        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as database, database:
+            database.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('review_pending','not json')")
+        result, events = self.worker(rows, options=replace(self.options, scan_mode="quick"))
+        self.assertEqual((result, events[-1]["scan_mode"]), (0, "full"))
+        self.assertEqual(self.pending(), set())
+        result, events = self.worker(rows, options=replace(self.options, scan_mode="quick"))
+        self.assertEqual(events[-1]["scan_mode"], "quick")
+
+    def test_merged_same_account_skip_memory_keeps_both_old_choices_reachable(self):
+        from xlikesaver.history import HistoryStore
+        from xlikesaver.storage import _merge_database
+
+        known = [(str(number), 1, "photo", "alice") for number in (*range(150, 144, -1), *range(120, 114, -1))]
+        older = ("99", 1, "photo", "alice")
+        other = ("98", 1, "photo", "alice")
+        self.worker(known + [older], review=Review(["save"] * len(known) + ["skip"]))
+        peer_dir = self.base / "peer-records"
+        with closing(HistoryStore(peer_dir, media_dir=self.output, output_dir=self.output)) as peer:
+            peer.set_review_pending({("98", 1, "photo")})
+            run = peer.start_run(self.options.folder_mode, media_signature=self.options.validate().media_signature)
+            peer.finish_run(run, "finished")
+        _merge_database(".xlikesaver-history.sqlite3", self.record_dir / ".xlikesaver-history.sqlite3",
+                        peer_dir / ".xlikesaver-history.sqlite3")
+        self.assertEqual(self.pending(), {("99", 1, "photo"), ("98", 1, "photo")})
+        review = Review(("skip", "save"))
+        with patch("xlikesaver.core.QUICK_STOP_AFTER", 4):
+            result, events = self.worker(known[:6] + [older] + known[6:] + [other], review=review,
+                                         options=replace(self.options, scan_mode="quick"))
+        self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"]), (0, "quick", 1))
+        self.assertEqual([media["tweet_id"] for _path, media in review.requests], ["99", "98"])
+        self.assertEqual(self.pending(), {("99", 1, "photo")})
+
+    def test_damaged_skip_memory_in_same_account_merge_still_requires_full_scan(self):
+        from xlikesaver.history import HistoryStore
+        from xlikesaver.storage import _merge_database
+
+        rows = [("100", 1, "photo", "alice")]
+        self.worker(rows)
+        store = self.store()
+        try:
+            store.set_review_pending({("99", 1, "photo")})
+        finally:
+            store.close()
+        peer_dir = self.base / "peer-records"
+        with closing(HistoryStore(peer_dir, media_dir=self.output, output_dir=self.output)) as peer:
+            with peer._db:
+                peer._db.execute("INSERT INTO catalog_meta(key,value) VALUES ('review_pending','damaged')")
+        _merge_database(".xlikesaver-history.sqlite3", self.record_dir / ".xlikesaver-history.sqlite3",
+                        peer_dir / ".xlikesaver-history.sqlite3")
+        result, events = self.worker(rows, options=replace(self.options, scan_mode="quick"))
+        self.assertEqual((result, events[-1]["scan_mode"]), (0, "full"))
+        self.assertEqual(self.pending(), set())
+
+    def store(self):
+        from xlikesaver.history import HistoryStore
+        from xlikesaver.storage import resolve_storage
+        return HistoryStore.for_storage(resolve_storage(self.output, "myaccount"))
+
+    def retry(self, targets, rows, review=None):
+        from test_missing_files import FakeTweetExtractor
+        tweets = {}
+        for tweet, number, kind, _author in rows:
+            tweets.setdefault(tweet, []).append((number, kind))
+        events = []
+        with patch("gallery_dl.extractor.find", side_effect=lambda url: FakeTweetExtractor(url, tweets)), \
+                patch("gallery_dl.downloader.find", return_value=test_core.FakeHttpDownloader):
+            result = core.run_worker(replace(self.options, targets=tuple(targets)), events.append, review=review)
+        self.assertNotIn(test_core.SECRET, json.dumps(events))
+        return result, events
+
+    def test_never_is_kept_like_a_hidden_deleted_file_and_is_not_asked_again(self):
+        rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "bob")]
+        recorder = []
+        with patch("xlikesaver.thumbcache.Recorder.add",
+                   side_effect=lambda key, path, suffix=None: recorder.append((key, Path(path).is_file(), suffix))):
+            result, events = self.worker(rows, review=Review(("never", "save")))
+        done = events[-1]
+        self.assertEqual((result, done["status"], done["saved"], done["review_skipped"], done["review_never"]),
+                         (0, "finished", 1, 0, 1))
+        self.assertIn("‘저장 안 함’으로 고른 파일 1개", done["message"])
+        self.assertEqual([event["tweet_id"] for event in events if event["type"] == "review-never"], ["100"])
+        # A small preview is kept from the temporary file before it is removed.
+        self.assertIn((("100", 1, "photo"), True, ".jpg"), recorder)
+        self.assertFalse(list(self.output.rglob("*.part*")))
+        self.assertFalse(list(self.output.rglob("100_1.jpg")))
+        self.assertEqual(self.keys(), {"twitter100_1", "twitter101_1"})
+        declined = next(row for row in self.records() if row["tweet_id"] == "100")
+        self.assertEqual((declined["path"], declined["record_source"], declined["author"]), ("", "declined", "alice"))
+        self.assertTrue(declined["last_path"].endswith("100_1.jpg") and declined["missing_since"])
+        self.assertEqual(self.pending(), set())
+        store = self.store()
+        try:
+            self.assertIn(("100", 1, "photo"), store.ignored_media())
+            [item] = store.missing_media()
+            store.import_legacy(refresh=True)
+            [again] = store.missing_media()
+        finally:
+            store.close()
+        self.assertEqual((item["tweet_id"], item["removed"], item["ignored"]), ("100", "declined", True))
+        self.assertEqual(again["removed"], "declined")
+        # Neither a later reviewed run nor an unattended one asks or saves it.
+        later = Review(("save",))
+        result, events = self.worker(rows, review=later)
+        self.assertEqual((result, events[-1]["saved"], later.requests), (0, 0, []))
+        result, events = self.worker(rows)
+        self.assertEqual((result, events[-1]["saved"]), (0, 0))
+        self.assertFalse(list(self.output.rglob("100_1.jpg")))
+
+    def test_declined_file_can_still_be_downloaded_from_the_missing_list(self):
+        rows = [("100", 1, "photo", "alice")]
+        self.worker(rows, review=Review(("never",)))
+        store = self.store()
+        try:
+            self.assertEqual(store.record_page(include_deleted=False)["total"], 0)
+            self.assertEqual(len(store.records()), 1)
+            self.assertEqual(len(store.missing_media()), 1)
+        finally:
+            store.close()
+        result, events = self.retry(["100_1"], rows)
+        self.assertEqual((result, events[-1]["saved"]), (0, 1))
+        self.assertTrue(list(self.output.rglob("100_1.jpg")))
+        store = self.store()
+        try:
+            self.assertNotIn(("100", 1, "photo"), store.ignored_media())
+            self.assertEqual(store.missing_media(), [])
+            self.assertEqual(store.record_page(include_deleted=False)["total"], 1)
+        finally:
+            store.close()
+
+    def test_only_previously_declined_media_finishes_without_false_empty_list_error(self):
+        rows = [("100", 1, "photo", "alice")]
+        self.worker(rows, review=Review(("never",)))
+        review = Review()
+        result, events = self.worker(rows, review=review)
+        self.assertEqual((result, events[-1]["status"], events[-1]["saved"]), (0, "finished", 0))
+        self.assertEqual(review.requests, [])
+        self.assertNotIn("저장할 미디어를 찾지 못했습니다", events[-1]["message"])
+        self.assertEqual(self.runs()[-1]["status"], "finished")
+
+    def test_never_rechecks_temporary_source_after_caching_preview(self):
+        review = Review(("never",))
+
+        def replace_source(key, path, *, suffix=None):
+            Path(path).write_bytes(b"external-change-during-cache")
+
+        with patch("xlikesaver.thumbcache.Recorder.add", side_effect=replace_source):
+            result, events = self.worker([("100", 1, "photo", "alice")], review=review)
+        self.assertEqual((result, events[-1]["status"], events[-1]["review_never"]), (1, "error", 0))
+        self.assertEqual(review.requests[0][0].read_bytes(), b"external-change-during-cache")
+        self.assertEqual(self.keys(), set())
+        self.assertEqual(self.records(), [])
+
+    def test_never_honors_stop_received_while_caching_preview(self):
+        flag = self.base / "stop.flag"
+        review = Review(("never",))
+
+        with patch("xlikesaver.thumbcache.Recorder.add", side_effect=lambda *args, **kwargs: flag.touch()):
+            result, events = self.worker([("100", 1, "photo", "alice")], review=review, stop_file=flag)
+        self.assertEqual((result, events[-1]["status"], events[-1]["review_never"]), (0, "stopped", 0))
+        self.assertTrue(review.requests[0][0].is_file())
+        self.assertEqual(self.keys(), set())
+        self.assertEqual(self.records(), [])
+
+    def test_never_rechecks_gif_completion_marker_after_caching_preview(self):
+        path = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"completed-local-gif")
+        core._mark_gif_source_complete(path)
+        marker = Path(str(path) + ".xlikesaver-complete")
+
+        with patch("xlikesaver.thumbcache.Recorder.add",
+                   side_effect=lambda *args, **kwargs: marker.write_bytes(b"changed-during-cache")):
+            result, events = self.worker([("100", 1, "animated_gif", "alice")],
+                                         review=Review(("never",)), options=self.options_all())
+        self.assertEqual((result, events[-1]["status"], events[-1]["review_never"]), (1, "error", 0))
+        self.assertEqual(path.read_bytes(), b"completed-local-gif")
+        self.assertEqual(marker.read_bytes(), b"changed-during-cache")
+        self.assertEqual(self.keys(), set())
+
+    def test_never_in_a_chosen_redownload_hides_it_without_new_records(self):
+        rows = [("100", 1, "photo", "alice")]
+        self.worker(rows)
+        saved = next(self.output.rglob("100_1.jpg"))
+        saved.unlink()  # Only this test's temporary fixture.
+        result, events = self.retry(["100_1"], rows, review=Review(("never",)))
+        self.assertEqual((result, events[-1]["saved"], events[-1]["review_never"]), (0, 0, 1))
+        self.assertNotIn("받지 못한", json.dumps(events, ensure_ascii=False))
+        self.assertIn("twitter100_1", self.keys())
+        store = self.store()
+        try:
+            self.assertIn(("100", 1, "photo"), store.ignored_media())
+            [item] = store.missing_media()
+        finally:
+            store.close()
+        self.assertEqual(item["removed"], "")
+
+    def test_declined_gif_records_the_gif_name_it_would_have_had(self):
+        rows = [("100", 1, "animated_gif", "alice")]
+        with patch("xlikesaver.thumbcache.Recorder.add"):
+            result, events = self.worker(rows, review=Review(("never",)), options=self.options_all())
+        self.assertEqual((result, events[-1]["review_never"]), (0, 1))
+        declined = next(row for row in self.records() if row["tweet_id"] == "100")
+        self.assertTrue(declined["last_path"].endswith("100_gif_1.gif"))
+        self.assertFalse(list(self.output.rglob("*.part*")) + list(self.output.rglob("*.xlikesaver-complete")))
 
     def test_live_option_enables_and_disables_between_files(self):
         review = Review(("save",), enabled=False)
@@ -181,7 +447,8 @@ class InteractiveSaveTests(unittest.TestCase):
                          (0, "quick", 1, 1))
         self.assertIn("twitter101_1", self.keys())
         self.assertNotIn("twitter102_1", self.keys())
-        self.assertEqual(self.runs()[-1]["status"], "partial")
+        self.assertEqual(self.runs()[-1]["status"], "finished")
+        self.assertEqual(self.pending(), {("102", 1, "photo")})
 
     def test_existing_file_or_archive_hit_never_prompts_or_discards_file(self):
         rows = [("100", 1, "photo", "alice")]

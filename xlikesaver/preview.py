@@ -24,15 +24,20 @@ class Thumbnail:
     note: str
 
 
-def thumbnail(path: Path, size=PREVIEW_SIZE) -> Thumbnail:
-    """Decode one image/frame, with bounded output and no external protocols."""
+def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Thumbnail:
+    """Decode one image/frame, with bounded output and no external protocols.
+
+    ``suffix`` names the type of a file whose name does not show it yet,
+    such as a download's temporary ``.part`` file.
+    """
     path = Path(path)
+    kind = (suffix if suffix is not None else path.suffix).lower()
     if cloud_only(path):
         return Thumbnail(None, "파일이 클라우드에만 있습니다. 탐색기에서 내려받은 뒤 다시 확인해 주세요.")
     if not path.is_file():
         return Thumbnail(None, "파일이 이동되었거나 삭제되었습니다.")
     try:
-        if path.suffix.lower() == ".mp4":
+        if kind == ".mp4":
             from .media import ffmpeg_path
             executable = ffmpeg_path()
             if executable is None:
@@ -48,9 +53,9 @@ def thumbnail(path: Path, size=PREVIEW_SIZE) -> Thumbnail:
                 return Thumbnail(None, "동영상 미리보기를 만들지 못했습니다. 파일 열기로 확인해 주세요.")
             source = BytesIO(result.stdout)
             note = "동영상 · 첫 프레임"
-        elif path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+        elif kind in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
             source = path
-            note = "GIF · 첫 프레임" if path.suffix.lower() == ".gif" else "사진 미리보기"
+            note = "GIF · 첫 프레임" if kind == ".gif" else "사진 미리보기"
         else:
             return Thumbnail(None, "미리보기를 지원하지 않는 파일입니다.")
         with warnings.catch_warnings():

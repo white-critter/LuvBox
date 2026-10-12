@@ -163,6 +163,23 @@ def _identity(row: dict) -> tuple[str, int, str]:
     return row["tweet_id"], row["num"], row["media_type"]
 
 
+def _review_pending_items(value: str) -> set | None:
+    """Validate skip memory for both the live catalog and snapshot merges."""
+    items = set()
+    try:
+        values = json.loads(value)
+        if not isinstance(values, list):
+            return None
+        for tweet_id, number, media_type in values:
+            if (not isinstance(tweet_id, str) or not re.fullmatch(r"[0-9]{1,20}", tweet_id) or
+                    type(number) is not int or not 1 <= number <= 10000 or media_type not in _TYPES):
+                return None
+            items.add((tweet_id, number, media_type))
+    except (TypeError, ValueError):
+        return None
+    return items
+
+
 def archive_key(tweet_id: str, number: int, media_type: str) -> str:
     """The worker's download-archive key for one media (without the prefix)."""
     return f"{tweet_id}_{number}" if media_type == "photo" else f"{tweet_id}_{media_type}_{number}"
@@ -479,6 +496,9 @@ class HistoryStore:
                     row["status"] = "saved"
             if old["record_source"] == "saved" and row["record_source"] != "saved":
                 row["record_source"] = "saved"
+            if old["record_source"] == "declined" and row["record_source"] == "archive":
+                # Its archive entry is how a declined file stays undownloaded.
+                row["record_source"] = "declined"
             if not replace_path:
                 row["path"], row["filesize"] = old["path"], old["filesize"]
                 row["filename"] = old["filename"] or row["filename"]
@@ -553,6 +573,29 @@ class HistoryStore:
                 # mark where this account's previous Like traversal ended.
                 return "records-changed"
         return "ready" if row["media_signature"] == media_signature else "settings-changed"
+
+    @_safe
+    def review_pending(self) -> set | None:
+        """Files skipped in a save review, which the next quick run must reach.
+
+        They are neither saved nor in the archive, so a later run of saved
+        files could otherwise hide them. ``None`` means the value is damaged;
+        the caller then checks the whole Like list once.
+        """
+        row = self._db.execute("SELECT value FROM catalog_meta WHERE key='review_pending'").fetchone()
+        if row is None:
+            return set()
+        return _review_pending_items(row[0])
+
+    @_safe
+    def set_review_pending(self, items) -> None:
+        values = sorted({(str(tweet_id), int(number), str(media_type)) for tweet_id, number, media_type in items})
+        with self._db:
+            if values:
+                self._db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('review_pending',?)",
+                                 (json.dumps(values, separators=(",", ":")),))
+            else:
+                self._db.execute("DELETE FROM catalog_meta WHERE key='review_pending'")
 
     def _run_values(self, fields: dict) -> dict:
         if not set(fields).issubset(_RUN_FIELDS):
@@ -629,6 +672,39 @@ class HistoryStore:
         row["author_metadata_status"] = author_status
         with self._db:
             self._upsert(row)
+
+    @_safe
+    def record_declined(self, folder_mode: str, metadata: dict, path: Path | str) -> None:
+        """A reviewed file the user chose not to save ('저장 안 함').
+
+        It is kept like a file deleted with 'do not download again': a
+        hidden missing file with its would-be location, which the user can
+        still download later from the missing files list.
+        """
+        if not isinstance(metadata, dict):
+            raise HistoryError(_HISTORY_HELP)
+        mode = self._mode(folder_mode)
+        tweet_id, number = self._key(metadata)
+        media_type = metadata.get("type", "photo")
+        path = Path(path)
+        if media_type not in _TYPES or not path.is_absolute() or not self.is_media_path(path):
+            raise HistoryError(_HISTORY_HELP)
+        author_data = metadata.get("author")
+        author = _clean_text(author_data.get("name", ""), 100) if isinstance(author_data, dict) else ""
+        _, author_id = _author_fields(author_data)
+        posted = _posted(metadata.get("date"))
+        stamp = _now()
+        row = {"folder_mode": mode, "tweet_id": tweet_id, "num": number, "media_type": media_type,
+               "author": author, "author_id": author_id, "filename": path.name, "posted_at": posted,
+               "posted_source": "metadata" if posted else "", "saved_at": None, "path": "",
+               "filesize": None, "status": "existing", "record_source": "declined",
+               "last_path": str(path), "missing_since": stamp}
+        with self._db:
+            self._upsert(row)
+            self._db.execute(
+                "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,1,?) "
+                "ON CONFLICT(tweet_id,num,media_type) DO UPDATE SET ignored=1,updated_at=excluded.updated_at",
+                (tweet_id, number, media_type, stamp))
 
     @_safe
     def media_record(self, folder_mode: str, metadata: dict) -> dict | None:
@@ -1137,6 +1213,11 @@ class HistoryStore:
             if identity not in found:
                 groups.setdefault(identity, []).append(row)
         ignored = self._ignored()
+        # A recycle marks its files missing in the same commit, so the
+        # times match exactly; a later deletion in Explorer does not.
+        removed = {(row[0], row[1], row[2], row[4]): row[3] for row in self._db.execute(
+            "SELECT tweet_id,num,media_type,status,finished_at FROM deletion_items "
+            "WHERE status IN ('recycled','interrupted') AND finished_at!=''")}
         items = []
         for identity, group in groups.items():
             group.sort(key=lambda row: (row["record_source"] == "saved", row["updated_at"]), reverse=True)
@@ -1153,6 +1234,8 @@ class HistoryStore:
             item["last_path"] = next((row["last_path"] for row in group if row.get("last_path")), "")
             item["missing_since"] = max((row.get("missing_since") or "" for row in group), default="")
             item["ignored"] = identity in ignored
+            item["removed"] = ("declined" if group[0]["record_source"] == "declined" else
+                               removed.get((*identity, item["missing_since"]), ""))
             item["archive_key"] = archive_key(*identity)
             items.append(item)
         items.sort(key=lambda item: (item["saved_at"] or item["posted_at"] or "", item["tweet_id"], item["num"]),
@@ -1339,6 +1422,9 @@ class HistoryStore:
             raise HistoryError(_HISTORY_HELP)
         clauses, params = [], []
         if not include_deleted:
+            # A review refusal has never been saved. It belongs to the
+            # hidden missing list until a real copy is downloaded/restored.
+            clauses.append("NOT (media.path='' AND media.record_source='declined')")
             clauses.append("NOT (media.path='' AND media.last_path!='' AND EXISTS ("
                            "SELECT 1 FROM deletion_items WHERE deletion_items.tweet_id=media.tweet_id "
                            "AND deletion_items.num=media.num AND deletion_items.media_type=media.media_type "

@@ -756,6 +756,20 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
     if "catalog_meta" in source_tables:
         _prepare_table(target, source, "catalog_meta")
         for key, value in source.execute("SELECT key,value FROM catalog_meta WHERE key NOT IN ('allowed_media_roots','quick_scan_merge_run')"):
+            if key == "review_pending":
+                from .history import _review_pending_items
+                # Same-account copies may have skipped different files. Keep
+                # both sets reachable rather than letting one PC's quick scan
+                # hide the other PC's choices behind a saved-file streak.
+                previous = target.execute("SELECT value FROM catalog_meta WHERE key='review_pending'").fetchone()
+                incoming = _review_pending_items(value)
+                local = _review_pending_items(previous[0]) if previous else set()
+                # Damaged memory cannot be interpreted as an empty set; let
+                # the worker complete one full scan before repairing it.
+                merged = None if incoming is None or local is None else sorted(incoming | local)
+                target.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('review_pending',?)",
+                               (json.dumps(merged, separators=(",", ":")),))
+                continue
             target.execute("INSERT OR IGNORE INTO catalog_meta(key,value) VALUES (?,?)", (key, value))
     if target_pending or source_pending:
         _prepare_table(target, source, "catalog_meta")

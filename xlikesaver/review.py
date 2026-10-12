@@ -13,6 +13,10 @@ from .recycling import file_signature
 
 CONTROL_NAME = "review-control.json"
 _HEARTBEAT_TIMEOUT = 15.0
+# Antivirus scans or the parent's replace can hold the file for a moment, and
+# after sleep/resume the parent needs up to a second to write a new heartbeat.
+_READ_RETRY_SECONDS = 0.5
+_STALE_GRACE_SECONDS = 1.2
 _MAX_CONTROL_BYTES = 4096
 _DETAIL_KEYS = ("tweet_id", "num", "author", "posted_at", "media_type", "filename")
 
@@ -22,9 +26,17 @@ class ReviewUnavailable(RuntimeError):
 
 
 def _read(path):
+    deadline = time.monotonic() + _READ_RETRY_SECONDS
+    while True:
+        try:
+            with Path(path).open("rb") as source:
+                content = source.read(_MAX_CONTROL_BYTES + 1)
+            break
+        except OSError as exc:
+            if time.monotonic() >= deadline:
+                raise ReviewUnavailable("저장 확인 창과 연결하지 못했습니다.") from exc
+            time.sleep(.05)
     try:
-        with Path(path).open("rb") as source:
-            content = source.read(_MAX_CONTROL_BYTES + 1)
         if len(content) > _MAX_CONTROL_BYTES:
             raise ValueError("oversized control")
         value = json.loads(content)
@@ -36,7 +48,7 @@ def _read(path):
                 not math.isfinite(value["heartbeat"])):
             raise ValueError("invalid control")
         return value
-    except (OSError, ValueError, TypeError) as exc:
+    except (ValueError, TypeError) as exc:
         raise ReviewUnavailable("저장 확인 창과 연결하지 못했습니다.") from exc
 
 
@@ -61,13 +73,13 @@ class ReviewControl:
             with staged.open("wb") as output:
                 output.write(content)
                 output.flush()
-            # A reader can briefly hold the old file open on Windows.
-            for attempt in range(6):
+            # A reader or an antivirus scan can briefly hold the old file.
+            for attempt in range(25):
                 try:
                     os.replace(staged, self._path)
                     break
                 except PermissionError:
-                    if attempt == 5:
+                    if attempt == 24:
                         raise
                     time.sleep(.02)
         finally:
@@ -92,7 +104,7 @@ class ReviewControl:
             self._write()
 
     def respond(self, ident, action, *, enabled=None):
-        if action not in {"save", "skip", "stop"}:
+        if action not in {"save", "skip", "never", "stop"}:
             raise ValueError("invalid review decision")
         with self._lock:
             if enabled is not None:
@@ -114,11 +126,17 @@ class ReviewChannel:
         self.session = _read(self.path)["session"]
 
     def _state(self):
-        value = _read(self.path)
-        if (value["session"] != self.session or
-                not -5 <= time.time() - value["heartbeat"] <= _HEARTBEAT_TIMEOUT):
-            raise ReviewUnavailable("저장 확인 창의 연결이 종료되었습니다.")
-        return value
+        deadline = time.monotonic() + _STALE_GRACE_SECONDS
+        while True:
+            value = _read(self.path)
+            if value["session"] != self.session:
+                raise ReviewUnavailable("저장 확인 창의 연결이 종료되었습니다.")
+            if -5 <= time.time() - value["heartbeat"] <= _HEARTBEAT_TIMEOUT:
+                return value
+            # Never approve on a stale state; allow one late heartbeat only.
+            if time.monotonic() >= deadline:
+                raise ReviewUnavailable("저장 확인 창의 연결이 종료되었습니다.")
+            time.sleep(.1)
 
     def enabled(self):
         return self._state()["enabled"]
@@ -141,7 +159,7 @@ class ReviewChannel:
             action = None
             if isinstance(decision, dict) and decision.get("id") == ident:
                 action = decision.get("action")
-                if action not in {"save", "skip", "stop"}:
+                if action not in {"save", "skip", "never", "stop"}:
                     raise ReviewUnavailable("저장 여부를 확인하지 못했습니다.")
             elif not state["enabled"]:
                 action = "save"

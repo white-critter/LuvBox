@@ -365,8 +365,9 @@ class MissingTabTests(StateTestCase):
         self.saved(1)
         with patch("xlikesaver.history_gui.threading.Thread"):
             self.load()
-        # Nothing was ever deleted in this library: the old deletion tab hides.
-        self.assertEqual(self.window.tabs.tab(self.window.deletion_view, "state"), "hidden")
+        # Files that are gone, however they went, have one tab.
+        self.assertEqual([self.window.tabs.tab(tab, "text").split(" ")[0] for tab in self.window.tabs.tabs()],
+                         ["파일", "실행", "통계", "사라진"])
         self.assertEqual(self.window.tile_values["bytes"].get().split()[-1], "KB")
         with patch("xlikesaver.history_gui.os.startfile") as opened:
             self.window.open_media_folder()

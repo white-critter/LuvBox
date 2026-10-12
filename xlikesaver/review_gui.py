@@ -17,7 +17,8 @@ from .review_preview import REVIEW_SIZE, ReviewPreview
 class ReviewWindow(tk.Toplevel):
     """Show one candidate without grabbing the main window's ON/OFF switch.
 
-    Decisions are ``save``, ``skip``, ``stop`` and ``auto``. A user closing the
+    Decisions are ``save``, ``skip`` (this run only), ``never`` (do not ask
+    again), ``stop`` and ``auto``. A user closing the
     window stops the download; an external ``destroy()`` only cleans up. Each
     decision waits asynchronously for the decoder's source handles to close.
     """
@@ -60,11 +61,12 @@ class ReviewWindow(tk.Toplevel):
         self.details = ttk.Label(body, text=f"@{author.lstrip('@')}  {posted}\n{filename}".strip(),
                                  style="Muted.TLabel", wraplength=max(260, width - 40))
         self.details.grid(row=1, column=0, sticky="ew", pady=(7, 8))
-        self.explanation = ttk.Label(body, text="미리보기를 위해 파일을 먼저 받습니다. 저장을 누르면 보관합니다.",
+        self.explanation = ttk.Label(body, text="미리보기를 위해 파일을 먼저 받습니다. ‘이번엔 건너뛰기’는 이번 실행에만 "
+                                                "적용하며, ‘저장 안 함’은 다음에도 받지 않습니다.",
                                      style="Muted.TLabel", wraplength=max(260, width - 40))
         self.explanation.grid(row=2, column=0, sticky="ew", pady=(0, 12))
         self.canvas = tk.Canvas(body, width=min(REVIEW_SIZE[0], width - 40),
-                                height=min(REVIEW_SIZE[1], max(80, height - 245)),
+                                height=min(REVIEW_SIZE[1], max(80, height - 265)),
                                 highlightthickness=0, background=theme.CARD)
         self.canvas.grid(row=3, column=0, sticky="nsew")
         self.canvas.bind("<Configure>", self._resized)
@@ -73,15 +75,18 @@ class ReviewWindow(tk.Toplevel):
         self.note.grid(row=4, column=0, sticky="ew", pady=(9, 12))
         self.actions = ttk.Frame(body)
         self.actions.grid(row=5, column=0, sticky="ew")
-        self.actions.columnconfigure((0, 1), weight=1, uniform="review-action")
         self.buttons = {}
-        for index, (action, label) in enumerate((("save", "저장"), ("skip", "이번엔 건너뛰기"),
-                                                ("auto", "이후 자동 저장"), ("stop", "전체 작업 중단"))):
-            button = ttk.Button(self.actions, text=label, command=lambda action=action: self.choose(action),
-                                style="Primary.TButton" if action == "save" else "TButton")
-            button.grid(row=index // 2, column=index % 2, sticky="ew",
-                        padx=(0, 6) if index % 2 == 0 else (6, 0), pady=(0, 8) if index < 2 else (0, 0))
-            self.buttons[action] = button
+        # This file's three choices first, then the choices for the whole run.
+        for row, choices in enumerate(((("save", "저장"), ("skip", "이번엔 건너뛰기"), ("never", "저장 안 함")),
+                                       (("auto", "이후 자동 저장"), ("stop", "전체 작업 중단")))):
+            line = ttk.Frame(self.actions)
+            line.pack(fill="x", pady=(0, 8) if row == 0 else (0, 0))
+            line.columnconfigure(tuple(range(len(choices))), weight=1, uniform=f"review-action-{row}")
+            for column, (action, label) in enumerate(choices):
+                button = ttk.Button(line, text=label, command=lambda action=action: self.choose(action),
+                                    style="Primary.TButton" if action == "save" else "TButton")
+                button.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 6, 0))
+                self.buttons[action] = button
 
         path = Path(candidate.get("path") or "")
         try:

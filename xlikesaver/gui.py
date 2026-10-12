@@ -103,6 +103,7 @@ class App:
         self.skipped = 0
         self.size_skipped = 0
         self.review_skipped = 0
+        self.review_never = 0
         self.review_window = None
         self._review_candidate = None
         self._review_context = None
@@ -533,7 +534,9 @@ class App:
     def _update_review_summary(self):
         text = "사진·영상·GIF를 보고 선택합니다 · 예약 자동 저장은 확인 없이 진행합니다." if self.confirm_each.get() else "켜면 사진·영상·GIF를 보고 저장 여부를 선택합니다."
         if self.review_skipped:
-            text += f" · 선택으로 건너뜀 {self.review_skipped:,}개"
+            text += f" · 이번엔 건너뜀 {self.review_skipped:,}개"
+        if self.review_never:
+            text += f" · 저장 안 함 {self.review_never:,}개"
         self.review_summary.set(text)
 
     def _review_mode_changed(self):
@@ -605,7 +608,7 @@ class App:
         self._review_candidate = event
         self.progress.stop()
         self.status.set("저장할지 골라 주세요")
-        self.status_detail.set("‘저장’을 누르면 보관하고, ‘건너뛰기’를 누르면 다음 파일을 보여줍니다.")
+        self.status_detail.set("저장하거나 이번만 건너뛰고, ‘저장 안 함’으로 다음에도 받지 않도록 고를 수 있습니다.")
         self.review_window = ReviewWindow(self.root, event,
                                          lambda action: self._review_decision(ident, action), permitted)
 
@@ -1250,16 +1253,17 @@ class App:
         ), None),
         ("보고 골라 저장하기", (
             "메인 화면의 ‘저장 전에 하나씩 확인’을 켜고 저장을 시작합니다. 진행 중에도 켜고 끌 수 있습니다.",
-            "사진은 크게, 동영상·GIF는 소리 없이 처음 30초를 반복합니다. 저장하거나 이번에는 건너뜁니다.",
+            "사진은 크게, 동영상·GIF는 소리 없이 처음 30초를 반복합니다. ‘저장’, ‘이번엔 건너뛰기’, ‘저장 안 함’ 중에서 고릅니다.",
+            "‘저장 안 함’을 고른 파일은 다시 묻지 않고 예약 자동 저장도 받지 않습니다. 필요하면 ‘사라진 파일’의 ‘숨긴 파일도 보기’에서 골라 ‘다시 받기’를 누릅니다.",
             "‘이후 자동 저장’은 지금 파일부터 확인 없이 저장합니다. 확인창을 닫으면 전체 작업을 중단합니다.",
             "미리보기용 임시 파일을 먼저 받으므로 인터넷 데이터가 사용됩니다. 동기화 폴더에서는 임시 파일도 동기화될 수 있습니다.",
-            "건너뛴 새 파일은 다음 실행에서 다시 확인합니다. ‘사라진 파일’의 다시 받기에서 건너뛴 파일은 필요하면 다시 선택합니다.",
+            "건너뛴 새 파일은 다음 저장에서 다시 처리합니다. 확인을 끄거나 예약 저장을 실행하면 자동 저장될 수 있습니다. ‘사라진 파일’의 다시 받기에서 건너뛴 파일은 필요하면 다시 선택합니다.",
         ), "예약 자동 저장은 이 옵션과 관계없이 확인창 없이 진행합니다."),
         ("기록 · 통계", (
             "받은 파일을 목록이나 갤러리로 보고, 작성자·내용으로 찾습니다.",
             "끌어서 여러 개를 고르거나 ‘여러 개 선택’을 켜고 하나씩 클릭합니다.",
             "고른 파일은 ‘휴지통으로 보내기’ 버튼이나 우클릭 메뉴로 정리합니다. 개수·용량을 확인한 뒤 진행합니다.",
-            "처리 결과는 ‘삭제 기록’에 남습니다. 휴지통을 사용할 수 없는 위치는 건너뜁니다.",
+            "보낸 파일은 ‘사라진 파일’에서 확인합니다. 휴지통을 사용할 수 없는 위치는 건너뜁니다.",
             "통계에서 작성자를 누르면 그 작성자의 최근 사진이 나옵니다.",
         ), None),
         ("파일을 지웠을 때", (
@@ -1649,7 +1653,7 @@ class App:
         self.record_locations[options.account] = options.output_dir
         self.account.set(options.account)
         self.folder.set(options.output_dir)
-        self.saved = self.skipped = self.size_skipped = self.review_skipped = 0
+        self.saved = self.skipped = self.size_skipped = self.review_skipped = self.review_never = 0
         self._review_context = resolve_storage(options.output_dir, options.account, options.separate_accounts)
         self.review_control.set_enabled(self.confirm_each.get())
         self.received_final = False
@@ -1749,8 +1753,13 @@ class App:
                         heartbeat_at = time.monotonic()
                         while True:
                             if time.monotonic() - heartbeat_at >= 1:
-                                self.review_control.heartbeat()
                                 heartbeat_at = time.monotonic()
+                                try:
+                                    self.review_control.heartbeat()
+                                except OSError:
+                                    # The child waits for the next beat; only a
+                                    # lasting failure stops its confirmation.
+                                    pass
                             chunk = stream.read()
                             if chunk:
                                 partial += chunk
@@ -1834,7 +1843,11 @@ class App:
                     self.stop()
             elif kind == "review-skipped":
                 self.review_skipped += 1
-                self._log("선택으로 건너뜀 · " + _file_label(event), event)
+                self._log("이번엔 건너뜀 · " + _file_label(event), event)
+                self._update_counts()
+            elif kind == "review-never":
+                self.review_never += 1
+                self._log("저장 안 함 · " + _file_label(event), event)
                 self._update_counts()
             elif kind in ("saved", "skipped", "size-skipped"):
                 if kind == "saved":
@@ -1866,6 +1879,7 @@ class App:
                 self.skipped = int(event.get("skipped", self.skipped))
                 self.size_skipped = int(event.get("size_skipped", self.size_skipped))
                 self.review_skipped = int(event.get("review_skipped", self.review_skipped))
+                self.review_never = int(event.get("review_never", self.review_never))
                 self._update_counts()
                 message = str(event.get("message", "작업이 종료되었습니다."))
                 headline = self.FINISH_HEADLINES.get(self.final_status, message)

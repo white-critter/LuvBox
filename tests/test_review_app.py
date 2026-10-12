@@ -108,7 +108,20 @@ class AppReviewTests(unittest.TestCase):
         self.app.events.put({"type": "review-skipped", "filename": "100_1.jpg", "tweet_id": "100"})
         self.app._poll()
         self.assertEqual((self.app.saved, self.app.skipped, self.app.size_skipped, self.app.review_skipped), (0, 0, 0, 1))
-        self.assertIn("선택으로 건너뜀 1개", self.app.review_summary.get())
+        self.assertIn("이번엔 건너뜀 1개", self.app.review_summary.get())
+
+    def test_never_choice_is_counted_and_passed_to_the_child(self):
+        self.app.events.put({"type": "review-never", "filename": "100_1.jpg", "tweet_id": "100"})
+        self.app._poll()
+        self.assertEqual((self.app.saved, self.app.review_skipped, self.app.review_never), (0, 0, 1))
+        self.assertIn("저장 안 함 1개", self.app.review_summary.get())
+        event = self.candidate()
+        self.app._review_candidate = event
+        self.app.confirm_each.set(True)
+        with patch.object(self.app.review_control, "respond") as respond:
+            self.app._review_decision(event["id"], "never")
+        respond.assert_called_once_with(event["id"], "never", enabled=True)
+        self.assertFalse(self.app.stopping)
 
     def test_stop_marks_the_child_flag_and_destroys_pending_preview(self):
         event = self.candidate()

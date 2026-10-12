@@ -34,6 +34,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
     roots_locked = False
     processed = 0
     warnings = []
+    failures = []
     batch = uuid.uuid4().hex
 
     def progress(message):
@@ -44,6 +45,11 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
         result["message"] = f"휴지통 이동 {result['recycled']:,}개 · 실패 {result['failed']:,}개"
         if result["cancelled"]:
             result["message"] += f" · 처리하지 않은 파일 {result['cancelled']:,}개"
+        if failures:
+            # The results are not kept in a separate list; name a few here.
+            result["message"] += "\n" + "\n".join(failures[:3])
+            if len(failures) > 3:
+                result["message"] += f"\n외 {len(failures) - 3:,}개"
         if warnings:
             result["message"] += "\n" + "\n".join(warnings)
         emit(dict(result, type="done", processed=processed))
@@ -113,7 +119,8 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                     store.finish_deletion(ident, "failed", error)
                 result["failed"] += 1
                 processed += 1
-                progress(f"{Path(path).name}: {error}")
+                failures.append(f"{Path(path).name}: {error}")
+                progress(failures[-1])
                 continue
             ident = store.begin_deletion(batch, row, keep_deleted, signature)
             if stop.is_set():
@@ -127,7 +134,8 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 processed += 1
                 store.finish_deletion(ident, "interrupted" if uncertain else "failed", str(exc),
                                       recycle_path=exc.recycled_path)
-                progress(f"{Path(path).name}: {exc}")
+                failures.append(f"{Path(path).name}: {exc}")
+                progress(failures[-1])
                 if uncertain:
                     warnings.append("휴지통 이동 결과가 확실하지 않아 중단했습니다. 파일과 Windows 휴지통을 확인해 주세요.")
                     break
@@ -136,7 +144,8 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 result["failed"] += 1
                 processed += 1
                 store.finish_deletion(ident, "interrupted" if absent else "failed", str(exc))
-                progress(f"{Path(path).name}: 파일을 옮기지 못했습니다.")
+                failures.append(f"{Path(path).name}: 파일을 옮기지 못했습니다.")
+                progress(failures[-1])
                 if absent:
                     warnings.append("파일 이동 결과를 확인하지 못해 중단했습니다. Windows 휴지통을 확인해 주세요.")
                     break
@@ -157,7 +166,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
             try:
                 store.reconcile_deletions()
             except Exception:
-                warnings.append("삭제 기록 확인은 다음 실행에서 다시 시도합니다.")
+                warnings.append("휴지통 이동 결과 확인은 다음 실행에서 다시 시도합니다.")
     finally:
         if store is not None:
             closed = False

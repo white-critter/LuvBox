@@ -139,12 +139,12 @@ def decode(data: bytes):
         return None
 
 
-def make(path: Path | str):
+def make(path: Path | str, *, suffix: str | None = None):
     """A preview image of a local media file, or None (never downloads)."""
     if cloud_only(path):
         return None
     from .preview import thumbnail
-    return thumbnail(Path(path), SIZE).image
+    return thumbnail(Path(path), SIZE, suffix=suffix).image
 
 
 class Cache:
@@ -300,12 +300,12 @@ class Recorder:
         self._cache = None
         self._disabled = False
 
-    def add(self, key, path: Path | str) -> None:
+    def add(self, key, path: Path | str, *, suffix: str | None = None) -> None:
         if self._disabled:
             return
         try:
             key = identity(*key)
-            image = make(path)
+            image = make(path, suffix=suffix)
             if image is None:
                 return
             if self._cache is None:

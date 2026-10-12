@@ -56,7 +56,7 @@ class ReviewGuiTests(unittest.TestCase):
         self.factory.assert_called_once_with(self.path, "photo")
 
     def test_each_decision_is_delivered_once_after_destroy(self):
-        for action in ("save", "skip", "stop", "auto"):
+        for action in ("save", "skip", "never", "stop", "auto"):
             with self.subTest(action=action):
                 window = self.window_for()
                 self.decisions.clear()

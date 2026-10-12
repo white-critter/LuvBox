@@ -62,8 +62,8 @@ class ReviewProtocolTests(unittest.TestCase):
     def result(self):
         return self.results.get(timeout=2)
 
-    def test_current_candidate_save_and_skip(self):
-        for action in ("save", "skip"):
+    def test_current_candidate_save_skip_and_never(self):
+        for action in ("save", "skip", "never"):
             event = self.begin()
             self.assertEqual(event["type"], "review-request")
             self.assertEqual(event["media_type"], "photo")
@@ -110,6 +110,23 @@ class ReviewProtocolTests(unittest.TestCase):
         value["heartbeat"] = time.time() - 60
         self.path.write_text(json.dumps(value), encoding="utf8")
         self.assertIsInstance(self.result(), ReviewUnavailable)
+
+    def test_late_heartbeat_after_sleep_is_accepted_but_never_as_approval(self):
+        value = json.loads(self.path.read_text(encoding="utf8"))
+        value["heartbeat"] = time.time() - 60
+        self.path.write_text(json.dumps(value), encoding="utf8")
+        beat = threading.Timer(.3, self.control.heartbeat)
+        beat.start()
+        self.addCleanup(beat.cancel)
+        self.assertTrue(self.channel.enabled())
+
+    def test_briefly_unreadable_control_is_read_again(self):
+        held = self.path.with_name("held.json")
+        self.path.replace(held)
+        restore = threading.Timer(.2, lambda: held.replace(self.path))
+        restore.start()
+        self.addCleanup(restore.cancel)
+        self.assertTrue(self.channel.enabled())
 
     def test_new_parent_session_cannot_adopt_a_waiting_child(self):
         self.begin()

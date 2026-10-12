@@ -140,6 +140,23 @@ class DeletionWorkerTests(unittest.TestCase):
         self.assertEqual({item["status"] for item in self.state()["journal"]}, {"recycled", "failed"})
         self.assertEqual(self.state()["choices"], {("200", 1, "photo")})
 
+    def test_finished_message_names_a_few_failed_files_and_their_reason(self):
+        rows = [self.row(str(tweet)) for tweet in range(100, 105)]
+
+        def recycle(path, expected=None):
+            if Path(path) != Path(rows[0]["path"]):
+                raise RecyclingError("fixture recycle is unavailable")
+            return self.mock_recycle(path, expected)
+
+        result = self.run_worker(rows, native=recycle)
+        self.assertEqual((result["recycled"], result["failed"]), (1, 4))
+        lines = result["message"].splitlines()
+        self.assertEqual(lines[0], "휴지통 이동 1개 · 실패 4개")
+        self.assertEqual(lines[1:], ["101_1.jpg: fixture recycle is unavailable",
+                                     "102_1.jpg: fixture recycle is unavailable",
+                                     "103_1.jpg: fixture recycle is unavailable", "외 1개"])
+        self.assertEqual(self.events[-1]["message"], result["message"])
+
     def test_uncertain_native_result_stops_before_next_file(self):
         rows = [self.row("100"), self.row("200")]
 
