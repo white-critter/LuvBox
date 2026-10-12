@@ -328,7 +328,7 @@ class GalleryLayoutTests(unittest.TestCase):
     def drag(self, start, end, state=0, start_key=None):
         self.grid._press(start, start_key)
         self.grid._drag_motion(end)
-        boxed = [frame.winfo_manager() for frame in self.grid._band]
+        boxed = self.grid._band.area if self.grid._band.visible else None
         self.grid._release_drag(end)
         return boxed
 
@@ -338,11 +338,14 @@ class GalleryLayoutTests(unittest.TestCase):
         self.assertEqual(self.grid.columns, 6)
         changes = []
         self.grid.on_selection = lambda keys, focus: changes.append(keys)
-        boxed = self.drag(self.pointer("1"), self.pointer("8"), start_key="1")
-        self.assertEqual(boxed, ["place"] * 4)  # the box is drawn while dragging
+        start, end = self.pointer("1"), self.pointer("8")
+        boxed = self.drag(start, end, start_key="1")
+        # The box is drawn while dragging, exactly between the two points.
+        self.assertEqual(boxed, (start.x_root, start.y_root, end.x_root - start.x_root, end.y_root - start.y_root))
         self.assertEqual(self.grid.selected_keys, ("1", "2", "7", "8"))
         self.assertEqual(changes[-1], ("1", "2", "7", "8"))
-        self.assertTrue(all(not frame.winfo_manager() for frame in self.grid._band))
+        self.assertFalse(self.grid._band.visible)
+        self.assertFalse(self.grid._band.window.winfo_viewable())
         self.assertTrue(self.grid.tiles["7"].cget("text").startswith("✓ "))
         self.assertFalse(self.grid.tiles["3"].cget("text").startswith("✓ "))
 
@@ -381,6 +384,12 @@ class GalleryLayoutTests(unittest.TestCase):
                                 state=0)
         self.grid._drag_motion(below)
         self.assertIsNotNone(self.grid._drag_scroll)
+        # The box stops at the gallery's visible edge; that side has no line.
+        left, top, width, height = self.grid._band.area
+        self.assertEqual(top + height, self.grid.canvas.winfo_rooty() + self.grid.canvas.winfo_height())
+        lines = [self.grid._band.canvas.coords(item) for item in self.grid._band.canvas.find_all()]
+        self.assertEqual(len(lines), 3)
+        self.assertNotIn([0.0, float(height - 2), float(width), float(height)], lines)
         first, chosen = self.grid.canvas.yview()[0], len(self.grid.selected_keys)
         for _ in range(10):
             self.grid._scroll_drag()
@@ -388,6 +397,23 @@ class GalleryLayoutTests(unittest.TestCase):
         self.assertGreater(len(self.grid.selected_keys), chosen)  # rows scrolled into the box join it
         self.grid._release_drag(below)
         self.assertIsNone(self.grid._drag_scroll)
+
+    def test_fast_drag_box_is_one_window_that_never_takes_focus_or_leaves_lines(self):
+        self.grid.show([(str(index), {"author": "offline"}) for index in range(12)], set)
+        self.root.update()
+        children = set(self.grid.inner.winfo_children())
+        focus = self.root.focus_get()
+        self.grid._press(self.pointer("0"), "0")
+        for key in ("1", "7", "2", "8", "3", "9", "0"):
+            self.grid._drag_motion(self.pointer(key))
+        self.root.update()
+        # Nothing is placed among the tiles, so moving the box repaints none.
+        self.assertEqual(set(self.grid.inner.winfo_children()), children)
+        self.assertEqual(self.grid._band.window.wm_overrideredirect(), True)
+        self.assertEqual(self.root.focus_get(), focus)
+        self.grid._release_drag(self.pointer("0"))
+        self.grid.release()
+        self.assertIsNone(self.grid._band.window)
 
 if __name__ == "__main__":
     unittest.main()

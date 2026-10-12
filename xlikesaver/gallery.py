@@ -13,6 +13,7 @@ import os
 import queue
 import threading
 import tkinter as tk
+import weakref
 from pathlib import Path
 from tkinter import ttk
 
@@ -29,6 +30,7 @@ _CACHE_SIZE = 240
 _SELECTED = "#e3eaff"           # theme maps this to the dark selection color
 _SELECTED_INK = "#314fbb"
 _DRAG_START = 6        # pixels the pointer moves before a press becomes a drag
+_SEE_THROUGH = "#010203"  # never a theme color; the drag box window shows through it
 _CONTROL = 0x0004
 
 
@@ -145,6 +147,91 @@ class _GridDecoder:
                     self.results.put_nowait((token, key, image))
 
 
+class DragBox:
+    """The drag-selection box, drawn in a see-through window above the tiles.
+
+    Lines placed among the tiles had to wait until every tile they had
+    crossed was repainted, so a fast drag left several boxes behind.
+    Windows composes a separate window without repainting what is below.
+    The window never takes focus, so the drag keeps the mouse.
+    """
+
+    def __init__(self, parent):
+        # A weak link: the gallery owns this box, never the other way round.
+        self._parent = weakref.ref(parent)
+        self.window = None
+        self.canvas = None
+        self.visible = False
+        self.area = None
+
+    def _create(self):
+        parent = self._parent()
+        window = tk.Toplevel(parent)
+        window.withdraw()
+        window.overrideredirect(True)
+        try:
+            window.transient(parent.winfo_toplevel())
+            window.attributes("-transparentcolor", _SEE_THROUGH)
+        except tk.TclError:
+            pass
+        self.canvas = tk.Canvas(window, background=_SEE_THROUGH, highlightthickness=0, borderwidth=0,
+                                width=1, height=1)
+        self.canvas.pack(fill="both", expand=True)
+        window.update_idletasks()
+        if os.name == "nt":
+            try:
+                import ctypes
+                user32 = ctypes.windll.user32
+                handle = int(window.wm_frame(), 16)
+                # No activation, no taskbar button, mouse input passes through.
+                style = user32.GetWindowLongW(handle, -20)
+                user32.SetWindowLongW(handle, -20, style | 0x08000000 | 0x00000080 | 0x00000020)
+                # Owned by the library window: always just above it, and
+                # hidden with it (Tk does not set an owner for this kind).
+                from ctypes import wintypes
+                user32.SetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t)
+                user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+                user32.SetWindowLongPtrW(handle, -8, int(parent.winfo_toplevel().wm_frame(), 16))
+            except (OSError, AttributeError, ValueError, tk.TclError):
+                pass
+        self.window = window
+
+    def show(self, left, top, right, bottom, edges):
+        """Screen rectangle; ``edges`` (left, top, right, bottom) are the
+        sides of the box inside the visible gallery, which get a line."""
+        if self.window is None:
+            self._create()
+        width, height = max(2, right - left), max(2, bottom - top)
+        self.area = (left, top, width, height)
+        canvas = self.canvas
+        canvas.delete("all")
+        canvas.configure(width=width, height=height)
+        for drawn, line in zip(edges, ((0, 0, 2, height), (0, 0, width, 2),
+                                       (width - 2, 0, width, height), (0, height - 2, width, height))):
+            if drawn:
+                canvas.create_rectangle(*line, outline="", fill=theme.BLUE)
+        self.window.geometry(f"{width}x{height}+{left}+{top}")
+        if not self.visible:
+            self.window.deiconify()
+            self.visible = True
+        self.window.lift()
+
+    def hide(self):
+        if self.window is not None and self.visible:
+            self.window.withdraw()
+        self.visible = False
+        self.area = None
+
+    def destroy(self):
+        window, self.window = self.window, None
+        self.visible = False
+        if window is not None:
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
+
+
 class ThumbnailGrid(ttk.Frame):
     def __init__(self, parent, *, on_select, on_open, on_selection=None, on_context=None):
         super().__init__(parent, style="Card.TFrame", padding=8)
@@ -182,8 +269,7 @@ class ThumbnailGrid(ttk.Frame):
         self._drag = None
         self._drag_scroll = None
         self._unavailable = set()
-        # Tk cannot overlay a translucent rectangle, so the box is four lines.
-        self._band = [tk.Frame(self.inner, width=1, height=1, background=theme.BLUE) for _ in range(4)]
+        self._band = DragBox(self)
         self.canvas.bind("<Configure>", lambda _: self._layout())
         for widget in (self.canvas, self.inner, self.empty):
             widget.bind("<MouseWheel>", self._wheel)
@@ -210,6 +296,7 @@ class ThumbnailGrid(ttk.Frame):
                 self._captions.pop(key, None)
                 self._unavailable.discard(key)
         relayout = order != self.order or len(self.tiles) != len(rows)
+        appended = bool(self.order) and order[:len(self.order)] == self.order
         self.order = order
         self._paths = paths
         if relayout:
@@ -240,7 +327,7 @@ class ThumbnailGrid(ttk.Frame):
         # position to an unrelated record on the next page.
         self.select_many(self.selected_keys, focus=self.selected, scroll=False, _preserve_anchor=True)
         self._layout()
-        if relayout:
+        if relayout and not appended:
             self.canvas.yview_moveto(0)
         self._decoder.request(self._token, jobs, permitted, remember=remember, recall=recall)
 
@@ -400,12 +487,18 @@ class ThumbnailGrid(ttk.Frame):
         (x0, x1), (y0, y1) = sorted((drag["origin"][0], x)), sorted((drag["origin"][1], y))
         x0, x1 = max(0, x0), min(width, x1)
         y0, y1 = max(0, y0), min(height, y1)
-        span_x, span_y = max(2, x1 - x0), max(2, y1 - y0)
-        for frame, place in zip(self._band, ((x0, y0, span_x, 2), (x0, y1 - 2, span_x, 2),
-                                             (x0, y0, 2, span_y), (x1 - 2, y0, 2, span_y))):
-            frame.configure(background=theme.BLUE)
-            frame.place(x=place[0], y=place[1], width=place[2], height=place[3])
-            frame.lift()
+        # Show only the part inside the visible gallery, on the screen.
+        left, top = self.inner.winfo_rootx(), self.inner.winfo_rooty()
+        view_left, view_top = self.canvas.winfo_rootx(), self.canvas.winfo_rooty()
+        view_right, view_bottom = view_left + self.canvas.winfo_width(), view_top + self.canvas.winfo_height()
+        # A straight drag still shows a thin box.
+        box = (left + x0, top + y0, max(left + x1, left + x0 + 2), max(top + y1, top + y0 + 2))
+        shown = (max(box[0], view_left), max(box[1], view_top), min(box[2], view_right), min(box[3], view_bottom))
+        if shown[0] < shown[2] and shown[1] < shown[3]:
+            self._band.show(*shown, edges=(box[0] >= view_left, box[1] >= view_top,
+                                           box[2] <= view_right, box[3] <= view_bottom))
+        else:
+            self._band.hide()
         hits = set()
         for key in self.order:
             tile = self.tiles.get(key)
@@ -423,8 +516,7 @@ class ThumbnailGrid(ttk.Frame):
         if self._drag_scroll is not None:
             self.after_cancel(self._drag_scroll)
             self._drag_scroll = None
-        for frame in self._band:
-            frame.place_forget()
+        self._band.hide()
         if drag is None or self._released:
             return "break"
         if (not drag["moved"] and drag["key"] is None and not event.state & _CONTROL
@@ -483,6 +575,7 @@ class ThumbnailGrid(ttk.Frame):
         self._released = True
         self._token += 1
         self._drag = None
+        self._band.destroy()
         if self._drag_scroll is not None:
             self.after_cancel(self._drag_scroll)
             self._drag_scroll = None

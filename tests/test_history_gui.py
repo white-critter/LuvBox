@@ -450,13 +450,81 @@ class HistoryGuiTests(unittest.TestCase):
             self.window._show_author_samples()
         self.window._samples_worker(self.window._sample_results, *thread.call_args.kwargs["args"])
         self.window._poll_samples()
-        self.assertEqual(len(self.window.sample_view.tiles), 8)
+        # Every file of the author, newest first (no longer only eight).
+        self.assertEqual(len(self.window.sample_view.tiles), 10)
         newest = [row["tweet_id"] for row in self.window.sample_rows.values()]
-        self.assertEqual(newest, [str(309 - index) for index in range(8)])
-        self.assertIn("@alice", self.window.sample_text.get())
+        self.assertEqual(newest, [str(309 - index) for index in range(10)])
+        self.assertIn("@alice · 파일 10개", self.window.sample_text.get())
+        self.assertFalse(self.window.sample_more_button.winfo_manager())
         with patch("xlikesaver.history_gui.os.startfile") as start:
             self.window._open_sample("0")
         start.assert_called_once_with(str(self.account / "309_1.jpg"))
+
+    def author_gallery(self, count=10):
+        store = HistoryStore(self.account)
+        self.addCleanup(store.close)
+        for index in range(count):
+            path = self.account / f"{300 + index}_1.jpg"
+            path.write_bytes(b"offline-image")
+            store.record_media("flat", {"tweet_id": str(300 + index), "num": 1, "type": "photo",
+                                        "author": {"name": "alice"},
+                                        "date": datetime(2020, 1, 1 + index, tzinfo=timezone.utc)}, path)
+        self.window.tabs.select(2)
+        self.load()
+        [key] = self.window.author_tree.get_children()
+        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.author_tree.selection_set(key)
+            self.window._show_author_samples()
+        self.window._samples_worker(self.window._sample_results, *thread.call_args.kwargs["args"])
+        self.window._poll_samples()
+
+    def test_many_author_files_are_added_a_batch_at_a_time(self):
+        with patch("xlikesaver.history_gui.SAMPLE_STEP", 4):
+            self.author_gallery(10)
+            self.assertEqual(len(self.window.sample_view.tiles), 4)
+            self.assertIn("파일 10개 중 최근 4개", self.window.sample_text.get())
+            self.assertEqual(self.window.sample_more_button.cget("text"), "더 보기 (4개)")
+            self.window.more_samples()
+            self.assertEqual(len(self.window.sample_view.tiles), 8)
+            self.assertEqual(self.window.sample_more_button.cget("text"), "더 보기 (2개)")
+            self.window.more_samples()
+        self.assertEqual([row["tweet_id"] for row in self.window.sample_rows.values()],
+                         [str(309 - index) for index in range(10)])
+        self.assertFalse(self.window.sample_more_button.winfo_manager())
+        self.assertNotIn("최근", self.window.sample_text.get())
+
+    def test_author_gallery_files_can_be_sent_to_the_recycle_bin(self):
+        self.author_gallery(10)
+        self.assertEqual(str(self.window.sample_delete_button.cget("state")), "disabled")
+        keys = list(self.window.sample_view.order)
+        self.window.sample_view.select_many(keys[:2], focus=keys[0])
+        self.window._update_sample_actions()
+        self.assertEqual(str(self.window.sample_delete_button.cget("state")), "normal")
+        self.assertEqual(self.window.sample_delete_button.cget("text"), "휴지통으로 보내기 (2개)")
+        with patch("xlikesaver.history_gui.dialogs.confirm_delete", return_value=None) as confirm:
+            self.window.delete_samples()
+        self.assertEqual(confirm.call_args.args[:2], (2, len(b"offline-image") * 2))
+        # Delete key and the right-click menu work on the same chosen tiles.
+        with patch.object(self.window, "start_deletion") as start:
+            self.window._file_delete_key(SimpleNamespace(widget=self.window.sample_view.canvas))
+        self.assertEqual([row["tweet_id"] for row in start.call_args.args[0]], ["309", "308"])
+        with patch.object(self.window, "_post_context") as post:
+            self.window._sample_context(SimpleNamespace(x_root=100, y_root=100), keys[1])
+        self.assertEqual(self.window.sample_view.selected_keys, tuple(keys[:2]))
+        commands = {label: (callback, enabled) for label, callback, enabled in post.call_args.args[1]}
+        callback, enabled = commands["휴지통으로 보내기 (2개)"]
+        self.assertTrue(enabled)
+        with patch.object(self.window, "start_deletion") as start:
+            callback()
+        self.assertEqual(len(start.call_args.args[0]), 2)
+        # Right-clicking an unchosen tile chooses only that one.
+        with patch.object(self.window, "_post_context"):
+            self.window._sample_context(SimpleNamespace(x_root=100, y_root=100), keys[5])
+        self.assertEqual(self.window.sample_view.selected_keys, (keys[5],))
+        # Not while a save is running.
+        self.window.is_downloading = lambda: True
+        self.window._update_sample_actions()
+        self.assertEqual(str(self.window.sample_delete_button.cget("state")), "disabled")
 
     def test_repeated_author_selection_reuses_inflight_and_empty_result(self):
         self.records()
@@ -511,11 +579,17 @@ class HistoryGuiTests(unittest.TestCase):
                 patch.object(self.window,"_post_context") as post:
             self.window._tree_context(event,"files")
         post.assert_not_called()
-        with patch("tkinter.Menu.tk_popup"):
-            theme.apply(self.root,"dark")
-            self.window._post_context(event,[("실행",lambda:None,True),("사용 불가",lambda:None,False)])
-        self.assertEqual(str(self.window._context_menu.cget("background")),theme.DARK["CARD"])
-        self.assertEqual(self.window._context_menu.entrycget(1,"state"),"disabled")
+        theme.apply(self.root,"dark")
+        self.window._post_context(event,[("실행",lambda:None,True),("사용 불가",lambda:None,False)])
+        menu = self.window._context_menu
+        self.addCleanup(lambda: menu.winfo_exists() and menu.close())
+        self.assertEqual(str(menu.body.cget("background")),theme.DARK["CARD"])
+        self.assertEqual((menu.rows[0][2],menu.rows[1][2]),(True,False))
+        self.assertEqual(str(menu.rows[1][0].cget("foreground")),theme.DARK["DISABLED"])
+        # A second right-click replaces the open menu instead of stacking another.
+        self.window._post_context(event,[("다시",lambda:None,True)])
+        self.assertFalse(menu.winfo_exists())
+        self.window._context_menu.close()
 
     def test_statistics_sample_context_keeps_original_author_and_media(self):
         self.records()

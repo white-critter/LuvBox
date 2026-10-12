@@ -1590,10 +1590,14 @@ class HistoryStore:
         return {"authors": authors if top is None else authors[:top], "months": months}
 
     @_safe
-    def author_samples(self, author: str, limit: int = 8) -> list[dict]:
-        """The author's files from their newest tweets, one row per file."""
+    def author_samples(self, author: str, limit: int | None = 8) -> list[dict]:
+        """The author's files from their newest tweets, one row per file.
+
+        ``limit=None`` lists every present file of the author.
+        """
         if (not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author)
-                or isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100):
+                or (limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
+                                           or not 1 <= limit <= 100))):
             raise HistoryError(_HISTORY_HELP)
         samples, seen = [], set()
         for row in self._db.execute(

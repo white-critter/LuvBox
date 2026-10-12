@@ -51,7 +51,10 @@ MISSING_HELP = ("저장한 뒤 사라진 파일입니다. 휴지통으로 보낸
                 "저장 전 확인에서 ‘저장 안 함’을 고른 파일은 ‘숨긴 파일도 보기’에서 볼 수 있습니다.")
 ALL_AUTHORS = "작성자 전체"
 FILE_HINT = "끌어서 고르거나 ‘여러 개 선택’을 켜고 클릭하세요."
-SAMPLE_HINT = "작성자를 고르면 최근 게시물 사진을 보여 드립니다."
+SAMPLE_HINT = "작성자를 고르면 그 작성자의 파일을 최근 게시물부터 보여 드립니다."
+# The author gallery grows by this many tiles, so a prolific author does
+# not create thousands of thumbnails at once.
+SAMPLE_STEP = 100
 MISSING_PICK = "파일을 고르면 저장해 둔 미리보기와 원래 위치가 나옵니다."
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}")
 
@@ -210,6 +213,8 @@ class HistoryWindow(tk.Toplevel):
         self._sample_author = None
         self._sample_results = queue.Queue()
         self.sample_rows = {}
+        self._sample_list = []
+        self._sample_shown = 0
         self._context_menu = None
         # How long the last full catalog load took; it paces refreshes during a save.
         self.last_load_seconds = 0.0
@@ -618,12 +623,20 @@ class HistoryWindow(tk.Toplevel):
         ttk.Label(ranking, textvariable=self.sample_text, style="CardMuted.TLabel").grid(
             row=2, column=0, columnspan=2, sticky="w")
         self.sample_view = ThumbnailGrid(ranking, on_select=lambda _key: None, on_open=self._open_sample,
+                                         on_selection=lambda _keys, _focus: self._update_sample_actions(),
                                          on_context=self._sample_context)
-        # Keep a thumbnail row visible on short screens; scroll for all eight.
+        # Keep a thumbnail row visible on short screens; the gallery scrolls.
         self.sample_view.canvas.configure(height=TILE[1] + 58)
         self.sample_view.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(6, 10))
-        ttk.Button(ranking, text="이 작성자 파일 전체 보기", style="Compact.TButton",
-                   command=self.show_ranked_author).grid(row=4, column=0, sticky="w")
+        sample_actions = ttk.Frame(ranking, style="Plain.TFrame")
+        sample_actions.grid(row=4, column=0, columnspan=2, sticky="ew")
+        ttk.Button(sample_actions, text="이 작성자 파일 전체 보기", style="Compact.TButton",
+                   command=self.show_ranked_author).pack(side="left")
+        self.sample_more_button = ttk.Button(sample_actions, text="더 보기", style="Compact.TButton",
+                                             command=self.more_samples)
+        self.sample_delete_button = ttk.Button(sample_actions, text="휴지통으로 보내기", style="Compact.TButton",
+                                               command=self.delete_samples, state="disabled")
+        self.sample_delete_button.pack(side="right")
         months = self.months_card = ttk.Frame(stats, style="Card.TFrame", padding=(16, 14))
         months.grid(row=0, column=1, sticky="nsew")
         months.columnconfigure(0, weight=1)
@@ -1052,6 +1065,7 @@ class HistoryWindow(tk.Toplevel):
                                       state="normal" if ready and mp4_gifs else "disabled")
         self._update_missing_actions()
         self._update_file_actions()
+        self._update_sample_actions()
 
     def _update_pager(self, prefix, page, pages, ready, *, runs=False, missing=False):
         for name in ("first", "previous"):
@@ -1368,6 +1382,7 @@ class HistoryWindow(tk.Toplevel):
                         self._display(*snapshot)
                 elif kind == "deleted":
                     self._selection_after_deletion(result.get("paths", []))
+                    # The refresh below reads the author gallery again too.
                     self.completion_text = result.get("message") or "파일 처리를 마쳤습니다."
                     if result.get("recycled"):
                         self.completion_text += (" 보낸 파일은 ‘사라진 파일’의 ‘숨긴 파일도 보기’에서 볼 수 있습니다."
@@ -2475,29 +2490,26 @@ class HistoryWindow(tk.Toplevel):
         row = self.sample_rows.get(key)
         if row is None:
             return "break"
-        self.sample_view.select(key)
+        # Right-click on one of several chosen tiles keeps the whole selection.
+        if key not in self.sample_view.selected_keys:
+            self.sample_view.select(key)
+        self._update_sample_actions()
         # Snapshot this row; a later author selection must not change the target.
         value, tweet, author = row.get("path"), str(row.get("tweet_id") or ""), self._sample_author or ""
+        chosen = self._selected_samples()
         return self._post_context(event, [
             ("파일 열기", lambda: self._open_path(value), bool(value)),
             ("트윗 열기", lambda: webbrowser.open(f"https://x.com/i/web/status/{tweet}"), tweet.isdigit()),
             ("파일 경로 복사", lambda: self._copy_text(value), bool(value)),
-            ("이 작성자 파일 전체 보기", lambda: self.set_author(author), bool(_HANDLE.fullmatch(author)))])
+            ("이 작성자 파일 전체 보기", lambda: self.set_author(author), bool(_HANDLE.fullmatch(author))),
+            ("휴지통으로 보내기" + (f" ({len(chosen):,}개)" if len(chosen) > 1 else ""),
+             lambda: self.start_deletion(chosen), not self.sample_delete_button.instate(["disabled"]))])
 
     def _post_context(self, event, commands):
-        if self._context_menu is not None:
-            self._context_menu.destroy()
-        palette = theme.DARK if theme.mode(self) == "dark" else theme.LIGHT
-        menu = self._context_menu = tk.Menu(self, tearoff=False, font=theme.SMALL,
-                                            background=palette["CARD"], foreground=palette["INK"],
-                                            activebackground=palette["BLUE"], activeforeground=palette["PRIMARY_INK"],
-                                            disabledforeground=palette["DISABLED"])
-        for label, callback, enabled in commands:
-            menu.add_command(label=label, command=callback, state="normal" if enabled else "disabled")
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+        from .popup_menu import PopupMenu
+        if self._context_menu is not None and self._context_menu.winfo_exists():
+            self._context_menu.close()
+        self._context_menu = PopupMenu(self, commands, event.x_root, event.y_root)
         return "break"
 
     def _copy_text(self, value):
@@ -2516,11 +2528,15 @@ class HistoryWindow(tk.Toplevel):
         return self.select_all_files()
 
     def _file_delete_key(self, event):
-        if self.tabs.index("current") != 0 or event.widget.winfo_class() in {
+        tab = self.tabs.index("current")
+        if tab not in {0, 2} or event.widget.winfo_class() in {
             "Entry", "TEntry", "Text", "TCombobox", "Spinbox", "TSpinbox"
         }:
             return
-        self.start_deletion()
+        if tab == 2:
+            self.delete_samples()
+        else:
+            self.start_deletion()
         return "break"
 
     def _local_context_valid(self, account, location, generation):
@@ -2528,8 +2544,16 @@ class HistoryWindow(tk.Toplevel):
                     or generation != self.generation or location != self.current_storage
                     or account != self.current_account)
 
-    def start_deletion(self):
-        files = [dict(row) for row in self._selected_files()]
+    def start_deletion(self, rows=None):
+        """Recycle the chosen files of the list/gallery, or the given rows."""
+        if rows is None:
+            files = [dict(row) for row in self._selected_files()]
+        else:
+            unique = {}
+            for row in rows:
+                if row and row.get("path"):
+                    unique.setdefault(self._path_key(row["path"]), dict(row))
+            files = list(unique.values())
         if self._destroyed or self.closing or self.busy or self.current_storage is None or not files:
             return
         if self._offline_blocked("휴지통으로 보내기"):
@@ -2684,7 +2708,9 @@ class HistoryWindow(tk.Toplevel):
             self._sample_token += 1
             self._sample_author = None
             self.sample_rows = {}
+            self._sample_list, self._sample_shown = [], 0
             self.sample_view.show([], lambda paths: set(), empty_text="")
+            self.sample_more_button.pack_forget()
             self._authors_stale = True
             self._show_stale_authors()
         self._draw_months()
@@ -2722,13 +2748,19 @@ class HistoryWindow(tk.Toplevel):
         if row is None or not _HANDLE.fullmatch(row["author"]) or self.current_storage is None:
             self._sample_author = None
             self.sample_rows = {}
+            self._sample_list, self._sample_shown = [], 0
             self.sample_view.show([], lambda paths: set(), empty_text="")
             self.sample_text.set(SAMPLE_HINT)
+            self.sample_more_button.pack_forget()
+            self._update_sample_actions()
             return
         self._sample_author = row["author"]
         self.sample_rows = {}
+        self._sample_list, self._sample_shown = [], 0
         self.sample_view.show([], lambda paths: set(), empty_text="불러오는 중…")
-        self.sample_text.set(f"@{row['author']} · 최근 게시물을 불러오는 중…")
+        self.sample_text.set(f"@{row['author']} · 파일을 불러오는 중…")
+        self.sample_more_button.pack_forget()
+        self._update_sample_actions()
         threading.Thread(target=partial(HistoryWindow._samples_worker, self._sample_results),
                          args=(self._sample_token, self.current_storage, row["author"]), daemon=True).start()
 
@@ -2737,7 +2769,7 @@ class HistoryWindow(tk.Toplevel):
         store = None
         try:
             store = HistoryWindow._store(location)
-            results.put((token, author, store.author_samples(author, 8)))
+            results.put((token, author, store.author_samples(author, None)))
         except Exception:
             results.put((token, author, None))
         finally:
@@ -2756,20 +2788,60 @@ class HistoryWindow(tk.Toplevel):
                 self._sample_author = None
                 self.sample_text.set(f"@{author} · 사진을 불러오지 못했습니다.")
                 continue
-            self.sample_rows = {str(index): row for index, row in enumerate(samples)}
-            location = self.current_storage
-
-            def permitted(paths):
-                if location is None:
-                    return set()
-                with closing(HistoryWindow._store(location)) as store:
-                    return {path for path in paths if store.is_media_path(path)}
-
-            self.sample_view.show(list(self.sample_rows.items()), permitted, empty_text="저장된 파일이 없습니다.",
-                                  **self._preview_hooks())
-            self.sample_text.set(f"@{author} · 최근 게시물 {len(samples)}개 · 두 번 클릭하면 열립니다"
-                                 if samples else f"@{author} · 지금 있는 파일이 없습니다.")
+            self._sample_list = samples
+            self._sample_shown = min(len(samples), SAMPLE_STEP)
+            self._render_samples()
         self.sample_view.poll()
+
+    def _render_samples(self):
+        author, samples = self._sample_author or "", self._sample_list
+        shown = self._sample_shown
+        self.sample_rows = {str(index): row for index, row in enumerate(samples[:shown])}
+        location = self.current_storage
+
+        def permitted(paths):
+            if location is None:
+                return set()
+            with closing(HistoryWindow._store(location)) as store:
+                return {path for path in paths if store.is_media_path(path)}
+
+        self.sample_view.show(list(self.sample_rows.items()), permitted, empty_text="저장된 파일이 없습니다.",
+                              **self._preview_hooks())
+        if not samples:
+            self.sample_text.set(f"@{author} · 지금 있는 파일이 없습니다.")
+        else:
+            self.sample_text.set(f"@{author} · 파일 {len(samples):,}개"
+                                 + (f" 중 최근 {shown:,}개" if shown < len(samples) else "")
+                                 + " · 끌어서 여러 개 고르기 · 두 번 클릭하면 열립니다")
+        rest = len(samples) - shown
+        if rest > 0:
+            self.sample_more_button.configure(text=f"더 보기 ({min(rest, SAMPLE_STEP):,}개)")
+            self.sample_more_button.pack(side="left", padx=(8, 0))
+        else:
+            self.sample_more_button.pack_forget()
+        self._update_sample_actions()
+
+    def more_samples(self):
+        """Add the next tiles below the ones already shown."""
+        if self._sample_shown < len(self._sample_list):
+            self._sample_shown = min(len(self._sample_list), self._sample_shown + SAMPLE_STEP)
+            self._render_samples()
+
+    def _selected_samples(self):
+        return [self.sample_rows[key] for key in self.sample_view.selected_keys if key in self.sample_rows]
+
+    def _update_sample_actions(self):
+        chosen = self._selected_samples()
+        ready = not self.busy and self.current_storage is not None and not self.media_offline
+        downloading = bool(self.is_downloading()) if self.is_downloading else False
+        self.sample_delete_button.configure(
+            text="휴지통으로 보내기" + (f" ({len(chosen):,}개)" if len(chosen) > 1 else ""),
+            state="normal" if ready and chosen and not downloading else "disabled")
+
+    def delete_samples(self):
+        chosen = self._selected_samples()
+        if chosen:
+            self.start_deletion(chosen)
 
     def _open_sample(self, key):
         row = self.sample_rows.get(key)

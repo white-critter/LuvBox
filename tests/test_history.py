@@ -193,6 +193,11 @@ class HistoryTests(unittest.TestCase):
             self.store._db.execute("UPDATE media SET path='' WHERE tweet_id='110'")  # a deleted file
         samples = self.store.author_samples("alice", 4)
         self.assertEqual([row["tweet_id"] for row in samples], ["111", "109", "108", "107"])
+        every = self.store.author_samples("alice", None)
+        self.assertEqual([row["tweet_id"] for row in every], [str(index) for index in range(111, 99, -1) if index != 110])
+        for bad_limit in (0, 101, True, "8"):
+            with self.subTest(limit=bad_limit), self.assertRaises(HistoryError):
+                self.store.author_samples("alice", bad_limit)
         self.assertEqual(self.store.author_samples("nobody"), [])
         for bad in ("", "x" * 16, "bad name"):
             with self.subTest(bad=bad), self.assertRaises(HistoryError):
