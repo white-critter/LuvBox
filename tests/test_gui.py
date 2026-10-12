@@ -7,9 +7,10 @@ from pathlib import Path
 import tempfile
 import threading
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
 import weakref
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from xlikesaver.gui import App, AUTH_MODES, worker_command
 
@@ -998,6 +999,32 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.app.login_cancel.is_set())
         self.assertTrue(self.app.closing)
         after.assert_called_once_with(150, self.app.close)
+
+    def test_app_close_stops_deletion_and_waits_for_its_result_before_destroying_tk(self):
+        library = SimpleNamespace(winfo_exists=lambda: True, metadata_active=False, delete_active=True,
+                                  choice_active=False, repair_active=False, stop_metadata=Mock())
+        self.app.history_window = library
+        with patch.object(self.root, "destroy") as destroy, patch.object(self.root, "after") as after:
+            self.app.close()
+            library.stop_metadata.assert_called_once()
+            destroy.assert_not_called()
+            after.assert_called_once_with(150, self.app.close)
+            self.assertTrue(self.app.closing)
+            library.delete_active = False
+            self.app.close()
+            destroy.assert_called_once()
+
+    def test_library_deletion_blocks_a_new_download_before_login_or_worker_creation(self):
+        self.app.history_window = SimpleNamespace(winfo_exists=lambda: True, metadata_active=False,
+                                                  delete_active=True, choice_active=False, repair_active=False)
+        with patch("xlikesaver.gui.threading.Thread") as worker, \
+                patch("xlikesaver.gui.dialogs.showinfo") as info:
+            self.assertFalse(self.app.start())
+        worker.assert_not_called()
+        info.assert_called_once()
+        self.assertEqual(info.call_args.args[0], "기록 화면 작업 중")
+        self.assertFalse(self.app.running)
+        self.assertIsNone(self.app.connect_window)
 
     def test_token_connection_masks_and_clears_input_without_launching_worker(self):
         self.app.saved, self.app.skipped = 7, 3

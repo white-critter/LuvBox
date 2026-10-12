@@ -1,6 +1,8 @@
-"""File selection and read-only previous deletion records, using temporary media."""
+"""File selection, deletion confirmation and journals, using temporary media."""
 
 import json
+import queue
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -8,6 +10,8 @@ from unittest.mock import patch
 import uuid
 
 from xlikesaver import theme
+from xlikesaver.history_gui import HistoryWindow
+from xlikesaver.recycling import file_signature
 from tests import test_history_gui as history_tests
 
 
@@ -99,18 +103,18 @@ class FileSelectionGuiTests(unittest.TestCase):
         self.window.tabs.select(4)
         self.assertIsNone(self.window._file_select_all_key(event))
 
-    def test_selected_files_have_no_delete_action_and_delete_key_preserves_media(self):
+    def test_delete_action_asks_in_list_and_gallery_and_cancel_preserves_media(self):
         store = self.prepare()
         self.select(100, 101)
         before = {Path(row["path"]): (Path(row["path"]).read_bytes(), Path(row["path"]).stat().st_mtime_ns)
                   for row in store.records()}
         records = store.records()
-        self.assertFalse(self.window.bind("<Delete>"))
+        self.assertTrue(self.window.bind("<Delete>"))
         labels = {button.cget("text") for button in self.window.file_selection_actions.winfo_children()}
-        self.assertFalse(any("삭제" in label for label in labels))
+        self.assertIn("휴지통으로 보내기", labels)
         commands = {label: callback for label, callback, _enabled in self.window._file_menu_commands()}
         self.assertEqual(set(commands), {"파일 열기", "트윗 열기", "이 작성자 파일 보기",
-                                         "선택한 파일 경로 복사", "이 페이지 모두 선택", "선택 해제"})
+                                         "선택한 파일 경로 복사", "이 페이지 모두 선택", "선택 해제", "휴지통으로 보내기"})
         self.show()
         for view in ("table", "grid"):
             with self.subTest(view=view):
@@ -118,17 +122,180 @@ class FileSelectionGuiTests(unittest.TestCase):
                 self.root.update()
                 target = self.window.tree if view == "table" else self.window.grid_view.canvas
                 target.focus_force()
-                with patch("xlikesaver.history_gui.dialogs.askyesno") as confirmation, \
+                with patch("xlikesaver.history_gui.dialogs.confirm_delete", return_value=None) as confirmation, \
                         patch("xlikesaver.history_gui.threading.Thread") as thread:
                     target.event_generate("<Delete>")
                     self.root.update()
-                confirmation.assert_not_called()
+                confirmation.assert_called_once()
                 thread.assert_not_called()
                 self.assertEqual(store.records(), records)
                 self.assertEqual(store.deletion_page()["total"], 0)
                 self.assertEqual(store.ignored_media(), set())
                 for path, expected in before.items():
                     self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), expected)
+
+    def test_delete_confirmation_deduplicates_files_and_keeps_unchecked_choice(self):
+        store = self.prepare(1)
+        source = self.account / "100_1.jpg"
+        store.record_media("author", {"tweet_id": "100", "num": 1, "type": "photo"}, source)
+        self.load()
+        self.window.select_all_files()
+        expected = file_signature(source)
+        with patch("xlikesaver.history_gui.dialogs.confirm_delete", return_value=False) as confirm, \
+                patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.start_deletion()
+        confirm.assert_called_once_with(1, source.stat().st_size, [source.name], parent=self.window)
+        generation, location, files, keep = thread.call_args.kwargs["args"]
+        self.assertEqual((generation, location, keep), (self.window.generation, self.account, False))
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0]["_delete_signature"], expected)
+        self.assertNotIn("_delete_signature", next(iter(self.window.rows.values())))
+        self.assertTrue(self.window.busy and self.window.delete_active)
+        self.assertTrue(self.window.delete_button.instate(["disabled"]))
+        self.assertEqual(thread.call_args.kwargs["target"].func, HistoryWindow._delete_worker)
+        self.assertEqual(thread.call_args.kwargs["target"].args, (self.window.results, self.window.delete_stop))
+        thread.return_value.start.assert_called_once()
+
+    def test_delete_key_leaves_entries_and_other_tabs_alone(self):
+        self.prepare()
+        self.select(100)
+        with patch.object(self.window, "start_deletion") as start:
+            self.assertIsNone(self.window._file_delete_key(SimpleNamespace(widget=self.window.search_entry)))
+            self.window.tabs.select(1)
+            self.assertIsNone(self.window._file_delete_key(SimpleNamespace(widget=self.window.tree)))
+            start.assert_not_called()
+            self.window.tabs.select(0)
+            self.assertEqual(self.window._file_delete_key(SimpleNamespace(widget=self.window.tree)), "break")
+            start.assert_called_once()
+
+    def test_delete_waits_during_download_or_media_folder_disconnect(self):
+        self.prepare()
+        self.select(100)
+        for offline, downloading in ((False, True), (True, False)):
+            with self.subTest(offline=offline, downloading=downloading), \
+                    patch("xlikesaver.history_gui.dialogs.showinfo") as notice, \
+                    patch("xlikesaver.history_gui.dialogs.confirm_delete") as confirm, \
+                    patch("xlikesaver.history_gui.threading.Thread") as thread:
+                self.window.media_offline = offline
+                self.window.is_downloading = lambda: downloading
+                self.window._update_file_actions()
+                self.assertTrue(self.window.delete_button.instate(["disabled"]))
+                self.window.start_deletion()
+                notice.assert_called_once()
+                confirm.assert_not_called()
+                thread.assert_not_called()
+        self.window.media_offline = False
+        self.window.is_downloading = lambda: False
+
+    def test_delete_rejects_main_form_change_before_confirmation(self):
+        self.prepare()
+        self.select(100)
+        with patch.object(self.window, "get_location", return_value=("other", self.account)), \
+                patch("xlikesaver.history_gui.dialogs.showinfo") as notice, \
+                patch("xlikesaver.history_gui.dialogs.confirm_delete") as confirm, \
+                patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.start_deletion()
+        notice.assert_called_once()
+        confirm.assert_not_called()
+        thread.assert_not_called()
+
+    def test_delete_rechecks_generation_account_folder_and_busy_state_after_confirmation(self):
+        self.prepare()
+        self.select(100)
+        old_account, old_storage = self.window.current_account, self.window.current_storage
+        cases = ("generation", "account", "folder", "download", "busy", "closing", "offline", "main form")
+        for case in cases:
+            def confirm(*_args, **_kwargs):
+                if case == "generation":
+                    self.window.generation += 1
+                elif case == "account":
+                    self.window.current_account = "other"
+                elif case == "folder":
+                    self.window.current_storage = self.account / "elsewhere"
+                elif case == "download":
+                    self.window.is_downloading = lambda: True
+                elif case == "busy":
+                    self.window.busy = True
+                elif case == "closing":
+                    self.window.closing = True
+                elif case == "offline":
+                    self.window.media_offline = True
+                else:
+                    self.window.get_location = lambda: ("other", self.account)
+                return True
+            with self.subTest(case=case), patch("xlikesaver.history_gui.dialogs.confirm_delete", side_effect=confirm), \
+                    patch("xlikesaver.history_gui.dialogs.showinfo"), \
+                    patch("xlikesaver.history_gui.threading.Thread") as thread:
+                self.window.start_deletion()
+                thread.assert_not_called()
+                self.assertFalse(self.window.delete_active)
+            self.window.current_account, self.window.current_storage = old_account, old_storage
+            self.window.get_location = lambda: ("offline", self.account)
+            self.window.is_downloading = lambda: False
+            self.window.busy = self.window.closing = self.window.media_offline = False
+
+    def test_delete_captures_original_file_identity_before_confirmation(self):
+        self.prepare(1)
+        self.select(100)
+        source = self.account / "100_1.jpg"
+        expected = file_signature(source)
+        def changed(*_args, **_kwargs):
+            source.write_bytes(b"changed while the confirmation is open")
+            return True
+        with patch("xlikesaver.history_gui.dialogs.confirm_delete", side_effect=changed), \
+                patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.start_deletion()
+        [row] = thread.call_args.kwargs["args"][2]
+        self.assertEqual(row["_delete_signature"], expected)
+        self.assertNotEqual(file_signature(source), expected)
+
+    def test_missing_file_that_reappears_during_confirmation_is_not_a_new_target(self):
+        self.prepare(1)
+        self.select(100)
+        source = self.account / "100_1.jpg"
+        source.unlink()  # Only this test's temporary fixture.
+        def appeared(*_args, **_kwargs):
+            source.write_bytes(b"replacement file")
+            return True
+        with patch("xlikesaver.history_gui.dialogs.confirm_delete", side_effect=appeared), \
+                patch("xlikesaver.history_gui.threading.Thread") as thread:
+            self.window.start_deletion()
+        [row] = thread.call_args.kwargs["args"][2]
+        self.assertEqual(row["_delete_signature"], (0, 0, 0, 0))
+        self.assertNotEqual(file_signature(source), row["_delete_signature"])
+
+    def test_delete_progress_does_not_release_controls_and_done_keeps_next_selection(self):
+        self.prepare(3)
+        selected = self.select(100)
+        removed_path = self.window.rows[selected[0]]["path"]
+        self.window.busy = self.window.delete_active = True
+        self.window.source_stop_button.configure(text="휴지통 보내기 중단", state="normal")
+        self.window.results.put((self.window.generation - 1, "deleted", {"paths": [removed_path]}))
+        self.window.results.put((self.window.generation, "delete-progress", {"message": "완료 1개"}))
+        self.window._poll()
+        self.assertTrue(self.window.busy and self.window.delete_active)
+        self.assertEqual(self.window.status_text.get(), "완료 1개")
+        self.window.results.put((self.window.generation, "deleted", {"paths": [removed_path], "message": "처리 완료"}))
+        with patch.object(self.window, "refresh") as refresh:
+            self.window._poll()
+        self.assertFalse(self.window.busy or self.window.delete_active)
+        self.assertEqual(self.window.completion_text, "처리 완료")
+        self.assertEqual(self.window.deletion_page, 0)
+        self.assertIsNotNone(self.window._delete_next_identity)
+        self.assertEqual(self.window._delete_next_identity[1], "101")
+        refresh.assert_called_once_with()
+
+    def test_delete_close_waits_for_worker_completion_and_signals_stop(self):
+        self.prepare()
+        self.window.busy = self.window.delete_active = True
+        with patch.object(self.window, "destroy") as destroy:
+            self.window.close()
+            self.assertTrue(self.window.closing and self.window.delete_stop.is_set())
+            destroy.assert_not_called()
+            self.window.results.put((self.window.generation, "deleted", {"paths": []}))
+            self.window._poll()
+            destroy.assert_called_once()
+        self.window.closing = False
 
     def test_previous_deletion_policy_is_only_reported_applied_after_verified_recycle(self):
         self.prepare(1)
@@ -142,10 +309,10 @@ class FileSelectionGuiTests(unittest.TestCase):
         self.window.deletion_tree.selection_set("1")
         self.window.select_deletion()
         self.assertIn("요청한 설정  이 계정에서 다시 받지 않기", self.window.deletion_detail.get())
-        self.assertEqual(self.window.tabs.tab(self.window.deletion_view, "text"), "이전 삭제 기록 5")
+        self.assertEqual(self.window.tabs.tab(self.window.deletion_view, "text"), "삭제 기록 5")
 
     def journal(self, store, row, status="failed", *, remove=False, keep=True):
-        """Represent an existing journal, without using the retired deletion worker."""
+        """Represent an existing journal without touching the Windows Recycle Bin."""
         source = Path(row["path"])
         stat = source.stat()
         signature = tuple(getattr(stat, name) for name in ("st_dev", "st_ino", "st_size", "st_mtime_ns"))

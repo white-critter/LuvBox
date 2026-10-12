@@ -495,10 +495,10 @@ class HistoryGuiTests(unittest.TestCase):
         with patch("xlikesaver.history_gui.webbrowser.open") as open_tweet:
             commands["트윗 열기"][0]()
         open_tweet.assert_called_once_with("https://x.com/i/web/status/"+self.window.rows[keys[1]]["tweet_id"])
-        self.assertNotIn("선택한 파일 삭제", commands)
+        self.assertTrue(commands["휴지통으로 보내기"][1])
         self.window.is_downloading = lambda:True
         commands = {label:enabled for label,_,enabled in self.window._file_menu_commands()}
-        self.assertNotIn("선택한 파일 삭제", commands)
+        self.assertFalse(commands["휴지통으로 보내기"])
         with patch.object(self.window,"_post_context"):
             self.window._gallery_context(event,keys[2])
         self.assertEqual(self.window.tree.selection(),(keys[2],))
@@ -1703,6 +1703,8 @@ class LocalChangeWorkerTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
+        self.delete_fixture = root / "offline-delete.jpg"
+        self.delete_fixture.write_bytes(b"offline deletion test fixture")
         self.location = StoragePaths(root, root, root / "records", root / "legacy", "offline", False,
                                      root / ".xlikesaver" / "offline")
         self.store = Mock(media_roots=[root])
@@ -1717,6 +1719,11 @@ class LocalChangeWorkerTests(unittest.TestCase):
             patch("xlikesaver.metadata.persistent", side_effect=lambda: nullcontext()),
             patch("xlikesaver.metadata.available", return_value=False),
             patch("xlikesaver.recovery.repair_history", return_value={"counts": {}, "kept": root / "kept"}),
+            patch("xlikesaver.deletion.HistoryStore.for_storage", return_value=self.store),
+            patch("xlikesaver.deletion.OutputGuard", return_value=self.output_guard),
+            patch("xlikesaver.deletion.AccountGuard", return_value=self.account_guard),
+            patch("xlikesaver.deletion.backup_catalog", return_value=root / "backup"),
+            patch("xlikesaver.deletion.recycle_file", return_value=str(root / "mock-bin")),
         ]
         for patcher in patchers:
             patcher.start()
@@ -1730,9 +1737,13 @@ class LocalChangeWorkerTests(unittest.TestCase):
             HistoryWindow._convert_worker(results, stop, 23, self.location, "original", 200)
         elif operation == "repaired":
             HistoryWindow._repair_worker(results, 23, self.location)
+        elif operation == "deleted":
+            HistoryWindow._delete_worker(results, stop, 23, self.location,
+                                         [{"path": str(self.delete_fixture), "tweet_id": "100", "num": 1,
+                                           "media_type": "photo", "folder_mode": "flat"}], True)
 
     def test_completion_waits_for_snapshot_and_releases_locks_before_queueing(self):
-        for operation in ("backfilled", "converted", "repaired"):
+        for operation in ("backfilled", "converted", "repaired", "deleted"):
             with self.subTest(operation=operation):
                 self.store.reset_mock()
                 self.account_guard.reset_mock()
@@ -1743,6 +1754,8 @@ class LocalChangeWorkerTests(unittest.TestCase):
                 put = results.put
 
                 def observe_terminal(value):
+                    if value[1] == "delete-progress":
+                        return
                     terminal_state.append((self.account_guard.close.called, self.output_guard.close.called))
                     put(value)
 
@@ -1759,7 +1772,8 @@ class LocalChangeWorkerTests(unittest.TestCase):
                     except BaseException as exc:
                         errors.append(exc)
 
-                target = "xlikesaver.history_gui._publish"
+                target = ("xlikesaver.deletion.publish_snapshot" if operation == "deleted"
+                          else "xlikesaver.history_gui._publish")
                 with patch(target, side_effect=publish):
                     thread = threading.Thread(target=run)
                     thread.start()

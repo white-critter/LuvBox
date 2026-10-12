@@ -229,10 +229,54 @@ def main() -> int:
                     assert store.summary()["missing_files"] == 0
                     assert store.summary()["files"] == 2
                     from xlikesaver.history_gui import HistoryWindow
-                    assert not hasattr(HistoryWindow, "start_deletion")
+                    assert hasattr(HistoryWindow, "start_deletion")
                     # Damaged-database salvage reads the catalog page by page.
                     from xlikesaver.recovery import salvage
                     assert len(salvage(store.path)["media"]["rows"]) == 4
+                finally:
+                    store.close()
+                # Exercise the protected deletion and restore bookkeeping with
+                # a temporary GIF. Substitute only the native move: a self-test
+                # must never touch the user's actual Windows Recycle Bin.
+                import threading
+                from xlikesaver import deletion, recycling
+                disposable_gif = relocated.media_dir / "400_animated_gif_1.gif"
+                disposable_gif.write_bytes(animated.read_bytes())
+                store = HistoryStore.for_storage(relocated)
+                try:
+                    store.record_media("flat", {"tweet_id": "400", "num": 1, "type": "animated_gif"}, disposable_gif)
+                    chosen = next(row for row in store.records() if row["tweet_id"] == "400")
+                finally:
+                    store.close()
+                chosen["_delete_signature"] = recycling.file_signature(disposable_gif)
+                parked = Path(folder) / "simulated-recycled-selftest.gif"
+                original_recycle = deletion.recycle_file
+
+                def simulate_recycle(path, *, expected):
+                    assert Path(path) == disposable_gif
+                    assert recycling.file_signature(path) == expected
+                    Path(path).rename(parked)
+                    return str(parked)
+
+                deletion.recycle_file = simulate_recycle
+                try:
+                    outcome = deletion.run_deletion(relocated, [chosen], True, threading.Event(), lambda _: None)
+                finally:
+                    deletion.recycle_file = original_recycle
+                assert outcome["recycled"] == 1 and outcome["failed"] == 0
+                assert not disposable_gif.exists() and parked.is_file()
+                store = HistoryStore.for_storage(relocated)
+                try:
+                    after = next(row for row in store.records() if row["tweet_id"] == "400")
+                    assert after["path"] == "" and after["last_path"] == str(disposable_gif)
+                    assert after["saved_at"] == chosen["saved_at"]
+                    assert ("400", 1, "animated_gif") in store.ignored_media()
+                    assert store.deletion_page()["rows"][0]["status"] == "recycled"
+                    parked.rename(disposable_gif)
+                    store.import_legacy(refresh=True)
+                    restored = next(row for row in store.records() if row["tweet_id"] == "400")
+                    assert restored["path"] == str(disposable_gif)
+                    assert ("400", 1, "animated_gif") not in store.ignored_media()
                 finally:
                     store.close()
                 # Exercise the actual child executable under the frozen
@@ -259,7 +303,8 @@ def main() -> int:
                       "statistics": "authors-and-months", "catalog_recovery": "salvage-verified",
                       "records": "local-with-folder-snapshot", "progress": "rounded-borderless",
                       "missing_files": "listed-keep-deleted-or-retry-by-tweet",
-                      "external_files": "missing-and-restored-without-deletion-controls",
+                      "external_files": "missing-and-restored",
+                      "library_deletion": "mock-recycle-journal-and-gif-restoration",
                       "missing_previews": "webp-kept-on-this-pc",
                       "workspace": "sidebar-scrollable-dashboard-three-settings-tabs",
                       "tk": tk.TkVersion, "python": sys.version.split()[0],

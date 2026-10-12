@@ -1129,10 +1129,14 @@ class App:
         ("기록 · 통계", (
             "받은 파일을 목록이나 갤러리로 보고, 작성자·내용으로 찾습니다.",
             "끌어서 여러 개를 고르거나 ‘여러 개 선택’을 켜고 하나씩 클릭합니다.",
+            "고른 파일은 ‘휴지통으로 보내기’ 버튼이나 우클릭 메뉴로 정리합니다. 개수·용량을 확인한 뒤 진행합니다.",
+            "처리 결과는 ‘삭제 기록’에 남습니다. 휴지통을 사용할 수 없는 위치는 건너뜁니다.",
             "통계에서 작성자를 누르면 그 작성자의 최근 사진이 나옵니다.",
         ), None),
         ("파일을 지웠을 때", (
-            "파일은 탐색기에서 지웁니다. 기록 창에서 ‘새로고침’을 누르면 ‘사라진 파일’에 모입니다.",
+            "탐색기에서 직접 지운 파일도 기록 창의 ‘새로고침’으로 ‘사라진 파일’에 반영됩니다.",
+            "휴지통으로 보낼 때 ‘이 계정에서 다시 받지 않기’는 기본으로 켜져 있습니다. 필요하면 ‘숨긴 파일도 보기’에서 다시 받습니다.",
+            "Windows 휴지통에서 원래 위치로 복원한 뒤 ‘새로고침’을 누르면 다시 표시됩니다.",
             "지운 파일은 자동으로 다시 받지 않습니다. 필요하면 골라서 ‘다시 받기’를 누릅니다.",
             "‘사라진 파일’에서 고르면 작은 미리보기와 원래 폴더를 볼 수 있습니다.",
             "저장 폴더를 옮겼다면 메인 화면의 ‘저장 폴더’에서 새 위치를 고릅니다.",
@@ -1763,7 +1767,7 @@ class App:
         """A library job that writes records or files has not finished yet."""
         window = self.history_window
         return bool(window is not None and window.winfo_exists() and (
-            window.metadata_active or window.choice_active or window.repair_active))
+            window.metadata_active or window.delete_active or window.choice_active or window.repair_active))
 
     def close(self):
         if self.login_busy:
@@ -1779,7 +1783,7 @@ class App:
             self.stop()
         elif self._library_job_active():
             self.closing = True
-            if self.history_window.metadata_active:
+            if self.history_window.metadata_active or self.history_window.delete_active:
                 self.history_window.stop_metadata()
             elif self.history_window.repair_active:
                 self.status.set("기록 복구를 마친 뒤 종료합니다…")
