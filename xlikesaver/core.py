@@ -576,7 +576,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     from gallery_dl import config, exception, job, output, util
     from gallery_dl.extractor import common
     from requests.exceptions import RequestException
-    from .metadata import available, embed_source, persistent
+    from .metadata import available, embed_source, failure_message, persistent
 
     saved = skipped = size_skipped = review_skipped = review_never = 0
     metadata_failed = 0
@@ -699,6 +699,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         same_author = author == old_author and author_id == old_author_id
         author_done = not known_author or (previous_author_status == "embedded" and same_author)
         recording_required = False
+        metadata_reason = "unknown"
         if previous_status == "unsupported" or (previous_status == "embedded" and author_done):
             metadata_status = previous_status
             author_status = previous_author_status if known_author else "unknown"
@@ -715,6 +716,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             recording_required = True
             try:
                 result = embed_source(media_path, str(kwdict["tweet_id"]), author=author, author_id=author_id)
+                metadata_reason = result.get("reason", "unknown")
                 metadata_status = result.get("status")
                 if metadata_status not in {"embedded", "failed", "unsupported"}:
                     metadata_status = "failed"
@@ -726,6 +728,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 author_status = "error" if known_author else "unknown"
         else:
             recording_required = True
+            metadata_reason = "unavailable"
             metadata_status = "failed"
             author_status = "error" if known_author else "unknown"
         kwdict["_xlikesaver_metadata_status"] = metadata_status
@@ -736,7 +739,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             metadata_failed += 1
             if not metadata_warned:
                 metadata_warned = True
-                emit({"type": "log", "level": "warning", "message": _METADATA_ERROR,
+                emit({"type": "log", "level": "warning",
+                      "message": f"{_METADATA_ERROR} {failure_message(metadata_reason)}",
                       **_media_details(kwdict)})
 
     class SizeLimit(exception.ControlException):

@@ -57,6 +57,20 @@ def main() -> int:
             assert (asset_directory() / "luvbox.png").is_file()
             assert install(root)
             root.update_idletasks()
+            if os.name == "nt":
+                import ctypes
+                user = ctypes.WinDLL("user32")
+                user.SendMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
+                user.SendMessageW.restype = ctypes.c_ssize_t
+                get_class = user.GetClassLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8 else user.GetClassLongW
+                get_class.argtypes = (ctypes.c_void_p, ctypes.c_int)
+                get_class.restype = ctypes.c_size_t
+                handle = int(root.wm_frame(), 16)
+                for slot, class_slot in ((1, -14), (0, -34)):
+                    native = user.SendMessageW(handle, 0x007F, slot, 0)
+                    assert native and native == get_class(handle, class_slot)
+                from xlikesaver.app_icon import _taskbar_properties, _taskbar_values
+                assert _taskbar_properties(handle, None) == _taskbar_values(str(asset_directory() / "luvbox.ico"))
             from xlikesaver import fonts, theme
             actual_font = tkfont.Font(root=root, font=theme.BODY).actual("family")
             assert actual_font == fonts.FAMILY
@@ -328,6 +342,7 @@ def main() -> int:
                 assert final["saved"] == 0
             report = {"ok": True, "version": __version__, "gallery_dl": version.__version__,
                       "icon": "transparent-multisize-default",
+                      "taskbar_icon": "native-window-class-and-explicit-shell-icon",
                       "font": actual_font, "record_pagination": "queried-and-clamped",
                       "appearance": "light-dark-live-switch", "theme_images": theme_images,
                       "local_previews": "photo-video-gif",

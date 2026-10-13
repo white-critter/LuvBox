@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -44,6 +45,90 @@ _MESSAGES = {
     "failed": "원본 트윗 주소를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다.",
     "unsupported": "이 파일 형식은 원본 트윗 주소 기록을 지원하지 않습니다.",
 }
+_FAILURE_MESSAGES = {
+    "invalid": "파일 정보나 트윗 주소가 올바르지 않습니다.",
+    "unavailable": "출처 기록 도구를 찾지 못했습니다. 프로그램 파일을 다시 확인해 주세요.",
+    "missing": "파일이 사라졌거나 현재 위치에서 읽을 수 없습니다.",
+    "permission": "파일이나 폴더에 접근할 권한이 없습니다. 권한과 읽기 전용 설정을 확인해 주세요.",
+    "busy": "다른 프로그램이 파일을 사용 중입니다. 잠시 뒤 다시 기록해 주세요.",
+    "changed": "기록하는 동안 파일이 바뀌어 교체를 중단했습니다.",
+    "copy": "기록용 임시 복사본을 만들지 못했습니다. 폴더 권한과 남은 공간을 확인해 주세요.",
+    "read": "파일 안의 기존 기록을 읽지 못했습니다. 파일 상태를 확인해 주세요.",
+    "write": "파일 형식이나 기존 메타데이터 때문에 출처를 기록하지 못했습니다.",
+    "replace": "검증한 파일을 원본 위치로 옮기지 못했습니다. 저장 폴더 상태와 남은 공간을 확인해 주세요.",
+    "verification": "새로 기록한 출처·작성자를 확인하지 못해 원본 교체를 중단했습니다.",
+    "timeout": "출처 기록 도구의 응답을 기다리다 중단했습니다. 잠시 뒤 다시 기록해 주세요.",
+    "unknown": "출처 기록을 완료하지 못했습니다. 잠시 뒤 다시 기록해 주세요.",
+    "unsupported": _MESSAGES["unsupported"],
+}
+_REPLACE_WAIT_SECONDS = 1.0
+_REPLACE_RETRY_SECONDS = 0.1
+
+
+def failure_message(reason) -> str:
+    """Translate only fixed reason codes; never display external tool errors."""
+    return _FAILURE_MESSAGES.get(reason, _FAILURE_MESSAGES["unknown"]) if isinstance(reason, str) else _FAILURE_MESSAGES["unknown"]
+
+
+class _MediaChanged(ValueError):
+    """The original is no longer the file whose copy was verified."""
+
+
+class _MediaBusy(OSError):
+    """A verified copy cannot replace a file still held by another program."""
+
+
+def _sharing_violation(error: OSError, target: Path) -> bool:
+    if getattr(error, "winerror", None) in {32, 33}:
+        return True
+    if os.name != "nt" or getattr(error, "winerror", None) != 5:
+        return False
+    # Windows rename/replace reports access denied when an existing handle
+    # omitted FILE_SHARE_DELETE. Read-only attributes and a non-mutating
+    # DELETE-access open distinguish ordinary permission failures. Handles
+    # opened only for attributes may permit this open yet still block rename.
+    if getattr(target.lstat(), "st_file_attributes", 0) & 1:
+        return False
+    import ctypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                  ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.CloseHandle.restype = ctypes.c_int
+    handle = kernel.CreateFileW(str(target), 0x10000, 1 | 2 | 4, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        return ctypes.get_last_error() in {32, 33}
+    kernel.CloseHandle(handle)
+    return True
+
+
+def _original_unchanged(target: Path, original) -> None:
+    current = target.lstat()
+    if (not stat.S_ISREG(current.st_mode) or
+            getattr(current, "st_reparse_tag", 0) & 0x20000000 or
+            (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) !=
+            (original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns)):
+        raise _MediaChanged("media changed")
+
+
+def _replace_verified(temporary: Path, target: Path, original, deadline: float) -> None:
+    """Wait briefly for a Windows sharing lock, rechecking the original each time."""
+    expires = min(deadline, time.monotonic() + _REPLACE_WAIT_SECONDS)
+    while True:
+        _original_unchanged(target, original)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("metadata timeout")
+        try:
+            os.replace(temporary, target)
+            return
+        except OSError as exc:
+            if not _sharing_violation(exc, target):
+                raise
+            remaining = expires - time.monotonic()
+            if remaining <= 0:
+                raise _MediaBusy("media busy") from None
+            time.sleep(min(_REPLACE_RETRY_SECONDS, remaining))
 
 
 def exiftool_path() -> Path:
@@ -465,6 +550,7 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
     """Embed tweet source and optional author, preserving original on failure."""
     url = f"https://x.com/i/web/status/{tweet_id}" if isinstance(tweet_id, str) and _ID.fullmatch(tweet_id) else ""
     status = "failed"
+    reason = "invalid"
     temporary = None
     text_files = []
     # An invalid handle or ID is treated as unknown: the author part is
@@ -479,15 +565,26 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         if target_input.suffix.lower() not in SUPPORTED_SUFFIXES:
             status = "unsupported"
             return {"status": status, "url": url, "message": _MESSAGES[status],
+                    "reason": "unsupported", "reason_message": failure_message("unsupported"),
                     "author_status": author_status, **identity}
         if target_input.is_symlink() or getattr(target_input, "is_junction", lambda: False)():
-            raise ValueError("linked media")
+            raise _MediaChanged("linked media")
+        reason = "missing"
         target = target_input.resolve(strict=True)
-        if not target.is_file() or not available():
-            raise ValueError("media or helper missing")
+        if not target.is_file():
+            raise ValueError("media missing")
+        reason = "unavailable"
+        if not available():
+            raise ValueError("helper missing")
+        reason = "read"
         original = target.stat()
+        if os.name == "nt" and getattr(original, "st_file_attributes", 0) & 1:
+            # copy2 also copies the read-only flag. Refuse before making a
+            # temporary which neither the writer nor cleanup could change.
+            raise PermissionError("read-only media")
         deadline = time.monotonic() + TIMEOUT_SECONDS
         previous_tags = _read_tags(target, deadline)
+        reason = "copy"
         fd, name = tempfile.mkstemp(prefix=".xlikesaver-source-", suffix=target.suffix, dir=target.parent)
         os.close(fd)
         temporary = Path(name)
@@ -576,9 +673,11 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                 if value not in kept_identifiers:
                     arguments.append(f"-XMP-xmp:Identifier+={value}")
                     required_tags["XMP-xmp:Identifier"].append(value)
+        reason = "write"
         result = _run(arguments + [str(temporary)], deadline)
         if result.returncode != 0:
             raise ValueError("metadata write failed")
+        reason = "verification"
         tags = _read_tags(temporary, deadline)
         if tags.get("XMP-dc:Source") != url or tags.get("XMP-dc:Description") != description_value:
             raise ValueError("metadata verification failed")
@@ -595,16 +694,28 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             if _author_from_tags(tags) != identity:
                 raise ValueError("author metadata verification failed")
         # Do not overwrite a file another local process changed during the copy.
-        current = target.stat()
-        if (current.st_size, current.st_mtime_ns, current.st_ino) != (original.st_size, original.st_mtime_ns, original.st_ino):
-            raise ValueError("media changed")
+        _original_unchanged(target, original)
         os.utime(temporary, ns=(original.st_atime_ns, original.st_mtime_ns))
-        os.replace(temporary, target)
+        reason = "replace"
+        _replace_verified(temporary, target, original, deadline)
         temporary = None
         status = "embedded"
+        reason = ""
         author_status = "embedded" if has_author else "unknown"
-    except Exception:
+    except Exception as exc:
         status = "failed"
+        if isinstance(exc, _MediaChanged):
+            reason = "changed"
+        elif isinstance(exc, _MediaBusy):
+            reason = "busy"
+        elif isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+            reason = "timeout"
+        elif isinstance(exc, FileNotFoundError):
+            reason = "missing"
+        elif getattr(exc, "winerror", None) in {32, 33}:
+            reason = "busy"
+        elif isinstance(exc, PermissionError):
+            reason = "permission"
         if has_author:
             author_status = "error"
     finally:
@@ -621,4 +732,5 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             except OSError:
                 pass
     return {"status": status, "url": url, "message": _MESSAGES[status],
+            "reason": reason, "reason_message": failure_message(reason) if reason else "",
             "author_status": author_status, **identity}

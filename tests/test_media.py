@@ -746,7 +746,7 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(self.archive_keys(), {"twitter100_1"})
 
     def test_source_failure_is_nonfatal_logged_once_and_existing_failure_can_retry(self):
-        self.embed_source.side_effect = lambda *args, **kwargs: {"status": "failed", "url": "", "message": test_core.SECRET, "author_status": "error"}
+        self.embed_source.side_effect = lambda *args, **kwargs: {"status": "failed", "url": "", "message": test_core.SECRET, "author_status": "error", "reason": test_core.SECRET, "reason_message": test_core.SECRET}
         rows = [("100", 1, "photo", "alice"), ("101", 1, "video", "alice")]
         code, events = self.worker(rows, options=self.all_media())
         self.assertEqual(code, 0)
@@ -764,6 +764,16 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(events[-1]["metadata_failed"], 0)
         self.assertEqual(self.embed_source.call_count, 2)
         self.assertEqual({row["metadata_status"] for row in self.history_rows()}, {"embedded"})
+
+    def test_metadata_sharing_lock_reason_is_explained_without_losing_the_download(self):
+        self.embed_source.side_effect = lambda *args, **kwargs: {"status": "failed", "author_status": "error", "reason": "busy", "reason_message": test_core.SECRET}
+        code, events = self.worker([("100", 1, "photo", "alice")])
+        self.assertEqual((code, events[-1]["saved"], events[-1]["metadata_failed"]), (0, 1, 1))
+        warnings = [event["message"] for event in events if event["type"] == "log" and event.get("level") == "warning"]
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("다른 프로그램이 파일을 사용 중", warnings[0])
+        self.assertEqual(self.archive_keys(), {"twitter100_1"})
+        self.assertEqual(self.history_rows()[0]["metadata_status"], "failed")
 
     def test_helper_unavailable_checked_once_and_never_invoked_for_each_file(self):
         with patch("xlikesaver.metadata.available", return_value=False) as available:
