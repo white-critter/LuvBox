@@ -78,28 +78,40 @@ def _save_day() -> date:
     return datetime.now(_KOREA).date()
 
 
-def _transfer_complete(source: Path) -> bool:
-    """Whether our downloader completed this .part file, unchanged since.
+def _transfer_complete(source: Path) -> dict | None:
+    """The record our downloader left on completing this .part, or None.
 
     Only such a file is used again without a request. Asking the server to
-    resume a complete file is answered with 416, which stops the run.
+    resume a complete file is answered with 416, which stops the run. Sync
+    tools and FAT drives round modification times, so up to two seconds of
+    difference still describe the same file; its size must match exactly.
     """
     try:
         with Path(str(source) + ".xlikesaver-complete").open(encoding="utf-8") as stream:
-            marker = json.loads(stream.read(256))
+            marker = json.loads(stream.read(1024))
         stat = source.stat()
-        return marker == {"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-    except (OSError, ValueError, TypeError):
-        return False
+        modified = marker.get("mtime_http")
+        if (marker.get("version") != 1 or type(marker.get("size")) is not int or
+                marker["size"] != stat.st_size or type(marker.get("mtime_ns")) is not int or
+                abs(marker["mtime_ns"] - stat.st_mtime_ns) > 2_000_000_000 or
+                not (modified is None or isinstance(modified, str) and len(modified) <= 100)):
+            return None
+        return marker
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
 
 
-def _mark_transfer_complete(source: Path) -> None:
+def _mark_transfer_complete(source: Path, modified=None) -> None:
     stat = source.stat()
+    record = {"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    if isinstance(modified, str) and len(modified) <= 100:
+        # The server's Last-Modified, which a saved file is stamped with.
+        record["mtime_http"] = modified
     fd, name = tempfile.mkstemp(prefix=".xlikesaver-complete-", dir=source.parent)
     temporary = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump({"version": 1, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}, stream)
+            json.dump(record, stream)
         os.replace(temporary, str(source) + ".xlikesaver-complete")
     finally:
         temporary.unlink(missing_ok=True)
@@ -1006,8 +1018,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             Path(str(self.gif_source) + ".xlikesaver-complete").unlink(missing_ok=True)
                             self.gif_source = None
                         if self.transfer_marker is not None:
-                            # The .part this marker described is saved now.
-                            self.transfer_marker.unlink(missing_ok=True)
+                            # The .part it described is saved now. A leftover
+                            # record matches no .part and is harmless.
+                            try:
+                                self.transfer_marker.unlink(missing_ok=True)
+                            except OSError:
+                                pass
                             self.transfer_marker = None
                         saved += 1
                         if normalized.folder_mode == "date":
@@ -1162,9 +1178,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             # run is used again without a request.
             self.pathfmt.part_enable()
             local_source = Path(self.pathfmt.temppath)
-            locally_complete = _transfer_complete(local_source)
+            completed = _transfer_complete(local_source)
+            locally_complete = completed is not None
             if locally_complete:
                 self.transfer_marker = Path(str(local_source) + ".xlikesaver-complete")
+                if completed.get("mtime_http"):
+                    # Stamp the saved file as the original transfer would have.
+                    self.pathfmt.kwdict["_mtime_http"] = completed["mtime_http"]
                 cap = normalized.max_video_mb * 1024 * 1024 if media_type != "photo" else 0
                 if cap and local_source.stat().st_size > cap:
                     # The limit was lowered after this file finished. Treat it
@@ -1185,13 +1205,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 # fallback image size and removes the resumable .part file. A
                 # completed download is left to finalize and be archived.
                 check_stop()
-            if (result and not locally_complete and self.pathfmt.temppath and
-                    (review is not None or (is_gif and normalized.gif_format == "gif"))):
-                # A choice or a conversion may still stop the run. The server
-                # answers a request to resume a complete file with 416.
-                source = Path(self.pathfmt.temppath)
-                _mark_transfer_complete(source)
-                self.transfer_marker = Path(str(source) + ".xlikesaver-complete")
             if result and review is not None and self.pathfmt.temppath:
                 self.review_download()
             if result and is_gif and self.pathfmt.temppath:
@@ -1201,6 +1214,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # Keep X's original MP4; the normal finalize saves it and
                     # handle_url removes a marker left by an earlier GIF run.
                     return result
+                if not locally_complete:
+                    # A stop during conversion keeps the MP4 for a local retry.
+                    self.keep_transfer(source, replace=True)
                 # Completion describes the MP4 transfer. Conversion can make
                 # the GIF much larger; it must not inflate downloaded bytes.
                 source_bytes = source.stat().st_size
@@ -1252,9 +1268,26 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                       **_media_details(self.current_media)})
             return result
 
+        def keep_transfer(self, source, signature=None, *, replace=False):
+            """Leave a complete .part for the next run when this one stops first.
+
+            Without the record the next run asks the server to resume the
+            complete file, which is refused (416) and stops that run. Only
+            exits that keep the file call this, and it never fails the run.
+            An existing record is replaced only for a transfer just made; one
+            changed by another program meanwhile is left as it is.
+            """
+            try:
+                if signature is not None and _review_file_signature(source) != signature:
+                    return  # changed meanwhile: not the transfer we completed
+                if _transfer_complete(source) is None and (
+                        replace or not os.path.lexists(str(source) + ".xlikesaver-complete")):
+                    _mark_transfer_complete(source, self.pathfmt.kwdict.get("_mtime_http"))
+            except OSError:
+                pass
+
         def review_download(self):
             """Preview the completed transfer before conversion or archiving."""
-            check_stop()
             source = _review_path(self.pathfmt.temppath)
             destination = _review_path(self.pathfmt.realpath)
             # A downloader may change paths. Only this run's .part file can be
@@ -1264,12 +1297,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     not history.is_download_path(source) or not history.is_download_path(destination)):
                 guard.failure = _REVIEW_ERROR
                 raise exception.AbortExtraction(guard.failure)
+            signature = None
             try:
                 signature = _review_file_signature(source)
                 marker = Path(str(source) + ".xlikesaver-complete")
                 marker_signature = None
                 if marker.exists() and _transfer_complete(source):
                     marker_signature = _review_file_signature(marker)
+                check_stop()
                 enabled = review.enabled()
                 if type(enabled) is not bool:
                     raise ValueError("invalid review state")
@@ -1312,9 +1347,16 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                      if self.current_media.get("type") == "animated_gif" and
                                      normalized.gif_format == "gif" else destination)
                     raise declined
+            except ReviewSkip:
+                raise
             except exception.ControlException:
+                # Stopped before a choice: the complete transfer is kept.
+                if signature is not None:
+                    self.keep_transfer(source, signature)
                 raise
             except Exception:
+                if signature is not None:
+                    self.keep_transfer(source, signature)
                 guard.failure = _REVIEW_ERROR
                 raise exception.AbortExtraction(guard.failure) from None
 
@@ -1322,13 +1364,18 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.review_finalize = original_finalize
 
             def finalize_reviewed():
-                check_stop()
+                try:
+                    check_stop()
+                except exception.StopExtraction:
+                    self.keep_transfer(source, signature)
+                    raise
                 try:
                     if (not history.is_download_path(source) or not history.is_download_path(destination) or
                             _review_file_signature(source) != signature):
                         raise OSError("review temporary file changed")
                     _move_without_overwrite(source, destination)
                 except OSError:
+                    self.keep_transfer(source, signature)
                     guard.failure = _LOCAL_WRITE_ERROR
                     raise exception.AbortExtraction(guard.failure) from None
                 self.pathfmt.part = False
