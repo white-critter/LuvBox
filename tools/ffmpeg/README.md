@@ -1,11 +1,11 @@
-# XlikeSaver FFmpeg runtime
+# LuvBox FFmpeg runtime
 
 This is a purpose-built, unmodified FFmpeg **7.1** command-line executable for
 Windows x64, licensed **LGPL-2.1-or-later**. It runs as a separate process; the
 application does not link against FFmpeg libraries.
 
 The complete upstream FFmpeg source is `ffmpeg-7.1.tar.xz`. The archive and the
-build recipe are included in the XlikeSaver source ZIP. A Git checkout can
+build recipe are included in the LuvBox source ZIP. A Git checkout can
 download the exact archive from the official FFmpeg server with `build.py`.
 The source SHA-256 is:
 

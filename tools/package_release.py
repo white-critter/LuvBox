@@ -68,9 +68,8 @@ def package() -> None:
                     archive.write(path, "source/tools/ffmpeg/runtime/" + path.relative_to(ROOT / "tools/ffmpeg/runtime").as_posix())
             for name in SOURCE_FILES:
                 archive.write(ROOT / name, "source/" + name)
-            # Development review notes stay in the repository; users get
-            # the guide and the developer notes.
-            for name in ("docs/사용안내.txt", "docs/development.md"):
+            # Ship the current guide and verification, without obsolete reports.
+            for name in ("docs/사용안내.txt", "docs/development.md", "docs/verification.md"):
                 archive.write(ROOT / name, "source/" + name)
             for folder, pattern in (("xlikesaver", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):
                 for path in sorted((ROOT / folder).glob(pattern)):

@@ -1,4 +1,4 @@
-"""Check or reproduce XlikeSaver's small, native-only Windows FFmpeg runtime.
+"""Check or reproduce LuvBox's small, native-only Windows FFmpeg runtime.
 
 Use a portable w64devkit 2.10.0 directory; no admin install is needed. Its
 compiler and make are build tools, never copied into the application release.
