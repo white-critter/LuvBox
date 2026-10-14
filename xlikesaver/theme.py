@@ -272,7 +272,13 @@ def _asset_key() -> str:
     try:
         code = Path(__file__).read_bytes()
     except OSError:
-        code = b""   # a frozen build: the version identifies the code
+        # A frozen build has no source file. Fixes were re-released under the
+        # same version, so the executable (size and build time) names the code.
+        try:
+            status = os.stat(sys.executable)
+            code = f"{status.st_size}:{status.st_mtime_ns}".encode("ascii")
+        except OSError:
+            code = b""
     palette = DARK if _active_mode == "dark" else LIGHT
     material = json.dumps([__version__, _active_mode, palette], sort_keys=True).encode("utf-8") + code
     return hashlib.sha256(material).hexdigest()[:20]
@@ -308,10 +314,12 @@ def _write_asset_cache(key: str, assets: dict[str, bytes]) -> None:
         return
     try:
         location.parent.mkdir(parents=True, exist_ok=True)
-        # Keep both appearances of this version; drop other versions' images.
-        current = location.name.split("-")[1]
+        # Keep both appearances of this build; drop other versions' and other
+        # builds' images (a rebuild under one version changes only the key).
+        version, appearance = location.name.split("-")[1:3]
         for old in location.parent.glob("theme-*.zip"):
-            if old.name.split("-")[1:2] != [current]:
+            parts = old.name.split("-")
+            if old != location and (parts[1:2] != [version] or parts[2:3] == [appearance]):
                 old.unlink(missing_ok=True)
     except OSError:
         pass

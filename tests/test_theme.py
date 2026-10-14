@@ -173,6 +173,37 @@ class ThemeTests(unittest.TestCase):
             self.assertIsNotNone(theme._read_asset_cache(theme._asset_key()))
             self.assertFalse(list(cache.glob("*.partial")))
 
+    def test_installed_rebuild_with_the_same_version_draws_images_again(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(sys, "frozen", True, create=True), \
+                patch.object(theme, "__file__", str(Path(folder) / "theme.pyc")), \
+                patch("xlikesaver.settings.app_directory", return_value=Path(folder)), \
+                patch.dict(theme._ASSET_CACHE, clear=True):
+            cache = Path(folder) / "cache"
+            executable = Path(folder) / "LuvBox-1.0.0.exe"
+            executable.write_bytes(b"first build")
+            os.utime(executable, ns=(1_700_000_000_000_000_000,) * 2)
+            with patch.object(sys, "executable", str(executable)):
+                theme.apply_style(self.root, mode="dark")
+                theme.apply_style(self.root, mode="light")
+                first = set(cache.glob("theme-*.zip"))
+                self.assertEqual(len(first), 2)
+                theme._ASSET_CACHE.clear()
+                with patch.object(theme, "_draw_assets", side_effect=AssertionError("drawn again")):
+                    theme.apply_style(self.root, mode="dark")
+                    theme.apply_style(self.root, mode="light")
+                # A fixed build keeps its version number but not its executable.
+                executable.write_bytes(b"second, fixed build")
+                os.utime(executable, ns=(1_700_000_100_000_000_000,) * 2)
+                theme._ASSET_CACHE.clear()
+                with patch.object(theme, "_draw_assets", wraps=theme._draw_assets) as draw:
+                    theme.apply_style(self.root, mode="dark")
+                    theme.apply_style(self.root, mode="light")
+                self.assertEqual(draw.call_count, 2)
+                second = set(cache.glob("theme-*.zip"))
+                self.assertEqual(len(second), 2)
+                self.assertFalse(first & second)
+
     def test_installed_app_recovers_incomplete_or_undecodable_cache_at_start(self):
         original = dict(theme._ASSET_CACHE[theme._asset_key()])
         without_button = dict(original)
