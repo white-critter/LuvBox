@@ -98,7 +98,7 @@ class MediaTests(unittest.TestCase):
         response.iter_content = lambda *args, **kwargs: iter(chunks)
         return response
 
-    def http_worker(self, rows, responses, *, options=None, items=None, stop_file=None):
+    def http_worker(self, rows, responses, *, options=None, items=None, stop_file=None, review=None):
         events = []
         patches = [patch("gallery_dl.extractor.find", side_effect=lambda url: test_core.FakeLikesExtractor(url, rows)),
                    patch("gallery_dl.downloader.find", return_value=HttpDownloader),
@@ -109,7 +109,7 @@ class MediaTests(unittest.TestCase):
         from contextlib import ExitStack
         with ExitStack() as stack:
             entered = [stack.enter_context(patch_item) for patch_item in patches]
-            result = run_worker(options or self.all_media(max_video_mb=1), events.append, stop_file)
+            result = run_worker(options or self.all_media(max_video_mb=1), events.append, stop_file, review=review)
         self.assertNotIn(test_core.SECRET, json.dumps(events))
         return result, events, entered[2]
 
@@ -410,6 +410,77 @@ class MediaTests(unittest.TestCase):
         self.assertEqual([call.args[0].url for call in send.call_args_list], ["https://pbs.twimg.com/media/100?name=orig"])
         # Not reported as a failed download: the user asked to stop.
         self.assertFalse(any(event.get("level") == "error" for event in events if event["type"] == "log"))
+
+    def test_transfer_kept_by_a_stop_at_the_review_is_saved_later_without_a_resume_request(self):
+        # X answers a request to resume a complete file with 416, which stops
+        # the run. A choice the user left open must not cause that next time.
+        kinds = {"photo": ("100_1.jpg", [b"\xff\xd8\xff", b"photo-bytes"], "image/jpeg"),
+                 "video": ("100_video_1.mp4", [MP4_HEADER, b"video-bytes"], "video/mp4")}
+
+        class Review:
+            def __init__(self, choice, flag=None):
+                self.choice, self.flag, self.asked = choice, flag, []
+
+            def enabled(self):
+                return True
+
+            def ask(self, path, media, check_stop):
+                self.asked.append(path.name)
+                if self.choice == "stop":
+                    self.flag.touch()
+                    check_stop()
+                return self.choice
+
+        for media_type, (name, chunks, content_type) in kinds.items():
+            for later in ("unattended", "review-save", "review-skip"):
+                with self.subTest(media_type=media_type, later=later):
+                    self.tearDown()
+                    self.setUp()
+                    flag = self.base / "stop.flag"
+                    rows = [("100", 1, media_type, "alice")]
+                    folder = self.output / "myaccount" / "alice"
+                    payload = b"".join(chunks)
+                    code, events, send = self.http_worker(
+                        rows, [self.response(chunks, size=len(payload), content_type=content_type)],
+                        review=Review("stop", flag), stop_file=flag)
+                    self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "stopped", 0))
+                    partial = folder / (name + ".part")
+                    self.assertEqual(partial.read_bytes(), payload)
+                    self.assertTrue(Path(str(partial) + ".xlikesaver-complete").is_file())
+                    self.assertEqual(self.archive_keys(), set())
+                    flag.unlink()
+                    # The server would refuse a resume of the complete file.
+                    refused = self.response(status=416, content_range=f"bytes */{len(payload)}")
+                    review = None if later == "unattended" else Review(later.removeprefix("review-"))
+                    code, events, send = self.http_worker(rows, [refused], review=review)
+                    send.assert_not_called()
+                    self.assertEqual(code, 0)
+                    self.assertEqual(events[-1]["status"], "finished")
+                    if review is not None:
+                        self.assertEqual(review.asked, [name + ".part"])
+                    if later == "review-skip":
+                        self.assertEqual(events[-1]["saved"], 0)
+                        self.assertFalse((folder / name).exists())
+                        self.assertEqual(self.archive_keys(), set())
+                    else:
+                        self.assertEqual(events[-1]["saved"], 1)
+                        self.assertEqual((folder / name).read_bytes(), payload)
+                        self.assertEqual(len(self.archive_keys()), 1)
+                    self.assertFalse(list(self.output.rglob("*.part*")))
+                    self.assertFalse(list(self.output.rglob("*.xlikesaver-complete")))
+
+    def test_unmarked_complete_partial_still_stops_on_416(self):
+        # Only a transfer this app recorded as complete is trusted.
+        folder = self.output / "myaccount" / "alice"
+        folder.mkdir(parents=True)
+        partial = folder / "100_1.jpg.part"
+        partial.write_bytes(b"\xff\xd8\xffphoto-bytes")
+        refused = self.response(status=416, content_range=f"bytes */{partial.stat().st_size}")
+        code, events, send = self.http_worker([("100", 1, "photo", "alice")], [refused])
+        self.assertNotEqual(code, 0)
+        self.assertIn("이어받기", events[-1]["message"])
+        self.assertEqual(send.call_count, 1)
+        self.assertTrue(partial.is_file())
 
     def test_416_never_finalizes_partial_or_requests_fallback_and_preserves_completed_archive(self):
         self.worker([("90", 1, "photo", "alice")])

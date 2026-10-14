@@ -139,7 +139,7 @@ class GifWorkerTests(unittest.TestCase):
 
     def convert(self, source, **kwargs):
         self.assertTrue(source.name.endswith(".mp4.part"))
-        self.assertTrue(core._gif_source_complete(source))
+        self.assertTrue(core._transfer_complete(source))
         kwargs["check_stop"]()
         output = source.parent / ".test-gif.gif"
         Image.new("RGB", (10, 10), "green").save(output, "GIF")
@@ -321,7 +321,7 @@ class GifWorkerTests(unittest.TestCase):
         with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=stop):
             self.worker(rows, options=self.options_all(), stop_file=str(flag))
         source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
-        self.assertTrue(core._gif_source_complete(source))
+        self.assertTrue(core._transfer_complete(source))
         flag.unlink()
         with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert):
             code, events = self.worker(rows, options=self.options_all())
@@ -341,7 +341,7 @@ class GifWorkerTests(unittest.TestCase):
         self.assertEqual(self.keys(), set())
         self.assertEqual(self.records(), [])
         source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
-        self.assertTrue(core._gif_source_complete(source))
+        self.assertTrue(core._transfer_complete(source))
 
     def test_gif_over_size_cap_saves_original_mp4_and_next_file(self):
         with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=media.ConversionSizeLimit()):
@@ -354,7 +354,7 @@ class GifWorkerTests(unittest.TestCase):
         source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
         source.parent.mkdir(parents=True)
         source.write_bytes(b"0" * (2 * 1024 * 1024))
-        core._mark_gif_source_complete(source)
+        core._mark_transfer_complete(source)
         with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
             code, events = self.worker([("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")],
                                       options=self.options_all(max_video_mb=1))
@@ -382,11 +382,11 @@ class GifWorkerTests(unittest.TestCase):
     def test_marker_does_not_treat_an_arbitrary_partial_download_as_complete(self):
         source = self.base / "unfinished.mp4.part"
         source.write_bytes(b"only part of the source")
-        self.assertFalse(core._gif_source_complete(source))
-        core._mark_gif_source_complete(source)
-        self.assertTrue(core._gif_source_complete(source))
+        self.assertFalse(core._transfer_complete(source))
+        core._mark_transfer_complete(source)
+        self.assertTrue(core._transfer_complete(source))
         source.write_bytes(b"changed incomplete source with another size")
-        self.assertFalse(core._gif_source_complete(source))
+        self.assertFalse(core._transfer_complete(source))
 
     def test_existing_mp4_gif_is_not_rewritten(self):
         path = self.output / "myaccount" / "alice" / "100_gif_1.mp4"
@@ -425,7 +425,7 @@ class GifWorkerTests(unittest.TestCase):
         source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
         source.parent.mkdir(parents=True)
         source.write_bytes(b"completed earlier for a GIF")
-        core._mark_gif_source_complete(source)
+        core._mark_transfer_complete(source)
         with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
             code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all(gif_format="mp4"))
         convert.assert_not_called()

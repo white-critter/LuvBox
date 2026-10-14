@@ -78,8 +78,12 @@ def _save_day() -> date:
     return datetime.now(_KOREA).date()
 
 
-def _gif_source_complete(source: Path) -> bool:
-    """Only retry conversion locally for a source our downloader completed."""
+def _transfer_complete(source: Path) -> bool:
+    """Whether our downloader completed this .part file, unchanged since.
+
+    Only such a file is used again without a request. Asking the server to
+    resume a complete file is answered with 416, which stops the run.
+    """
     try:
         with Path(str(source) + ".xlikesaver-complete").open(encoding="utf-8") as stream:
             marker = json.loads(stream.read(256))
@@ -89,9 +93,9 @@ def _gif_source_complete(source: Path) -> bool:
         return False
 
 
-def _mark_gif_source_complete(source: Path) -> None:
+def _mark_transfer_complete(source: Path) -> None:
     stat = source.stat()
-    fd, name = tempfile.mkstemp(prefix=".xlikesaver-gif-complete-", dir=source.parent)
+    fd, name = tempfile.mkstemp(prefix=".xlikesaver-complete-", dir=source.parent)
     temporary = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
@@ -773,6 +777,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.gif_source = self.gif_temporary = None
             self.gif_finalize = None
             self.review_finalize = None
+            self.transfer_marker = None
             self.photo_positions = {}
             self.photo_counts = {}
             extract_media = getattr(self.extractor, "_extract_media", None)
@@ -927,6 +932,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.gif_source = self.gif_temporary = None
             self.gif_finalize = None
             self.review_finalize = None
+            self.transfer_marker = None
             if normalized.folder_mode == "date":
                 kwdict = dict(kwdict, _xlikesaver_date=_save_day().isoformat())
             self.current_media = kwdict
@@ -999,6 +1005,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             self.gif_source.unlink(missing_ok=True)
                             Path(str(self.gif_source) + ".xlikesaver-complete").unlink(missing_ok=True)
                             self.gif_source = None
+                        if self.transfer_marker is not None:
+                            # The .part this marker described is saved now.
+                            self.transfer_marker.unlink(missing_ok=True)
+                            self.transfer_marker = None
                         saved += 1
                         if normalized.folder_mode == "date":
                             completed_day = _save_day().isoformat()
@@ -1143,19 +1153,23 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             # gallery-dl's media downloader catches exceptions from request()
             # and returns False. Re-raise a protection failure before its parent
             # attempts other image sizes or the next photo.
-            is_gif = self.current_media.get("type") == "animated_gif"
-            if is_gif or review is not None:
-                # A conversion failure must never leave a completed-looking
-                # MP4 that gallery-dl would archive as a success on the next run.
-                self.pathfmt.part_enable()
-            local_source = Path(self.pathfmt.temppath) if is_gif else None
-            locally_complete = is_gif and _gif_source_complete(local_source)
+            media_type = self.current_media.get("type")
+            is_gif = media_type == "animated_gif"
+            # gallery-dl's HTTP downloader writes every transfer to its .part
+            # file (its default). Name it now: a conversion failure must never
+            # leave a completed-looking MP4 that gallery-dl would archive as a
+            # success on the next run, and a transfer completed by an earlier
+            # run is used again without a request.
+            self.pathfmt.part_enable()
+            local_source = Path(self.pathfmt.temppath)
+            locally_complete = _transfer_complete(local_source)
             if locally_complete:
-                cap = normalized.max_video_mb * 1024 * 1024
+                self.transfer_marker = Path(str(local_source) + ".xlikesaver-complete")
+                cap = normalized.max_video_mb * 1024 * 1024 if media_type != "photo" else 0
                 if cap and local_source.stat().st_size > cap:
-                    # The limit was lowered after this MP4 finished. Treat it
+                    # The limit was lowered after this file finished. Treat it
                     # like any other oversized video and drop the temporary file.
-                    Path(str(local_source) + ".xlikesaver-complete").unlink(missing_ok=True)
+                    self.transfer_marker.unlink(missing_ok=True)
                     raise SizeLimit()
                 self.progress(local_source.stat().st_size, local_source.stat().st_size, force=True)
                 result = True
@@ -1171,6 +1185,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 # fallback image size and removes the resumable .part file. A
                 # completed download is left to finalize and be archived.
                 check_stop()
+            if (result and not locally_complete and self.pathfmt.temppath and
+                    (review is not None or (is_gif and normalized.gif_format == "gif"))):
+                # A choice or a conversion may still stop the run. The server
+                # answers a request to resume a complete file with 416.
+                source = Path(self.pathfmt.temppath)
+                _mark_transfer_complete(source)
+                self.transfer_marker = Path(str(source) + ".xlikesaver-complete")
             if result and review is not None and self.pathfmt.temppath:
                 self.review_download()
             if result and is_gif and self.pathfmt.temppath:
@@ -1180,8 +1201,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # Keep X's original MP4; the normal finalize saves it and
                     # handle_url removes a marker left by an earlier GIF run.
                     return result
-                if not locally_complete:
-                    _mark_gif_source_complete(source)
                 # Completion describes the MP4 transfer. Conversion can make
                 # the GIF much larger; it must not inflate downloaded bytes.
                 source_bytes = source.stat().st_size
@@ -1249,7 +1268,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 signature = _review_file_signature(source)
                 marker = Path(str(source) + ".xlikesaver-complete")
                 marker_signature = None
-                if marker.exists() and _gif_source_complete(source):
+                if marker.exists() and _transfer_complete(source):
                     marker_signature = _review_file_signature(marker)
                 enabled = review.enabled()
                 if type(enabled) is not bool:
