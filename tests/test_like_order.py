@@ -9,8 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tests import test_core
-from xlikesaver import storage
-from xlikesaver.history import HistoryError, HistoryStore
+from luvbox import storage
+from luvbox.history import HistoryError, HistoryStore
 
 
 class LikeOrderTests(unittest.TestCase):
@@ -131,7 +131,7 @@ class LikeOrderWorkerTests(unittest.TestCase):
     runs = test_core.CoreTests.runs
 
     def likes(self):
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             return [row for row in db.execute(
                 "SELECT tweet_id,liked_after,liked_before FROM likes ORDER BY like_key DESC")]
 

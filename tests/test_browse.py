@@ -11,9 +11,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import test_core
-from xlikesaver import charts, storage
-from xlikesaver.core import run_worker
-from xlikesaver.history import HistoryError, HistoryStore
+from luvbox import charts, storage
+from luvbox.core import run_worker
+from luvbox.history import HistoryError, HistoryStore
 
 
 class BrowseCatalogTests(unittest.TestCase):
@@ -130,7 +130,7 @@ class TweetTextWorkerTests(unittest.TestCase):
             code = run_worker(self.options, events.append)
         self.assertEqual(code, 0)
         self.assertNotIn(test_core.SECRET, json.dumps(events))
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             texts = dict(db.execute("SELECT tweet_id,content FROM tweets"))
         # The video is not saved (videos are off), but its text is kept.
         self.assertEqual(texts, {"100": "글 100 두 줄", "200": "글 200 두 줄"})

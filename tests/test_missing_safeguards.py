@@ -20,13 +20,13 @@ from PIL import Image
 
 from tests import test_core as core_support
 from tests.test_gui import destroy_tk, release_tk
-from xlikesaver import thumbcache
-from xlikesaver.gui import App
-from xlikesaver.history import HistoryStore
-from xlikesaver.history_gui import HistoryWindow, _publish
-from xlikesaver.preview import PreviewLoader, Thumbnail
-from xlikesaver.gallery import _GridDecoder
-from xlikesaver.storage import missing_media_help, resolve_storage, saved_media_missing
+from luvbox import thumbcache
+from luvbox.gui import App
+from luvbox.history import HistoryStore
+from luvbox.history_gui import HistoryWindow, _publish
+from luvbox.preview import PreviewLoader, Thumbnail
+from luvbox.gallery import _GridDecoder
+from luvbox.storage import missing_media_help, resolve_storage, saved_media_missing
 
 
 def jpeg(color=(200, 40, 40), size=(320, 240)) -> bytes:
@@ -46,7 +46,7 @@ class StateTestCase(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
-        state = patch("xlikesaver.protection.state_directory", return_value=self.base / "state" / "protection")
+        state = patch("luvbox.protection.state_directory", return_value=self.base / "state" / "protection")
         state.start()
         self.addCleanup(state.stop)
         self.paths = resolve_storage(self.base / "Likes", "offline")
@@ -98,7 +98,7 @@ class MovedFolderTests(StateTestCase):
         self.assertIn(f"드라이브({letter}:)", missing_media_help(paths))
 
     def test_scheduled_save_skips_a_moved_folder(self):
-        from xlikesaver.scheduled import _options_from_settings
+        from luvbox.scheduled import _options_from_settings
         self.saved(1)
         settings = {"auth_mode": "managed", "account": "offline", "output_dir": str(self.paths.output_dir)}
         _options_from_settings(settings, False)
@@ -115,16 +115,16 @@ class MovedFolderTests(StateTestCase):
         fake = SimpleNamespace(root=None, status=SimpleNamespace(set=texts["status"].append),
                                status_detail=SimpleNamespace(set=texts["detail"].append))
         options = SimpleNamespace(output_dir=str(self.paths.output_dir), account="offline", separate_accounts=False)
-        with patch("xlikesaver.gui.dialogs.askyesno", return_value=False) as ask:
+        with patch("luvbox.gui.dialogs.askyesno", return_value=False) as ask:
             self.assertFalse(App._confirm_missing_media(fake, options))
         self.assertFalse(fake._allow_recreate_media)
         self.assertEqual(ask.call_args.kwargs["default"], "no")
         self.assertIn("시작하지 않았습니다", texts["status"][-1])
-        with patch("xlikesaver.gui.dialogs.askyesno", return_value=True):
+        with patch("luvbox.gui.dialogs.askyesno", return_value=True):
             self.assertTrue(App._confirm_missing_media(fake, options))
         self.assertTrue(fake._allow_recreate_media)
         self.paths.media_dir.mkdir()
-        with patch("xlikesaver.gui.dialogs.askyesno") as ask:
+        with patch("luvbox.gui.dialogs.askyesno") as ask:
             self.assertTrue(App._confirm_missing_media(fake, options))
         self.assertFalse(fake._allow_recreate_media)
         ask.assert_not_called()
@@ -188,8 +188,8 @@ class PreviewCacheTests(StateTestCase):
     def test_cloud_only_files_are_never_read(self):
         [path] = self.saved(1)
         placeholder = SimpleNamespace(st_file_attributes=0x400000)
-        with patch("xlikesaver.thumbcache.Path.stat", return_value=placeholder), \
-                patch("xlikesaver.preview.thumbnail") as decode:
+        with patch("luvbox.thumbcache.Path.stat", return_value=placeholder), \
+                patch("luvbox.preview.thumbnail") as decode:
             self.assertTrue(thumbcache.cloud_only(path))
             self.assertIsNone(thumbcache.make(path))
         decode.assert_not_called()
@@ -201,7 +201,7 @@ class PreviewCacheTests(StateTestCase):
         self.assertIsNone(thumbcache.recall("offline", ("999", 1, "photo")))
         self.assertIsNone(thumbcache.recall("nobody", ("100", 1, "photo")))
         recorder = thumbcache.Recorder("offline")
-        with patch("xlikesaver.thumbcache.Cache", side_effect=sqlite3.OperationalError("locked")):
+        with patch("luvbox.thumbcache.Cache", side_effect=sqlite3.OperationalError("locked")):
             [path] = self.saved(1)
             recorder.add(("100", 1, "photo"), path)
         self.assertTrue(recorder._disabled)
@@ -254,7 +254,7 @@ class WorkerPreviewTests(unittest.TestCase):
         core_support.CoreTests.tearDown(self)
 
     def test_each_newly_saved_file_gets_a_preview_on_this_pc(self):
-        from xlikesaver.core import run_worker
+        from luvbox.core import run_worker
         rows = [("123", 1, "photo", "alice")]
         events = []
         with patch("gallery_dl.extractor.find", side_effect=lambda url: core_support.FakeLikesExtractor(url, rows, None, None)), \
@@ -272,7 +272,7 @@ class MissingTabTests(StateTestCase):
         self.root.withdraw()
         self.addCleanup(release_tk, self, "window", "root")
         self.addCleanup(destroy_tk, self.root)
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window = HistoryWindow(self.root, lambda: ("offline", self.paths))
         self.window.withdraw()
 
@@ -285,7 +285,7 @@ class MissingTabTests(StateTestCase):
         [path] = self.saved(1)
         thumbcache.remember("offline", ("100", 1, "photo"), Image.open(path))
         path.unlink()
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.load()
         [key] = self.window.missing_rows
         self.window.missing_tree.selection_set(key)
@@ -296,7 +296,7 @@ class MissingTabTests(StateTestCase):
         self.assertIn(str(self.paths.media_dir), detail.replace("\n", ""))   # wrapped at separators
         self.assertNotIn("알 수 없음", detail)
         self.assertIsNotNone(self.window._missing_image)
-        with patch("xlikesaver.history_gui.os.startfile") as start:
+        with patch("luvbox.history_gui.os.startfile") as start:
             self.window.open_missing_folder()
         start.assert_called_once_with(str(self.paths.media_dir))
 
@@ -304,7 +304,7 @@ class MissingTabTests(StateTestCase):
         files = self.saved(130)
         for path in files:
             path.unlink()
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.load()
         self.assertEqual(len(self.window.missing_rows), 100)
         self.window.select_every_missing()
@@ -313,8 +313,8 @@ class MissingTabTests(StateTestCase):
         self.window.change_page(1, missing=True)
         self.assertEqual(set(self.window.missing_tree.selection()), set(self.window.missing_rows))
         self.assertEqual(len(self.window._missing_selection()), 130)
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True) as ask, \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True) as ask, \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.choose_missing(True)
         self.assertIn("130개", ask.call_args.args[1])
         self.assertEqual(len(thread.call_args.kwargs["args"][2]), 130)
@@ -330,12 +330,12 @@ class MissingTabTests(StateTestCase):
         for path in files:
             path.unlink()
         self.window.retry_missing = lambda *args: True
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.load()
         self.window.select_every_missing()
-        with patch("xlikesaver.core.RETRY_LIMIT", 2), \
-                patch("xlikesaver.history_gui.dialogs.showinfo") as info, \
-                patch("xlikesaver.history_gui.dialogs.askyesno") as ask:
+        with patch("luvbox.core.RETRY_LIMIT", 2), \
+                patch("luvbox.history_gui.dialogs.showinfo") as info, \
+                patch("luvbox.history_gui.dialogs.askyesno") as ask:
             self.window.retry_missing_files()
         self.assertIn("2개까지", info.call_args.args[1])
         ask.assert_not_called()
@@ -343,7 +343,7 @@ class MissingTabTests(StateTestCase):
     def test_moved_folder_banner_blocks_downloads_and_file_jobs(self):
         self.saved(2)
         self.paths.media_dir.rename(self.base / "Likes-moved")
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.load()
         self.assertTrue(self.window.media_offline)
         self.assertIn("저장 폴더를 찾을 수 없습니다", self.window.offline_text.get())
@@ -351,30 +351,30 @@ class MissingTabTests(StateTestCase):
         self.assertEqual(self.window.tile_values["files"].get(), "2")
         for start in (self.window.backfill, self.window.save_previews):
             with self.subTest(job=start.__name__), \
-                    patch("xlikesaver.history_gui.dialogs.showinfo") as info, \
-                    patch("xlikesaver.history_gui.threading.Thread") as thread:
+                    patch("luvbox.history_gui.dialogs.showinfo") as info, \
+                    patch("luvbox.history_gui.threading.Thread") as thread:
                 start()
             info.assert_called_once()
             thread.assert_not_called()
         self.assertFalse(self.paths.media_dir.exists())
 
     def test_library_basics_for_new_users(self):
-        from xlikesaver.history_gui import format_bytes
+        from luvbox.history_gui import format_bytes
         self.assertEqual(format_bytes(1536), "1.5 KB")
         self.assertEqual(format_bytes(5 * 1024 * 1024), "5.0 MB")
         self.saved(1)
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.load()
         # Files that are gone, however they went, have one tab.
         self.assertEqual([self.window.tabs.tab(tab, "text").split(" ")[0] for tab in self.window.tabs.tabs()],
                          ["파일", "실행", "통계", "사라진"])
         self.assertEqual(self.window.tile_values["bytes"].get().split()[-1], "KB")
-        with patch("xlikesaver.history_gui.os.startfile") as opened:
+        with patch("luvbox.history_gui.os.startfile") as opened:
             self.window.open_media_folder()
         opened.assert_called_once_with(str(self.paths.media_dir))
         self.paths.media_dir.rename(self.base / "Likes-moved")
-        with patch("xlikesaver.history_gui.os.startfile") as opened, \
-                patch("xlikesaver.history_gui.dialogs.showinfo") as info:
+        with patch("luvbox.history_gui.os.startfile") as opened, \
+                patch("luvbox.history_gui.dialogs.showinfo") as info:
             self.window.open_media_folder()
         opened.assert_not_called()
         info.assert_called_once()
@@ -382,13 +382,13 @@ class MissingTabTests(StateTestCase):
 
     def test_status_suggests_recording_sources_only_for_old_files(self):
         self.saved(2)
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.load()
         self.assertIn("출처가 기록되지 않은 예전 파일 2개", self.window.status_text.get())
         with closing(HistoryStore.for_storage(self.paths)) as store:
             for row in store.records():
                 store.mark_metadata(row, "embedded")
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.load()
         self.assertNotIn("출처가 기록되지 않은", self.window.status_text.get())
 
@@ -397,7 +397,7 @@ class MissingTabTests(StateTestCase):
         results = queue.Queue()
         stop = threading.Event()
         cloud = str(files[2])
-        with patch("xlikesaver.history_gui.thumbcache.cloud_only", side_effect=lambda path: str(path) == cloud):
+        with patch("luvbox.history_gui.thumbcache.cloud_only", side_effect=lambda path: str(path) == cloud):
             HistoryWindow._previews_worker(results, stop, 1, self.paths, "offline")
         _, kind, message = results.get_nowait()
         self.assertEqual(kind, "previews-saved")

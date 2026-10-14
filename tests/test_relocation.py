@@ -11,9 +11,9 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from xlikesaver.history import HistoryStore
-from xlikesaver.protection import AccountGuard, ProtectionError
-from xlikesaver.storage import (MigrationError, OutputGuard, migrate_records,
+from luvbox.history import HistoryStore
+from luvbox.protection import AccountGuard, ProtectionError
+from luvbox.storage import (MigrationError, OutputGuard, migrate_records,
                                prepare_storage, publish_snapshot, resolve_storage)
 
 
@@ -22,7 +22,7 @@ class RelocationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.guard_patch = patch("xlikesaver.protection.state_directory", return_value=self.root / "locks")
+        self.guard_patch = patch("luvbox.protection.state_directory", return_value=self.root / "locks")
         self.guard_patch.start()
         self.addCleanup(self.guard_patch.stop)
         self.a, self.b, self.c = [resolve_storage(self.root / name, "alice") for name in ("A", "B", "C")]
@@ -31,7 +31,7 @@ class RelocationTests(unittest.TestCase):
 
     def archive(self, paths, ids):
         prepare_storage(paths)
-        with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-archive.flat.sqlite3")) as db:
+        with closing(sqlite3.connect(paths.record_dir / ".luvbox-archive.flat.sqlite3")) as db:
             db.execute("CREATE TABLE IF NOT EXISTS archive(entry TEXT PRIMARY KEY) WITHOUT ROWID")
             db.executemany("INSERT OR IGNORE INTO archive(entry) VALUES (?)", (("twitter" + str(ident) + "_1",) for ident in ids))
             db.commit()
@@ -44,7 +44,7 @@ class RelocationTests(unittest.TestCase):
         try:
             metadata = {"tweet_id": str(ident), "num": 1, "type": "photo",
                         "author": {"name": "author"}, "date": "2026-10-04T20:00:00+09:00",
-                        "_xlikesaver_metadata_status": "embedded" if embedded else "pending"}
+                        "_luvbox_metadata_status": "embedded" if embedded else "pending"}
             store.record_media("flat", metadata, file)
             run = store.start_run("flat")
             store.finish_run(run, "finished", saved=1, skipped=2, visited=3, last_tweet_id=str(ident))
@@ -62,7 +62,7 @@ class RelocationTests(unittest.TestCase):
             store.close()
 
     def archived(self, paths):
-        with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-archive.flat.sqlite3")) as db:
+        with closing(sqlite3.connect(paths.record_dir / ".luvbox-archive.flat.sqlite3")) as db:
             return {row[0] for row in db.execute("SELECT entry FROM archive")}
 
     def digests(self, paths):
@@ -79,11 +79,11 @@ class RelocationTests(unittest.TestCase):
         with closing(HistoryStore(paths.snapshot_dir, media_dir=paths.media_dir,
                                   output_dir=paths.output_dir)) as store:
             store.record_media("flat", {"tweet_id": str(ident), "num": 1, "type": "photo"}, file)
-        archive = paths.snapshot_dir / ".xlikesaver-archive.flat.sqlite3"
+        archive = paths.snapshot_dir / ".luvbox-archive.flat.sqlite3"
         with closing(sqlite3.connect(archive)) as db:
             db.execute("INSERT INTO archive VALUES (?)", (f"twitter{ident}_1",))
             db.commit()
-        history = paths.snapshot_dir / ".xlikesaver-history.sqlite3"
+        history = paths.snapshot_dir / ".luvbox-history.sqlite3"
         with closing(sqlite3.connect(history)) as db:
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             db.execute("PRAGMA journal_mode=DELETE")
@@ -104,7 +104,7 @@ class RelocationTests(unittest.TestCase):
         state = (self.a.record_dir / "snapshot.json").read_bytes()
         # Even if writing the new travel copy fails, the published local
         # catalog already includes both outputs' received records.
-        with patch("xlikesaver.storage.publish_snapshot", side_effect=MigrationError("sync file lock")):
+        with patch("luvbox.storage.publish_snapshot", side_effect=MigrationError("sync file lock")):
             result = migrate_records(self.a, self.b)
         self.assertEqual(result.media_records, 4)
         self.assertEqual({row["tweet_id"] for row in self.rows(self.b)[0]}, {"100", "200", "300", "400"})
@@ -114,7 +114,7 @@ class RelocationTests(unittest.TestCase):
         self.assertFalse(list(self.b.record_dir.parent.glob(".snapshot-union-*")))
 
     def test_unreadable_changed_snapshot_cannot_publish_a_partial_relocation(self):
-        from xlikesaver import storage
+        from luvbox import storage
         self.record(self.a, 100)
         self.record(self.b, 300)
         for paths, received in ((self.a, 200), (self.b, 400)):
@@ -123,7 +123,7 @@ class RelocationTests(unittest.TestCase):
         originals = self.digests(self.a) | self.digests(self.b)
         backup = storage._backup_database
         for paths in (self.a, self.b):
-            shared = paths.snapshot_dir / ".xlikesaver-archive.flat.sqlite3"
+            shared = paths.snapshot_dir / ".luvbox-archive.flat.sqlite3"
 
             def unreadable(source, destination):
                 if source == shared:
@@ -131,7 +131,7 @@ class RelocationTests(unittest.TestCase):
                 return backup(source, destination)
 
             with self.subTest(output=paths.output_dir), patch(
-                    "xlikesaver.storage._backup_database", side_effect=unreadable):
+                    "luvbox.storage._backup_database", side_effect=unreadable):
                 with self.assertRaises(MigrationError):
                     migrate_records(self.a, self.b)
             self.assert_digests(originals)
@@ -141,7 +141,7 @@ class RelocationTests(unittest.TestCase):
     def test_confirmed_corrupt_changed_snapshot_keeps_the_live_records(self):
         self.record(self.a, 100)
         publish_snapshot(self.a)
-        shared = self.a.snapshot_dir / ".xlikesaver-archive.flat.sqlite3"
+        shared = self.a.snapshot_dir / ".luvbox-archive.flat.sqlite3"
         shared.write_bytes(b"confirmed non-database fixture")
         originals = self.digests(self.a)
         originals[shared] = hashlib.sha256(shared.read_bytes()).hexdigest()
@@ -201,7 +201,7 @@ class RelocationTests(unittest.TestCase):
         self.assertEqual(len(self.archived(self.b)), 1)
 
     def test_media_conflict_prefers_file_with_verified_author_metadata(self):
-        from xlikesaver.storage import _merge_media
+        from luvbox.storage import _merge_media
         old = self.record(self.a, 100)
         newer = self.record(self.b, 100)
         old.update(author_id="42", author_metadata_status="embedded")
@@ -212,7 +212,7 @@ class RelocationTests(unittest.TestCase):
         self.assertEqual(chosen["author_id"], "42")
 
     def test_old_schema_selected_file_does_not_inherit_another_files_author_status(self):
-        from xlikesaver.storage import _merge_media
+        from luvbox.storage import _merge_media
         old = self.record(self.a, 100)
         missing = self.record(self.b, 100)
         Path(missing["path"]).unlink()
@@ -224,7 +224,7 @@ class RelocationTests(unittest.TestCase):
         self.assertEqual(chosen["author_id"], "42")
 
     def test_same_file_keeps_author_verification_when_merging_record_versions(self):
-        from xlikesaver.storage import _merge_media
+        from luvbox.storage import _merge_media
         old = self.record(self.a, 100)
         old.update(author_id="42", author_metadata_status="embedded", posted_source="unknown")
         recent = dict(old, author_metadata_status="pending", posted_source="metadata")
@@ -232,7 +232,7 @@ class RelocationTests(unittest.TestCase):
         self.assertEqual(chosen["author_metadata_status"], "embedded")
 
     def test_same_file_old_spelling_cannot_complete_a_pending_author_change(self):
-        from xlikesaver.storage import _merge_media
+        from luvbox.storage import _merge_media
         old = self.record(self.a, 100)
         old.update(author="Writer", author_id="42", author_metadata_status="embedded", posted_source="unknown")
         current = dict(old, author="writer", author_metadata_status="pending", posted_source="metadata")
@@ -242,7 +242,7 @@ class RelocationTests(unittest.TestCase):
         self.assertEqual(merged["metadata_status"], "embedded")
 
     def test_identity_added_from_another_copy_requires_embedding_in_selected_file(self):
-        from xlikesaver.storage import _merge_media
+        from luvbox.storage import _merge_media
         chosen_file = self.record(self.a, 100)
         other_file = self.record(self.b, 100)
         chosen_file.update(author="author", author_id="", author_metadata_status="embedded",
@@ -289,7 +289,7 @@ class RelocationTests(unittest.TestCase):
         result = migrate_records(self.a, self.b)
         self.assertEqual(result.media_records, 0)
         self.assertEqual(len(self.rows(self.b)[0]), 0)
-        self.assertEqual({path.name for path in self.b.record_dir.iterdir()}, {".xlikesaver-history.sqlite3", "snapshot.json"})
+        self.assertEqual({path.name for path in self.b.record_dir.iterdir()}, {".luvbox-history.sqlite3", "snapshot.json"})
         self.assertFalse((self.b.output_dir / "cookies.txt").exists())
 
     def test_nonexistent_source_does_not_silently_reset_records(self):
@@ -303,7 +303,7 @@ class RelocationTests(unittest.TestCase):
         self.record(self.b, 101)
         for paths in (self.a, self.b):
             with self.subTest(root=paths.output_dir):
-                database = paths.record_dir / ".xlikesaver-archive.flat.sqlite3"
+                database = paths.record_dir / ".luvbox-archive.flat.sqlite3"
                 original = database.read_bytes()
                 database.write_bytes(b"not a sqlite database")
                 values = self.digests(self.a) | self.digests(self.b)
@@ -317,7 +317,7 @@ class RelocationTests(unittest.TestCase):
         self.record(self.a, 100)
         self.record(self.b, 101)
         values = self.digests(self.a) | self.digests(self.b)
-        with patch("xlikesaver.storage._merge_database", side_effect=sqlite3.OperationalError("disk full")):
+        with patch("luvbox.storage._merge_database", side_effect=sqlite3.OperationalError("disk full")):
             with self.assertRaises(MigrationError):
                 migrate_records(self.a, self.b)
         self.assert_digests(values)
@@ -365,7 +365,7 @@ class RelocationTests(unittest.TestCase):
     def test_crash_after_publication_keeps_complete_merged_destination(self):
         self.record(self.a, 100)
         self.record(self.b, 101)
-        from xlikesaver import storage
+        from luvbox import storage
         recovery = storage._recover_relocation
 
         def interrupted(paths, **kwargs):
@@ -373,7 +373,7 @@ class RelocationTests(unittest.TestCase):
                 raise KeyboardInterrupt("simulated process exit after publish")
             return recovery(paths, **kwargs)
 
-        with patch("xlikesaver.storage._recover_relocation", side_effect=interrupted):
+        with patch("luvbox.storage._recover_relocation", side_effect=interrupted):
             with self.assertRaises(KeyboardInterrupt):
                 migrate_records(self.a, self.b)
         prepare_storage(self.b)
@@ -438,7 +438,7 @@ class RelocationTests(unittest.TestCase):
     def test_linked_record_directory_or_database_is_rejected_without_reading_it(self):
         self.record(self.a, 100)
         original = Path.is_symlink
-        for target in (self.b.record_dir, self.a.record_dir / ".xlikesaver-history.sqlite3"):
+        for target in (self.b.record_dir, self.a.record_dir / ".luvbox-history.sqlite3"):
             with self.subTest(target=target), patch.object(Path, "is_symlink", autospec=True,
                     side_effect=lambda path: path == target or original(path)):
                 with self.assertRaises((ValueError, MigrationError)):
@@ -446,7 +446,7 @@ class RelocationTests(unittest.TestCase):
 
     def test_prior_authorized_root_validation_rejects_relative_or_redirected_values(self):
         self.record(self.a, 100)
-        with closing(sqlite3.connect(self.a.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.a.record_dir / ".luvbox-history.sqlite3")) as db:
             db.execute("INSERT INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)", ('["../outside"]',))
             db.commit()
         values = self.digests(self.a)
@@ -471,7 +471,7 @@ class RelocationTests(unittest.TestCase):
         legacy.mkdir()
         file = legacy / "100_1.jpg"
         file.write_bytes(b"old saved photo")
-        archive = legacy / ".xlikesaver-archive.flat.sqlite3"
+        archive = legacy / ".luvbox-archive.flat.sqlite3"
         with closing(sqlite3.connect(archive)) as db:
             db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY)")
             db.execute("INSERT INTO archive(entry) VALUES ('twitter100_1')")
@@ -486,7 +486,7 @@ class RelocationTests(unittest.TestCase):
 
     def test_committed_source_wal_is_included_in_readonly_backup(self):
         self.record(self.a, 100)
-        database = self.a.record_dir / ".xlikesaver-archive.flat.sqlite3"
+        database = self.a.record_dir / ".luvbox-archive.flat.sqlite3"
         with closing(sqlite3.connect(database)) as db:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("INSERT INTO archive(entry) VALUES ('twitter101_1')")
@@ -496,7 +496,7 @@ class RelocationTests(unittest.TestCase):
             self.assertEqual(self.archived(self.b), {"twitter100_1", "twitter101_1"})
 
     def write_legacy_sync(self, paths, timestamp, ids):
-        with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-sync.sqlite3")) as db:
+        with closing(sqlite3.connect(paths.record_dir / ".luvbox-sync.sqlite3")) as db:
             db.execute("CREATE TABLE likes(folder_mode TEXT,tweet_id TEXT,PRIMARY KEY(folder_mode,tweet_id))")
             db.execute("CREATE TABLE sync_state(folder_mode TEXT PRIMARY KEY,last_sync_at TEXT NOT NULL)")
             db.executemany("INSERT INTO likes VALUES ('flat',?)", ((str(ident),) for ident in ids))
@@ -504,7 +504,7 @@ class RelocationTests(unittest.TestCase):
             db.commit()
 
     def legacy_sync(self, paths):
-        with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-sync.sqlite3")) as db:
+        with closing(sqlite3.connect(paths.record_dir / ".luvbox-sync.sqlite3")) as db:
             return ({row[0] for row in db.execute("SELECT tweet_id FROM likes")},
                     db.execute("SELECT last_sync_at FROM sync_state").fetchone()[0])
 
@@ -551,13 +551,13 @@ class RelocationTests(unittest.TestCase):
         self.record(self.a, 100)
         self.record(self.b, 101)
         for paths, ident in ((self.a, 100), (self.b, 101)):
-            for name in (".xlikesaver-archive.sqlite3", ".xlikesaver-archive.date.sqlite3"):
+            for name in (".luvbox-archive.sqlite3", ".luvbox-archive.date.sqlite3"):
                 with closing(sqlite3.connect(paths.record_dir / name)) as db:
                     db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY)")
                     db.execute("INSERT INTO archive VALUES (?)", ("twitter" + str(ident) + "_video_2",))
                     db.commit()
         migrate_records(self.a, self.b)
-        for name in (".xlikesaver-archive.sqlite3", ".xlikesaver-archive.date.sqlite3"):
+        for name in (".luvbox-archive.sqlite3", ".luvbox-archive.date.sqlite3"):
             with closing(sqlite3.connect(self.b.record_dir / name)) as db:
                 self.assertEqual({row[0] for row in db.execute("SELECT entry FROM archive")},
                                  {"twitter100_video_2", "twitter101_video_2"})
@@ -565,7 +565,7 @@ class RelocationTests(unittest.TestCase):
     def test_source_duplicate_run_timestamps_merge_progress_without_id_collision(self):
         self.record(self.a, 100)
         self.record(self.b, 101)
-        with closing(sqlite3.connect(self.a.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.a.record_dir / ".luvbox-history.sqlite3")) as db:
             row = db.execute("SELECT folder_mode,started_at FROM runs").fetchone()
             db.execute("INSERT INTO runs(folder_mode,started_at,status,saved,skipped,visited) VALUES (?,?,'running',2,4,6)", row)
             db.commit()

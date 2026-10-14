@@ -85,11 +85,11 @@ def _taskbar_properties(handle: int, values: dict[int, str] | None) -> dict[int,
 
 def _windows_taskbar(root: tk.Tk, icon: str) -> None:
     handle = int(root.wm_frame(), 16)
-    if getattr(root, "_xlikesaver_taskbar_handle", None) == handle:
+    if getattr(root, "_luvbox_taskbar_handle", None) == handle:
         return
     _taskbar_properties(handle, _taskbar_values(icon))
-    root._xlikesaver_taskbar_handle = handle
-    if not getattr(root, "_xlikesaver_taskbar_cleanup", False):
+    root._luvbox_taskbar_handle = handle
+    if not getattr(root, "_luvbox_taskbar_cleanup", False):
         root_ref = weakref.ref(root)
         destroy_ref = weakref.WeakMethod(root.destroy)
         def close():
@@ -99,12 +99,12 @@ def _windows_taskbar(root: tk.Tk, icon: str) -> None:
                 return
             try:
                 # Free the shell's property values before Tk destroys the HWND.
-                _taskbar_properties(owner._xlikesaver_taskbar_handle, {})
+                _taskbar_properties(owner._luvbox_taskbar_handle, {})
             except (OSError, AttributeError, tk.TclError):
                 pass
             destroy()
         root.destroy = close
-        root._xlikesaver_taskbar_cleanup = True
+        root._luvbox_taskbar_cleanup = True
 
 
 def _windows_icon(window: tk.Misc, icon: str) -> None:
@@ -161,13 +161,13 @@ def install(root: tk.Tk) -> bool:
             icon = str(asset_directory() / "luvbox.ico")
             # Create Tk's native wrapper without loading the multi-image ICO
             # again for every window/map. Use our two cached native icons below.
-            if not getattr(root, "_xlikesaver_icon_binding", False):
+            if not getattr(root, "_luvbox_icon_binding", False):
                 root.iconbitmap("")
             _windows_icon(root, icon)
             _windows_taskbar(root, icon)
             # Map may follow creation of a new native wrapper. Reapply to the
             # root too, and preserve the fallback on independently mapped children.
-            if not getattr(root, "_xlikesaver_icon_binding", False):
+            if not getattr(root, "_luvbox_icon_binding", False):
                 def mapped(event):
                     if isinstance(event.widget, (tk.Tk, tk.Toplevel)):
                         try:
@@ -178,7 +178,7 @@ def install(root: tk.Tk) -> bool:
                             pass
                 for window_class in ("Tk", "Toplevel"):
                     root.bind_class(window_class, "<Map>", mapped, add="+")
-                root._xlikesaver_icon_binding = True
+                root._luvbox_icon_binding = True
         else:
             image = tk.PhotoImage(master=root, file=str(asset_directory() / "luvbox.png"))
             root.iconphoto(True, image)

@@ -14,9 +14,9 @@ from unittest.mock import patch
 from PIL import Image, ImageSequence
 
 from tests import test_core, test_missing_files
-from xlikesaver import core, media
-from xlikesaver.history import HistoryStore
-from xlikesaver.storage import migrate_records, resolve_storage
+from luvbox import core, media
+from luvbox.history import HistoryStore
+from luvbox.storage import migrate_records, resolve_storage
 
 
 class GifConversionTests(unittest.TestCase):
@@ -129,11 +129,11 @@ class GifWorkerTests(unittest.TestCase):
         return replace(self.options, include_gifs=True, **changes)
 
     def keys(self):
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.sqlite3")) as database:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.sqlite3")) as database:
             return {row[0] for row in database.execute("SELECT entry FROM archive")}
 
     def records(self):
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as database:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as database:
             database.row_factory = sqlite3.Row
             return [dict(row) for row in database.execute("SELECT * FROM media")]
 
@@ -161,7 +161,7 @@ class GifWorkerTests(unittest.TestCase):
     def test_new_gif_is_finalized_catalogued_and_archived_once(self):
         posted = test_core.datetime(2020, 1, 1, tzinfo=test_core.timezone.utc)
         rows = [("100", 1, "animated_gif", "alice", posted, 123)]
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
             code, events = self.worker(rows, options=self.options_all())
             self.assertEqual((code, events[-1]["status"], events[-1]["saved"], events[-1]["skipped"]),
                              (0, "finished", 1, 0))
@@ -188,7 +188,7 @@ class GifWorkerTests(unittest.TestCase):
         rows = [("100", 1, "animated_gif", "alice")]
         options = self.options_all()
         paths = resolve_storage(self.output, "myaccount", options.separate_accounts)
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
             code, events = self.worker(rows, options=options)
             self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "finished", 1))
             before = self.records()[0]
@@ -246,7 +246,7 @@ class GifWorkerTests(unittest.TestCase):
 
     def test_selected_retry_adopts_existing_gif_at_new_output_when_former_path_disappeared(self):
         options = self.options_all()
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert):
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=self.convert):
             code, _ = self.worker([("100", 1, "animated_gif", "alice")], options=options)
         self.assertEqual(code, 0)
         old = self.records()[0]
@@ -268,7 +268,7 @@ class GifWorkerTests(unittest.TestCase):
         gif.write_bytes(content)
         test_core.FakeHttpDownloader.downloaded = []
         retry_options = replace(options, output_dir=str(destination.output_dir))
-        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+        with patch("luvbox.core.convert_mp4_to_gif") as convert:
             code, events = self.retry_gif(retry_options)
         convert.assert_not_called()
         self.assertEqual((code, events[-1]["status"], events[-1]["saved"], events[-1]["recovered"],
@@ -303,7 +303,7 @@ class GifWorkerTests(unittest.TestCase):
         # One unconvertible GIF used to abort every run before later Likes.
         rows = [("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")]
         failure = media.ConversionError("GIF로 변환하지 못했습니다.")
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=failure) as convert:
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=failure) as convert:
             code, events = self.worker(rows, options=self.options_all())
             self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "finished", 2))
             self.assert_saved_as_original_mp4(events, "원본 MP4로 저장")
@@ -318,12 +318,12 @@ class GifWorkerTests(unittest.TestCase):
         def stop(source, **kwargs):
             flag.touch()
             kwargs["check_stop"]()
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=stop):
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=stop):
             self.worker(rows, options=self.options_all(), stop_file=str(flag))
         source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
         self.assertTrue(core._transfer_complete(source))
         flag.unlink()
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert):
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=self.convert):
             code, events = self.worker(rows, options=self.options_all())
         self.assertEqual((code, events[-1]["saved"]), (0, 1))
         self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 1)
@@ -335,7 +335,7 @@ class GifWorkerTests(unittest.TestCase):
         def stop(source, **kwargs):
             flag.touch()
             kwargs["check_stop"]()
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=stop):
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=stop):
             code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all(), stop_file=str(flag))
         self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "stopped", 0))
         self.assertEqual(self.keys(), set())
@@ -344,7 +344,7 @@ class GifWorkerTests(unittest.TestCase):
         self.assertTrue(core._transfer_complete(source))
 
     def test_gif_over_size_cap_saves_original_mp4_and_next_file(self):
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=media.ConversionSizeLimit()):
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=media.ConversionSizeLimit()):
             code, events = self.worker([("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")],
                                       options=self.options_all())
         self.assertEqual((code, events[-1]["saved"], events[-1]["size_skipped"]), (0, 2, 0))
@@ -355,7 +355,7 @@ class GifWorkerTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_bytes(b"0" * (2 * 1024 * 1024))
         core._mark_transfer_complete(source)
-        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+        with patch("luvbox.core.convert_mp4_to_gif") as convert:
             code, events = self.worker([("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")],
                                       options=self.options_all(max_video_mb=1))
         convert.assert_not_called()
@@ -370,7 +370,7 @@ class GifWorkerTests(unittest.TestCase):
             output = self.convert(source, **kwargs)
             destination.write_bytes(b"another process created this file")
             return output
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=collision):
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=collision):
             code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all())
         self.assertNotEqual(code, 0)
         self.assertEqual(destination.read_bytes(), b"another process created this file")
@@ -392,7 +392,7 @@ class GifWorkerTests(unittest.TestCase):
         path = self.output / "myaccount" / "alice" / "100_gif_1.mp4"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"previous downloaded MP4")
-        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+        with patch("luvbox.core.convert_mp4_to_gif") as convert:
             code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all())
         self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 0, 1))
         convert.assert_not_called()
@@ -403,13 +403,13 @@ class GifWorkerTests(unittest.TestCase):
         for changes in ({"gif_format": "webm"}, {"gif_size": "1080"}, {"gif_format": ["gif"]}):
             with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "GIF 저장 형식"):
                 self.options_all(**changes).validate()
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
             code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all(gif_size="720"))
         self.assertEqual(code, 0)
         self.assertEqual(convert.call_args.kwargs["size"], "720")
 
     def test_mp4_choice_saves_the_original_without_converting(self):
-        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+        with patch("luvbox.core.convert_mp4_to_gif") as convert:
             code, events = self.worker([("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")],
                                       options=self.options_all(gif_format="mp4"))
         convert.assert_not_called()
@@ -426,7 +426,7 @@ class GifWorkerTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_bytes(b"completed earlier for a GIF")
         core._mark_transfer_complete(source)
-        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+        with patch("luvbox.core.convert_mp4_to_gif") as convert:
             code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all(gif_format="mp4"))
         convert.assert_not_called()
         self.assertEqual((code, events[-1]["saved"]), (0, 1))
@@ -438,7 +438,7 @@ class GifWorkerTests(unittest.TestCase):
         path = self.output / "myaccount" / "alice" / "100_gif_1.gif"
         path.parent.mkdir(parents=True)
         Image.new("RGB", (10, 10), "green").save(path)
-        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+        with patch("luvbox.core.convert_mp4_to_gif") as convert:
             code, events = self.worker([("100", 1, "animated_gif", "alice")], options=self.options_all())
         self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 0, 1))
         convert.assert_not_called()

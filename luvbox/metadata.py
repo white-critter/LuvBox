@@ -26,9 +26,14 @@ _ID = re.compile(r"[0-9]{1,20}\Z", re.ASCII)
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z", re.ASCII)
 _URL = re.compile(r"https://x\.com/i/web/status/[0-9]{1,20}\Z", re.ASCII)
 _URL_CHARACTER = r"[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]"
-_AUTHOR_MARKER = "xlikesaver:x-author:"
-_AUTHOR_ID_MARKER = "xlikesaver:x-user-id:"
-_OWNED_AUTHOR_MARKER = "xlikesaver:owned-author:v1:"
+_AUTHOR_MARKER = "luvbox:x-author:"
+_AUTHOR_ID_MARKER = "luvbox:x-user-id:"
+_OWNED_AUTHOR_MARKER = "luvbox:owned-author:v1:"
+# These are persisted inside media from releases before the rename. Read and
+# retire them too, while writing only the current protocol markers.
+_AUTHOR_MARKERS = (_AUTHOR_MARKER, "xlikesaver:x-author:")
+_AUTHOR_ID_MARKERS = (_AUTHOR_ID_MARKER, "xlikesaver:x-user-id:")
+_OWNED_AUTHOR_MARKERS = (_OWNED_AUTHOR_MARKER, "xlikesaver:owned-author:v1:")
 # Ownership is separate from identity: an existing matching value may have
 # come from another program. Only values this app actually appends are owned.
 _AUTHOR_ENTRY_ROLES = {
@@ -110,6 +115,98 @@ def _original_unchanged(target: Path, original) -> None:
             (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) !=
             (original.st_dev, original.st_ino, original.st_size, original.st_mtime_ns)):
         raise _MediaChanged("media changed")
+
+
+def _copy_for_metadata(source: Path, temporary: Path) -> None:
+    """Preserve Windows named streams on the private staging copy."""
+    if os.name != "nt":
+        shutil.copy2(source, temporary)
+        return
+    import ctypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    copy = kernel.CopyFileW
+    copy.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_int)
+    copy.restype = ctypes.c_int
+    # mkstemp already reserved this path. CopyFile preserves the original's
+    # NTFS streams; shutil.copy2 copies only the unnamed data stream.
+    if not copy(str(source), str(temporary), False):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _preserve_creation_time(temporary: Path, original) -> None:
+    """Restore Windows creation time exactly after the writer's time rounding."""
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Python 3.10/3.11 expose Windows creation time as st_ctime_ns; 3.12
+    # added its explicit name. Both supported interpreter versions work.
+    created_ns = getattr(original, "st_birthtime_ns", None)
+    if created_ns is None:
+        created_ns = original.st_ctime_ns
+    created = created_ns // 100 + 116444736000000000
+    birth = wintypes.FILETIME(created & 0xffffffff, created >> 32)
+    create = kernel.CreateFileW
+    create.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                       wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+    create.restype = wintypes.HANDLE
+    set_time = kernel.SetFileTime
+    set_time.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+                         ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME))
+    set_time.restype = wintypes.BOOL
+    close = kernel.CloseHandle
+    close.argtypes = (wintypes.HANDLE,)
+    close.restype = wintypes.BOOL
+    handle = create(str(temporary), 0x100, 7, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        if not set_time(handle, ctypes.byref(birth), None, None):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        close(handle)
+
+
+def _preserve_permissions(source: Path, temporary: Path) -> None:
+    """Retain the original Windows DACL rather than inheriting the folder's."""
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+    security = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    pointer = ctypes.c_void_p
+    get = security.GetNamedSecurityInfoW
+    get.argtypes = (wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+                    ctypes.POINTER(pointer), ctypes.POINTER(pointer), ctypes.POINTER(pointer),
+                    ctypes.POINTER(pointer), ctypes.POINTER(pointer))
+    get.restype = wintypes.DWORD
+    set_security = security.SetNamedSecurityInfoW
+    set_security.argtypes = (wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+                             pointer, pointer, pointer, pointer)
+    set_security.restype = wintypes.DWORD
+    control = security.GetSecurityDescriptorControl
+    control.argtypes = (pointer, ctypes.POINTER(wintypes.WORD), ctypes.POINTER(wintypes.DWORD))
+    control.restype = wintypes.BOOL
+    free = kernel.LocalFree
+    free.argtypes = (pointer,)
+    free.restype = pointer
+    descriptor, dacl = pointer(), pointer()
+    result = get(str(source), 1, 4, None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
+    if result:
+        raise ctypes.WinError(result)
+    try:
+        flags, revision = wintypes.WORD(), wintypes.DWORD()
+        if not control(descriptor, ctypes.byref(flags), ctypes.byref(revision)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        # Preserve whether the file inherits permissions from its folder.
+        protection = 0x80000000 if flags.value & 0x1000 else 0x20000000
+        result = set_security(str(temporary), 1, 4 | protection, None, None, dacl, None)
+        if result:
+            raise ctypes.WinError(result)
+    finally:
+        free(descriptor)
 
 
 def _replace_verified(temporary: Path, target: Path, original, deadline: float) -> None:
@@ -471,9 +568,10 @@ def author_identity(author, author_id) -> dict[str, str]:
 
 def _owned_author_entry(marker: str) -> tuple[str, str] | None:
     """Recognize only bounded, valid ownership markers written by this app."""
-    if not marker.startswith(_OWNED_AUTHOR_MARKER):
+    prefix = next((prefix for prefix in _OWNED_AUTHOR_MARKERS if marker.startswith(prefix)), None)
+    if prefix is None:
         return None
-    role, separator, value = marker[len(_OWNED_AUTHOR_MARKER):].partition(":")
+    role, separator, value = marker[len(prefix):].partition(":")
     specification = _AUTHOR_ENTRY_ROLES.get(role)
     if not separator or specification is None:
         return None
@@ -483,11 +581,17 @@ def _owned_author_entry(marker: str) -> tuple[str, str] | None:
     return tag, template.format(value)
 
 
+def _marker_value(marker: str, prefixes: tuple[str, ...], pattern) -> str:
+    for prefix in prefixes:
+        if marker.startswith(prefix):
+            value = marker[len(prefix):]
+            return value if pattern.fullmatch(value) else ""
+    return ""
+
+
 def _identity_marker(marker: str) -> bool:
-    return ((marker.startswith(_AUTHOR_MARKER) and
-             bool(_HANDLE.fullmatch(marker[len(_AUTHOR_MARKER):]))) or
-            (marker.startswith(_AUTHOR_ID_MARKER) and
-             bool(_ID.fullmatch(marker[len(_AUTHOR_ID_MARKER):]))))
+    return bool(_marker_value(marker, _AUTHOR_MARKERS, _HANDLE) or
+                _marker_value(marker, _AUTHOR_ID_MARKERS, _ID))
 
 
 def _remove_owned_line(text: str, line: str) -> str:
@@ -504,10 +608,10 @@ def _remove_owned_line(text: str, line: str) -> str:
 
 def _author_from_tags(tags: dict) -> dict[str, str]:
     identities = _values(tags.get("XMP-xmp:Identifier"))
-    authors = {value[len(_AUTHOR_MARKER):] for value in identities
-               if value.startswith(_AUTHOR_MARKER) and _HANDLE.fullmatch(value[len(_AUTHOR_MARKER):])}
-    ids = {value[len(_AUTHOR_ID_MARKER):] for value in identities
-           if value.startswith(_AUTHOR_ID_MARKER) and _ID.fullmatch(value[len(_AUTHOR_ID_MARKER):])}
+    authors = {author for value in identities
+               if (author := _marker_value(value, _AUTHOR_MARKERS, _HANDLE))}
+    ids = {author_id for value in identities
+           if (author_id := _marker_value(value, _AUTHOR_ID_MARKERS, _ID))}
     # A photographer's unrelated Creator entry is not a tweet-author identity.
     # Conflicting markers are ambiguous; do not guess which author is current.
     if len(authors) > 1 or len(ids) > 1:
@@ -585,10 +689,10 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         deadline = time.monotonic() + TIMEOUT_SECONDS
         previous_tags = _read_tags(target, deadline)
         reason = "copy"
-        fd, name = tempfile.mkstemp(prefix=".xlikesaver-source-", suffix=target.suffix, dir=target.parent)
+        fd, name = tempfile.mkstemp(prefix=".luvbox-source-", suffix=target.suffix, dir=target.parent)
         os.close(fd)
         temporary = Path(name)
-        shutil.copy2(target, temporary)
+        _copy_for_metadata(target, temporary)
         source_token = re.compile(r"(?<!" + _URL_CHARACTER + r")" + re.escape(url) + r"(?!" + _URL_CHARACTER + r")")
         identifiers = _values(previous_tags.get("XMP-xmp:Identifier"))
         previous_owned = {}
@@ -623,7 +727,7 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                     owned_markers.append(marker)
                 elif line in previous_owned.get(ownership_tag, ()):
                     owned_markers.append(marker)
-            fd, name = tempfile.mkstemp(prefix=".xlikesaver-source-", suffix=".txt", dir=target.parent)
+            fd, name = tempfile.mkstemp(prefix=".luvbox-source-", suffix=".txt", dir=target.parent)
             text_path = Path(name)
             text_files.append(text_path)
             with os.fdopen(fd, "w", encoding="utf-8", newline="") as output:
@@ -631,7 +735,9 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             return f"-{tag}<={text_path}", value
 
         description_arg, description_value = text_argument("XMP-dc:Description-x-default", previous_tags.get("XMP-dc:Description", ""))
-        arguments = ["-overwrite_original", "-P", f"-XMP-dc:Source={url}", description_arg]
+        # Only the private copy is updated in place. The faster rename mode
+        # would discard the named streams just copied by Windows.
+        arguments = ["-overwrite_original_in_place", "-P", f"-XMP-dc:Source={url}", description_arg]
         required_tags = {}
         removed_tags = {}
         if has_author:
@@ -696,6 +802,8 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         # Do not overwrite a file another local process changed during the copy.
         _original_unchanged(target, original)
         os.utime(temporary, ns=(original.st_atime_ns, original.st_mtime_ns))
+        _preserve_creation_time(temporary, original)
+        _preserve_permissions(target, temporary)
         reason = "replace"
         _replace_verified(temporary, target, original, deadline)
         temporary = None

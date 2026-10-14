@@ -18,8 +18,8 @@ from gallery_dl.extractor.message import Message
 from gallery_dl.extractor.twitter import TwitterExtractor
 
 from tests import test_core
-from xlikesaver.core import JobOptions, run_worker
-from xlikesaver.history import HistoryError, HistoryStore
+from luvbox.core import JobOptions, run_worker
+from luvbox.history import HistoryError, HistoryStore
 
 
 MIB = 1024 * 1024
@@ -63,7 +63,7 @@ class MediaTests(unittest.TestCase):
             target = source.parent / ".offline-conversion.gif"
             target.write_bytes(b"GIF89a\x02\x00\x02\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff;" )
             return target
-        conversion_patch = patch("xlikesaver.core.convert_mp4_to_gif", side_effect=convert)
+        conversion_patch = patch("luvbox.core.convert_mp4_to_gif", side_effect=convert)
         self.gif_convert = conversion_patch.start()
         self.addCleanup(conversion_patch.stop)
     tearDown = test_core.CoreTests.tearDown
@@ -74,11 +74,11 @@ class MediaTests(unittest.TestCase):
         return replace(self.options, include_videos=True, include_gifs=True, **changes)
 
     def archive_keys(self):
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.sqlite3")) as db:
             return {row[0] for row in db.execute("SELECT entry FROM archive")}
 
     def history_rows(self, table="media"):
-        path = self.record_dir / ".xlikesaver-history.sqlite3"
+        path = self.record_dir / ".luvbox-history.sqlite3"
         with closing(sqlite3.connect(path)) as db:
             db.row_factory = sqlite3.Row
             return [dict(row) for row in db.execute(f"SELECT * FROM {table}")]
@@ -103,7 +103,7 @@ class MediaTests(unittest.TestCase):
         patches = [patch("gallery_dl.extractor.find", side_effect=lambda url: test_core.FakeLikesExtractor(url, rows)),
                    patch("gallery_dl.downloader.find", return_value=HttpDownloader),
                    patch("requests.Session.send", side_effect=responses),
-                   patch("xlikesaver.protection.MEDIA_INTERVAL", 0)]
+                   patch("luvbox.protection.MEDIA_INTERVAL", 0)]
         if items is not None:
             patches.append(patch.object(test_core.FakeLikesExtractor, "items", items))
         from contextlib import ExitStack
@@ -403,8 +403,8 @@ class MediaTests(unittest.TestCase):
                 patch.object(test_core.FakeLikesExtractor, "items", items), \
                 patch("gallery_dl.downloader.find", return_value=HttpDownloader), \
                 patch("requests.Session.send", side_effect=responses) as send, \
-                patch("xlikesaver.protection.MEDIA_INTERVAL", 20), \
-                patch("xlikesaver.core.time.sleep", press_stop_during_wait):
+                patch("luvbox.protection.MEDIA_INTERVAL", 20), \
+                patch("luvbox.core.time.sleep", press_stop_during_wait):
             code = run_worker(self.all_media(), events.append, flag)
         self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "stopped", 1))
         self.assertEqual([call.args[0].url for call in send.call_args_list], ["https://pbs.twimg.com/media/100?name=orig"])
@@ -446,7 +446,7 @@ class MediaTests(unittest.TestCase):
                     self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "stopped", 0))
                     partial = folder / (name + ".part")
                     self.assertEqual(partial.read_bytes(), payload)
-                    self.assertTrue(Path(str(partial) + ".xlikesaver-complete").is_file())
+                    self.assertTrue(Path(str(partial) + ".luvbox-complete").is_file())
                     self.assertEqual(self.archive_keys(), set())
                     flag.unlink()
                     # The server would refuse a resume of the complete file.
@@ -469,7 +469,7 @@ class MediaTests(unittest.TestCase):
                         self.assertEqual((folder / name).stat().st_mtime, 1577836800)
                         self.assertEqual(len(self.archive_keys()), 1)
                     self.assertFalse(list(self.output.rglob("*.part*")))
-                    self.assertFalse(list(self.output.rglob("*.xlikesaver-complete")))
+                    self.assertFalse(list(self.output.rglob("*.luvbox-complete")))
 
     def test_ordinary_saves_with_a_review_channel_write_no_completion_record(self):
         # Every run started from the window has a review channel, even with
@@ -486,7 +486,7 @@ class MediaTests(unittest.TestCase):
 
         for enabled in (False, True):
             with self.subTest(enabled=enabled), \
-                    patch("xlikesaver.core._mark_transfer_complete") as mark:
+                    patch("luvbox.core._mark_transfer_complete") as mark:
                 self.tearDown()
                 self.setUp()
                 photo = [b"\xff\xd8\xff", b"photo-bytes"]
@@ -523,7 +523,7 @@ class MediaTests(unittest.TestCase):
                                            review=Review(), stop_file=flag)
         self.assertEqual((code, events[-1]["status"]), (0, "stopped"))
         partial = self.output / "myaccount" / "alice" / "100_1.jpg.part"
-        self.assertTrue(Path(str(partial) + ".xlikesaver-complete").is_file())
+        self.assertTrue(Path(str(partial) + ".luvbox-complete").is_file())
         flag.unlink()
         refused = self.response(status=416, content_range="bytes */14")
         code, events, send = self.http_worker([("100", 1, "photo", "alice")], [refused])
@@ -543,22 +543,22 @@ class MediaTests(unittest.TestCase):
 
         photo = [b"\xff\xd8\xff", b"photo-bytes"]
         # A full disk or a locked folder only loses the record: still a stop.
-        with patch("xlikesaver.core._mark_transfer_complete", side_effect=OSError(28, "no space")):
+        with patch("luvbox.core._mark_transfer_complete", side_effect=OSError(28, "no space")):
             code, events, _ = self.http_worker([("100", 1, "photo", "alice")],
                                                [self.response(photo, size=14, content_type="image/jpeg")],
                                                review=Review(), stop_file=flag)
         self.assertEqual((code, events[-1]["status"]), (0, "stopped"))
         partial = self.output / "myaccount" / "alice" / "100_1.jpg.part"
         self.assertTrue(partial.is_file())
-        self.assertFalse(Path(str(partial) + ".xlikesaver-complete").exists())
+        self.assertFalse(Path(str(partial) + ".luvbox-complete").exists())
         # A record that cannot be removed after the save does not undo it.
-        from xlikesaver import core
+        from luvbox import core
         core._mark_transfer_complete(partial)
         flag.unlink()
         unlink = Path.unlink
 
         def locked(path, *args, **kwargs):
-            if path.name.endswith(".xlikesaver-complete"):
+            if path.name.endswith(".luvbox-complete"):
                 raise PermissionError(32, "in use")
             return unlink(path, *args, **kwargs)
 
@@ -571,7 +571,7 @@ class MediaTests(unittest.TestCase):
 
     def test_completion_record_allows_synced_time_rounding_but_not_other_sizes(self):
         import os
-        from xlikesaver import core
+        from luvbox import core
         source = self.base / "100_1.jpg.part"
         source.write_bytes(b"complete transfer")
         core._mark_transfer_complete(source, "Wed, 01 Jan 2020 00:00:00 GMT")
@@ -587,7 +587,7 @@ class MediaTests(unittest.TestCase):
         self.assertIsNone(core._transfer_complete(source))
         for damaged in (b"[]", b"{}", b'{"version": 1, "size": "25", "mtime_ns": 1}', b"not json"):
             with self.subTest(damaged=damaged):
-                Path(str(source) + ".xlikesaver-complete").write_bytes(damaged)
+                Path(str(source) + ".luvbox-complete").write_bytes(damaged)
                 self.assertIsNone(core._transfer_complete(source))
 
     def test_transfer_rejected_by_the_review_path_check_is_never_trusted_later(self):
@@ -607,7 +607,7 @@ class MediaTests(unittest.TestCase):
                                            review=Review())
         self.assertNotEqual(code, 0)
         self.assertIn("저장 여부 확인을 완료하지 못해", events[-1]["message"])
-        self.assertFalse(list(self.output.rglob("*.xlikesaver-complete")))
+        self.assertFalse(list(self.output.rglob("*.luvbox-complete")))
 
     def test_unmarked_complete_partial_still_stops_on_416(self):
         # Only a transfer this app recorded as complete is trusted.
@@ -762,7 +762,7 @@ class MediaTests(unittest.TestCase):
         observed = []
         def record(store, mode, metadata, path, *, status="saved"):
             observed.append((status, metadata["tweet_id"]))
-            self.assertIn(f"twitter{metadata['_xlikesaver_archive_key']}", self.archive_keys())
+            self.assertIn(f"twitter{metadata['_luvbox_archive_key']}", self.archive_keys())
             return original(store, mode, metadata, path, status=status)
         rows = [("100", 1, "photo", "alice", datetime(2026, 10, 4, tzinfo=timezone.utc)),
                 ("101", 1, "video", "bob", datetime(2019, 1, 1, tzinfo=timezone.utc))]
@@ -826,7 +826,7 @@ class MediaTests(unittest.TestCase):
         rows = [("100", 1, "photo", "alice", None, 123)]
         self.worker(rows)
         original = self.history_rows()[0]
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             db.execute("UPDATE media SET author_metadata_status='pending',author_id=''")
             db.commit()
         for _ in range(2):
@@ -859,8 +859,8 @@ class MediaTests(unittest.TestCase):
         from contextlib import nullcontext
         from queue import Queue
         from threading import Event
-        from xlikesaver.history_gui import HistoryWindow
-        from xlikesaver.storage import resolve_storage
+        from luvbox.history_gui import HistoryWindow
+        from luvbox.storage import resolve_storage
 
         options = replace(self.options, folder_mode="flat")
         self.worker([("100", 1, "photo", "Writer", None, 123)], options=options)
@@ -880,7 +880,7 @@ class MediaTests(unittest.TestCase):
 
         paths = resolve_storage(self.output, "myaccount", separate_accounts=options.separate_accounts)
         window = SimpleNamespace(_store=HistoryStore.for_storage, metadata_stop=Event(), results=Queue())
-        with patch("xlikesaver.metadata.persistent", return_value=nullcontext()), \
+        with patch("luvbox.metadata.persistent", return_value=nullcontext()), \
                 patch("requests.Session.request") as network:
             HistoryWindow._backfill(window, 1, paths)
             self.embed_source.assert_called_once_with(path, "100", author="writer", author_id="123")
@@ -890,19 +890,19 @@ class MediaTests(unittest.TestCase):
         row = self.history_rows()[0]
         self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "embedded"))
         self.assertEqual(row["saved_at"], original["saved_at"])
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.flat.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.flat.sqlite3")) as db:
             self.assertEqual({entry for entry, in db.execute("SELECT entry FROM archive")}, {"twitter100_1"})
 
     def test_deferred_prior_author_error_is_not_a_recording_failure_this_run(self):
         rows = [("100", 1, "photo", "alice", None, 123)]
         self.worker(rows)
         original = self.history_rows()[0]
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             db.execute("UPDATE media SET author_metadata_status='error'")
             db.commit()
         for helper_available in (True, False):
             with self.subTest(helper_available=helper_available), \
-                    patch("xlikesaver.metadata.available", return_value=helper_available):
+                    patch("luvbox.metadata.available", return_value=helper_available):
                 self.embed_source.reset_mock()
                 code, events = self.worker(rows)
                 self.assertEqual(code, 0)
@@ -928,7 +928,7 @@ class MediaTests(unittest.TestCase):
         options = replace(self.options, folder_mode="flat")
         rows = [("100", 1, "photo", "")]
         self.worker(rows, options=options)
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             db.execute("UPDATE media SET author_metadata_status='pending'")
             db.commit()
         self.embed_source.reset_mock()
@@ -942,7 +942,7 @@ class MediaTests(unittest.TestCase):
         rows = [("100", 1, "photo", "alice")]
         self.worker(rows)
         original = self.history_rows()[0]
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             db.execute("UPDATE media SET author_metadata_status='pending'")
             db.commit()
         self.embed_source.reset_mock()
@@ -987,7 +987,7 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(self.history_rows()[0]["metadata_status"], "failed")
 
     def test_helper_unavailable_checked_once_and_never_invoked_for_each_file(self):
-        with patch("xlikesaver.metadata.available", return_value=False) as available:
+        with patch("luvbox.metadata.available", return_value=False) as available:
             code, events = self.worker([("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")])
         self.assertEqual(code, 0)
         available.assert_called_once_with()

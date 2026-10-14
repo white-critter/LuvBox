@@ -11,7 +11,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from xlikesaver import browser_login as login
+from luvbox import browser_login as login
 
 
 TOKEN = "offline-browser-token"
@@ -28,10 +28,10 @@ class BrowserLoginTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
         self.addCleanup(patch.stopall)
-        patch("xlikesaver.browser_login.app_directory", return_value=self.directory).start()
-        patch("xlikesaver.browser_login._unused_port", return_value=12345).start()
-        patch("xlikesaver.browser_login._browser_endpoint", return_value=(12345, "/devtools/browser/offline")).start()
-        self.save = patch("xlikesaver.browser_login.save_auth_token").start()
+        patch("luvbox.browser_login.app_directory", return_value=self.directory).start()
+        patch("luvbox.browser_login._unused_port", return_value=12345).start()
+        patch("luvbox.browser_login._browser_endpoint", return_value=(12345, "/devtools/browser/offline")).start()
+        self.save = patch("luvbox.browser_login.save_auth_token").start()
         self.cancel = threading.Event()
         self.process = Mock()
         self.process.poll.return_value = None
@@ -58,7 +58,7 @@ class BrowserLoginTests(unittest.TestCase):
         other = self.directory / "login-profile-other-attempt"
         other.mkdir()
         (other / "marker").write_text("another running app")
-        with patch("xlikesaver.browser_login.devtools_call", side_effect=self.call) as wire:
+        with patch("luvbox.browser_login.devtools_call", side_effect=self.call) as wire:
             self.sign_in()
         self.save.assert_called_once_with(TOKEN)
         self.assertFalse(self.profile.exists())
@@ -78,7 +78,7 @@ class BrowserLoginTests(unittest.TestCase):
 
     def test_exited_edge_launcher_does_not_cancel_browser_and_browser_still_closes(self):
         self.process.poll.return_value = 0
-        with patch("xlikesaver.browser_login.devtools_call", side_effect=self.call) as wire:
+        with patch("luvbox.browser_login.devtools_call", side_effect=self.call) as wire:
             self.sign_in()
         self.save.assert_called_once_with(TOKEN)
         self.assertEqual(wire.call_args.args[-1], "Browser.close")
@@ -90,7 +90,7 @@ class BrowserLoginTests(unittest.TestCase):
             if args[-1] == "Storage.getCookies":
                 self.cancel.set()
             return result
-        with patch("xlikesaver.browser_login.devtools_call", side_effect=call), \
+        with patch("luvbox.browser_login.devtools_call", side_effect=call), \
                 self.assertRaisesRegex(login.SignInError, login.CANCELLED):
             self.sign_in()
         self.save.assert_not_called()
@@ -103,7 +103,7 @@ class BrowserLoginTests(unittest.TestCase):
         self.assertFalse(hasattr(self, "profile"))
 
     def test_timeout_closes_browser_and_preserves_previous_session(self):
-        with patch("xlikesaver.browser_login.devtools_call", side_effect=self.call), \
+        with patch("luvbox.browser_login.devtools_call", side_effect=self.call), \
                 self.assertRaisesRegex(login.SignInError, login.TIMED_OUT):
             self.sign_in(timeout=-1)
         self.save.assert_not_called()
@@ -115,7 +115,7 @@ class BrowserLoginTests(unittest.TestCase):
             self.cancel.set()
             self.process.poll.return_value = 0
             return result
-        with patch("xlikesaver.browser_login.devtools_call", side_effect=self.call) as wire, \
+        with patch("luvbox.browser_login.devtools_call", side_effect=self.call) as wire, \
                 self.assertRaisesRegex(login.SignInError, login.CANCELLED):
             login.sign_in(self.cancel, edge=Path("offline.exe"), launch=launch)
         self.assertEqual(wire.call_args.args[-1], "Browser.close")
@@ -127,8 +127,8 @@ class BrowserLoginTests(unittest.TestCase):
             if args[-1] == "Browser.close":
                 raise ConnectionError("offline")
             return self.call(*args, **kwargs)
-        with patch("xlikesaver.browser_login.devtools_call", side_effect=call), \
-                patch("xlikesaver.browser_login._stop_profile_processes") as stop:
+        with patch("luvbox.browser_login.devtools_call", side_effect=call), \
+                patch("luvbox.browser_login._stop_profile_processes") as stop:
             self.sign_in()
         stop.assert_called_once_with(self.profile)
 
@@ -138,7 +138,7 @@ class BrowserLoginTests(unittest.TestCase):
                  {"url": "https://x.com/home", "targetId": "home"}]
         for blank in (True, False, "true"):
             with self.subTest(blank=blank), \
-                    patch("xlikesaver.browser_login.devtools_call", return_value={"result":{"value":{"ready":True,"blank":blank}}}) as wire:
+                    patch("luvbox.browser_login.devtools_call", return_value={"result":{"value":{"ready":True,"blank":blank}}}) as wire:
                 self.assertTrue(login._recover_blank_login(12345, pages))
                 self.assertEqual(wire.call_count, 2 if blank is True else 1)
                 self.assertEqual(wire.call_args.args[1], "/devtools/page/offline")
@@ -148,35 +148,35 @@ class BrowserLoginTests(unittest.TestCase):
 
     def test_login_recovery_waits_for_slow_document_without_spending_retry(self):
         pages = [{"url":login.LOGIN_URL,"targetId":"offline"}]
-        with patch("xlikesaver.browser_login.devtools_call", return_value={"result":{"value":{"ready":False,"blank":True}}}) as wire:
+        with patch("luvbox.browser_login.devtools_call", return_value={"result":{"value":{"ready":False,"blank":True}}}) as wire:
             self.assertFalse(login._recover_blank_login(12345,pages))
         wire.assert_called_once()
 
     def test_partial_socket_receive_obeys_total_deadline(self):
         wire = Mock()
         wire.recv.return_value = b"a"
-        with patch("xlikesaver.browser_login.time.monotonic", side_effect=[1,2,4]), \
+        with patch("luvbox.browser_login.time.monotonic", side_effect=[1,2,4]), \
                 self.assertRaises(TimeoutError):
             login._receive_exact(wire, 3, 3)
         self.assertEqual(wire.recv.call_count, 2)
         self.assertEqual([call.args[0] for call in wire.settimeout.call_args_list], [2,1])
 
     def test_user_closes_all_pages_without_connecting(self):
-        with patch("xlikesaver.browser_login.devtools_call", return_value={}), \
+        with patch("luvbox.browser_login.devtools_call", return_value={}), \
                 self.assertRaisesRegex(login.SignInError, login.CLOSED):
             self.sign_in()
         self.save.assert_not_called()
         self.assertFalse(self.profile.exists())
 
     def test_no_edge_has_a_fixed_error_and_does_not_launch(self):
-        with patch("xlikesaver.browser_login.find_edge", return_value=None), \
+        with patch("luvbox.browser_login.find_edge", return_value=None), \
                 self.assertRaisesRegex(login.SignInError, login.NO_EDGE):
             login.sign_in(self.cancel, launch=self.launch)
         self.save.assert_not_called()
         self.assertFalse(hasattr(self, "profile"))
 
     def test_policy_cannot_redirect_login_to_a_personal_profile(self):
-        with patch("xlikesaver.browser_login._check_profile_policy", side_effect=login.SignInError(login.NO_DEBUGGING)), \
+        with patch("luvbox.browser_login._check_profile_policy", side_effect=login.SignInError(login.NO_DEBUGGING)), \
                 self.assertRaises(login.SignInError):
             self.sign_in()
         self.assertFalse(hasattr(self, "profile"))
@@ -192,7 +192,7 @@ class BrowserLoginTests(unittest.TestCase):
 
     def test_storage_failure_still_closes_and_cleans_browser(self):
         self.save.side_effect = ValueError("암호化 저장 실패")
-        with patch("xlikesaver.browser_login.devtools_call", side_effect=self.call), \
+        with patch("luvbox.browser_login.devtools_call", side_effect=self.call), \
                 self.assertRaises(login.SignInError):
             self.sign_in()
         self.assertFalse(self.profile.exists())
@@ -231,7 +231,7 @@ class BrowserLoginTests(unittest.TestCase):
                 return result
 
         wire = Wire()
-        with patch("xlikesaver.browser_login.socket.create_connection", return_value=wire) as connect:
+        with patch("luvbox.browser_login.socket.create_connection", return_value=wire) as connect:
             result = login.devtools_call(12345, "/devtools/browser/offline", "Storage.getCookies")
         connect.assert_called_once_with(("127.0.0.1", 12345), timeout=5.0)
         self.assertEqual(result["cookies"][0]["value"], TOKEN)

@@ -106,10 +106,10 @@ def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | N
     try:
         if not source.is_file():
             raise ConversionError("GIF로 변환할 MP4 임시 파일을 찾지 못했습니다.")
-        fd, name = tempfile.mkstemp(prefix=".xlikesaver-gif-palette-", suffix=".bmp", dir=source.parent)
+        fd, name = tempfile.mkstemp(prefix=".luvbox-gif-palette-", suffix=".bmp", dir=source.parent)
         os.close(fd)
         palette = Path(name)
-        fd, name = tempfile.mkstemp(prefix=".xlikesaver-gif-", suffix=".gif", dir=source.parent)
+        fd, name = tempfile.mkstemp(prefix=".luvbox-gif-", suffix=".gif", dir=source.parent)
         os.close(fd)
         output = Path(name)
         common = [str(executable), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",

@@ -10,9 +10,9 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from xlikesaver.history import _JOINED, HistoryError, HistoryStore
-from xlikesaver.recovery import rebuild_history
-from xlikesaver.storage import _merge_history, _merge_media
+from luvbox.history import _JOINED, HistoryError, HistoryStore
+from luvbox.recovery import rebuild_history
+from luvbox.storage import _merge_history, _merge_media
 
 
 def signature(path):
@@ -25,7 +25,7 @@ class DeleteRecordTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        isolated = patch("xlikesaver.protection.state_directory", return_value=self.root / "app" / "protection")
+        isolated = patch("luvbox.protection.state_directory", return_value=self.root / "app" / "protection")
         isolated.start()
         self.addCleanup(isolated.stop)
         self.folder = self.root / "media"
@@ -232,13 +232,13 @@ class DeleteRecordTests(unittest.TestCase):
                 self.store.begin_deletion(*args)
         self.assertEqual(self.store.deletion_page()["total"], 0)
 
-    @patch("xlikesaver.history._now", new=lambda: "2026-10-08T00:00:00+00:00")
+    @patch("luvbox.history._now", new=lambda: "2026-10-08T00:00:00+00:00")
     def test_snapshot_merge_keeps_finished_journal_and_deleted_path(self):
         row = self.media()
         ident = self.begin(row)
         other_folder = self.root / "other-records"
         other_folder.mkdir()
-        other_path = other_folder / ".xlikesaver-history.sqlite3"
+        other_path = other_folder / ".luvbox-history.sqlite3"
         with closing(sqlite3.connect(other_path)) as db:
             self.store._db.backup(db)
         self.store.finish_deletion(ident, "recycled", recycle_path=self.recycle(row))
@@ -282,7 +282,7 @@ class DeleteRecordTests(unittest.TestCase):
     def tick(self):
         # Windows clocks can repeat a time stamp within one test; keep them ordered.
         counter = itertools.count()
-        clock = patch("xlikesaver.history._now", side_effect=lambda: "2026-10-07T12:00:00.%06d+09:00" % next(counter))
+        clock = patch("luvbox.history._now", side_effect=lambda: "2026-10-07T12:00:00.%06d+09:00" % next(counter))
         clock.start()
         self.addCleanup(clock.stop)
 

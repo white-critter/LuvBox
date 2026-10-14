@@ -7,10 +7,10 @@ from tkinter import ttk
 from unittest.mock import patch
 
 from tests import test_account_merge as merge_support
-from xlikesaver.history import HistoryStore
-from xlikesaver.history_gui import HistoryWindow
-from xlikesaver.gallery import TILE
-from xlikesaver.storage import MigrationError
+from luvbox.history import HistoryStore
+from luvbox.history_gui import HistoryWindow
+from luvbox.gallery import TILE
+from luvbox.storage import MigrationError
 
 
 class AccountMergeGuiStabilityTests(unittest.TestCase):
@@ -20,8 +20,8 @@ class AccountMergeGuiStabilityTests(unittest.TestCase):
 
     def start_merge(self):
         self.load()
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.merge_accounts()
         self.assertTrue(self.window.choice_active)
         return thread.call_args.kwargs["args"]
@@ -29,7 +29,7 @@ class AccountMergeGuiStabilityTests(unittest.TestCase):
     def test_worker_publishes_one_batch_result_for_multiple_accounts(self):
         results = queue.Queue()
         accounts = ["old_account", "another"]
-        with patch("xlikesaver.history_gui.merge_accounts_records",
+        with patch("luvbox.history_gui.merge_accounts_records",
                    return_value={"records": 4, "added": 3, "keys": 4}) as merge:
             HistoryWindow._merge_worker(results, 1, self.paths, accounts)
         merge.assert_called_once_with(self.paths, accounts)
@@ -40,7 +40,7 @@ class AccountMergeGuiStabilityTests(unittest.TestCase):
 
     def test_failed_batch_releases_busy_state_and_leaves_current_records_unchanged(self):
         args = self.start_merge()
-        with patch("xlikesaver.history_gui.merge_accounts_records", side_effect=MigrationError("offline fixture")):
+        with patch("luvbox.history_gui.merge_accounts_records", side_effect=MigrationError("offline fixture")):
             HistoryWindow._merge_worker(self.window.results, *args)
         self.window._poll()
         self.assertFalse(self.window.busy)
@@ -58,7 +58,7 @@ class AccountMergeGuiStabilityTests(unittest.TestCase):
         self.window.close()
         self.assertTrue(self.window.closing)
         self.assertFalse(self.window._destroyed)
-        with patch("xlikesaver.history_gui.merge_accounts_records", side_effect=MigrationError("offline fixture")):
+        with patch("luvbox.history_gui.merge_accounts_records", side_effect=MigrationError("offline fixture")):
             HistoryWindow._merge_worker(self.window.results, *args)
         self.window._poll()
         self.assertFalse(self.window.busy)
@@ -72,8 +72,8 @@ class AccountMergeGuiStabilityTests(unittest.TestCase):
             self.window.generation += 1
             return True
 
-        with patch("xlikesaver.history_gui.dialogs.askyesno", side_effect=changed), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", side_effect=changed), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.merge_accounts()
         thread.assert_not_called()
         self.assertFalse(self.window.busy)
@@ -85,7 +85,7 @@ class AccountMergeGuiStabilityTests(unittest.TestCase):
         with closing(HistoryStore.for_storage(self.paths)) as store:
             store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo"}, path)
         path.unlink()
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window.refresh(import_legacy=True)
             self.load()
         self.window.attributes("-alpha", 0)

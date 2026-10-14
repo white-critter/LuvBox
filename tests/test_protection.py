@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from xlikesaver.protection import AccountGuard, ProtectionError, cooldown_until
+from luvbox.protection import AccountGuard, ProtectionError, cooldown_until
 
 
 class ProtectionTests(unittest.TestCase):
@@ -65,7 +65,7 @@ class ProtectionTests(unittest.TestCase):
         session = SimpleNamespace(send=Mock(side_effect=lambda *args, **kwargs: self.response()))
         original = session.send
         self.guard.protect_session(session)
-        with patch("xlikesaver.protection.time.monotonic", side_effect=[10, 10.2, 12, 20, 22, 30]):
+        with patch("luvbox.protection.time.monotonic", side_effect=[10, 10.2, 12, 20, 22, 30]):
             session.send(SimpleNamespace(url="https://pbs.twimg.com/media/photo?name=orig"))
             session.send(SimpleNamespace(url="https://pbs.twimg.com/media/photo?name=large"))
             session.send(SimpleNamespace(url="https://x.com/i/api/graphql/Likes"))
@@ -98,7 +98,7 @@ class ProtectionTests(unittest.TestCase):
         original = session.send
         self.guard.protect_session(session)
         request = SimpleNamespace(url="https://pbs.twimg.com/media/photo")
-        with patch("xlikesaver.protection.os.fsync", side_effect=PermissionError), \
+        with patch("luvbox.protection.os.fsync", side_effect=PermissionError), \
                 self.assertRaisesRegex(ProtectionError, "보호 기록"):
             session.send(request)
         with self.assertRaisesRegex(ProtectionError, "보호 기록"):
@@ -131,7 +131,7 @@ class ProtectionTests(unittest.TestCase):
         session.mount("https://", adapter)
         self.guard.protect_session(session)
         try:
-            with patch("xlikesaver.protection.time.monotonic", side_effect=[1, 1.1, 11]), \
+            with patch("luvbox.protection.time.monotonic", side_effect=[1, 1.1, 11]), \
                     self.assertRaisesRegex(ProtectionError, "요청 한도"):
                 session.get("https://x.com/original")
             self.assertEqual(adapter.urls, ["https://x.com/original", "https://x.com/redirected"])
@@ -264,7 +264,7 @@ class ProtectionTests(unittest.TestCase):
         other = AccountGuard("separate", sleep=Mock(), root=self.root)
         other.acquire()
         other.close()
-        script = ("from pathlib import Path; from xlikesaver.protection import AccountGuard, ProtectionError; "
+        script = ("from pathlib import Path; from luvbox.protection import AccountGuard, ProtectionError; "
                   "import sys; guard=AccountGuard('offline', sleep=lambda *a: None, root=Path(sys.argv[1])); "
                   "guard.acquire()")
         result = subprocess.run([sys.executable, "-X", "utf8", "-c", script, str(self.root)], capture_output=True, text=True, encoding="utf-8")

@@ -7,9 +7,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 import test_gui as fixtures
-from xlikesaver.recycling import file_signature
-from xlikesaver.review import ReviewControl
-from xlikesaver.storage import resolve_storage
+from luvbox.recycling import file_signature
+from luvbox.review import ReviewControl
+from luvbox.storage import resolve_storage
 
 
 class AppReviewTests(unittest.TestCase):
@@ -141,7 +141,7 @@ class ScheduledReviewTests(unittest.TestCase):
     def test_saved_confirmation_preference_never_blocks_an_unattended_run(self):
         import os
         import tempfile
-        from xlikesaver.scheduled import _options_from_settings
+        from luvbox.scheduled import _options_from_settings
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"LOCALAPPDATA": folder}):
             settings = {"account": "fixture", "output_dir": folder, "confirm_each": True}
             options = _options_from_settings(settings, False)

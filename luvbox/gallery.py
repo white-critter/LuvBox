@@ -101,7 +101,7 @@ class _GridDecoder:
                 if path in allowed:
                     try:
                         status = os.stat(path)
-                        stamp = (path, status.st_mtime_ns, status.st_size)
+                        stamp = (path, status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size)
                     except OSError:
                         status = stamp = None
                     with self.condition:

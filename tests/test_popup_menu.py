@@ -6,8 +6,8 @@ import unittest
 import unittest.mock
 
 from tests.test_gui import destroy_tk
-from xlikesaver import theme
-from xlikesaver.popup_menu import PopupMenu
+from luvbox import theme
+from luvbox.popup_menu import PopupMenu
 
 
 class PopupMenuTests(unittest.TestCase):

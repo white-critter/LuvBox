@@ -20,7 +20,7 @@ from itertools import groupby
 from pathlib import Path
 
 
-HISTORY_NAME = ".xlikesaver-history.sqlite3"
+HISTORY_NAME = ".luvbox-history.sqlite3"
 _KEEP_BACKUPS = 7
 
 
@@ -223,7 +223,7 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
     workspace.mkdir()
     try:
         HistoryStore(workspace).close()
-        built = workspace / ".xlikesaver-history.sqlite3"
+        built = workspace / ".luvbox-history.sqlite3"
         counts = {}
         connection = sqlite3.connect(built)
         try:
@@ -302,8 +302,19 @@ def _catalog_backups(account: str, record_dir: Path | str | None = None) -> Path
 
 
 def latest_backup(account: str, record_dir: Path | str | None = None) -> Path | None:
-    found = sorted(_catalog_backups(account, record_dir).glob("history-*.sqlite3"))
-    return found[-1] if found else None
+    folders = [_catalog_backups(account, record_dir)]
+    if record_dir is not None:
+        # Renaming the app-data root preserves backup folders, but their scope
+        # hash was computed from the original absolute record directory.
+        app = backup_directory().parent
+        current = Path(record_dir).expanduser().resolve()
+        if app.name.lower() == "luvbox" and current.is_relative_to(app / "records"):
+            previous = app.with_name("XlikeSaver") / current.relative_to(app)
+            identity = os.path.normcase(str(previous))
+            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+            folders.append(backup_directory() / "catalog" / account / ("catalog-" + digest))
+    found = [path for folder in folders for path in folder.glob("history-*.sqlite3")]
+    return max(found, key=lambda path: (path.name, path.stat().st_mtime_ns)) if found else None
 
 
 def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
@@ -358,7 +369,7 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error:
             pass
-        rebuilt = record_dir / f".xlikesaver-history.repaired-{stamp}.sqlite3"
+        rebuilt = record_dir / f".luvbox-history.repaired-{stamp}.sqlite3"
         # Old account-only backups cannot identify their output folder. Keep
         # them intact, but never mix an unrelated catalog into this repair.
         result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir))

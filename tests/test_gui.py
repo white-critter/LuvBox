@@ -12,7 +12,7 @@ import unittest
 import weakref
 from unittest.mock import Mock, patch
 
-from xlikesaver.gui import App, AUTH_MODES, worker_command
+from luvbox.gui import App, AUTH_MODES, worker_command
 
 
 def destroy_tk(root):
@@ -41,26 +41,26 @@ class GuiTests(unittest.TestCase):
         app_data = patch.dict(os.environ, {"LOCALAPPDATA": self.temp.name})
         app_data.start()
         self.addCleanup(app_data.stop)
-        self.guards = patch("xlikesaver.protection.state_directory", return_value=Path(self.temp.name) / "locks")
+        self.guards = patch("luvbox.protection.state_directory", return_value=Path(self.temp.name) / "locks")
         self.guards.start()
         self.addCleanup(self.guards.stop)
         self.root = tk.Tk()
         self.root.withdraw()
         self.addCleanup(release_tk, self, "app", "root")
         self.addCleanup(destroy_tk, self.root)
-        self.session = patch("xlikesaver.gui.has_session", return_value=False)
+        self.session = patch("luvbox.gui.has_session", return_value=False)
         self.session_mock = self.session.start()
         self.addCleanup(self.session.stop)
-        self.settings = patch("xlikesaver.gui.load_settings", return_value={})
+        self.settings = patch("luvbox.gui.load_settings", return_value={})
         self.settings.start()
         self.addCleanup(self.settings.stop)
-        preferences = patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json")
+        preferences = patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json")
         preferences.start()
         self.addCleanup(preferences.stop)
         self.app = App(self.root)
 
     def test_unconnected_token_mode_requests_connection_before_download(self):
-        with patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.threading.Thread") as thread:
             self.app.start()
         # The login window opens with the reason instead of a separate message box.
         self.assertTrue(self.app.connect_window.winfo_exists())
@@ -71,7 +71,7 @@ class GuiTests(unittest.TestCase):
 
     def test_connection_status_can_grow_after_a_short_disconnected_label(self):
         import tkinter.font as tkfont
-        from xlikesaver import theme
+        from luvbox import theme
         self.root.geometry("1180x880")
         self.root.deiconify()
         self.root.update()
@@ -88,8 +88,8 @@ class GuiTests(unittest.TestCase):
     def relocation_source(self):
         from contextlib import closing
         import sqlite3
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.storage import resolve_storage
+        from luvbox.history import HistoryStore
+        from luvbox.storage import resolve_storage
         source = resolve_storage(Path(self.temp.name) / "이전 폴더", "offline_test")
         source.output_dir.mkdir()
         media = source.output_dir / "100_1.jpg"
@@ -97,10 +97,10 @@ class GuiTests(unittest.TestCase):
         store = HistoryStore.for_storage(source)
         try:
             store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo",
-                                        "_xlikesaver_metadata_status": "embedded"}, media)
+                                        "_luvbox_metadata_status": "embedded"}, media)
         finally:
             store.close()
-        with closing(sqlite3.connect(source.record_dir / ".xlikesaver-archive.flat.sqlite3")) as db:
+        with closing(sqlite3.connect(source.record_dir / ".luvbox-archive.flat.sqlite3")) as db:
             db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY)")
             db.execute("INSERT INTO archive VALUES ('twitter100_1')")
             db.commit()
@@ -110,12 +110,12 @@ class GuiTests(unittest.TestCase):
         return source, Path(self.temp.name) / "새 폴더"
 
     def test_folder_choice_carries_records_and_remembers_new_location(self):
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.storage import resolve_storage
+        from luvbox.history import HistoryStore
+        from luvbox.storage import resolve_storage
         source, target = self.relocation_source()
-        with patch("xlikesaver.gui.filedialog.askdirectory", return_value=str(target)), \
-                patch("xlikesaver.gui.threading.Thread") as thread, \
-                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.filedialog.askdirectory", return_value=str(target)), \
+                patch("luvbox.gui.threading.Thread") as thread, \
+                patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.choose_folder()
             self.assertTrue(self.app.relocating)
             self.assertFalse(self.app.running)
@@ -140,8 +140,8 @@ class GuiTests(unittest.TestCase):
         source, target = self.relocation_source()
         self.app.folder.set(str(target))
         self.session_mock.return_value = True
-        with patch("xlikesaver.gui.threading.Thread") as thread, \
-                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread") as thread, \
+                patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
             self.assertTrue(self.app.relocating)
             self.assertFalse(self.app.running)
@@ -155,9 +155,9 @@ class GuiTests(unittest.TestCase):
     def test_relocation_failure_keeps_old_location_without_starting_download(self):
         source, target = self.relocation_source()
         self.app.folder.set(str(target))
-        with patch("xlikesaver.gui.threading.Thread") as thread, \
-                patch("xlikesaver.storage.migrate_records", side_effect=OSError("private-error")), \
-                patch("xlikesaver.gui.dialogs.showerror") as error:
+        with patch("luvbox.gui.threading.Thread") as thread, \
+                patch("luvbox.storage.migrate_records", side_effect=OSError("private-error")), \
+                patch("luvbox.gui.dialogs.showerror") as error:
             self.assertFalse(self.app._ensure_storage("start"))
             self.app._relocate_records(*thread.call_args.kwargs["args"])
             self.app._poll()
@@ -171,13 +171,13 @@ class GuiTests(unittest.TestCase):
     def test_source_validation_failure_cannot_silently_use_an_empty_new_catalog(self):
         source, target = self.relocation_source()
         self.app.folder.set(str(target))
-        from xlikesaver.storage import resolve_storage
+        from luvbox.storage import resolve_storage
         def resolve(directory, account, split):
             if str(directory) == str(source.output_dir):
                 raise ValueError("linked-source")
             return resolve_storage(directory, account, split)
-        with patch("xlikesaver.gui.resolve_storage", side_effect=resolve), \
-                patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.resolve_storage", side_effect=resolve), \
+                patch("luvbox.gui.threading.Thread") as thread:
             self.assertFalse(self.app._ensure_storage("start"))
         thread.assert_not_called()
         self.assertEqual(self.app.folder.get(), str(source.output_dir))
@@ -194,8 +194,8 @@ class GuiTests(unittest.TestCase):
         offline = source.output_dir.with_name("연결되지 않은 드라이브")
         self.app.record_locations[source.account] = str(offline)
         self.app.folder.set(str(target))
-        with patch("xlikesaver.gui.dialogs.askyesno", return_value=False) as notice, \
-                patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.dialogs.askyesno", return_value=False) as notice, \
+                patch("luvbox.gui.threading.Thread") as thread:
             self.assertFalse(self.app._ensure_storage("start"))
         notice.assert_called_once()
         thread.assert_not_called()
@@ -203,8 +203,8 @@ class GuiTests(unittest.TestCase):
         self.assertFalse(target.exists())
 
     def test_explicit_fresh_start_preserves_destination_records_and_can_merge_old_records_later(self):
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.storage import migrate_records, resolve_storage
+        from luvbox.history import HistoryStore
+        from luvbox.storage import migrate_records, resolve_storage
         source, target = self.relocation_source()
         destination = resolve_storage(target, source.account)
         store = HistoryStore.for_storage(destination)
@@ -214,10 +214,10 @@ class GuiTests(unittest.TestCase):
         store.close()
         self.app.record_locations[source.account] = str(source.output_dir.with_name("offline"))
         self.app.folder.set(str(target))
-        with patch("xlikesaver.gui.dialogs.askyesno", return_value=True), \
-                patch("xlikesaver.gui.threading.Thread") as thread, \
-                patch("xlikesaver.storage.migrate_records") as migration, \
-                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.dialogs.askyesno", return_value=True), \
+                patch("luvbox.gui.threading.Thread") as thread, \
+                patch("luvbox.storage.migrate_records") as migration, \
+                patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.assertFalse(self.app._ensure_storage())
             self.app._relocate_records(*thread.call_args.kwargs["args"])
             self.app._poll()
@@ -234,8 +234,8 @@ class GuiTests(unittest.TestCase):
 
     def test_first_folder_choice_does_not_require_an_unused_default_directory(self):
         self.app.account.set("offline_test")
-        with patch("xlikesaver.gui.filedialog.askdirectory", return_value=self.temp.name), \
-                patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.filedialog.askdirectory", return_value=self.temp.name), \
+                patch("luvbox.gui.threading.Thread") as thread:
             self.app.choose_folder()
         thread.assert_not_called()
         self.assertFalse(self.app.relocating)
@@ -244,8 +244,8 @@ class GuiTests(unittest.TestCase):
     def test_preferences_failure_after_copy_keeps_previous_active_location(self):
         source, target = self.relocation_source()
         self.app.folder.set(str(target))
-        with patch("xlikesaver.gui.threading.Thread"), patch.object(self.app, "_save_settings", side_effect=PermissionError), \
-                patch("xlikesaver.gui.dialogs.showerror"):
+        with patch("luvbox.gui.threading.Thread"), patch.object(self.app, "_save_settings", side_effect=PermissionError), \
+                patch("luvbox.gui.dialogs.showerror"):
             self.app._ensure_storage()
             self.app._finish_relocation({"ok": True})
         self.assertEqual(self.app.folder.get(), str(source.output_dir))
@@ -254,8 +254,8 @@ class GuiTests(unittest.TestCase):
     def test_close_waits_for_relocation_to_finish(self):
         self.relocation_source()
         self.app.folder.set(str(Path(self.temp.name) / "new"))
-        with patch("xlikesaver.gui.threading.Thread"), patch.object(self.root, "destroy") as destroy, \
-                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread"), patch.object(self.root, "destroy") as destroy, \
+                patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app._ensure_storage()
             self.app.close()
             destroy.assert_not_called()
@@ -267,7 +267,7 @@ class GuiTests(unittest.TestCase):
         self.app.folder.set(self.temp.name)
         self.session_mock.return_value = True
         self.app.folder_mode.set("저장일별 폴더")
-        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread") as thread, patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
         options = thread.call_args.kwargs["args"][0]
         self.assertEqual((options.folder_mode, options.scan_mode, options.photo_limit), ("date", "quick", 0))
@@ -286,7 +286,7 @@ class GuiTests(unittest.TestCase):
         self.app.folder.set(self.temp.name)
         self.session_mock.return_value = True
         self.app.limited.set(True)
-        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread") as thread, patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
         options = thread.call_args.kwargs["args"][0]
         self.assertEqual((options.scan_mode, options.photo_limit), ("quick", 20))
@@ -296,7 +296,7 @@ class GuiTests(unittest.TestCase):
         self.app.folder.set(self.temp.name)
         self.session_mock.return_value = True
         self.app.scan_mode.set("전체 목록 다시 확인")
-        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread") as thread, patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
         self.assertEqual(thread.call_args.kwargs["args"][0].scan_mode, "full")
         persisted = json.loads((Path(self.temp.name) / "settings.json").read_text(encoding="utf-8"))
@@ -304,7 +304,7 @@ class GuiTests(unittest.TestCase):
         other_root = tk.Tk()
         other_root.withdraw()
         self.addCleanup(destroy_tk, other_root)
-        with patch("xlikesaver.gui.load_settings", return_value=persisted):
+        with patch("luvbox.gui.load_settings", return_value=persisted):
             app = App(other_root)
         self.assertEqual(app.scan_mode.get(), "전체 목록 다시 확인")
 
@@ -319,18 +319,18 @@ class GuiTests(unittest.TestCase):
         def register(when):
             status.clear()
             status.update(registered=True, current=True, time=when, enabled=True, catch_up=True,
-                          on_battery=True, next_run="2026-10-07T07:30:00", program="XlikeSaver.exe")
+                          on_battery=True, next_run="2026-10-07T07:30:00", program="LuvBox.exe")
 
         def unregister():
             status.clear()
             status.update(registered=False)
 
         last = {"finished_at": "2026-10-06T09:00:05+09:00", "status": "finished", "saved": 3, "failed": False}
-        return (patch("xlikesaver.gui.threading.Thread", Immediate),
-                patch("xlikesaver.scheduled.task_status", side_effect=lambda: dict(status)),
-                patch("xlikesaver.scheduled.register_task", side_effect=register),
-                patch("xlikesaver.scheduled.unregister_task", side_effect=unregister),
-                patch("xlikesaver.scheduled.last_run", return_value=last))
+        return (patch("luvbox.gui.threading.Thread", Immediate),
+                patch("luvbox.scheduled.task_status", side_effect=lambda: dict(status)),
+                patch("luvbox.scheduled.register_task", side_effect=register),
+                patch("luvbox.scheduled.unregister_task", side_effect=unregister),
+                patch("luvbox.scheduled.last_run", return_value=last))
 
     def test_schedule_window_turns_the_daily_save_on_and_off(self):
         self.session_mock.return_value = True
@@ -342,7 +342,7 @@ class GuiTests(unittest.TestCase):
             self.addCleanup(item.stop)
         self.app.account.set("offline_test")
         self.app.folder.set(self.temp.name)
-        with patch("xlikesaver.gui.settings_path", return_value=target):
+        with patch("luvbox.gui.settings_path", return_value=target):
             self.app.show_schedule()
             self.addCleanup(self.app._close_schedule)
             self.app._poll()
@@ -352,14 +352,14 @@ class GuiTests(unittest.TestCase):
             self.app.schedule_time.set("7:30")
             self.app.register_schedule()
             self.app._poll()
-        from xlikesaver import scheduled
+        from luvbox import scheduled
         scheduled.register_task.assert_called_once_with("07:30")
         saved = json.loads(target.read_text(encoding="utf-8"))
         self.assertEqual((saved["account"], saved["schedule_time"]), ("offline_test", "07:30"))
         self.assertIn("매일 07:30 · 켜짐", self.app.schedule_text.get())
         self.assertEqual(self.app.schedule_on_button.cget("text"), "예약 갱신")
         self.assertIn("자동 저장을 켰습니다", self.app.status.get())
-        with patch("xlikesaver.gui.dialogs.askyesno", return_value=True):
+        with patch("luvbox.gui.dialogs.askyesno", return_value=True):
             self.app.unregister_schedule()
         self.app._poll()
         self.assertIn("꺼짐", self.app.schedule_text.get())
@@ -370,16 +370,16 @@ class GuiTests(unittest.TestCase):
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
-        from xlikesaver import scheduled
+        from luvbox import scheduled
         self.app.auth.set("cookies.txt 파일")
-        with patch("xlikesaver.gui.dialogs.showinfo") as notice:
+        with patch("luvbox.gui.dialogs.showinfo") as notice:
             self.app.register_schedule()
         notice.assert_called_once()
         self.app.auth.set("인증 토큰 (권장)")
         self.app.account.set("offline_test")
         self.app.folder.set(self.temp.name)
         self.app.schedule_time.set("25:00")
-        with patch("xlikesaver.gui.dialogs.showerror") as error:
+        with patch("luvbox.gui.dialogs.showerror") as error:
             self.app.register_schedule()
         self.assertIn("24시간", error.call_args.args[1])
         scheduled.register_task.assert_not_called()
@@ -422,28 +422,28 @@ class GuiTests(unittest.TestCase):
 
     def test_new_version_offers_to_move_the_task_once_and_failures_are_shown(self):
         self.session_mock.return_value = True
-        old = {"registered": True, "current": False, "program": r"C:\old\XlikeSaver-1.7.1.exe", "time": "08:00",
+        old = {"registered": True, "current": False, "program": r"C:\old\LuvBox-1.7.1.exe", "time": "08:00",
                "enabled": True, "catch_up": False, "on_battery": False, "next_run": ""}
         patches = self.schedule_patches(dict(old))
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
-        from xlikesaver import scheduled
+        from luvbox import scheduled
         self.app.account.set("offline_test")
         self.app.folder.set(self.temp.name)
-        with patch("xlikesaver.gui.dialogs.askyesno", return_value=True) as ask, \
-                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"), \
-                patch("xlikesaver.gui.load_settings", return_value={}):
+        with patch("luvbox.gui.dialogs.askyesno", return_value=True) as ask, \
+                patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"), \
+                patch("luvbox.gui.load_settings", return_value={}):
             self.app._schedule_result({"type": "schedule", "action": "status", "prompt": True, "result": old})
             self.app._poll()
-            self.assertIn("XlikeSaver-1.7.1.exe", ask.call_args.args[1])
+            self.assertIn("LuvBox-1.7.1.exe", ask.call_args.args[1])
             scheduled.register_task.assert_called_once_with("08:00")
             self.app._schedule_result({"type": "schedule", "action": "status", "prompt": True, "result": old})
         ask.assert_called_once()
         failed = {"finished_at": "2026-10-06T09:00:05+09:00", "status": "error", "saved": 0, "failed": True,
                   "seen": False, "message": "로그인 연결을 다시 해 주세요."}
-        with patch("xlikesaver.scheduled.last_run", return_value=failed), \
-                patch("xlikesaver.scheduled.mark_last_run_seen") as seen, \
+        with patch("luvbox.scheduled.last_run", return_value=failed), \
+                patch("luvbox.scheduled.mark_last_run_seen") as seen, \
                 patch.object(self.app, "refresh_schedule"):
             self.app._startup_schedule_check()
         seen.assert_called_once_with(failed)
@@ -461,7 +461,7 @@ class GuiTests(unittest.TestCase):
         self.app.include_gifs.set(False)
         self.app.max_video_mb.set("37")
         self.session_mock.return_value = True
-        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread") as thread, patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
         options = thread.call_args.kwargs["args"][0]
         self.assertEqual((options.folder_mode, options.include_videos, options.include_gifs, options.max_video_mb), ("flat", True, False, 37))
@@ -475,14 +475,14 @@ class GuiTests(unittest.TestCase):
         account, paths = self.app._history_location()
         self.assertEqual(account, "offline_test")
         self.assertEqual(paths.media_dir, directory)
-        self.assertEqual(paths.snapshot_dir, directory / ".xlikesaver" / "offline_test")
+        self.assertEqual(paths.snapshot_dir, directory / ".luvbox" / "offline_test")
         self.assertTrue(paths.record_dir.is_relative_to(Path(self.temp.name) / "records"))
-        with patch("xlikesaver.gui.os.startfile") as opened:
+        with patch("luvbox.gui.os.startfile") as opened:
             self.app.open_folder()
         opened.assert_called_once_with(str(directory))
         self.app.separate_accounts.set(True)
         self.assertEqual(self.app.destination_preview.get(), str(directory / "offline_test"))
-        with patch("xlikesaver.gui.os.startfile") as opened:
+        with patch("luvbox.gui.os.startfile") as opened:
             self.app.open_folder()
         opened.assert_called_once_with(str(directory / "offline_test"))
         self.app.folder_mode.set("저장일별 폴더")
@@ -511,7 +511,7 @@ class GuiTests(unittest.TestCase):
         self.app.folder.set(self.temp.name)
         self.app.separate_accounts.set(True)
         self.session_mock.return_value = True
-        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread") as thread, patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
         options = thread.call_args.kwargs["args"][0]
         self.assertTrue(options.separate_accounts)
@@ -658,13 +658,13 @@ class GuiTests(unittest.TestCase):
         self.app.limited.set(True)
         self.session_mock.return_value = True
         self.app.max_video_mb.set("bad")
-        with patch("xlikesaver.gui.dialogs.showerror"), patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.dialogs.showerror"), patch("luvbox.gui.threading.Thread") as thread:
             self.app.start()
             thread.assert_not_called()
         self.assertTrue(self.app.limited.get())
         self.app.max_video_mb.set("200")
-        with patch("xlikesaver.gui.threading.Thread") as thread, \
-                patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread") as thread, \
+                patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
             self.assertEqual(thread.call_args.kwargs["args"][0].photo_limit, 20)
             self.app.events.put({"type": "finished", "status": "finished"})
@@ -712,7 +712,7 @@ class GuiTests(unittest.TestCase):
         self.app.show_options()
         self.app.include_videos.set(False)
         self.app.max_video_mb.set("350")
-        with patch("xlikesaver.gui.load_settings", return_value=active):
+        with patch("luvbox.gui.load_settings", return_value=active):
             self.app._close_options()
         saved = json.loads((Path(self.temp.name) / "settings.json").read_text(encoding="utf-8"))
         self.assertEqual((saved["account"], saved["output_dir"], saved["record_locations"]),
@@ -734,7 +734,7 @@ class GuiTests(unittest.TestCase):
     def test_invalid_options_stay_open_and_irrelevant_gif_fields_are_disabled(self):
         self.app.show_options()
         self.app.max_video_mb.set("-1")
-        with patch("xlikesaver.gui.dialogs.showerror") as error:
+        with patch("luvbox.gui.dialogs.showerror") as error:
             self.app._close_options()
         error.assert_called_once()
         self.assertTrue(self.app.options_window.winfo_exists())
@@ -764,8 +764,8 @@ class GuiTests(unittest.TestCase):
         self.app.show_options()
         self.app.include_gifs.set(False)
         self.assertIs(self.app.options_window.grab_current(), self.app.options_window)
-        with patch("xlikesaver.gui.filedialog.askdirectory") as folder, \
-                patch("xlikesaver.gui.threading.Thread") as worker, \
+        with patch("luvbox.gui.filedialog.askdirectory") as folder, \
+                patch("luvbox.gui.threading.Thread") as worker, \
                 patch.object(self.app, "_save_settings") as save:
             self.app.show_history()
             self.app.choose_folder()
@@ -827,7 +827,7 @@ class GuiTests(unittest.TestCase):
         self.assertIn("새 Like만", self.app.scheduled_option_summary.get())
         self.assertNotIn("전체 확인", self.app.scheduled_option_summary.get())
         self.assertNotIn("시험", self.app.scheduled_option_summary.get())
-        with patch("xlikesaver.scheduled.register_task") as register, patch.object(self.app, "_schedule_job") as job:
+        with patch("luvbox.scheduled.register_task") as register, patch.object(self.app, "_schedule_job") as job:
             self.app.register_schedule()
             self.assertTrue(self.app.connect_window.winfo_exists())
             self.assertIn("로그인", self.app.status.get())
@@ -836,7 +836,7 @@ class GuiTests(unittest.TestCase):
             self.app._close_connect()
             self.session_mock.return_value = True
             self.app.max_video_mb.set("-1")
-            with patch("xlikesaver.gui.dialogs.showerror") as error:
+            with patch("luvbox.gui.dialogs.showerror") as error:
                 self.app.register_schedule()
             error.assert_called_once()
             job.assert_not_called()
@@ -894,7 +894,7 @@ class GuiTests(unittest.TestCase):
         self.session_mock.return_value = True
         for invalid in ("bad", "1.5", "-1"):
             self.app.max_video_mb.set(invalid)
-            with patch("xlikesaver.gui.dialogs.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
+            with patch("luvbox.gui.dialogs.showerror") as error, patch("luvbox.gui.threading.Thread") as thread:
                 self.app.start()
             error.assert_called_once()
             thread.assert_not_called()
@@ -932,14 +932,14 @@ class GuiTests(unittest.TestCase):
         other_root = tk.Tk()
         other_root.withdraw()
         self.addCleanup(destroy_tk, other_root)
-        with patch("xlikesaver.gui.load_settings", return_value={"sync_mode": "new", "scan_mode": "bogus", "photo_limit": 20, "date_from": "2026-10-02"}):
+        with patch("luvbox.gui.load_settings", return_value={"sync_mode": "new", "scan_mode": "bogus", "photo_limit": 20, "date_from": "2026-10-02"}):
             app = App(other_root)
         self.assertFalse(app.limited.get())
         self.assertFalse(hasattr(app, "incremental"))
         app.account.set("offline_test")
         app.folder.set(self.temp.name)
         self.session_mock.return_value = True
-        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.threading.Thread") as thread, patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             app.start()
         options = thread.call_args.kwargs["args"][0]
         self.assertEqual((options.scan_mode, options.photo_limit), ("quick", 0))
@@ -948,7 +948,7 @@ class GuiTests(unittest.TestCase):
     def test_invalid_account_stops_before_worker(self):
         self.app.account.set("bad account")
         self.session_mock.return_value = True
-        with patch("xlikesaver.gui.dialogs.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.dialogs.showerror") as error, patch("luvbox.gui.threading.Thread") as thread:
             self.app.start()
         self.assertTrue(error.called)
         thread.assert_not_called()
@@ -956,19 +956,19 @@ class GuiTests(unittest.TestCase):
     def test_browser_connection_runs_off_ui_thread_and_blocks_duplicate_actions(self):
         self.app.show_connect()
         self.assertFalse(self.app.manual_controls.winfo_manager())
-        with patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.threading.Thread") as thread:
             self.app.connect_browser()
             self.app.connect_browser()
         thread.assert_called_once()
         self.assertTrue(self.app.login_busy)
         self.assertFalse(self.app.start())
-        with patch("xlikesaver.gui.save_auth_token") as save:
+        with patch("luvbox.gui.save_auth_token") as save:
             self.assertFalse(self.app.connect_token())
         save.assert_not_called()
         args = thread.call_args.kwargs["args"]
         self.assertIs(args[0], self.app.events)
         self.assertIsInstance(args[1], threading.Event)
-        with patch("xlikesaver.browser_login.sign_in") as sign_in:
+        with patch("luvbox.browser_login.sign_in") as sign_in:
             thread.call_args.kwargs["target"](*args)
         sign_in.assert_called_once_with(self.app.login_cancel)
         self.session_mock.return_value = True
@@ -979,13 +979,13 @@ class GuiTests(unittest.TestCase):
 
     def test_closing_login_popup_cancels_and_error_does_not_leak_exception(self):
         self.app.show_connect()
-        with patch("xlikesaver.gui.threading.Thread"):
+        with patch("luvbox.gui.threading.Thread"):
             self.app.connect_browser()
         cancel = self.app.login_cancel
         self.app._close_connect()
         self.assertTrue(cancel.is_set())
         secret = "offline-secret-in-exception"
-        with patch("xlikesaver.browser_login.sign_in", side_effect=OSError(secret)):
+        with patch("luvbox.browser_login.sign_in", side_effect=OSError(secret)):
             App._browser_worker(self.app.events, cancel)
         self.app._poll()
         self.assertFalse(self.app.login_busy)
@@ -1017,8 +1017,8 @@ class GuiTests(unittest.TestCase):
     def test_library_deletion_blocks_a_new_download_before_login_or_worker_creation(self):
         self.app.history_window = SimpleNamespace(winfo_exists=lambda: True, metadata_active=False,
                                                   delete_active=True, choice_active=False, repair_active=False)
-        with patch("xlikesaver.gui.threading.Thread") as worker, \
-                patch("xlikesaver.gui.dialogs.showinfo") as info:
+        with patch("luvbox.gui.threading.Thread") as worker, \
+                patch("luvbox.gui.dialogs.showinfo") as info:
             self.assertFalse(self.app.start())
         worker.assert_not_called()
         info.assert_called_once()
@@ -1032,7 +1032,7 @@ class GuiTests(unittest.TestCase):
         self.app.show_connect()
         self.app.token.set(secret)
         self.assertTrue(self.app.token_entry.cget("show"))
-        with patch("xlikesaver.gui.save_auth_token") as save, patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.save_auth_token") as save, patch("luvbox.gui.threading.Thread") as thread:
             self.assertTrue(self.app.connect_token())
         save.assert_called_once_with(secret)
         thread.assert_not_called()
@@ -1047,7 +1047,7 @@ class GuiTests(unittest.TestCase):
         self.session_mock.return_value = True  # A previous saved connection exists.
         secret = "offline-invalid-new-token"
         self.app.token.set(secret)
-        with patch("xlikesaver.gui.save_auth_token", side_effect=ValueError("인증 토큰을 확인해 주세요.")), patch("xlikesaver.gui.dialogs.showerror") as error, patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.save_auth_token", side_effect=ValueError("인증 토큰을 확인해 주세요.")), patch("luvbox.gui.dialogs.showerror") as error, patch("luvbox.gui.threading.Thread") as thread:
             self.app.start()
         error.assert_called_once()
         thread.assert_not_called()
@@ -1060,7 +1060,7 @@ class GuiTests(unittest.TestCase):
         self.app.folder.set(self.temp.name)
         self.app.token.set("offline-test-token")
         self.session_mock.return_value = True
-        with patch("xlikesaver.gui.save_auth_token") as save, patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
+        with patch("luvbox.gui.save_auth_token") as save, patch("luvbox.gui.threading.Thread") as thread, patch("luvbox.gui.settings_path", return_value=Path(self.temp.name) / "settings.json"):
             self.app.start()
         save.assert_called_once_with("offline-test-token")
         options = thread.call_args.kwargs["args"][0]
@@ -1073,7 +1073,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(set(AUTH_MODES.values()), {"managed", "file"})
         for old_mode in ("chrome", "edge", "firefox"):
             window = tk.Toplevel(self.root)
-            with patch("xlikesaver.gui.load_settings", return_value={"auth_mode": old_mode}):
+            with patch("luvbox.gui.load_settings", return_value={"auth_mode": old_mode}):
                 app = App(window)
             self.assertEqual(AUTH_MODES[app.auth.get()], "managed")
             window.destroy()
@@ -1091,7 +1091,7 @@ class GuiTests(unittest.TestCase):
 
     def test_disconnect_clears_pending_input_and_stored_session(self):
         self.app.token.set("offline-test-token")
-        with patch("xlikesaver.gui.clear_session") as clear:
+        with patch("luvbox.gui.clear_session") as clear:
             self.app.disconnect()
         clear.assert_called_once()
         self.assertEqual(self.app.token.get(), "")
@@ -1134,7 +1134,7 @@ class GuiTests(unittest.TestCase):
         self.assertEqual((self.app.saved, self.app.skipped, self.app.size_skipped), (1, 2, 1))
 
     def test_gif_options_are_saved_summarized_and_sent_to_the_worker(self):
-        from xlikesaver import gui
+        from luvbox import gui
         self.assertEqual(self.app._gif_options(), ("original", 200))
         self.app.gif_size.set("최대 480px · 초당 12장 (가장 작게)")
         self.assertIn("GIF 480px", self.app.option_summary.get())
@@ -1145,7 +1145,7 @@ class GuiTests(unittest.TestCase):
         self.app.account.set("offline_test")
         self.app.folder.set(self.temp.name)
         self.session_mock.return_value = True
-        with patch("xlikesaver.gui.threading.Thread") as thread, patch("xlikesaver.gui.settings_path", return_value=target):
+        with patch("luvbox.gui.threading.Thread") as thread, patch("luvbox.gui.settings_path", return_value=target):
             self.app.start()
         options = thread.call_args.kwargs["args"][0]
         self.assertEqual((options.gif_format, options.gif_size), ("mp4", "480"))
@@ -1154,7 +1154,7 @@ class GuiTests(unittest.TestCase):
         other_root = tk.Tk()
         other_root.withdraw()
         self.addCleanup(destroy_tk, other_root)
-        with patch("xlikesaver.gui.load_settings", return_value=saved):
+        with patch("luvbox.gui.load_settings", return_value=saved):
             restored = gui.App(other_root)
         self.assertEqual((restored.gif_format.get(), restored.gif_size.get()),
                          ("원본 MP4 그대로 저장", "최대 480px · 초당 12장 (가장 작게)"))
@@ -1187,12 +1187,12 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(len(content.strip().splitlines()), 1)
 
     def test_theme_can_switch_during_work_and_preserves_unedited_settings(self):
-        from xlikesaver import theme
+        from luvbox import theme
         original = {"account": "remembered", "output_dir": "old-folder", "future_option": 7}
         target = Path(self.temp.name) / "settings.json"
         self.app.running = True
-        with patch("xlikesaver.gui.load_settings", return_value=original.copy()), \
-                patch("xlikesaver.gui.settings_path", return_value=target):
+        with patch("luvbox.gui.load_settings", return_value=original.copy()), \
+                patch("luvbox.gui.settings_path", return_value=target):
             self.app.toggle_theme()
             self.root.update_idletasks()
             saved = json.loads(target.read_text(encoding="utf-8"))
@@ -1204,9 +1204,9 @@ class GuiTests(unittest.TestCase):
             self.assertEqual(self.app.appearance.get(), "light")
 
     def test_persisted_dark_theme_is_loaded_without_starting_a_worker(self):
-        from xlikesaver import theme
-        with patch("xlikesaver.gui.load_settings", return_value={"appearance": "dark"}), \
-                patch("xlikesaver.gui.threading.Thread") as worker:
+        from luvbox import theme
+        with patch("luvbox.gui.load_settings", return_value={"appearance": "dark"}), \
+                patch("luvbox.gui.threading.Thread") as worker:
             window = tk.Toplevel(self.root)
             app = App(window)
             self.root.update_idletasks()
@@ -1224,20 +1224,20 @@ class ScheduleWorkerLifetimeTests(unittest.TestCase):
         enabled = gc.isenabled()
         gc.disable()
         try:
-            with patch("xlikesaver.gui.load_settings", return_value={}), \
-                    patch("xlikesaver.gui.has_session", return_value=False):
+            with patch("luvbox.gui.load_settings", return_value={}), \
+                    patch("luvbox.gui.has_session", return_value=False):
                 root = tk.Tk()
                 root.withdraw()
                 app = App(root)
             events = app.events
             refs = [weakref.ref(value) for value in (app, root, app.status)]
-            with patch("xlikesaver.gui.threading.Thread") as worker:
+            with patch("luvbox.gui.threading.Thread") as worker:
                 app._schedule_job("status", lambda: None, prompt=False)
                 target = worker.call_args.kwargs["target"]
             destroy_tk(root)
             root = app = None
             self.assertTrue(all(ref() is None for ref in refs), "Scheduler worker retained closed Tk resources")
-            with patch("xlikesaver.scheduled.task_status", return_value={"registered": False}):
+            with patch("luvbox.scheduled.task_status", return_value={"registered": False}):
                 target()
             self.assertEqual(events.get_nowait(), {"type": "schedule", "action": "status",
                                                    "result": {"registered": False}, "prompt": False})
@@ -1264,18 +1264,33 @@ with open(sys.argv[2], "ab", buffering=0) as stream:
 """
 
 
+class StartupMigrationTests(unittest.TestCase):
+    def test_failed_data_migration_explains_and_never_enters_main_loop(self):
+        from luvbox.gui import launch
+        from luvbox.settings import AppDataError
+
+        with patch("luvbox.gui.tk.Tk") as create_root, \
+                patch("luvbox.gui.App", side_effect=AppDataError("기존 데이터를 보존했습니다")), \
+                patch("luvbox.gui.dialogs.showerror") as notice:
+            launch()
+        create_root.return_value.mainloop.assert_not_called()
+        create_root.return_value.destroy.assert_called_once_with()
+        notice.assert_called_once_with("기존 데이터 이전 확인", "기존 데이터를 보존했습니다",
+                                       parent=create_root.return_value)
+
+
 class WorkerEventReaderTests(unittest.TestCase):
     def test_partially_written_character_never_stops_progress_updates(self):
         import queue
         import sys
-        from xlikesaver.core import JobOptions
+        from luvbox.core import JobOptions
 
         app = App.__new__(App)
         app.events, app.stopping, app.stop_path, app.process = queue.Queue(), False, None, None
-        from xlikesaver.review import ReviewControl
+        from luvbox.review import ReviewControl
         app.review_control = ReviewControl(False)
         command = lambda request, events, stop: [sys.executable, "-c", _SPLIT_WRITER, str(request), str(events), str(stop)]
-        with tempfile.TemporaryDirectory() as folder, patch("xlikesaver.gui.worker_command", command):
+        with tempfile.TemporaryDirectory() as folder, patch("luvbox.gui.worker_command", command):
             app._run_process(JobOptions(account="example", output_dir=folder))
         events = []
         while not app.events.empty():

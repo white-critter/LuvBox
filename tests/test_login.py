@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from xlikesaver import login
+from luvbox import login
 
 
 SECRET = "offline-login-secret-never-print-or-save-as-plaintext"
@@ -25,7 +25,7 @@ class LoginTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.base = Path(self.temporary.name)
         self.session = self.base / "app" / "session.bin"
-        self.path_patch = patch("xlikesaver.login.session_path", return_value=self.session)
+        self.path_patch = patch("luvbox.login.session_path", return_value=self.session)
         self.path_patch.start()
 
     def tearDown(self):
@@ -36,7 +36,7 @@ class LoginTests(unittest.TestCase):
         self.path_patch.stop()
         try:
             with patch.dict(os.environ, {"LOCALAPPDATA": str(self.base)}):
-                self.assertEqual(login.session_path(), self.base / "XlikeSaver" / "session.bin")
+                self.assertEqual(login.session_path(), self.base / "LuvBox" / "session.bin")
         finally:
             self.path_patch.start()
 
@@ -108,7 +108,7 @@ class LoginTests(unittest.TestCase):
     def test_encryption_failure_does_not_write_or_replace_session(self):
         self.session.parent.mkdir()
         self.session.write_bytes(b"previous-encrypted-session")
-        with patch("xlikesaver.login._dpapi", side_effect=ValueError("cannot encrypt")), self.assertRaises(ValueError):
+        with patch("luvbox.login._dpapi", side_effect=ValueError("cannot encrypt")), self.assertRaises(ValueError):
             login._store_session_cookies([cookie()])
         self.assertEqual(self.session.read_bytes(), b"previous-encrypted-session")
         self.assertEqual(list(self.session.parent.iterdir()), [self.session])
@@ -116,22 +116,22 @@ class LoginTests(unittest.TestCase):
     def test_atomic_replace_failure_keeps_previous_file_and_removes_temp(self):
         self.session.parent.mkdir()
         self.session.write_bytes(b"previous-encrypted-session")
-        with patch("xlikesaver.login._dpapi", return_value=b"ciphertext"), \
-                patch("xlikesaver.login.os.replace", side_effect=PermissionError), self.assertRaises(PermissionError):
+        with patch("luvbox.login._dpapi", return_value=b"ciphertext"), \
+                patch("luvbox.login.os.replace", side_effect=PermissionError), self.assertRaises(PermissionError):
             login._store_session_cookies([cookie()])
         self.assertEqual(self.session.read_bytes(), b"previous-encrypted-session")
         self.assertEqual(list(self.session.parent.iterdir()), [self.session])
 
     def test_save_auth_token_accepts_variable_safe_values_without_fixed_hex_assumption(self):
         for value in ("a", "token-with-different-length_123", "base64+/value=", "x" * 4096):
-            with self.subTest(length=len(value)), patch("xlikesaver.login._store_session_cookies") as store:
+            with self.subTest(length=len(value)), patch("luvbox.login._store_session_cookies") as store:
                 self.assertIsNone(login.save_auth_token(value))
             store.assert_called_once_with([{"name": "auth_token", "value": value,
                                            "domain": ".x.com", "path": "/", "expires": -1,
                                            "secure": True, "httpOnly": True}])
 
     def test_save_auth_token_trims_outer_copy_whitespace(self):
-        with patch("xlikesaver.login._store_session_cookies") as store:
+        with patch("luvbox.login._store_session_cookies") as store:
             login.save_auth_token(" \t\n" + SECRET + "\r\n ")
         self.assertEqual(store.call_args.args[0][0]["value"], SECRET)
 
@@ -141,7 +141,7 @@ class LoginTests(unittest.TestCase):
         invalid = (None, True, {}, "", " \t\r\n ", "space inside", "new\nline", "new\tline",
                    'quoted"value', "comma,value", "semi;colon", "back\\slash", "del\x7fvalue",
                    "한글", "x" * 4097, SECRET + ";injected=value")
-        with patch("xlikesaver.login._store_session_cookies") as store:
+        with patch("luvbox.login._store_session_cookies") as store:
             for value in invalid:
                 with self.subTest(kind=type(value).__name__), self.assertRaisesRegex(ValueError, "auth_token") as error:
                     login.save_auth_token(value)
@@ -150,7 +150,7 @@ class LoginTests(unittest.TestCase):
         store.assert_not_called()
 
     def test_manual_token_storage_is_encrypted_and_never_opens_browser_or_network(self):
-        with patch("xlikesaver.login._dpapi", return_value=b"encrypted-fixture") as dpapi, \
+        with patch("luvbox.login._dpapi", return_value=b"encrypted-fixture") as dpapi, \
                 patch("requests.Session.request") as request, patch("subprocess.Popen") as process, \
                 patch("webbrowser.open") as browser:
             login.save_auth_token(SECRET)
@@ -170,7 +170,7 @@ class LoginTests(unittest.TestCase):
     def test_public_save_normalizes_encryption_failure_and_preserves_previous_session(self):
         self.session.parent.mkdir()
         self.session.write_bytes(b"previous-encrypted-session")
-        with patch("xlikesaver.login._dpapi", side_effect=ValueError(SECRET)), \
+        with patch("luvbox.login._dpapi", side_effect=ValueError(SECRET)), \
                 self.assertRaisesRegex(ValueError, "암호화해 저장") as error:
             login.save_auth_token(SECRET)
         self.assertNotIn(SECRET, str(error.exception))
@@ -180,8 +180,8 @@ class LoginTests(unittest.TestCase):
     def test_public_save_normalizes_atomic_replace_failure_and_cleans_ciphertext_temp(self):
         self.session.parent.mkdir()
         self.session.write_bytes(b"previous-encrypted-session")
-        with patch("xlikesaver.login._dpapi", return_value=b"encrypted-fixture"), \
-                patch("xlikesaver.login.os.replace", side_effect=PermissionError(SECRET)), \
+        with patch("luvbox.login._dpapi", return_value=b"encrypted-fixture"), \
+                patch("luvbox.login.os.replace", side_effect=PermissionError(SECRET)), \
                 self.assertRaisesRegex(ValueError, "암호화해 저장") as error:
             login.save_auth_token(SECRET)
         self.assertNotIn(SECRET, str(error.exception))
@@ -192,7 +192,7 @@ class LoginTests(unittest.TestCase):
         original = {"version": 1, "cookies": [cookie(), cookie("ct0")]}
         self.session.parent.mkdir()
         self.session.write_bytes(login._HEADER + b"legacy-encrypted-fixture")
-        with patch("xlikesaver.login._dpapi", return_value=json.dumps(original).encode()) as dpapi:
+        with patch("luvbox.login._dpapi", return_value=json.dumps(original).encode()) as dpapi:
             self.assertEqual([item["name"] for item in login.load_session_cookies()], ["auth_token", "ct0"])
             self.assertTrue(login.has_session())
         for call in dpapi.call_args_list:
@@ -208,7 +208,7 @@ class LoginTests(unittest.TestCase):
                 return b"manual-encrypted-fixture"
             return encoded
 
-        with patch("xlikesaver.login._dpapi", side_effect=fake_dpapi):
+        with patch("luvbox.login._dpapi", side_effect=fake_dpapi):
             login.save_auth_token(SECRET)
             self.assertTrue(login.has_session())
             clean = login.load_session_cookies()

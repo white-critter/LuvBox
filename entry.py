@@ -21,7 +21,7 @@ def main() -> int:
         # Keep the check's settings, locks and records out of the user's app
         # data (the worker child process inherits this too).
         import tempfile as _tempfile
-        app_data = _tempfile.TemporaryDirectory(prefix="xlikesaver-selftest-", ignore_cleanup_errors=True)
+        app_data = _tempfile.TemporaryDirectory(prefix="luvbox-selftest-", ignore_cleanup_errors=True)
         os.environ["LOCALAPPDATA"] = app_data.name
         try:
             import importlib
@@ -32,14 +32,14 @@ def main() -> int:
             from tkinter import font as tkfont
             import certifi
             from gallery_dl import extractor, version
-            from xlikesaver.gui import App, worker_command
-            from xlikesaver import __version__, metadata
-            from xlikesaver.core import check_gallery_hooks
-            from xlikesaver.history import HistoryStore
-            from xlikesaver.storage import migrate_records, resolve_storage
-            from xlikesaver.media import convert_mp4_to_gif, ffmpeg_path
-            from xlikesaver.preview import thumbnail
-            from xlikesaver import charts, gallery  # bundled UI modules
+            from luvbox.gui import App, worker_command
+            from luvbox import __version__, metadata
+            from luvbox.core import check_gallery_hooks
+            from luvbox.history import HistoryStore
+            from luvbox.storage import migrate_records, resolve_storage
+            from luvbox.media import convert_mp4_to_gif, ffmpeg_path
+            from luvbox.preview import thumbnail
+            from luvbox import charts, gallery  # bundled UI modules
             from PIL import Image
 
             importlib.import_module("gallery_dl.extractor.utils.twitter_transaction_id")
@@ -52,7 +52,7 @@ def main() -> int:
             root = tk.Tk()
             root.withdraw()
             app = App(root)
-            from xlikesaver.app_icon import asset_directory, install
+            from luvbox.app_icon import asset_directory, install
             assert (asset_directory() / "luvbox.ico").is_file()
             assert (asset_directory() / "luvbox.png").is_file()
             assert install(root)
@@ -69,9 +69,9 @@ def main() -> int:
                 for slot, class_slot in ((1, -14), (0, -34)):
                     native = user.SendMessageW(handle, 0x007F, slot, 0)
                     assert native and native == get_class(handle, class_slot)
-                from xlikesaver.app_icon import _taskbar_properties, _taskbar_values
+                from luvbox.app_icon import _taskbar_properties, _taskbar_values
                 assert _taskbar_properties(handle, None) == _taskbar_values(str(asset_directory() / "luvbox.ico"))
-            from xlikesaver import fonts, theme
+            from luvbox import fonts, theme
             actual_font = tkfont.Font(root=root, font=theme.BODY).actual("family")
             assert actual_font == fonts.FAMILY
             report["font"] = actual_font
@@ -86,7 +86,7 @@ def main() -> int:
             theme_images = "drawn"
             if getattr(sys, "frozen", False):
                 # Both appearances were drawn once and kept for the next start.
-                cached = list((Path(app_data.name) / "XlikeSaver" / "cache").glob(f"theme-{__version__}-*.zip"))
+                cached = list((Path(app_data.name) / "LuvBox" / "cache").glob(f"theme-{__version__}-*.zip"))
                 assert len(cached) == 2, cached
                 theme_images = "cached-light-and-dark"
             assert int(app.progress.cget("highlightthickness")) == 0
@@ -99,7 +99,7 @@ def main() -> int:
             assert app.options_window is None
             assert metadata.available()
             # This also verifies the extracted Perl runtime and Unicode paths.
-            with tempfile.TemporaryDirectory(prefix="xlikesaver-check-") as folder:
+            with tempfile.TemporaryDirectory(prefix="luvbox-check-") as folder:
                 target = Path(folder) / "한글 출처 확인.png"
                 target.write_bytes(base64.b64decode(
                     "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGNUjl/AwMDAxAAGAA1FASYPxkisAAAAAElFTkSuQmCC"))
@@ -113,7 +113,7 @@ def main() -> int:
                 local_preview = thumbnail(target)
                 assert local_preview.image is not None and local_preview.image.size == (2, 2)
                 # Previews kept for files deleted later: WebP must be bundled.
-                from xlikesaver import thumbcache
+                from luvbox import thumbcache
                 previews = thumbcache.Cache("example")
                 try:
                     previews.put(("100", 1, "photo"), local_preview.image)
@@ -139,7 +139,7 @@ def main() -> int:
                 assert thumbnail(video).image is not None and thumbnail(animated).image is not None
                 # Playback reads only our temporary fixtures. Keep its frame
                 # buffer bounded and wait for handles before continuing.
-                from xlikesaver.review_preview import ReviewPreview
+                from luvbox.review_preview import ReviewPreview
                 for preview_path, kind in ((video, "video"), (animated, "animated_gif")):
                     playback = ReviewPreview(preview_path, kind, size=(160, 120))
                     try:
@@ -154,7 +154,7 @@ def main() -> int:
                 # Cancel the app's startup/scheduler polls before pumping Tk.
                 for timer in root.tk.call("after", "info"):
                     root.tk.call("after", "cancel", timer)
-                from xlikesaver.review_gui import ReviewWindow
+                from luvbox.review_gui import ReviewWindow
                 import time as _time
                 choices = []
                 chooser = ReviewWindow(root, {"path": str(target), "media_type": "photo",
@@ -181,7 +181,7 @@ def main() -> int:
                 smaller = convert_mp4_to_gif(wide, size="480")
                 with Image.open(smaller) as decoded:
                     assert decoded.size == (480, 270) and decoded.n_frames == 12
-                from xlikesaver import dialogs
+                from luvbox import dialogs
                 dialog = dialogs.Dialog(root, "확인", "자체 점검", buttons=(("예", True), ("아니요", False)),
                                         default=1, cancel=False)
                 assert dialog.default_button is dialog.buttons[1]
@@ -203,8 +203,8 @@ def main() -> int:
                     assert store.summary()["files"] == 0
                     store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo",
                                                 "author": {"name": author["author"], "id": author["author_id"]},
-                                                "_xlikesaver_metadata_status": "embedded",
-                                                "_xlikesaver_author_metadata_status": "embedded"}, target)
+                                                "_luvbox_metadata_status": "embedded",
+                                                "_luvbox_author_metadata_status": "embedded"}, target)
                     previous = store.records()[0]
                 finally:
                     store.close()
@@ -213,7 +213,7 @@ def main() -> int:
                 relocated = resolve_storage(Path(folder) / "새 저장 폴더", "example")
                 migration = migrate_records(paths, relocated)
                 assert migration.changed and migration.media_records == 1
-                assert (relocated.snapshot_dir / ".xlikesaver-history.sqlite3").is_file()
+                assert (relocated.snapshot_dir / ".luvbox-history.sqlite3").is_file()
                 store = HistoryStore.for_storage(relocated)
                 try:
                     store.import_legacy(refresh=True)
@@ -257,7 +257,7 @@ def main() -> int:
                     assert missing["archive_key"] == "200_1" and store.summary()["missing_files"] == 1
                     store.set_missing_ignored([("200", 1, "photo")], True)
                     assert store.summary()["ignored_missing"] == 1 and store.ignored_media() == {("200", 1, "photo")}
-                    from xlikesaver.core import JobOptions
+                    from luvbox.core import JobOptions
                     retry = JobOptions("example", folder, targets=["200_1", "200_1"]).validate()
                     assert retry.targets == ("200_1",)
                     assert charts.bins([("2026-01", 1), ("2026-03", 2)])[0][1] == ("2026-02", 0)
@@ -275,10 +275,10 @@ def main() -> int:
                     store.import_legacy(refresh=True)
                     assert store.summary()["missing_files"] == 0
                     assert store.summary()["files"] == 2
-                    from xlikesaver.history_gui import HistoryWindow
+                    from luvbox.history_gui import HistoryWindow
                     assert hasattr(HistoryWindow, "start_deletion")
                     # Damaged-database salvage reads the catalog page by page.
-                    from xlikesaver.recovery import salvage
+                    from luvbox.recovery import salvage
                     assert len(salvage(store.path)["media"]["rows"]) == 4
                 finally:
                     store.close()
@@ -286,7 +286,7 @@ def main() -> int:
                 # a temporary GIF. Substitute only the native move: a self-test
                 # must never touch the user's actual Windows Recycle Bin.
                 import threading
-                from xlikesaver import deletion, recycling
+                from luvbox import deletion, recycling
                 disposable_gif = relocated.media_dir / "400_animated_gif_1.gif"
                 disposable_gif.write_bytes(animated.read_bytes())
                 store = HistoryStore.for_storage(relocated)
@@ -380,10 +380,10 @@ def main() -> int:
                 events.flush()
 
             try:
-                from xlikesaver.core import JobOptions, run_worker
+                from luvbox.core import JobOptions, run_worker
 
                 options = JobOptions(**json.loads(request_path.read_text(encoding="utf-8")))
-                from xlikesaver.review import CONTROL_NAME, ReviewChannel
+                from luvbox.review import CONTROL_NAME, ReviewChannel
                 control_path = request_path.parent / CONTROL_NAME
                 review = ReviewChannel(control_path, emit) if control_path.exists() else None
                 return run_worker(options, emit, stop_path, review=review)
@@ -395,17 +395,17 @@ def main() -> int:
                 return 1
 
     if len(sys.argv) > 1 and sys.argv[1] == "--run-saved":
-        # Unattended run for Windows Task Scheduler; see xlikesaver/scheduled.py.
+        # Unattended run for Windows Task Scheduler; see luvbox/scheduled.py.
         if len(sys.argv) > 3 or (len(sys.argv) == 3 and sys.argv[2] != "--full"):
             return 2
-        from xlikesaver.scheduled import run_saved
+        from luvbox.scheduled import run_saved
 
         return run_saved(full=len(sys.argv) == 3)
 
     if len(sys.argv) > 1:
         return 2
 
-    from xlikesaver.gui import launch
+    from luvbox.gui import launch
 
     launch()
     return 0

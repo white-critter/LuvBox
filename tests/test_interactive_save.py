@@ -12,7 +12,7 @@ from gallery_dl.extractor.message import Message
 from PIL import Image
 
 import test_core
-from xlikesaver import core
+from luvbox import core
 
 
 class Review:
@@ -49,12 +49,12 @@ class InteractiveSaveTests(unittest.TestCase):
         return result, events
 
     def records(self):
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as database:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as database:
             database.row_factory = sqlite3.Row
             return [dict(row) for row in database.execute("SELECT * FROM media")]
 
     def keys(self):
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.sqlite3")) as database:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.sqlite3")) as database:
             return {row[0] for row in database.execute("SELECT entry FROM archive")}
 
     def options_all(self, **changes):
@@ -146,7 +146,7 @@ class InteractiveSaveTests(unittest.TestCase):
         # The quick run continues past the saved-file streak until it reaches
         # the file refused in the previous run, without scanning everything.
         known = [(str(number), 1, "photo", "alice") for number in range(150, 100, -1)]
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 4):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 4):
             self.worker(known)
             older = ("99", 1, "photo", "alice")
             first = Review(("skip",))
@@ -159,7 +159,7 @@ class InteractiveSaveTests(unittest.TestCase):
         self.assertEqual(second.requests[0][1]["tweet_id"], "99")
 
     def pending(self):
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as database:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as database:
             row = database.execute("SELECT value FROM catalog_meta WHERE key='review_pending'").fetchone()
         return {tuple(item) for item in json.loads(row[0])} if row else set()
 
@@ -169,7 +169,7 @@ class InteractiveSaveTests(unittest.TestCase):
         known = [(str(number), 1, "photo", "alice") for number in range(150, 100, -1)]
         older = ("99", 1, "photo", "alice")
         quick = replace(self.options, scan_mode="quick")
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 4):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 4):
             self.worker(known)
             self.worker(known + [older], review=Review(("skip",)))
             self.assertEqual(self.pending(), {("99", 1, "photo")})
@@ -191,7 +191,7 @@ class InteractiveSaveTests(unittest.TestCase):
     def test_skipped_file_no_longer_liked_is_forgotten_after_a_complete_pass(self):
         known = [(str(number), 1, "photo", "alice") for number in range(110, 100, -1)]
         quick = replace(self.options, scan_mode="quick")
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 3):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 3):
             self.worker(known + [("99", 1, "photo", "alice")], review=Review(["save"] * 10 + ["skip"]))
             self.assertEqual(self.pending(), {("99", 1, "photo")})
             # The Like was removed: the run looks through the list once.
@@ -218,7 +218,7 @@ class InteractiveSaveTests(unittest.TestCase):
     def test_damaged_skip_memory_makes_the_quick_run_check_everything(self):
         rows = [("100", 1, "photo", "alice")]
         self.worker(rows)
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as database, database:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as database, database:
             database.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('review_pending','not json')")
         result, events = self.worker(rows, options=replace(self.options, scan_mode="quick"))
         self.assertEqual((result, events[-1]["scan_mode"]), (0, "full"))
@@ -227,8 +227,8 @@ class InteractiveSaveTests(unittest.TestCase):
         self.assertEqual(events[-1]["scan_mode"], "quick")
 
     def test_merged_same_account_skip_memory_keeps_both_old_choices_reachable(self):
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.storage import _merge_database
+        from luvbox.history import HistoryStore
+        from luvbox.storage import _merge_database
 
         known = [(str(number), 1, "photo", "alice") for number in (*range(150, 144, -1), *range(120, 114, -1))]
         older = ("99", 1, "photo", "alice")
@@ -239,11 +239,11 @@ class InteractiveSaveTests(unittest.TestCase):
             peer.set_review_pending({("98", 1, "photo")})
             run = peer.start_run(self.options.folder_mode, media_signature=self.options.validate().media_signature)
             peer.finish_run(run, "finished")
-        _merge_database(".xlikesaver-history.sqlite3", self.record_dir / ".xlikesaver-history.sqlite3",
-                        peer_dir / ".xlikesaver-history.sqlite3")
+        _merge_database(".luvbox-history.sqlite3", self.record_dir / ".luvbox-history.sqlite3",
+                        peer_dir / ".luvbox-history.sqlite3")
         self.assertEqual(self.pending(), {("99", 1, "photo"), ("98", 1, "photo")})
         review = Review(("skip", "save"))
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 4):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 4):
             result, events = self.worker(known[:6] + [older] + known[6:] + [other], review=review,
                                          options=replace(self.options, scan_mode="quick"))
         self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"]), (0, "quick", 1))
@@ -251,8 +251,8 @@ class InteractiveSaveTests(unittest.TestCase):
         self.assertEqual(self.pending(), {("99", 1, "photo")})
 
     def test_damaged_skip_memory_in_same_account_merge_still_requires_full_scan(self):
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.storage import _merge_database
+        from luvbox.history import HistoryStore
+        from luvbox.storage import _merge_database
 
         rows = [("100", 1, "photo", "alice")]
         self.worker(rows)
@@ -265,15 +265,15 @@ class InteractiveSaveTests(unittest.TestCase):
         with closing(HistoryStore(peer_dir, media_dir=self.output, output_dir=self.output)) as peer:
             with peer._db:
                 peer._db.execute("INSERT INTO catalog_meta(key,value) VALUES ('review_pending','damaged')")
-        _merge_database(".xlikesaver-history.sqlite3", self.record_dir / ".xlikesaver-history.sqlite3",
-                        peer_dir / ".xlikesaver-history.sqlite3")
+        _merge_database(".luvbox-history.sqlite3", self.record_dir / ".luvbox-history.sqlite3",
+                        peer_dir / ".luvbox-history.sqlite3")
         result, events = self.worker(rows, options=replace(self.options, scan_mode="quick"))
         self.assertEqual((result, events[-1]["scan_mode"]), (0, "full"))
         self.assertEqual(self.pending(), set())
 
     def store(self):
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.storage import resolve_storage
+        from luvbox.history import HistoryStore
+        from luvbox.storage import resolve_storage
         return HistoryStore.for_storage(resolve_storage(self.output, "myaccount"))
 
     def retry(self, targets, rows, review=None):
@@ -291,7 +291,7 @@ class InteractiveSaveTests(unittest.TestCase):
     def test_never_is_kept_like_a_hidden_deleted_file_and_is_not_asked_again(self):
         rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "bob")]
         recorder = []
-        with patch("xlikesaver.thumbcache.Recorder.add",
+        with patch("luvbox.thumbcache.Recorder.add",
                    side_effect=lambda key, path, suffix=None: recorder.append((key, Path(path).is_file(), suffix))):
             result, events = self.worker(rows, review=Review(("never", "save")))
         done = events[-1]
@@ -363,7 +363,7 @@ class InteractiveSaveTests(unittest.TestCase):
         def replace_source(key, path, *, suffix=None):
             Path(path).write_bytes(b"external-change-during-cache")
 
-        with patch("xlikesaver.thumbcache.Recorder.add", side_effect=replace_source):
+        with patch("luvbox.thumbcache.Recorder.add", side_effect=replace_source):
             result, events = self.worker([("100", 1, "photo", "alice")], review=review)
         self.assertEqual((result, events[-1]["status"], events[-1]["review_never"]), (1, "error", 0))
         self.assertEqual(review.requests[0][0].read_bytes(), b"external-change-during-cache")
@@ -374,7 +374,7 @@ class InteractiveSaveTests(unittest.TestCase):
         flag = self.base / "stop.flag"
         review = Review(("never",))
 
-        with patch("xlikesaver.thumbcache.Recorder.add", side_effect=lambda *args, **kwargs: flag.touch()):
+        with patch("luvbox.thumbcache.Recorder.add", side_effect=lambda *args, **kwargs: flag.touch()):
             result, events = self.worker([("100", 1, "photo", "alice")], review=review, stop_file=flag)
         self.assertEqual((result, events[-1]["status"], events[-1]["review_never"]), (0, "stopped", 0))
         self.assertTrue(review.requests[0][0].is_file())
@@ -386,9 +386,9 @@ class InteractiveSaveTests(unittest.TestCase):
         path.parent.mkdir(parents=True)
         path.write_bytes(b"completed-local-gif")
         core._mark_transfer_complete(path)
-        marker = Path(str(path) + ".xlikesaver-complete")
+        marker = Path(str(path) + ".luvbox-complete")
 
-        with patch("xlikesaver.thumbcache.Recorder.add",
+        with patch("luvbox.thumbcache.Recorder.add",
                    side_effect=lambda *args, **kwargs: marker.write_bytes(b"changed-during-cache")):
             result, events = self.worker([("100", 1, "animated_gif", "alice")],
                                          review=Review(("never",)), options=self.options_all())
@@ -416,12 +416,12 @@ class InteractiveSaveTests(unittest.TestCase):
 
     def test_declined_gif_records_the_gif_name_it_would_have_had(self):
         rows = [("100", 1, "animated_gif", "alice")]
-        with patch("xlikesaver.thumbcache.Recorder.add"):
+        with patch("luvbox.thumbcache.Recorder.add"):
             result, events = self.worker(rows, review=Review(("never",)), options=self.options_all())
         self.assertEqual((result, events[-1]["review_never"]), (0, 1))
         declined = next(row for row in self.records() if row["tweet_id"] == "100")
         self.assertTrue(declined["last_path"].endswith("100_gif_1.gif"))
-        self.assertFalse(list(self.output.rglob("*.part*")) + list(self.output.rglob("*.xlikesaver-complete")))
+        self.assertFalse(list(self.output.rglob("*.part*")) + list(self.output.rglob("*.luvbox-complete")))
 
     def test_live_option_enables_and_disables_between_files(self):
         review = Review(("save",), enabled=False)
@@ -440,7 +440,7 @@ class InteractiveSaveTests(unittest.TestCase):
         self.worker(known)
         choices = [("102", 1, "photo", "alice"), ("101", 1, "photo", "alice")]
         rows = known[:1] + choices[:1] + known[1:3] + choices[1:] + known[3:]
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 3):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 3):
             result, events = self.worker(rows, review=Review(("skip", "save")),
                                          options=replace(self.options, scan_mode="quick"))
         self.assertEqual((result, events[-1]["scan_mode"], events[-1]["saved"], events[-1]["review_skipped"]),
@@ -581,7 +581,7 @@ class InteractiveSaveTests(unittest.TestCase):
 
     def test_gif_skip_does_not_convert_and_saved_gif_keeps_success_metadata(self):
         review = Review(("skip", "save"))
-        with patch("xlikesaver.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=self.convert) as convert:
             result, events = self.worker([("100", 1, "animated_gif", "alice"), ("100", 2, "animated_gif", "alice")],
                                          review=review, options=self.options_all())
         self.assertEqual((result, events[-1]["saved"], events[-1]["review_skipped"]), (0, 1, 1))
@@ -596,7 +596,7 @@ class InteractiveSaveTests(unittest.TestCase):
 
     def test_mp4_gif_choice_is_reviewed_before_save(self):
         review = Review(("save",))
-        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+        with patch("luvbox.core.convert_mp4_to_gif") as convert:
             result, events = self.worker([("100", 1, "animated_gif", "alice")], review=review,
                                          options=self.options_all(gif_format="mp4"))
         self.assertEqual((result, events[-1]["saved"]), (0, 1))
@@ -611,14 +611,14 @@ class InteractiveSaveTests(unittest.TestCase):
         path.parent.mkdir(parents=True)
         path.write_bytes(b"completed-local-gif")
         core._mark_transfer_complete(path)
-        with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
+        with patch("luvbox.core.convert_mp4_to_gif") as convert:
             result, events = self.worker([("100", 1, "animated_gif", "alice")], review=Review(("skip",)),
                                          options=self.options_all())
         self.assertEqual((result, events[-1]["review_skipped"]), (0, 1))
         self.assertEqual(test_core.FakeHttpDownloader.downloaded, [])
         convert.assert_not_called()
         self.assertFalse(path.exists())
-        self.assertFalse(Path(str(path) + ".xlikesaver-complete").exists())
+        self.assertFalse(Path(str(path) + ".luvbox-complete").exists())
         self.assertEqual(self.keys(), set())
 
     def test_changed_gif_completion_marker_is_preserved_with_source(self):
@@ -626,7 +626,7 @@ class InteractiveSaveTests(unittest.TestCase):
         path.parent.mkdir(parents=True)
         path.write_bytes(b"completed-local-gif")
         core._mark_transfer_complete(path)
-        marker = Path(str(path) + ".xlikesaver-complete")
+        marker = Path(str(path) + ".luvbox-complete")
 
         def edit_marker(path, media, check_stop):
             marker.write_bytes(b"user-changed-marker")

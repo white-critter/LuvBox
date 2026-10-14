@@ -9,9 +9,9 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from xlikesaver import recovery
-from xlikesaver.history import CatalogDamaged, HistoryError, HistoryStore
-from xlikesaver.history_gui import HistoryWindow
+from luvbox import recovery
+from luvbox.history import CatalogDamaged, HistoryError, HistoryStore
+from luvbox.history_gui import HistoryWindow
 
 
 def damage_media_table(path: Path):
@@ -78,7 +78,7 @@ class RecoveryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        protection = patch("xlikesaver.protection.state_directory", return_value=self.root / "app" / "request-protection")
+        protection = patch("luvbox.protection.state_directory", return_value=self.root / "app" / "request-protection")
         protection.start()
         self.addCleanup(protection.stop)
         self.account = self.root / "records" / "myaccount"
@@ -89,7 +89,7 @@ class RecoveryTests(unittest.TestCase):
                 path.write_bytes(b"offline")
                 store.record_media("flat", {"tweet_id": str(1000 + index), "num": 1, "type": "photo",
                                             "author": {"name": "alice", "id": 7},
-                                            "_xlikesaver_metadata_status": "embedded"}, path)
+                                            "_luvbox_metadata_status": "embedded"}, path)
             run = store.start_run("flat")
             store.finish_run(run, "finished", saved=600)
             store.record_tweets([("1000", "본문", ["tag"])])
@@ -257,7 +257,7 @@ class RecoverySchemaTests(unittest.TestCase):
                 # when the damaged table is recovered directly from pages.
                 del row["last_path"]
         rebuilt = self.root / "rebuilt.sqlite3"
-        with patch("xlikesaver.recovery.salvage", return_value=tables):
+        with patch("luvbox.recovery.salvage", return_value=tables):
             result = recovery.rebuild_history(current, rebuilt)
         self.assertEqual(result["counts"]["media"], 1)
         with closing(sqlite3.connect(rebuilt)) as connection:

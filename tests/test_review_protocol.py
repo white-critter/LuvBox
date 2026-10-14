@@ -10,7 +10,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from xlikesaver.review import ReviewChannel, ReviewControl, ReviewUnavailable
+from luvbox.review import ReviewChannel, ReviewControl, ReviewUnavailable
 
 
 class Stopped(Exception):
@@ -152,7 +152,7 @@ class ReviewProtocolTests(unittest.TestCase):
                 raise PermissionError("temporary sharing")
             return original(source, destination)
 
-        with patch("xlikesaver.review.os.replace", side_effect=replace):
+        with patch("luvbox.review.os.replace", side_effect=replace):
             self.control.set_enabled(False)
         self.assertFalse(self.channel.enabled())
         self.assertEqual(len(calls), 2)

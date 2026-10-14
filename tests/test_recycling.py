@@ -8,13 +8,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from xlikesaver import recycling
-from xlikesaver.recycling import RecyclingError, file_signature, recycle_file, verify_receipt
+from luvbox import recycling
+from luvbox.recycling import RecyclingError, file_signature, recycle_file, verify_receipt
 
 
 class RecyclingTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="xlikesaver-recycle-test-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="luvbox-recycle-test-")
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
         self.source = self.base / "원본 사진.jpg"
@@ -264,19 +264,19 @@ class RecyclingTests(unittest.TestCase):
         self.assertTrue(self.source.exists())
 
 
-@unittest.skipUnless(os.name == "nt" and os.environ.get("XLIKESAVER_NATIVE_RECYCLE_TEST") == "1",
+@unittest.skipUnless(os.name == "nt" and os.environ.get("LUVBOX_NATIVE_RECYCLE_TEST") == "1",
                      "native Shell test is opt-in and uses only its own new temp file")
 class NativeRecyclingTest(unittest.TestCase):
     def test_one_new_temporary_file_has_verified_shell_receipt(self):
         # This test never enumerates or modifies existing user media/Recycle Bin items.
-        with tempfile.TemporaryDirectory(prefix="xlikesaver-native-recycle-") as folder:
-            original = Path(folder) / "XlikeSaver 휴지통 기능 테스트.txt"
-            original.write_bytes(b"XlikeSaver native recycle fixture only.\n")
+        with tempfile.TemporaryDirectory(prefix="luvbox-native-recycle-") as folder:
+            original = Path(folder) / "LuvBox 휴지통 기능 테스트.txt"
+            original.write_bytes(b"LuvBox native recycle fixture only.\n")
             expected = file_signature(original)
             destination = recycle_file(original, expected)
             self.assertFalse(original.exists())
             self.assertTrue(verify_receipt(original, destination, expected))
-            self.assertEqual(Path(destination).read_bytes(), b"XlikeSaver native recycle fixture only.\n")
+            self.assertEqual(Path(destination).read_bytes(), b"LuvBox native recycle fixture only.\n")
 
 
 if __name__ == "__main__":

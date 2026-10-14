@@ -78,7 +78,12 @@ def _save_day() -> date:
     return datetime.now(_KOREA).date()
 
 
-def _transfer_complete(source: Path) -> dict | None:
+def _completion_paths(source: Path) -> tuple[Path, ...]:
+    return tuple(Path(str(source) + suffix) for suffix in
+                 (".luvbox-complete", ".xlikesaver-complete"))
+
+
+def _transfer_complete(source: Path, *, marker_path: Path | None = None) -> dict | None:
     """The record our downloader left on completing this .part, or None.
 
     Only such a file is used again without a request. Asking the server to
@@ -86,19 +91,47 @@ def _transfer_complete(source: Path) -> dict | None:
     tools and FAT drives round modification times, so up to two seconds of
     difference still describe the same file; its size must match exactly.
     """
-    try:
-        with Path(str(source) + ".xlikesaver-complete").open(encoding="utf-8") as stream:
-            marker = json.loads(stream.read(1024))
-        stat = source.stat()
-        modified = marker.get("mtime_http")
-        if (marker.get("version") != 1 or type(marker.get("size")) is not int or
-                marker["size"] != stat.st_size or type(marker.get("mtime_ns")) is not int or
-                abs(marker["mtime_ns"] - stat.st_mtime_ns) > 2_000_000_000 or
-                not (modified is None or isinstance(modified, str) and len(modified) <= 100)):
-            return None
-        return marker
-    except (OSError, ValueError, TypeError, AttributeError):
-        return None
+    paths = (marker_path,) if marker_path is not None else _completion_paths(source)
+    for path in paths:
+        try:
+            signature = _review_file_signature(path)
+            with path.open(encoding="utf-8") as stream:
+                marker = json.loads(stream.read(1024))
+            if _review_file_signature(path) != signature:
+                continue
+            source_signature = _review_file_signature(source)
+            modified = marker.get("mtime_http")
+            if (marker.get("version") != 1 or type(marker.get("size")) is not int or
+                    marker["size"] != source_signature[2] or type(marker.get("mtime_ns")) is not int or
+                    abs(marker["mtime_ns"] - source_signature[3]) > 2_000_000_000 or
+                    not (modified is None or isinstance(modified, str) and len(modified) <= 100)):
+                continue
+            return marker
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+    return None
+
+
+def _valid_completion_markers(source: Path) -> list[tuple[Path, tuple]]:
+    result = []
+    for marker in _completion_paths(source):
+        try:
+            signature = _review_file_signature(marker)
+            if (_transfer_complete(source, marker_path=marker) is not None and
+                    _review_file_signature(marker) == signature):
+                result.append((marker, signature))
+        except OSError:
+            pass
+    return result
+
+
+def _clear_completion_markers(markers) -> None:
+    for marker, signature in markers:
+        try:
+            if _review_file_signature(marker) == signature:
+                marker.unlink()
+        except OSError:
+            pass
 
 
 def _mark_transfer_complete(source: Path, modified=None) -> None:
@@ -107,12 +140,12 @@ def _mark_transfer_complete(source: Path, modified=None) -> None:
     if isinstance(modified, str) and len(modified) <= 100:
         # The server's Last-Modified, which a saved file is stamped with.
         record["mtime_http"] = modified
-    fd, name = tempfile.mkstemp(prefix=".xlikesaver-complete-", dir=source.parent)
+    fd, name = tempfile.mkstemp(prefix=".luvbox-complete-", dir=source.parent)
     temporary = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(record, stream)
-        os.replace(temporary, str(source) + ".xlikesaver-complete")
+        os.replace(temporary, str(source) + ".luvbox-complete")
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -151,10 +184,10 @@ def _media_details(metadata: dict) -> dict:
             "media_type": metadata.get("type", ""),
             "author": author, "author_id": author_id,
             "posted_at": posted,
-            "filename": f"{tweet_id}_{metadata.get('_xlikesaver_filename_part', metadata.get('num', 0))}.{metadata.get('extension', '')}",
+            "filename": f"{tweet_id}_{metadata.get('_luvbox_filename_part', metadata.get('num', 0))}.{metadata.get('extension', '')}",
             "source_url": f"https://x.com/i/web/status/{tweet_id}" if re.fullmatch(r"[0-9]{1,20}", tweet_id) else "",
-            "metadata_status": metadata.get("_xlikesaver_metadata_status", "pending"),
-            "author_metadata_status": metadata.get("_xlikesaver_author_metadata_status", "pending")}
+            "metadata_status": metadata.get("_luvbox_metadata_status", "pending"),
+            "author_metadata_status": metadata.get("_luvbox_author_metadata_status", "pending")}
 
 
 class GalleryCompatibilityError(RuntimeError):
@@ -548,13 +581,13 @@ def _configure_gallery(options: JobOptions, archive_path: Path, account_folder: 
     if options.folder_mode == "author":
         directory.append("{author[name]}")
     elif options.folder_mode == "date":
-        directory.append("{_xlikesaver_date}")
+        directory.append("{_luvbox_date}")
     values = {
         "base-directory": options.output_dir,
         "directory": directory,
-        "filename": "{tweet_id}_{_xlikesaver_filename_part}.{extension}",
+        "filename": "{tweet_id}_{_luvbox_filename_part}.{extension}",
         "archive": str(archive_path),
-        "archive-format": "{_xlikesaver_archive_key}",
+        "archive-format": "{_luvbox_archive_key}",
         "archive-event": ["file", "skip"],
         "archive-mode": "disk", "archive-reuse": False,
         "cookies-update": False, "netrc": False,
@@ -747,8 +780,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             metadata_reason = "unavailable"
             metadata_status = "failed"
             author_status = "error" if known_author else "unknown"
-        kwdict["_xlikesaver_metadata_status"] = metadata_status
-        kwdict["_xlikesaver_author_metadata_status"] = author_status
+        kwdict["_luvbox_metadata_status"] = metadata_status
+        kwdict["_luvbox_author_metadata_status"] = author_status
         # Deferred work keeps any prior author error for retry; it is not a
         # recording failure from this run.
         if recording_required and (metadata_status == "failed" or author_status == "error"):
@@ -797,14 +830,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 extract_source = self.extractor._extract_media_source
                 def numbered_source(dest, media):
                     extract_source(dest, media)
-                    if "_xlikesaver_attachment_number" in media:
-                        dest["_xlikesaver_attachment_number"] = media["_xlikesaver_attachment_number"]
+                    if "_luvbox_attachment_number" in media:
+                        dest["_luvbox_attachment_number"] = media["_luvbox_attachment_number"]
                 self.extractor._extract_media_source = numbered_source
 
                 def direct_media(tweet, media_items, files):
                     selected = []
                     for attachment_number, media in enumerate(media_items, 1):
-                        media = dict(media, _xlikesaver_attachment_number=attachment_number)
+                        media = dict(media, _luvbox_attachment_number=attachment_number)
                         if "video_info" in media:
                             # Keep both types until handle_url so disabling one
                             # type cannot renumber the other's attachment key.
@@ -907,27 +940,27 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 return
             kwdict = dict(kwdict)
             tweet_id = str(kwdict["tweet_id"])
-            attachment_number = kwdict.get("_xlikesaver_attachment_number", kwdict["num"])
+            attachment_number = kwdict.get("_luvbox_attachment_number", kwdict["num"])
             if media_type == "photo":
                 position_key = (tweet_id, attachment_number)
                 if position_key not in self.photo_positions:
                     self.photo_counts[tweet_id] = self.photo_counts.get(tweet_id, 0) + 1
                     self.photo_positions[position_key] = self.photo_counts[tweet_id]
                 kwdict["num"] = self.photo_positions[position_key]
-                kwdict["_xlikesaver_filename_part"] = str(kwdict["num"])
-                kwdict["_xlikesaver_archive_key"] = f"{tweet_id}_{kwdict['num']}"
+                kwdict["_luvbox_filename_part"] = str(kwdict["num"])
+                kwdict["_luvbox_archive_key"] = f"{tweet_id}_{kwdict['num']}"
             else:
                 kind = "gif" if media_type == "animated_gif" else "video"
                 kwdict["num"] = attachment_number
                 kwdict["extension"] = "mp4"
-                kwdict["_xlikesaver_filename_part"] = f"{kind}_{kwdict['num']}"
-                kwdict["_xlikesaver_archive_key"] = f"{tweet_id}_{media_type}_{kwdict['num']}"
+                kwdict["_luvbox_filename_part"] = f"{kind}_{kwdict['num']}"
+                kwdict["_luvbox_archive_key"] = f"{tweet_id}_{media_type}_{kwdict['num']}"
             identity = (tweet_id, kwdict["num"], media_type)
             if identity in review_pending:
                 review_reached.add(identity)
             if targets:
                 # Only the chosen files; the tweet's other media are untouched.
-                if kwdict["_xlikesaver_archive_key"] not in targets:
+                if kwdict["_luvbox_archive_key"] not in targets:
                     return
             elif identity in ignored:
                 # The user deleted this file on purpose, in whichever layout.
@@ -946,7 +979,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             self.review_finalize = None
             self.transfer_marker = None
             if normalized.folder_mode == "date":
-                kwdict = dict(kwdict, _xlikesaver_date=_save_day().isoformat())
+                kwdict = dict(kwdict, _luvbox_date=_save_day().isoformat())
             self.current_media = kwdict
             # Real X file metadata contains its tweet's directory metadata.
             # Delay folder/archive setup until media is selected for this run.
@@ -968,7 +1001,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 super().handle_url(url, kwdict)
             except ReviewNever as declined:
                 review_never += 1
-                review_declined.add(kwdict["_xlikesaver_archive_key"])
+                review_declined.add(kwdict["_luvbox_archive_key"])
                 existing_streak = 0
                 if identity in review_pending:
                     review_resolved.add(identity)
@@ -987,7 +1020,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 emit({"type": "review-never", "path": "", **_media_details(kwdict)})
             except ReviewSkip:
                 review_skipped += 1
-                review_declined.add(kwdict["_xlikesaver_archive_key"])
+                review_declined.add(kwdict["_luvbox_archive_key"])
                 review_declined_ids.add(identity)
                 existing_streak = 0
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
@@ -997,7 +1030,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if identity in review_pending:
                     review_resolved.add(identity)
                 if targets:
-                    size_limited.add(kwdict["_xlikesaver_archive_key"])
+                    size_limited.add(kwdict["_luvbox_archive_key"])
                 if self.pathfmt.temppath:
                     Path(self.pathfmt.temppath).unlink(missing_ok=True)
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
@@ -1014,21 +1047,19 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         if self.gif_source is not None:
                             # The GIF is finalized and archived now. Until this
                             # point the source remains recoverable on any error.
+                            markers = _valid_completion_markers(self.gif_source)
                             self.gif_source.unlink(missing_ok=True)
-                            Path(str(self.gif_source) + ".xlikesaver-complete").unlink(missing_ok=True)
+                            _clear_completion_markers(markers)
                             self.gif_source = None
                         if self.transfer_marker is not None:
                             # The .part it described is saved now. A leftover
                             # record matches no .part and is harmless.
-                            try:
-                                self.transfer_marker.unlink(missing_ok=True)
-                            except OSError:
-                                pass
+                            _clear_completion_markers(self.transfer_marker)
                             self.transfer_marker = None
                         saved += 1
                         if normalized.folder_mode == "date":
                             completed_day = _save_day().isoformat()
-                            if completed_day != kwdict["_xlikesaver_date"]:
+                            if completed_day != kwdict["_luvbox_date"]:
                                 original_path = Path(media_path)
                                 completed_path = account_dir / completed_day / original_path.name
                                 try:
@@ -1044,7 +1075,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                           **_media_details(kwdict)})
                                 else:
                                     media_path = str(completed_path)
-                                    kwdict["_xlikesaver_date"] = completed_day
+                                    kwdict["_luvbox_date"] = completed_day
                     else:
                         skipped += 1
                         # An archive hit may belong to an older saving day or
@@ -1080,7 +1111,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                                     author_metadata_status="pending")
                                 break
                     self.last_output = (media_status, media_path)
-                    kwdict["_xlikesaver_path"] = media_path
+                    kwdict["_luvbox_path"] = media_path
                     media_stat = None
                     if media_path:
                         try:
@@ -1102,7 +1133,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             previews.add((kwdict.get("tweet_id"), kwdict.get("num"), kwdict.get("type", "photo")),
                                          media_path)
                         if targets:
-                            recovered[kwdict["_xlikesaver_archive_key"]] = media_status
+                            recovered[kwdict["_luvbox_archive_key"]] = media_status
                     if media_status == "saved":
                         payload_size = self.progress_bytes if media_type == "animated_gif" else original_size
                         self.progress(payload_size, self.progress_total, force=True, final=True)
@@ -1163,7 +1194,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             speed = max(0, downloaded - self.progress_offset) / max(now - self.progress_started, 0.001)
             emit({"type": "progress", **_media_details(self.current_media), "downloaded": downloaded,
                   "total": total or 0, "speed": speed, "final": final,
-                  "path": self.current_media.get("_xlikesaver_path", "")})
+                  "path": self.current_media.get("_luvbox_path", "")})
 
         def download(self, url):
             # gallery-dl's media downloader catches exceptions from request()
@@ -1181,7 +1212,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             completed = _transfer_complete(local_source)
             locally_complete = completed is not None
             if locally_complete:
-                self.transfer_marker = Path(str(local_source) + ".xlikesaver-complete")
+                self.transfer_marker = _valid_completion_markers(local_source)
                 if completed.get("mtime_http"):
                     # Stamp the saved file as the original transfer would have.
                     self.pathfmt.kwdict["_mtime_http"] = completed["mtime_http"]
@@ -1189,7 +1220,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if cap and local_source.stat().st_size > cap:
                     # The limit was lowered after this file finished. Treat it
                     # like any other oversized video and drop the temporary file.
-                    self.transfer_marker.unlink(missing_ok=True)
+                    _clear_completion_markers(self.transfer_marker)
                     raise SizeLimit()
                 self.progress(local_source.stat().st_size, local_source.stat().st_size, force=True)
                 result = True
@@ -1205,7 +1236,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 # fallback image size and removes the resumable .part file. A
                 # completed download is left to finalize and be archived.
                 check_stop()
-            if result and review is not None and self.pathfmt.temppath:
+            if result and self.pathfmt.temppath:
                 self.review_download()
             if result and is_gif and self.pathfmt.temppath:
                 source = Path(self.pathfmt.temppath)
@@ -1281,13 +1312,16 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if signature is not None and _review_file_signature(source) != signature:
                     return  # changed meanwhile: not the transfer we completed
                 if _transfer_complete(source) is None and (
-                        replace or not os.path.lexists(str(source) + ".xlikesaver-complete")):
+                        replace or not os.path.lexists(str(source) + ".luvbox-complete")):
                     _mark_transfer_complete(source, self.pathfmt.kwdict.get("_mtime_http"))
+                # GIF fallback may move this .part to MP4 before handle_url
+                # can inspect it again. Remember only markers validated now.
+                self.transfer_marker = _valid_completion_markers(source)
             except OSError:
                 pass
 
         def review_download(self):
-            """Preview the completed transfer before conversion or archiving."""
+            """Protect finalization, optionally asking before conversion/archiving."""
             source = _review_path(self.pathfmt.temppath)
             destination = _review_path(self.pathfmt.realpath)
             # A downloader may change paths. Only this run's .part file can be
@@ -1300,12 +1334,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             signature = None
             try:
                 signature = _review_file_signature(source)
-                marker = Path(str(source) + ".xlikesaver-complete")
-                marker_signature = None
-                if marker.exists() and _transfer_complete(source):
-                    marker_signature = _review_file_signature(marker)
+                markers = _valid_completion_markers(source)
                 check_stop()
-                enabled = review.enabled()
+                enabled = review.enabled() if review is not None else False
                 if type(enabled) is not bool:
                     raise ValueError("invalid review state")
                 decision = review.ask(source, {**_media_details(self.current_media),
@@ -1317,10 +1348,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         _review_file_signature(source) != signature):
                     raise OSError("review temporary file changed")
                 if decision in {"skip", "never"}:
-                    if marker_signature is not None and (
-                            not history.is_download_path(marker) or
-                            _review_file_signature(marker) != marker_signature):
-                        raise OSError("review completion marker changed")
+                    for marker, marker_signature in markers:
+                        if (not history.is_download_path(marker) or
+                                _review_file_signature(marker) != marker_signature):
+                            raise OSError("review completion marker changed")
                     if decision == "never" and previews is not None:
                         # What the file looked like, for the hidden missing list.
                         previews.add((self.current_media.get("tweet_id"), self.current_media.get("num"),
@@ -1332,12 +1363,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     if (not history.is_download_path(source) or
                             _review_file_signature(source) != signature):
                         raise OSError("review temporary file changed")
-                    if marker_signature is not None and (
-                            not history.is_download_path(marker) or
-                            _review_file_signature(marker) != marker_signature):
-                        raise OSError("review completion marker changed")
+                    for marker, marker_signature in markers:
+                        if (not history.is_download_path(marker) or
+                                _review_file_signature(marker) != marker_signature):
+                            raise OSError("review completion marker changed")
                     source.unlink()
-                    if marker_signature is not None:
+                    for marker, _ in markers:
                         marker.unlink()
                     if decision == "skip":
                         raise ReviewSkip()
@@ -1387,7 +1418,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
         def get_downloader(self, scheme):
             instance = super().get_downloader(scheme)
-            if instance is not None and not getattr(instance, "_xlikesaver_stop", False):
+            if instance is not None and not getattr(instance, "_luvbox_stop", False):
                 original_download = instance.download
 
                 def tracked_download(url, pathfmt):
@@ -1482,7 +1513,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
                 instance.download = tracked_download
 
-            if instance is not None and hasattr(instance, "receive") and not getattr(instance, "_xlikesaver_stop", False):
+            if instance is not None and hasattr(instance, "receive") and not getattr(instance, "_luvbox_stop", False):
                 receive = instance.receive
 
                 def checked_receive(fp, content, bytes_total, bytes_start):
@@ -1513,7 +1544,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
                 instance.receive = checked_receive
             if instance is not None:
-                instance._xlikesaver_stop = True
+                instance._luvbox_stop = True
             return instance
 
     try:
@@ -1543,7 +1574,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         # Previously saved files may still be tagged at their old location.
         # Exclude another account writing into those same selected roots too.
         for previous_root in history.media_roots[1:]:
-            previous_guard = OutputGuard(previous_root)
+            previous_guard = OutputGuard(previous_root, group=output_guard)
             previous_guard.acquire()
             previous_output_guards.append(previous_guard)
         history.import_legacy()
@@ -1582,8 +1613,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         # Preserve the original author archive so existing installations resume.
         # Other layouts need their own record, otherwise switching folders would
         # skip photos saved only in the previous destination.
-        archive_name = (".xlikesaver-archive.sqlite3" if normalized.folder_mode == "author"
-                        else f".xlikesaver-archive.{normalized.folder_mode}.sqlite3")
+        archive_name = (".luvbox-archive.sqlite3" if normalized.folder_mode == "author"
+                        else f".luvbox-archive.{normalized.folder_mode}.sqlite3")
         archive_path = storage.record_dir / archive_name
         _configure_gallery(normalized, archive_path, storage.legacy_dir.name)
         common.CACHE_COOKIES.clear()

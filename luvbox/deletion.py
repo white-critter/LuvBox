@@ -79,7 +79,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
         for root in store.media_roots:
             if os.path.normcase(str(root)) == os.path.normcase(str(initial_root)):
                 continue
-            guard = OutputGuard(root)
+            guard = OutputGuard(root, group=guards[0])
             guard.acquire()
             guards.append(guard)
         roots_locked = True

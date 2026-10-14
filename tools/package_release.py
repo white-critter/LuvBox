@@ -12,7 +12,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from xlikesaver import __version__  # noqa: E402
+from luvbox import __version__  # noqa: E402
 
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
@@ -71,7 +71,7 @@ def package() -> None:
             # Ship the current guide and verification, without obsolete reports.
             for name in ("docs/사용안내.txt", "docs/development.md", "docs/verification.md"):
                 archive.write(ROOT / name, "source/" + name)
-            for folder, pattern in (("xlikesaver", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):
+            for folder, pattern in (("luvbox", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):
                 for path in sorted((ROOT / folder).glob(pattern)):
                     if path.is_file():
                         archive.write(path, "source/" + path.relative_to(ROOT).as_posix())

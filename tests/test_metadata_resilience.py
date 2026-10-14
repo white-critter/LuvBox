@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests.test_metadata import JPEG, URL, SECRET, image_payload
-from xlikesaver import metadata
+from luvbox import metadata
 
 
 def sharing_error():

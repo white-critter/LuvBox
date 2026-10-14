@@ -7,7 +7,7 @@ The live record databases are on this PC (records_root), never in the media
 folder: cloud-sync tools upload and download SQLite files and their WAL
 sidecars at different moments, which corrupted a catalog. After changes, a
 verified snapshot of each database is placed in the media folder's
-.xlikesaver/<account> as a complete file (no WAL), so records still travel
+.luvbox/<account> as a complete file (no WAL), so records still travel
 with the folder; a PC without local records starts from that snapshot.
 """
 
@@ -33,10 +33,13 @@ _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
 # The sync ledger belonged to the removed "new likes only" snapshot mode. It is
 # still recognized and carried along unchanged so no user file is discarded,
 # but it is never created, copied from legacy folders, or merged any more.
-_LEGACY_SYNC = ".xlikesaver-sync.sqlite3"
-_DATABASES = (".xlikesaver-history.sqlite3", ".xlikesaver-archive.sqlite3",
-              ".xlikesaver-archive.date.sqlite3", ".xlikesaver-archive.flat.sqlite3",
+_LEGACY_SYNC = ".luvbox-sync.sqlite3"
+_DATABASES = (".luvbox-history.sqlite3", ".luvbox-archive.sqlite3",
+              ".luvbox-archive.date.sqlite3", ".luvbox-archive.flat.sqlite3",
               _LEGACY_SYNC)
+# Compatibility inputs stay untouched; every new database uses the LuvBox name.
+_OLD_DATABASES = {name: name.replace(".luvbox-", ".xlikesaver-", 1) for name in _DATABASES}
+_RECORD_FOLDERS = (".luvbox", ".xlikesaver")
 # Sizes and times of the snapshot files this PC last wrote or read; a
 # snapshot that differs was written elsewhere and is merged in.
 _SNAPSHOT_STATE = "snapshot.json"
@@ -84,6 +87,63 @@ def _legacy_source(path: Path, output_dir: Path) -> bool:
     return path.resolve().is_relative_to(output_dir) and path.is_file()
 
 
+def _database_aliases(directory: Path, name: str) -> tuple[Path, ...]:
+    return directory / name, directory / _OLD_DATABASES[name]
+
+
+def _snapshot_source(paths: StoragePaths, name: str) -> Path | None:
+    for folder in _RECORD_FOLDERS:
+        directory = paths.output_dir / folder / paths.record_dir.name
+        for source in _database_aliases(directory, name):
+            if _legacy_source(source, paths.output_dir):
+                return source
+    return None
+
+
+def _database_sources(paths: StoragePaths, name: str) -> tuple[Path, ...]:
+    directories = [paths.record_dir]
+    directories.extend(paths.output_dir / folder / paths.record_dir.name for folder in _RECORD_FOLDERS)
+    directories.append(paths.legacy_dir)
+    directories.extend(paths.legacy_dir / folder / paths.record_dir.name for folder in _RECORD_FOLDERS)
+    return tuple(source for directory in directories for source in _database_aliases(directory, name))
+
+
+def _copy_database_once(source: Path, destination: Path) -> bool:
+    """Publish a SQLite backup without overwriting another process's database."""
+    descriptor, filename = tempfile.mkstemp(prefix=".migrate-", suffix=".sqlite3", dir=destination.parent)
+    os.close(descriptor)
+    staged = Path(filename)
+    try:
+        _backup_database(source, staged)
+        try:
+            if os.name == "nt":
+                staged.rename(destination)
+            else:
+                os.link(staged, destination)
+            return True
+        except FileExistsError:
+            return False
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def migrate_legacy_databases(directory: Path) -> None:
+    """Read old local filenames before an empty replacement can be created."""
+    directory = Path(directory)
+    for name in _DATABASES:
+        if name == _LEGACY_SYNC:
+            continue  # Obsolete sync state is retained, never used by LuvBox.
+        destination, source = _database_aliases(directory, name)
+        if destination.exists():
+            continue
+        if _linked(source):
+            raise MigrationError("이전 기록 파일이 다른 위치에 연결되어 있어 가져오지 못했습니다.")
+        if source.exists():
+            if not _legacy_source(source, directory):
+                raise MigrationError(_MIGRATION_HELP)
+            _copy_database_once(source, destination)
+
+
 def records_root() -> Path:
     """Where live record databases are kept: this PC's application data."""
     from .protection import state_directory
@@ -107,14 +167,15 @@ def resolve_storage(output_dir: str | Path, account: str, separate_accounts: boo
     output = Path(output_dir).expanduser().resolve()
     folder = ("_" if account in _RESERVED else "") + account
     legacy = output / folder
-    snapshot = output / ".xlikesaver" / folder
-    for path in (output / ".xlikesaver", snapshot):
-        if _linked(path) or not path.resolve().is_relative_to(output):
-            raise ValueError("기록 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
+    snapshot = output / ".luvbox" / folder
+    for record_folder in _RECORD_FOLDERS:
+        for path in (output / record_folder, output / record_folder / folder):
+            if _linked(path) or not path.resolve().is_relative_to(output):
+                raise ValueError("기록 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
     if separate_accounts and (_linked(legacy) or not legacy.resolve().is_relative_to(output)):
         raise ValueError("계정 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
     root = records_root()
-    if output.is_relative_to(root.resolve()) or root.resolve().is_relative_to(output / ".xlikesaver"):
+    if output.is_relative_to(root.resolve()) or root.resolve().is_relative_to(output / ".luvbox"):
         raise ValueError("앱의 기록 폴더 안에는 저장 경로를 지정할 수 없습니다. 다른 저장 경로를 선택해 주세요.")
     record = root / _output_key(output) / folder
     for path in (root, record.parent, record):
@@ -137,6 +198,7 @@ def prepare_storage(paths: StoragePaths, *, protected: bool = False, create_medi
     if create_media:
         checked.media_dir.mkdir(parents=True, exist_ok=True)
     checked.record_dir.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_databases(checked.record_dir)
     for name in _DATABASES:
         destination = checked.record_dir / name
         if _linked(destination) or not destination.resolve().is_relative_to(checked.record_dir):
@@ -153,35 +215,15 @@ def prepare_storage(paths: StoragePaths, *, protected: bool = False, create_medi
         # which kept them there live, or from another PC). Also recognize an
         # account folder previously selected as the output root; its
         # isolated ledgers can be one account level deeper.
-        sources = (checked.snapshot_dir / name,)
-        if legacy:
-            sources += (checked.legacy_dir / name, checked.legacy_dir / ".xlikesaver" / checked.record_dir.name / name)
-        source = next((path for path in sources if _legacy_source(path, checked.output_dir)), None)
+        sources = _database_sources(checked, name)
+        source = next((path for path in sources
+                       if (path.parent == checked.record_dir and _legacy_source(path, checked.record_dir))
+                       or (legacy or not path.is_relative_to(checked.legacy_dir))
+                       and _legacy_source(path, checked.output_dir)), None)
         if source is None:
             continue
-        descriptor, filename = tempfile.mkstemp(prefix=".migrate-", suffix=".sqlite3", dir=checked.record_dir)
-        os.close(descriptor)
-        staged = Path(filename)
-        try:
-            with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=5)) as old:
-                with closing(sqlite3.connect(staged, timeout=5)) as copied:
-                    old.backup(copied)
-                    copied.commit()
-            # No replace: a second reader/worker must never overwrite a newer
-            # account ledger created while this backup was being prepared.
-            try:
-                if os.name == "nt":
-                    # Windows rename fails when a destination exists and also
-                    # works on removable FAT/exFAT volumes without hard links.
-                    staged.rename(destination)
-                else:
-                    os.link(staged, destination)
-                if source == checked.snapshot_dir / name:
-                    imported[name] = _file_state(source)
-            except FileExistsError:
-                pass
-        finally:
-            staged.unlink(missing_ok=True)
+        if _copy_database_once(source, destination) and source == _snapshot_source(checked, name):
+            imported[name] = _file_state(source)
     if imported:
         state = _snapshot_state(checked)
         state.update(imported)
@@ -198,7 +240,11 @@ def saved_media_missing(paths: StoragePaths) -> bool:
     """
     if paths.media_dir.is_dir():
         return False
-    history = paths.record_dir / ".xlikesaver-history.sqlite3"
+    history, previous = _database_aliases(paths.record_dir, ".luvbox-history.sqlite3")
+    if not history.exists() and not _linked(history):
+        # This guard runs before storage preparation on the first LuvBox
+        # launch. Inspect the old name without creating or migrating records.
+        history = previous
     if _linked(history) or not history.is_file():
         return False
     try:
@@ -275,8 +321,8 @@ def _merge_changed_snapshot(paths: StoragePaths) -> set[str]:
     for name in _DATABASES:
         if name == _LEGACY_SYNC:
             continue
-        shared, local = paths.snapshot_dir / name, paths.record_dir / name
-        if not local.is_file() or not _legacy_source(shared, paths.output_dir):
+        shared, local = _snapshot_source(paths, name), paths.record_dir / name
+        if not local.is_file() or shared is None:
             continue
         current = _file_state(shared)
         if state.get(name) == current:
@@ -366,7 +412,7 @@ def publish_snapshot(paths: StoragePaths) -> int:
 
 OUTPUT_BUSY_HELP = "이 저장 경로에서 다른 작업이 실행 중입니다. 먼저 실행한 작업을 종료해 주세요."
 _MIGRATION_HELP = "기록을 옮기지 못했습니다. 이전 기록은 보존했습니다. 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."
-_HISTORY_DB = ".xlikesaver-history.sqlite3"
+_HISTORY_DB = ".luvbox-history.sqlite3"
 
 
 def _record_files(directory: Path) -> None:
@@ -375,7 +421,8 @@ def _record_files(directory: Path) -> None:
         raise MigrationError(_MIGRATION_HELP)
     if not directory.exists():
         return
-    names = {name + suffix for name in _DATABASES for suffix in ("", "-wal", "-shm", "-journal")} | {_SNAPSHOT_STATE}
+    names = {name + suffix for name in (*_DATABASES, *_OLD_DATABASES.values())
+             for suffix in ("", "-wal", "-shm", "-journal")} | {_SNAPSHOT_STATE}
     for child in directory.iterdir():
         if child.name not in names or _linked(child) or not child.is_file():
             raise MigrationError("기록 폴더에 다른 파일이 있어 자동으로 옮기지 못했습니다. 이전 기록은 보존했습니다.")
@@ -450,9 +497,9 @@ def _available_databases(paths: StoragePaths) -> dict[str, Path]:
         if current.is_file():
             result[name] = current
             continue
-        candidates = (paths.snapshot_dir / name, paths.legacy_dir / name,
-                      paths.legacy_dir / ".xlikesaver" / paths.record_dir.name / name)
-        legacy = next((item for item in candidates if _legacy_source(item, paths.output_dir)), None)
+        candidates = _database_sources(paths, name)
+        legacy = next((item for item in candidates
+                       if _legacy_source(item, paths.record_dir if item.parent == paths.record_dir else paths.output_dir)), None)
         if legacy is not None:
             result[name] = legacy
     return result
@@ -471,9 +518,9 @@ def _merge_snapshot_copies(files: dict[str, Path], paths: StoragePaths, parent: 
     merged = dict(files)
     try:
         for name, original in files.items():
-            shared = paths.snapshot_dir / name
+            shared = _snapshot_source(paths, name)
             if (name == _LEGACY_SYNC or original == shared
-                    or not _legacy_source(shared, paths.output_dir)
+                    or shared is None
                     or state.get(name) == _file_state(shared)):
                 continue
             if temporary is None:
@@ -856,8 +903,8 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
         raise MigrationError("다른 계정의 기록은 합칠 수 없습니다.")
     if source.record_dir == destination.record_dir:
         return MigrationResult(source.record_dir, destination.record_dir, 0, 0, False)
-    if (destination.output_dir.is_relative_to(source.output_dir / ".xlikesaver") or
-            source.output_dir.is_relative_to(destination.output_dir / ".xlikesaver")):
+    if any(destination.output_dir.is_relative_to(source.output_dir / folder) or
+           source.output_dir.is_relative_to(destination.output_dir / folder) for folder in _RECORD_FOLDERS):
         raise MigrationError("기록 폴더 안에는 저장 경로를 지정할 수 없습니다.")
     guards = []
     stage = None
@@ -868,10 +915,12 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
         account_guard = AccountGuard(source.account, sleep=time.sleep)
         account_guard.acquire(respect_cooldown=False)
         guards.append(account_guard)
+        output_group = None
         for output in sorted({source.output_dir, destination.output_dir}, key=lambda item: os.path.normcase(str(item))):
-            guard = OutputGuard(output)
+            guard = OutputGuard(output, group=output_group)
             guard.acquire()
             guards.append(guard)
+            output_group = guard if output_group is None else output_group
         if not source.output_dir.is_dir():
             raise MigrationError("이전 저장 폴더에 접근할 수 없어 기록을 옮기지 못했습니다. 연결과 폴더 위치를 확인해 주세요.")
         _recover_relocation(source, protected=True)
@@ -970,10 +1019,13 @@ def _account_ledgers(paths: StoragePaths, account: str) -> Path | None:
     """Another account's records for this same output: this PC first, then
     the copy in the output folder (records saved on another PC)."""
     folder = _account_folder(account)
-    for directory in (paths.record_dir.parent / folder, paths.output_dir / ".xlikesaver" / folder):
-        history = directory / _HISTORY_DB
-        if not _linked(directory) and not _linked(history) and history.is_file():
-            return directory
+    directories = (paths.record_dir.parent / folder,
+                   *(paths.output_dir / name / folder for name in _RECORD_FOLDERS))
+    for directory in directories:
+        for history in _database_aliases(directory, _HISTORY_DB):
+            parent = paths.record_dir.parent if directory.parent == paths.record_dir.parent else paths.output_dir
+            if not _linked(directory) and _legacy_source(history, parent):
+                return directory
     return None
 
 
@@ -984,7 +1036,7 @@ def other_account_records(paths: StoragePaths) -> list[dict]:
     library cannot tell another account's files apart from unrelated ones.
     """
     found = {}
-    for parent in (paths.record_dir.parent, paths.output_dir / ".xlikesaver"):
+    for parent in (paths.record_dir.parent, *(paths.output_dir / folder for folder in _RECORD_FOLDERS)):
         try:
             if _linked(parent) or not parent.is_dir():
                 continue
@@ -995,9 +1047,10 @@ def other_account_records(paths: StoragePaths) -> list[dict]:
             account = _folder_account(child.name)
             if account is None or account == paths.account or account in found:
                 continue
-            history = child / _HISTORY_DB
+            history = next((path for path in _database_aliases(child, _HISTORY_DB)
+                            if _legacy_source(path, parent)), None)
             try:
-                if _linked(child) or _linked(history) or not history.is_file():
+                if _linked(child) or history is None:
                     continue
                 with closing(sqlite3.connect(history.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
                     records = db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
@@ -1162,36 +1215,102 @@ def merge_accounts_records(paths: StoragePaths, accounts) -> dict:
 
 
 class OutputGuard:
-    """Exclude overlapping file writes across accounts sharing an output root."""
+    """Exclude overlapping roots while allowing independent sibling folders.
 
-    def __init__(self, output_dir: Path | str):
+    The registry mutex is held only during acquisition. OS lifetime locks,
+    rather than process IDs or stale metadata, identify active operations.
+    Explicitly grouped guards belong to one job managing several old roots.
+    """
+
+    def __init__(self, output_dir: Path | str, *, group: OutputGuard | None = None):
         from .protection import state_directory
-        key = hashlib.sha256(os.path.normcase(str(Path(output_dir).resolve())).encode("utf-8")).hexdigest()
+        self.output_dir = Path(output_dir).resolve()
+        key = hashlib.sha256(os.path.normcase(str(self.output_dir)).encode("utf-8")).hexdigest()
         self.path = state_directory() / ("output-" + key + ".lock")
+        self._registry = self.path.parent / "output-registry.lock"
+        self._group = group._group if group is not None else uuid.uuid4().hex
         self._file = None
+
+    @staticmethod
+    def _open(path):
+        # Append mode cannot update the metadata after locked byte zero.
+        file = os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT, 0o600), "r+b")
+        if file.seek(0, os.SEEK_END) == 0:
+            file.write(b"\0")
+            file.flush()
+        file.seek(0)
+        return file
+
+    @staticmethod
+    def _lock(file):
+        file.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _check_active_roots(self):
+        from .protection import ProtectionError
+        for path in self.path.parent.glob("output-*.lock"):
+            if path == self.path or not re.fullmatch(r"output-[a-f0-9]{64}\.lock", path.name):
+                continue
+            with path.open("r+b") as other:
+                try:
+                    self._lock(other)
+                except OSError as error:
+                    if error.errno not in {11, 13, 35}:
+                        raise
+                else:
+                    continue  # Inactive metadata cannot block future work.
+                # Windows locks byte zero against reads too; metadata starts
+                # after that byte so another process can inspect its owner.
+                other.seek(1)
+                try:
+                    data = json.loads(other.read(131073).decode("utf-8"))
+                    root = Path(data["output"])
+                    group = data["group"]
+                    if (data.get("version") != 1 or not root.is_absolute()
+                            or not isinstance(group, str) or not re.fullmatch(r"[a-f0-9]{32}", group)):
+                        raise ValueError
+                except (ValueError, TypeError, KeyError, UnicodeError):
+                    raise ProtectionError(OUTPUT_BUSY_HELP) from None
+                if group != self._group and (root.is_relative_to(self.output_dir)
+                                               or self.output_dir.is_relative_to(root)):
+                    raise ProtectionError(OUTPUT_BUSY_HELP)
 
     def acquire(self) -> None:
         from .protection import ProtectionError
-        file = None
+        file, registry = None, None
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            file = self.path.open("a+b")
-            if file.tell() == 0:
-                file.write(b"\0")
-                file.flush()
-            file.seek(0)
-            if os.name == "nt":
-                import msvcrt
-                msvcrt.locking(file.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-                fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            registry = self._open(self._registry)
+            deadline = time.monotonic() + 0.75
+            while True:
+                try:
+                    self._lock(registry)
+                    break
+                except OSError as error:
+                    if error.errno not in {11, 13, 35} or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.05)
+            self._check_active_roots()
+            file = self._open(self.path)
+            self._lock(file)
+            file.seek(1)
+            file.write(json.dumps({"version": 1, "output": str(self.output_dir), "group": self._group}).encode("utf-8"))
+            file.truncate()
+            file.flush()
         except OSError as error:
             if file is not None:
                 file.close()
-            if file is not None and error.errno in {11, 13, 35}:
+            if error.errno in {11, 13, 35}:
                 raise ProtectionError(OUTPUT_BUSY_HELP) from None
             raise ProtectionError("저장 경로의 작업 보호 기록을 만들지 못했습니다. Windows 사용자 폴더 권한을 확인해 주세요.") from None
+        finally:
+            if registry is not None:
+                registry.close()
         self._file = file
 
     def close(self) -> None:

@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 from tests import test_core as core_support
 from tests import test_missing_files as missing_support
-from xlikesaver.core import run_worker
-from xlikesaver.history import HistoryStore
-from xlikesaver.storage import resolve_storage
+from luvbox.core import run_worker
+from luvbox.history import HistoryStore
+from luvbox.storage import resolve_storage
 
 
 class ExternalDeleteDownloadTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class ExternalDeleteDownloadTests(unittest.TestCase):
         self.recycled.mkdir()
         # Core's source embedding is already mocked. Avoid unrelated resident
         # ExifTool process startup/teardown in these deletion policy tests.
-        resident = patch("xlikesaver.metadata.persistent", side_effect=nullcontext)
+        resident = patch("luvbox.metadata.persistent", side_effect=nullcontext)
         resident.start()
         self.addCleanup(resident.stop)
 

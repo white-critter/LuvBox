@@ -16,8 +16,8 @@ from gallery_dl import config, exception
 from gallery_dl.extractor.common import Extractor
 from gallery_dl.extractor.message import Message
 
-from xlikesaver.core import JobOptions, run_worker
-from xlikesaver.storage import resolve_storage
+from luvbox.core import JobOptions, run_worker
+from luvbox.storage import resolve_storage
 
 
 SECRET = "offline-test-cookie-secret-never-emit"
@@ -77,7 +77,7 @@ class CoreTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
-        self.protection_root = patch("xlikesaver.protection.state_directory", return_value=self.base / "protection")
+        self.protection_root = patch("luvbox.protection.state_directory", return_value=self.base / "protection")
         self.protection_root.start()
         self.addCleanup(self.protection_root.stop)
         self.output = self.base / "photos"
@@ -87,10 +87,10 @@ class CoreTests(unittest.TestCase):
         self.write_cookies()
         self.options = JobOptions("@MyAccount", str(self.output), "file", str(self.cookie_file),
                                   folder_mode="author", include_videos=False, include_gifs=False, separate_accounts=True)
-        self.metadata_available = patch("xlikesaver.metadata.available", return_value=True)
+        self.metadata_available = patch("luvbox.metadata.available", return_value=True)
         self.metadata_available.start()
         self.addCleanup(self.metadata_available.stop)
-        self.metadata_embed = patch("xlikesaver.metadata.embed_source",
+        self.metadata_embed = patch("luvbox.metadata.embed_source",
                                     side_effect=lambda path, tweet_id, **values: {"status": "embedded", "url": f"https://x.com/i/web/status/{tweet_id}", "message": "", "author_status": "embedded" if values.get("author") or values.get("author_id") else "unknown"})
         self.embed_source = self.metadata_embed.start()
         self.addCleanup(self.metadata_embed.stop)
@@ -115,7 +115,7 @@ class CoreTests(unittest.TestCase):
         return result, events
 
     def runs(self):
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             db.row_factory = sqlite3.Row
             return [dict(row) for row in db.execute("SELECT * FROM runs ORDER BY id")]
 
@@ -126,15 +126,15 @@ class CoreTests(unittest.TestCase):
         for source in self.record_dir.glob("*.sqlite3"):
             with closing(sqlite3.connect(source)) as old, closing(sqlite3.connect(target / source.name)) as copied:
                 old.backup(copied)
-        with closing(sqlite3.connect(target / ".xlikesaver-history.sqlite3")) as catalog:
+        with closing(sqlite3.connect(target / ".luvbox-history.sqlite3")) as catalog:
             catalog.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",
                             (json.dumps([str(self.output), str(output)]),))
             catalog.commit()
         return target
 
     def test_output_change_skips_existing_old_media_and_saves_new_media_at_new_root(self):
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.storage import migrate_records, resolve_storage
+        from luvbox.history import HistoryStore
+        from luvbox.storage import migrate_records, resolve_storage
 
         options = replace(self.options, folder_mode="flat", separate_accounts=False)
         first, events = self.worker([("100", 1, "photo", "alice")], options=options)
@@ -159,14 +159,14 @@ class CoreTests(unittest.TestCase):
         self.assertFalse((new_output / old_path.name).exists())
         self.assertEqual(next(event for event in events if event["type"] == "skipped")["path"], str(old_path))
         self.assertEqual(next(event for event in events if event["type"] == "saved")["path"], str(new_output / "101_1.jpg"))
-        with closing(sqlite3.connect(target / ".xlikesaver-history.sqlite3")) as catalog:
+        with closing(sqlite3.connect(target / ".luvbox-history.sqlite3")) as catalog:
             catalog.row_factory = sqlite3.Row
             after = dict(catalog.execute("SELECT * FROM media WHERE tweet_id='100'").fetchone())
         for key in ("path", "saved_at", "source_url", "metadata_status"):
             self.assertEqual(after[key], before[key])
 
     def test_former_output_concurrent_writer_blocks_worker_before_network(self):
-        from xlikesaver.storage import OutputGuard
+        from luvbox.storage import OutputGuard
 
         first, _ = self.worker([("100", 1, "photo", "alice")])
         self.assertEqual(first, 0)
@@ -186,6 +186,19 @@ class CoreTests(unittest.TestCase):
         result, _ = self.worker([("100", 1, "photo", "alice")],
                                 options=replace(self.options, output_dir=str(new_output)))
         self.assertEqual(result, 0)
+
+    def test_nested_former_output_roots_can_be_locked_by_the_same_worker(self):
+        code, _ = self.worker([("100", 1, "photo", "alice")])
+        self.assertEqual(code, 0)
+        # The former media directory is a descendant of the newly selected root.
+        # Its files still need the worker's protection while old tags are read.
+        self.copied_records_for_new_output(self.base)
+        code, events = self.worker([("101", 1, "photo", "alice"), ("100", 1, "photo", "alice")],
+                                   options=replace(self.options, output_dir=str(self.base)))
+        self.assertEqual(code, 0)
+        self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (1, 1))
+        self.assertTrue((self.output / "myaccount" / "alice" / "100_1.jpg").is_file())
+        self.assertTrue((self.base / "myaccount" / "alice" / "101_1.jpg").is_file())
 
     def test_accepts_handles_and_profile_urls(self):
         for account in ("@MyAccount", "MyAccount", "https://x.com/MyAccount", "https://twitter.com/MyAccount/?s=20", "x.com/MyAccount/likes"):
@@ -236,7 +249,7 @@ class CoreTests(unittest.TestCase):
         moved = self.base / "renamed-photos"
         self.output.rename(moved)
         events = []
-        with patch("xlikesaver.login.load_session_cookies") as login, \
+        with patch("luvbox.login.load_session_cookies") as login, \
                 patch("gallery_dl.extractor.find") as find:
             result = run_worker(selected, events.append)
         self.assertEqual(result, 1)
@@ -298,7 +311,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(events[-1]["saved"], 1)
         self.assertIn("/10_1?", FakeHttpDownloader.downloaded[0])
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM archive").fetchone()[0], 1)
         result, events = self.worker(rows)
         self.assertEqual(result, 0)
@@ -313,7 +326,7 @@ class CoreTests(unittest.TestCase):
         rows = [("100", 1, "photo", "alice", datetime(2020, 1, 1)),
                 ("101", 1, "photo", "bob", datetime(2027, 12, 31)),
                 ("102", 1, "photo", "alice")]
-        with patch("xlikesaver.core.datetime") as clock:
+        with patch("luvbox.core.datetime") as clock:
             clock.now.return_value = saving
             code, events = self.worker(rows, options=replace(self.options, folder_mode="date"))
         self.assertEqual(clock.now.call_count, 6)  # Start and completion for each new file.
@@ -342,13 +355,13 @@ class CoreTests(unittest.TestCase):
 
         options = replace(self.options, folder_mode="date")
         rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")]
-        with patch("xlikesaver.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 4),
+        with patch("luvbox.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 4),
                                                              date(2026, 10, 5), date(2026, 10, 5)]):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
         self.assertTrue((self.output / "myaccount" / "2026-10-04" / "100_1.jpg").is_file())
         self.assertTrue((self.output / "myaccount" / "2026-10-05" / "101_1.jpg").is_file())
-        with patch("xlikesaver.core._save_day", return_value=date(2026, 10, 6)):
+        with patch("luvbox.core._save_day", return_value=date(2026, 10, 6)):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 0)
@@ -357,7 +370,7 @@ class CoreTests(unittest.TestCase):
 
     def test_date_layout_midnight_completion_moves_after_archive_and_preserves_later_skip(self):
         from datetime import date
-        from xlikesaver.core import _move_without_overwrite
+        from luvbox.core import _move_without_overwrite
 
         options = replace(self.options, folder_mode="date", include_videos=True)
         account = self.output / "myaccount"
@@ -365,14 +378,14 @@ class CoreTests(unittest.TestCase):
         completed_path = account / "2026-10-05" / old_path.name
         observed = []
         def move(source, destination):
-            with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.date.sqlite3")) as db:
+            with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.date.sqlite3")) as db:
                 observed.extend(row[0] for row in db.execute("SELECT entry FROM archive"))
             self.assertTrue(source.is_file())
             _move_without_overwrite(source, destination)
 
         rows = [("100", 1, "video", "alice")]
-        with patch("xlikesaver.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 5)]), \
-                patch("xlikesaver.core._move_without_overwrite", side_effect=move):
+        with patch("luvbox.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 5)]), \
+                patch("luvbox.core._move_without_overwrite", side_effect=move):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
         self.assertEqual(observed, ["twitter100_video_1"])
@@ -381,11 +394,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(next(event for event in events if event["type"] == "saved")["path"], str(completed_path))
         self.assertEqual(next(event for event in events if event["type"] == "progress" and event["final"])["path"], str(completed_path))
         self.assertEqual(str(self.embed_source.call_args.args[0]), str(completed_path))
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             before = db.execute("SELECT path,saved_at FROM media").fetchone()
         self.assertEqual(before[0], str(completed_path))
         self.assertTrue(before[1])
-        with patch("xlikesaver.core._save_day", return_value=date(2026, 10, 6)):
+        with patch("luvbox.core._save_day", return_value=date(2026, 10, 6)):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 0)
@@ -393,10 +406,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(next(event for event in events if event["type"] == "skipped")["path"], str(completed_path))
         self.assertEqual(len(FakeHttpDownloader.downloaded), 1)
         self.embed_source.assert_called_once()
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT path,saved_at FROM media").fetchone(), before)
         completed_path.unlink()
-        with patch("xlikesaver.core._save_day", return_value=date(2026, 10, 7)):
+        with patch("luvbox.core._save_day", return_value=date(2026, 10, 7)):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
         self.assertEqual(next(event for event in events if event["type"] == "skipped")["path"], "")
@@ -410,7 +423,7 @@ class CoreTests(unittest.TestCase):
         collision = account / "2026-10-05" / old_path.name
         collision.parent.mkdir(parents=True)
         collision.write_bytes(b"existing-user-file")
-        with patch("xlikesaver.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 5)]):
+        with patch("luvbox.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 5)]):
             code, events = self.worker([("100", 1, "photo", "alice")],
                                        options=replace(self.options, folder_mode="date"))
         self.assertEqual(code, 0)
@@ -420,29 +433,34 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(next(event for event in events if event["type"] == "saved")["path"], str(old_path))
         self.assertEqual(next(event for event in events if event["type"] == "progress" and event["final"])["path"], str(old_path))
         self.assertTrue(any("완료일 폴더" in event.get("message", "") for event in events))
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.date.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.date.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT entry FROM archive").fetchall(), [("twitter100_1",)])
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT path FROM media").fetchone()[0], str(old_path))
 
     def test_date_layout_midnight_move_failure_preserves_file_archive_and_retry_location(self):
         from datetime import date
+        from luvbox.core import _move_without_overwrite
 
         options = replace(self.options, folder_mode="date")
         rows = [("100", 1, "photo", "alice")]
         account = self.output / "myaccount"
         old_path = account / "2026-10-04" / "100_1.jpg"
-        with patch("xlikesaver.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 5)]), \
-                patch("xlikesaver.core._move_without_overwrite", side_effect=PermissionError(SECRET)):
+        def move(source, destination):
+            if source.name.endswith(".part"):
+                return _move_without_overwrite(source, destination)
+            raise PermissionError(SECRET)
+        with patch("luvbox.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 5)]), \
+                patch("luvbox.core._move_without_overwrite", side_effect=move):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
         self.assertEqual(old_path.read_bytes(), b"\xff\xd8\xffoffline-photo")
         self.assertFalse((account / "2026-10-05" / old_path.name).exists())
         self.assertEqual(next(event for event in events if event["type"] == "saved")["path"], str(old_path))
         self.assertTrue(any("완료일 폴더" in event.get("message", "") for event in events))
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.date.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.date.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT entry FROM archive").fetchall(), [("twitter100_1",)])
-        with patch("xlikesaver.core._save_day", return_value=date(2026, 10, 6)):
+        with patch("luvbox.core._save_day", return_value=date(2026, 10, 6)):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 0)
@@ -451,6 +469,7 @@ class CoreTests(unittest.TestCase):
 
     def test_date_layout_midnight_folder_redirect_after_creation_cannot_move_outside_account(self):
         from datetime import date
+        from luvbox.core import _move_without_overwrite
 
         account = self.output / "myaccount"
         old_path = account / "2026-10-04" / "100_1.jpg"
@@ -465,32 +484,34 @@ class CoreTests(unittest.TestCase):
                     return outside
             return resolve(path, *args, **kwargs)
 
-        with patch("xlikesaver.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 5)]), \
+        with patch("luvbox.core._save_day", side_effect=[date(2026, 10, 4), date(2026, 10, 5)]), \
                 patch.object(Path, "resolve", autospec=True, side_effect=redirected), \
-                patch("xlikesaver.core._move_without_overwrite") as move:
+                patch("luvbox.core._move_without_overwrite", wraps=_move_without_overwrite) as move:
             code, events = self.worker([("100", 1, "photo", "alice")],
                                        options=replace(self.options, folder_mode="date"))
         self.assertEqual(code, 0)
         self.assertEqual(len(checks), 2)
-        move.assert_not_called()
+        # The completed .part is finalized; the later date-folder move is refused.
+        self.assertEqual(move.call_count, 1)
+        self.assertTrue(move.call_args.args[0].name.endswith(".part"))
         self.assertEqual(old_path.read_bytes(), b"\xff\xd8\xffoffline-photo")
         self.assertFalse(outside.exists())
         self.assertFalse(completed_path.exists())
         self.assertEqual(next(event for event in events if event["type"] == "saved")["path"], str(old_path))
         self.assertTrue(any("완료일 폴더" in event.get("message", "") for event in events))
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.date.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.date.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT entry FROM archive").fetchall(), [("twitter100_1",)])
 
     def test_changing_layout_downloads_into_new_destination_then_skips_within_layout(self):
         rows = [("100", 1, "photo", "alice", datetime(2026, 10, 4))]
         for mode, relative, archive_name in (
-            ("author", "alice/100_1.jpg", ".xlikesaver-archive.sqlite3"),
-            ("date", "2026-10-04/100_1.jpg", ".xlikesaver-archive.date.sqlite3"),
-            ("flat", "100_1.jpg", ".xlikesaver-archive.flat.sqlite3"),
+            ("author", "alice/100_1.jpg", ".luvbox-archive.sqlite3"),
+            ("date", "2026-10-04/100_1.jpg", ".luvbox-archive.date.sqlite3"),
+            ("flat", "100_1.jpg", ".luvbox-archive.flat.sqlite3"),
         ):
             options = replace(self.options, folder_mode=mode)
             with self.subTest(mode=mode):
-                with patch("xlikesaver.core._save_day", return_value=datetime(2026, 10, 4).date()):
+                with patch("luvbox.core._save_day", return_value=datetime(2026, 10, 4).date()):
                     code, events = self.worker(rows, options=options)
                 self.assertEqual(code, 0)
                 self.assertEqual(events[-1]["saved"], 1)
@@ -511,7 +532,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 0)
         self.assertEqual(events[-1]["skipped"], 2)
         self.assertEqual(len(FakeHttpDownloader.downloaded), 2)
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.sqlite3")) as db:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM archive").fetchone()[0], 2)
 
     def test_quick_scan_runs_complete_scan_until_a_run_finishes(self):
@@ -532,7 +553,7 @@ class CoreTests(unittest.TestCase):
         self.worker(old)
         listed = []
         new_rows = [("200", 1, "photo", "bob"), ("201", 1, "photo", "bob")]
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 3):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 3):
             code, events = self.worker(new_rows + old, options=replace(self.options, scan_mode="quick"),
                                        before_row=lambda extractor, row: listed.append(row[0]))
         self.assertEqual(code, 0)
@@ -549,7 +570,7 @@ class CoreTests(unittest.TestCase):
         old = [(str(tweet), 1, "photo", "alice") for tweet in range(100, 104)]
         self.worker(old)
         rows = [old[0], old[1], ("200", 1, "photo", "bob"), old[2], old[3], ("201", 1, "photo", "bob")]
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 3):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 3):
             code, events = self.worker(rows, options=replace(self.options, scan_mode="quick"))
         self.assertEqual(code, 0)
         self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (2, 4))
@@ -560,7 +581,7 @@ class CoreTests(unittest.TestCase):
         self.worker(old)
         quick = replace(self.options, scan_mode="quick")
         rows = [("200", 1, "photo", "bob"), ("201", 1, "photo", "bob"), ("202", 1, "photo", "bob")] + old
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 2):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 2):
             # A short test run stops after one new file: newer likes below it
             # would otherwise sit behind the saved streak forever.
             code, events = self.worker(rows, options=replace(quick, photo_limit=1))
@@ -602,8 +623,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["scan_mode"], "full")
 
     def test_merging_new_archive_keys_requires_one_full_scan_before_the_saved_streak(self):
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.storage import merge_account_records
+        from luvbox.history import HistoryStore
+        from luvbox.storage import merge_account_records
 
         baseline = [("400", 1, "photo", "bob")]
         combined = [("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")]
@@ -616,7 +637,7 @@ class CoreTests(unittest.TestCase):
         quick = replace(self.options, scan_mode="quick")
         with closing(HistoryStore.for_storage(paths, create_media=False)) as store:
             self.assertEqual(store.quick_scan_readiness(quick.folder_mode, quick.media_signature), "records-changed")
-        with patch("xlikesaver.core.QUICK_STOP_AFTER", 2):
+        with patch("luvbox.core.QUICK_STOP_AFTER", 2):
             code, events = self.worker(rows, options=quick)
             self.assertEqual(code, 0)
             self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["visited"]),
@@ -631,7 +652,7 @@ class CoreTests(unittest.TestCase):
                              (0, "quick", 0, 2))
 
     def test_merge_watermark_is_cleared_by_each_layouts_completed_scan_and_never_by_retry(self):
-        from xlikesaver.history import HistoryStore
+        from luvbox.history import HistoryStore
 
         with closing(HistoryStore.for_storage(resolve_storage(self.output, "myaccount", True))) as store:
             signature = self.options.media_signature
@@ -657,7 +678,7 @@ class CoreTests(unittest.TestCase):
     def test_all_mode_ignores_legacy_corrupt_sync_database_and_uses_photo_archive(self):
         account = self.output / "myaccount"
         account.mkdir(parents=True)
-        sync_path = account / ".xlikesaver-sync.sqlite3"
+        sync_path = account / ".luvbox-sync.sqlite3"
         sync_path.write_bytes(b"old invalid sync database")
         rows = [("100", 1, "photo", "alice")]
         code, events = self.worker(rows)
@@ -682,11 +703,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["skipped"], 2)
 
     def test_existing_files_reuse_one_catalog_read_and_keep_metadata_retry_author(self):
-        from xlikesaver.history import HistoryStore
+        from luvbox.history import HistoryStore
 
         rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "bob")]
         self.assertEqual(self.worker(rows)[0], 0)
-        with closing(sqlite3.connect(self.record_dir / ".xlikesaver-history.sqlite3")) as database:
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-history.sqlite3")) as database:
             database.execute("UPDATE media SET metadata_status='failed' WHERE tweet_id='100'")
             database.commit()
         self.embed_source.reset_mock()
@@ -721,7 +742,7 @@ class CoreTests(unittest.TestCase):
         self.assertIn("일부 파일을 저장하지 못했습니다", events[-1]["message"])
 
     def test_diagnostics_match_whole_terms(self):
-        from xlikesaver.core import _safe_diagnostic
+        from luvbox.core import _safe_diagnostic
 
         for raw in ("AuthRequired: authenticated cookies needed", "AuthorizationError: Account temporarily locked",
                     "Invalid login credentials", "'401 Unauthorized'", "403 Forbidden", "cookie expired"):
@@ -783,7 +804,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 1)
 
     def test_managed_session_validation_does_not_read_secrets(self):
-        with patch("xlikesaver.login.load_session_cookies") as load:
+        with patch("luvbox.login.load_session_cookies") as load:
             normalized = replace(self.options, auth_mode="managed").validate()
         self.assertEqual(normalized.auth_mode, "managed")
         self.assertEqual(normalized.cookies_file, "")
@@ -803,7 +824,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(extractor.cookies.get("auth_token", domain=".x.com"), SECRET)
             self.assertEqual(extractor.cookies.get("ct0", domain=".x.com"), "offline-csrf")
 
-        with patch("xlikesaver.login.load_session_cookies", return_value=cookies) as load, \
+        with patch("luvbox.login.load_session_cookies", return_value=cookies) as load, \
                 patch("gallery_dl.cookies.load_cookies") as library_load:
             code, events = self.worker([("100", 1, "photo", "alice")],
                                        options=replace(self.options, auth_mode="managed"),
@@ -819,7 +840,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(auth.has_nonstandard_attr("HttpOnly"))
 
     def test_missing_managed_session_gives_reconnect_help_without_secret_diagnostics(self):
-        with patch("xlikesaver.login.load_session_cookies", side_effect=ValueError(SECRET)):
+        with patch("luvbox.login.load_session_cookies", side_effect=ValueError(SECRET)):
             code, events = self.worker(options=replace(self.options, auth_mode="managed"))
         self.assertNotEqual(code, 0)
         self.assertEqual(events[-1]["status"], "error")
@@ -828,7 +849,7 @@ class CoreTests(unittest.TestCase):
     def test_stop_before_managed_start_does_not_load_session(self):
         flag = self.base / "stop.flag"
         flag.touch()
-        with patch("xlikesaver.login.load_session_cookies") as load:
+        with patch("luvbox.login.load_session_cookies") as load:
             code, events = self.worker(options=replace(self.options, auth_mode="managed"), stop_file=flag)
         load.assert_not_called()
         self.assertEqual(code, 0)
@@ -837,7 +858,7 @@ class CoreTests(unittest.TestCase):
     def test_stop_before_start_does_not_touch_authentication(self):
         flag = self.base / "stop.flag"
         flag.touch()
-        with patch("xlikesaver.login.load_session_cookies") as load:
+        with patch("luvbox.login.load_session_cookies") as load:
             code, events = self.worker(options=JobOptions("me", str(self.output)), stop_file=flag)
         load.assert_not_called()
         self.assertEqual(code, 0)
@@ -891,7 +912,7 @@ class CoreTests(unittest.TestCase):
                 self.assertIn(normalized.auth_mode, {"file", "managed"})
         for mode in ("chrome", "edge", "firefox", "", "unknown", None, True, SECRET):
             with self.subTest(mode=mode), \
-                    patch("xlikesaver.login.load_session_cookies") as session_load, \
+                    patch("luvbox.login.load_session_cookies") as session_load, \
                     patch("gallery_dl.cookies.load_cookies") as library_load, \
                     patch("gallery_dl.extractor.find") as find:
                 events = []
@@ -930,8 +951,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["skipped"], 1)
 
     def test_unwritable_output_has_actionable_error_before_auth(self):
-        with patch("xlikesaver.core.tempfile.TemporaryFile", side_effect=PermissionError), \
-                patch("xlikesaver.login.load_session_cookies") as load:
+        with patch("luvbox.core.tempfile.TemporaryFile", side_effect=PermissionError), \
+                patch("luvbox.login.load_session_cookies") as load:
             code, events = self.worker(options=JobOptions("me", str(self.output), "managed"))
         load.assert_not_called()
         self.assertNotEqual(code, 0)
@@ -1072,7 +1093,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(events[-1]["skipped"], 1)
             self.assertIn("사진 서버", events[-1]["message"])
             self.assertNotIn(SECRET, json.dumps(events))
-            with closing(sqlite3.connect(self.record_dir / ".xlikesaver-archive.sqlite3")) as db:
+            with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.sqlite3")) as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM archive").fetchone()[0], 1)
         code, events = self.worker([("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")])
         self.assertEqual(code, 0)
@@ -1080,12 +1101,12 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["skipped"], 1)
 
     def test_same_account_parallel_worker_is_blocked_before_cookie_read(self):
-        from xlikesaver.protection import AccountGuard
+        from luvbox.protection import AccountGuard
 
         guard = AccountGuard("myaccount", sleep=lambda *args: None)
         guard.acquire()
         try:
-            with patch("xlikesaver.login.load_session_cookies") as load:
+            with patch("luvbox.login.load_session_cookies") as load:
                 result, events = self.worker(options=replace(self.options, auth_mode="managed"))
             load.assert_not_called()
             self.assertNotEqual(result, 0)
@@ -1096,10 +1117,10 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(result, 0)
 
     def test_abandoned_run_recovery_waits_for_exclusive_account_lock(self):
-        from xlikesaver.history import HistoryStore
-        from xlikesaver.protection import AccountGuard
+        from luvbox.history import HistoryStore
+        from luvbox.protection import AccountGuard
 
-        from xlikesaver.storage import resolve_storage
+        from luvbox.storage import resolve_storage
         catalog = HistoryStore.for_storage(resolve_storage(self.output, "myaccount", True))
         try:
             abandoned = catalog.start_run("author")

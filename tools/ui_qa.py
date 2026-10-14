@@ -39,9 +39,9 @@ def forbidden(*_args, **_kwargs):
 def make_catalog(temporary, account="demo_account", count=168):
     """Create colorful, local-only photos/GIFs/video and deterministic records."""
     from PIL import Image, ImageDraw, ImageFont
-    from xlikesaver.history import HistoryStore
-    from xlikesaver.media import ffmpeg_path
-    from xlikesaver.storage import resolve_storage
+    from luvbox.history import HistoryStore
+    from luvbox.media import ffmpeg_path
+    from luvbox.storage import resolve_storage
 
     output = temporary / "미디어"
     output.mkdir()
@@ -91,8 +91,8 @@ def make_catalog(temporary, account="demo_account", count=168):
             posted = datetime(2026, month, index % 27 + 1, 12, 30, tzinfo=timezone.utc)
             store.record_media("flat", {"tweet_id": tweet, "num": 1, "type": kind,
                                         "author": {"name": authors[index % len(authors)], "id": str(1000 + index % len(authors))},
-                                        "date": posted, "_xlikesaver_metadata_status": "embedded",
-                                        "_xlikesaver_author_metadata_status": "embedded"}, output / filename)
+                                        "date": posted, "_luvbox_metadata_status": "embedded",
+                                        "_luvbox_author_metadata_status": "embedded"}, output / filename)
             texts.append((tweet, f"오늘의 색과 작은 장면 {index + 1}. 함께 남기는 작업 기록입니다.", ["illustration", "daily"]))
             saved = f"2026-{month:02d}-{index % 27 + 1:02d}T22:10:00+09:00"
             with store._db:
@@ -352,7 +352,7 @@ class CaptureSession:
         return result
 
     def appearance(self, selected):
-        from xlikesaver import theme
+        from luvbox import theme
         self.app.appearance.set(selected)
         theme.apply(self.root, selected)
         self.app._update_theme_caption()
@@ -509,7 +509,7 @@ class CaptureSession:
         self.app.history_window = None
 
     def dialogs(self):
-        from xlikesaver import dialogs
+        from luvbox import dialogs
         cases = [
             ("dialog-confirm-light", "light", "이전 저장 폴더 연결 확인",
              "이전 폴더를 찾을 수 없습니다.\n새 폴더에서 저장을 시작할까요?\n\n"
@@ -559,28 +559,28 @@ def main():
     root = app = capture = None
     network_attempts = []
     try:
-        with tempfile.TemporaryDirectory(prefix="XlikeSaver-UIQA-") as directory, ExitStack() as stack:
+        with tempfile.TemporaryDirectory(prefix="LuvBox-UIQA-") as directory, ExitStack() as stack:
             temporary = Path(directory)
             # Do this before fonts/settings/storage/protection modules load.
             os.environ["LOCALAPPDATA"] = str(temporary / "LocalAppData")
             import tkinter as tk
-            from xlikesaver import __version__, dialogs
-            from xlikesaver.gui import App
-            from xlikesaver.settings import settings_path
-            from xlikesaver import scheduled
+            from luvbox import __version__, dialogs
+            from luvbox.gui import App
+            from luvbox.settings import settings_path
+            from luvbox import scheduled
             def no_network(*_args, **_kwargs):
                 network_attempts.append("blocked")
                 forbidden()
             for name in ("socket.socket.connect", "socket.socket.connect_ex", "socket.create_connection",
                          "urllib.request.urlopen", "requests.sessions.Session.request"):
                 stack.enter_context(patch(name, side_effect=no_network))
-            for name in ("webbrowser.open", "os.startfile", "xlikesaver.gui.save_auth_token",
-                         "xlikesaver.gui.clear_session", "xlikesaver.gui.App._run_process",
-                         "xlikesaver.scheduled.register_task", "xlikesaver.scheduled.unregister_task",
-                         "xlikesaver.core.run_worker"):
+            for name in ("webbrowser.open", "os.startfile", "luvbox.gui.save_auth_token",
+                         "luvbox.gui.clear_session", "luvbox.gui.App._run_process",
+                         "luvbox.scheduled.register_task", "luvbox.scheduled.unregister_task",
+                         "luvbox.core.run_worker"):
                 stack.enter_context(patch(name, side_effect=forbidden))
-            session_mock = stack.enter_context(patch("xlikesaver.gui.has_session", return_value=True))
-            stack.enter_context(patch("xlikesaver.history._now", return_value=STAMP))
+            session_mock = stack.enter_context(patch("luvbox.gui.has_session", return_value=True))
+            stack.enter_context(patch("luvbox.history._now", return_value=STAMP))
             scheduled_info = {"registered": True, "current": True, "time": "22:00", "enabled": True,
                               "catch_up": True, "on_battery": True, "next_run": "2026-10-07T22:00:00",
                               "program": f"LuvBox-{__version__}.exe"}

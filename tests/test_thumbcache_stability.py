@@ -14,14 +14,14 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from xlikesaver import thumbcache
-from xlikesaver.gallery import _GridDecoder
-from xlikesaver.preview import PreviewLoader, Thumbnail, thumbnail
+from luvbox import thumbcache
+from luvbox.gallery import _GridDecoder
+from luvbox.preview import PreviewLoader, Thumbnail, thumbnail
 
 
 class ThumbCacheStabilityTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="xlikesaver-preview-regression-")
+        self.temp = tempfile.TemporaryDirectory(prefix="luvbox-preview-regression-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.directory = self.root / "thumbnails"
@@ -94,7 +94,7 @@ class ThumbCacheStabilityTests(unittest.TestCase):
         self.assertTrue(thumbcache.known("offline", self.key))
         path = self.directory / "offline.sqlite3"
         before = path.stat().st_ino
-        command = ("import sys; from pathlib import Path; from xlikesaver import thumbcache; "
+        command = ("import sys; from pathlib import Path; from luvbox import thumbcache; "
                    "thumbcache.directory=lambda: Path(sys.argv[1]); "
                    "cache=thumbcache.Cache('offline'); cache.prune(1); cache.close()")
         subprocess.run([sys.executable, "-c", command, str(self.directory)], capture_output=True,
@@ -142,7 +142,7 @@ class ThumbCacheStabilityTests(unittest.TestCase):
         if completed.returncode:
             self.skipTest("Cannot create private junction fixture")
         self.addCleanup(os.rmdir, linked)
-        directory = linked / "XlikeSaver" / "thumbnails"
+        directory = linked / "LuvBox" / "thumbnails"
         with patch.object(thumbcache, "directory", return_value=directory):
             thumbcache.remember("offline", self.key, self.image)
             self.assertIsNotNone(thumbcache.recall("offline", self.key))
@@ -172,7 +172,7 @@ class ThumbCacheStabilityTests(unittest.TestCase):
 
 class CloudPreviewSafetyTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="xlikesaver-cloud-preview-")
+        self.temp = tempfile.TemporaryDirectory(prefix="luvbox-cloud-preview-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.path = self.root / "photo.jpg"
@@ -203,8 +203,8 @@ class CloudPreviewSafetyTests(unittest.TestCase):
     def test_direct_image_and_video_thumbnail_never_open_online_only_data(self):
         for suffix in (".jpg", ".mp4"):
             self.path = self.path.with_suffix(suffix)
-            with self.subTest(suffix=suffix), patch("xlikesaver.preview.Image.open") as open_image, \
-                    patch("xlikesaver.preview.subprocess.run") as ffmpeg:
+            with self.subTest(suffix=suffix), patch("luvbox.preview.Image.open") as open_image, \
+                    patch("luvbox.preview.subprocess.run") as ffmpeg:
                 result = thumbnail(self.path)
             self.assertIsNone(result.image)
             self.assertIn("클라우드", result.note)
@@ -246,11 +246,12 @@ class CloudPreviewSafetyTests(unittest.TestCase):
 
         def marked(path, *args, **kwargs):
             if str(path) == str(self.path):
-                return SimpleNamespace(st_size=self.status.st_size, st_mtime_ns=self.status.st_mtime_ns,
+                return SimpleNamespace(st_dev=self.status.st_dev, st_ino=self.status.st_ino,
+                                       st_size=self.status.st_size, st_mtime_ns=self.status.st_mtime_ns,
                                        st_file_attributes=0x400000 if self.cloud else 0)
             return real_stat(path, *args, **kwargs)
 
-        with patch("xlikesaver.gallery.os.stat", marked):
+        with patch("luvbox.gallery.os.stat", marked):
             grid.request(1, jobs, set, remember=remember, recall=lambda _: self.kept)
             self.assertIs(results.get(timeout=5)[2], self.kept)
             decode.assert_not_called()

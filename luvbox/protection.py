@@ -40,9 +40,8 @@ class ProtectionError(RuntimeError):
 
 
 def state_directory() -> Path:
-    local = os.environ.get("LOCALAPPDATA")
-    base = Path(local) if local else Path.home() / "AppData" / "Local"
-    return base / "XlikeSaver" / "request-protection"
+    from .settings import app_directory
+    return app_directory() / "request-protection"
 
 
 def _finite_number(value) -> float | None:
@@ -244,6 +243,10 @@ class AccountGuard:
         if status in {401, 403}:
             response.close()
             self.failure = _AUTH_HELP
+            raise ProtectionError(self.failure)
+        if status >= 500:
+            response.close()
+            self.failure = _API_ERROR_HELP
             raise ProtectionError(self.failure)
         # Some GraphQL limits and account challenges have HTTP 200 envelopes.
         if "json" in str(values.get("content-type", "")).lower():

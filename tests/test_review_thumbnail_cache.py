@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from xlikesaver import thumbcache
-from xlikesaver.media import ffmpeg_path
+from luvbox import thumbcache
+from luvbox.media import ffmpeg_path
 
 
 class ReviewThumbnailCacheTests(unittest.TestCase):
@@ -82,7 +82,7 @@ class ReviewThumbnailCacheTests(unittest.TestCase):
         recorder = thumbcache.Recorder("offline")
         try:
             with patch.object(thumbcache, "cloud_only", return_value=True), \
-                    patch("xlikesaver.preview.thumbnail") as decoder:
+                    patch("luvbox.preview.thumbnail") as decoder:
                 recorder.add(("100", 1, "video"), path, suffix=".mp4")
             decoder.assert_not_called()
         finally:

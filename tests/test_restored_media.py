@@ -9,8 +9,8 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from xlikesaver.history import HistoryStore
-from xlikesaver.storage import migrate_records, resolve_storage
+from luvbox.history import HistoryStore
+from luvbox.storage import migrate_records, resolve_storage
 
 
 class RestoredMediaTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class RestoredMediaTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        state = patch("xlikesaver.protection.state_directory", return_value=self.root / "app" / "protection")
+        state = patch("luvbox.protection.state_directory", return_value=self.root / "app" / "protection")
         state.start()
         self.addCleanup(state.stop)
         self.old = resolve_storage(self.root / "old", "alice")
@@ -28,8 +28,8 @@ class RestoredMediaTests(unittest.TestCase):
         self.original = self.old.media_dir / "100_1.jpg"
         self.original.write_bytes(b"offline restored photo")
         metadata = {"tweet_id": "100", "num": 1, "type": "photo", "author": {"name": "alice", "id": "42"},
-                    "date": "2026-10-05T12:00:00+09:00", "_xlikesaver_metadata_status": "embedded",
-                    "_xlikesaver_author_metadata_status": "embedded"}
+                    "date": "2026-10-05T12:00:00+09:00", "_luvbox_metadata_status": "embedded",
+                    "_luvbox_author_metadata_status": "embedded"}
         with closing(HistoryStore.for_storage(self.old)) as store:
             for mode in ("flat", "author"):
                 store.record_media(mode, metadata, self.original)
@@ -83,7 +83,7 @@ class RestoredMediaTests(unittest.TestCase):
             with self.subTest(old_primary=old_primary):
                 directory = self.root / ("old-primary" if old_primary else "old-indexes")
                 directory.mkdir()
-                with closing(sqlite3.connect(directory / ".xlikesaver-history.sqlite3")) as db:
+                with closing(sqlite3.connect(directory / ".luvbox-history.sqlite3")) as db:
                     db.execute(schema.replace(identity, "PRIMARY KEY(folder_mode, tweet_id, num)") if old_primary else schema)
                     db.execute("INSERT INTO media (" + ",".join(row) + ") VALUES (" + ",".join("?" for _ in row) + ")",
                                tuple(row.values()))
@@ -100,7 +100,7 @@ class RestoredMediaTests(unittest.TestCase):
                     self.assertNotIn("SCAN media", plan)
 
     def test_restore_keeps_a_later_explicit_ignore_choice(self):
-        with patch("xlikesaver.history._now", return_value="2099-01-01T00:00:00+09:00"):
+        with patch("luvbox.history._now", return_value="2099-01-01T00:00:00+09:00"):
             self.store.set_missing_ignored([("100", 1, "photo")], True)
         self.parked.rename(self.original)
         self.store.import_legacy(refresh=True)

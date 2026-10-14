@@ -10,9 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import test_core
-from xlikesaver.history import HistoryStore
-from xlikesaver.protection import ProtectionError
-from xlikesaver.storage import OutputGuard, prepare_storage, resolve_storage
+from luvbox.history import HistoryStore
+from luvbox.protection import ProtectionError
+from luvbox.storage import OutputGuard, prepare_storage, resolve_storage
 
 
 class StorageTests(unittest.TestCase):
@@ -21,7 +21,7 @@ class StorageTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         # Live records go to this PC's app data; keep it inside the test.
-        protection = patch("xlikesaver.protection.state_directory", return_value=self.root / "app" / "request-protection")
+        protection = patch("luvbox.protection.state_directory", return_value=self.root / "app" / "request-protection")
         protection.start()
         self.addCleanup(protection.stop)
 
@@ -30,7 +30,7 @@ class StorageTests(unittest.TestCase):
         split = resolve_storage(self.root, "Alice", True)
         self.assertEqual(direct.media_dir, self.root)
         self.assertEqual(split.media_dir, self.root / "alice")
-        self.assertEqual(direct.snapshot_dir, self.root / ".xlikesaver" / "alice")
+        self.assertEqual(direct.snapshot_dir, self.root / ".luvbox" / "alice")
         self.assertEqual(direct.record_dir.parent.parent, self.root / "app" / "records")
         self.assertEqual(direct.record_dir, split.record_dir)
         self.assertFalse(direct.record_dir.exists())
@@ -39,13 +39,13 @@ class StorageTests(unittest.TestCase):
     def test_migration_is_sqlite_backup_and_never_changes_or_replaces_originals(self):
         paths = resolve_storage(self.root, "alice")
         paths.legacy_dir.mkdir()
-        source = paths.legacy_dir / ".xlikesaver-archive.flat.sqlite3"
+        source = paths.legacy_dir / ".luvbox-archive.flat.sqlite3"
         with closing(sqlite3.connect(source)) as db:
             db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY)")
             db.execute("INSERT INTO archive VALUES ('twitter100_1')")
             db.commit()
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        with patch("xlikesaver.storage.os.link", side_effect=AssertionError("Windows does not require hard links")):
+        with patch("luvbox.storage.os.link", side_effect=AssertionError("Windows does not require hard links")):
             prepare_storage(paths)
         copied = paths.record_dir / source.name
         with closing(sqlite3.connect(copied)) as db:
@@ -59,19 +59,19 @@ class StorageTests(unittest.TestCase):
 
     def test_nested_account_ledger_preserves_media_path_dates_sources_and_original_database(self):
         paths = resolve_storage(self.root, "alice")
-        nested = paths.legacy_dir / ".xlikesaver" / "alice"
+        nested = paths.legacy_dir / ".luvbox" / "alice"
         media = paths.legacy_dir / "100_1.jpg"
         media.parent.mkdir(parents=True)
         media.write_bytes(b"user-media-unchanged")
         store = HistoryStore(nested, media_dir=paths.legacy_dir, output_dir=self.root)
         metadata = {"tweet_id": "100", "num": 1, "type": "photo",
-                    "_xlikesaver_metadata_status": "embedded", "date": "2026-10-04T20:00:00+09:00"}
+                    "_luvbox_metadata_status": "embedded", "date": "2026-10-04T20:00:00+09:00"}
         store.record_media("flat", metadata, media)
         old_row = store.records()[0]
         store.close()
-        source = nested / ".xlikesaver-history.sqlite3"
+        source = nested / ".luvbox-history.sqlite3"
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        with closing(sqlite3.connect(nested / ".xlikesaver-archive.flat.sqlite3")) as db:
+        with closing(sqlite3.connect(nested / ".luvbox-archive.flat.sqlite3")) as db:
             db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY)")
             db.execute("INSERT INTO archive VALUES ('twitter100_1')")
             db.commit()
@@ -89,9 +89,9 @@ class StorageTests(unittest.TestCase):
 
     def test_flat_legacy_database_has_priority_over_nested_and_existing_destination(self):
         paths = resolve_storage(self.root, "alice")
-        nested = paths.legacy_dir / ".xlikesaver" / "alice"
+        nested = paths.legacy_dir / ".luvbox" / "alice"
         nested.mkdir(parents=True)
-        filename = ".xlikesaver-archive.flat.sqlite3"
+        filename = ".luvbox-archive.flat.sqlite3"
         for directory, ident in ((nested, "nested"), (paths.legacy_dir, "flat")):
             with closing(sqlite3.connect(directory / filename)) as db:
                 db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY)")
@@ -110,24 +110,24 @@ class StorageTests(unittest.TestCase):
 
     def test_nested_legacy_parent_link_is_ignored_without_opening_database(self):
         paths = resolve_storage(self.root, "alice")
-        nested = paths.legacy_dir / ".xlikesaver" / "alice"
+        nested = paths.legacy_dir / ".luvbox" / "alice"
         nested.mkdir(parents=True)
-        source = nested / ".xlikesaver-archive.flat.sqlite3"
+        source = nested / ".luvbox-archive.flat.sqlite3"
         with closing(sqlite3.connect(source)) as db:
             db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY)")
             db.commit()
-        linked_parent = paths.legacy_dir / ".xlikesaver"
+        linked_parent = paths.legacy_dir / ".luvbox"
         original = Path.is_symlink
         with patch.object(Path, "is_symlink", autospec=True,
                           side_effect=lambda path: path == linked_parent or original(path)), \
-                patch("xlikesaver.storage.sqlite3.connect", side_effect=AssertionError("linked legacy DB must not be read")):
+                patch("luvbox.storage.sqlite3.connect", side_effect=AssertionError("linked legacy DB must not be read")):
             prepare_storage(paths)
         self.assertFalse((paths.record_dir / source.name).exists())
 
     def test_shared_output_import_accepts_only_account_archive_or_catalog_keys(self):
         alice, bob = resolve_storage(self.root, "alice"), resolve_storage(self.root, "bob")
         prepare_storage(alice)
-        with closing(sqlite3.connect(alice.record_dir / ".xlikesaver-archive.flat.sqlite3")) as db:
+        with closing(sqlite3.connect(alice.record_dir / ".luvbox-archive.flat.sqlite3")) as db:
             db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY)")
             db.execute("INSERT INTO archive VALUES ('twitter100_1')")
             db.commit()
@@ -144,7 +144,7 @@ class StorageTests(unittest.TestCase):
 
     def test_linked_record_database_is_rejected_before_opening_for_write(self):
         paths = resolve_storage(self.root, "alice")
-        linked = paths.record_dir / ".xlikesaver-history.sqlite3"
+        linked = paths.record_dir / ".luvbox-history.sqlite3"
         original = Path.is_symlink
         with patch.object(Path, "is_symlink", autospec=True,
                           side_effect=lambda path: path == linked or original(path)):
@@ -153,7 +153,7 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(linked.exists())
 
     def test_output_lock_excludes_different_accounts_and_releases_on_close(self):
-        with patch("xlikesaver.protection.state_directory", return_value=self.root / "locks"):
+        with patch("luvbox.protection.state_directory", return_value=self.root / "locks"):
             first, second = OutputGuard(self.root), OutputGuard(self.root)
             first.acquire()
             try:
@@ -188,8 +188,8 @@ class StorageWorkerTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 1)
         self.assertTrue((self.output / "100_1.jpg").is_file())
         self.assertFalse((self.output / "myaccount").exists())
-        self.assertTrue((self.record_dir / ".xlikesaver-history.sqlite3").is_file())
-        self.assertFalse((self.output / ".xlikesaver-history.sqlite3").exists())
+        self.assertTrue((self.record_dir / ".luvbox-history.sqlite3").is_file())
+        self.assertFalse((self.output / ".luvbox-history.sqlite3").exists())
 
     def test_author_and_saving_day_are_direct_children_without_account_option(self):
         rows = [("100", 1, "photo", "alice")]
@@ -197,7 +197,7 @@ class StorageWorkerTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue((self.output / "alice" / "100_1.jpg").is_file())
         from datetime import date
-        with patch("xlikesaver.core._save_day", return_value=date(2026, 10, 4)):
+        with patch("luvbox.core._save_day", return_value=date(2026, 10, 4)):
             code, _ = self.worker(rows, options=self.direct(folder_mode="date"))
         self.assertEqual(code, 0)
         self.assertTrue((self.output / "2026-10-04" / "100_1.jpg").is_file())
@@ -222,23 +222,23 @@ class StorageWorkerTests(unittest.TestCase):
                 self.assertTrue(Path(original).is_file())
 
     def test_legacy_account_files_and_archive_are_preserved_on_first_direct_save(self):
-        from xlikesaver.history import HistoryStore
+        from luvbox.history import HistoryStore
         legacy = self.output / "myaccount"
         legacy.mkdir(parents=True)
         old_file = legacy / "100_1.jpg"
         old_file.write_bytes(b"previous-user-photo")
-        old_archive = legacy / ".xlikesaver-archive.flat.sqlite3"
+        old_archive = legacy / ".luvbox-archive.flat.sqlite3"
         with closing(sqlite3.connect(old_archive)) as db:
             db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY) WITHOUT ROWID")
             db.execute("INSERT INTO archive VALUES ('twitter100_1')")
             db.commit()
         old_store = HistoryStore(legacy)
-        metadata = {"tweet_id": "100", "num": 1, "type": "photo", "_xlikesaver_metadata_status": "embedded"}
+        metadata = {"tweet_id": "100", "num": 1, "type": "photo", "_luvbox_metadata_status": "embedded"}
         old_store.record_media("flat", metadata, old_file)
         old_row = old_store.records()[0]
         old_store.close()
         original_databases = {path: hashlib.sha256(path.read_bytes()).hexdigest()
-                              for path in (old_archive, legacy / ".xlikesaver-history.sqlite3")}
+                              for path in (old_archive, legacy / ".luvbox-history.sqlite3")}
         code, events = self.worker([("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")],
                                    options=self.direct(folder_mode="flat"))
         self.assertEqual(code, 0)
@@ -282,7 +282,7 @@ class StorageWorkerTests(unittest.TestCase):
         guard = OutputGuard(self.output)
         guard.acquire()
         try:
-            with patch("xlikesaver.login.load_session_cookies") as login:
+            with patch("luvbox.login.load_session_cookies") as login:
                 code, events = self.worker(options=self.direct(auth_mode="managed", account="otheraccount"))
             login.assert_not_called()
             self.assertNotEqual(code, 0)

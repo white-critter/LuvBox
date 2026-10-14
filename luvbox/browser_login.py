@@ -239,9 +239,9 @@ def _stop_profile_processes(profile: Path) -> None:
         return
     # Pass the path as environment data, never as interpolated PowerShell code.
     script = r'''
-$needle = '--user-data-dir=' + $env:XLIKESAVER_LOGIN_PROFILE
-$quoted = '--user-data-dir="' + $env:XLIKESAVER_LOGIN_PROFILE + '"'
-$whole = '"--user-data-dir=' + $env:XLIKESAVER_LOGIN_PROFILE + '"'
+$needle = '--user-data-dir=' + $env:LUVBOX_LOGIN_PROFILE
+$quoted = '--user-data-dir="' + $env:LUVBOX_LOGIN_PROFILE + '"'
+$whole = '"--user-data-dir=' + $env:LUVBOX_LOGIN_PROFILE + '"'
 Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | ForEach-Object {
     $tokens = $_.CommandLine
     if ($tokens -and ($tokens.Contains($quoted + ' ') -or $tokens.EndsWith($quoted) -or
@@ -253,7 +253,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | ForEach-Object {
 '''
     try:
         subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                       env=dict(os.environ, XLIKESAVER_LOGIN_PROFILE=str(profile)),
+                       env=dict(os.environ, LUVBOX_LOGIN_PROFILE=str(profile)),
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        creationflags=subprocess.CREATE_NO_WINDOW, timeout=10, check=False)
     except (OSError, subprocess.TimeoutExpired):

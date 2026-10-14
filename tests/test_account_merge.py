@@ -18,11 +18,11 @@ from unittest.mock import patch
 
 from tests import test_core as core_support
 from tests.test_gui import destroy_tk, release_tk
-from xlikesaver.core import JobOptions, run_worker
-from xlikesaver.history import HistoryStore
-from xlikesaver.history_gui import HistoryWindow
-from xlikesaver.recovery import _catalog_backups
-from xlikesaver.storage import (MigrationError, OutputGuard, merge_account_records, merge_accounts_records,
+from luvbox.core import JobOptions, run_worker
+from luvbox.history import HistoryStore
+from luvbox.history_gui import HistoryWindow
+from luvbox.recovery import _catalog_backups
+from luvbox.storage import (MigrationError, OutputGuard, merge_account_records, merge_accounts_records,
                                 other_account_records, publish_snapshot, resolve_storage, saved_media_missing)
 
 
@@ -46,7 +46,7 @@ class AccountMergeTests(unittest.TestCase):
         with patch("gallery_dl.extractor.find",
                    side_effect=lambda url: core_support.FakeLikesExtractor(url, rows, None, None)), \
                 patch("gallery_dl.downloader.find", return_value=core_support.FakeHttpDownloader), \
-                patch("xlikesaver.core._save_day", return_value=day):
+                patch("luvbox.core._save_day", return_value=day):
             self.assertEqual(run_worker(options, events.append), 0, events[-1])
         return [url.split("/")[-1].split("?")[0] for url in core_support.FakeHttpDownloader.downloaded]
 
@@ -92,7 +92,7 @@ class AccountMergeTests(unittest.TestCase):
         self.old_account_saved()
         paths = resolve_storage(self.output, "new_account")
         merge_account_records(paths, "old_account")
-        with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(paths.record_dir / ".luvbox-history.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT COUNT(*) FROM runs").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT COUNT(*) FROM likes").fetchone()[0], 0)
             self.assertEqual(db.execute("SELECT value FROM catalog_meta WHERE key='merged_accounts'").fetchone()[0],
@@ -123,7 +123,7 @@ class AccountMergeStorageTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        guard = patch("xlikesaver.protection.state_directory", return_value=self.root / "state" / "locks")
+        guard = patch("luvbox.protection.state_directory", return_value=self.root / "state" / "locks")
         guard.start()
         self.addCleanup(guard.stop)
         self.output = self.root / "Likes"
@@ -134,7 +134,7 @@ class AccountMergeStorageTests(unittest.TestCase):
 
     def record(self, paths, tweet, kind="photo"):
         metadata = {"tweet_id": str(tweet), "num": 1, "type": kind, "author": {"name": "artist", "id": "42"},
-                    "date": "2026-10-01T00:00:00+09:00", "_xlikesaver_metadata_status": "embedded"}
+                    "date": "2026-10-01T00:00:00+09:00", "_luvbox_metadata_status": "embedded"}
         with closing(HistoryStore.for_storage(paths)) as store:
             filename = f"{tweet}_animated_gif_1.gif" if kind == "animated_gif" else f"{tweet}_1.jpg"
             file = paths.media_dir / filename
@@ -143,7 +143,7 @@ class AccountMergeStorageTests(unittest.TestCase):
             return store.media_record("flat", metadata)
 
     def archive(self, directory, ids, mode="flat", kind="photo"):
-        with closing(sqlite3.connect(directory / f".xlikesaver-archive.{mode}.sqlite3")) as db, db:
+        with closing(sqlite3.connect(directory / f".luvbox-archive.{mode}.sqlite3")) as db, db:
             db.execute("CREATE TABLE IF NOT EXISTS archive(entry TEXT PRIMARY KEY) WITHOUT ROWID")
             prefix = "animated_gif_" if kind == "animated_gif" else ""
             db.executemany("INSERT OR IGNORE INTO archive VALUES (?)", ((f"twitter{tweet}_{prefix}1",) for tweet in ids))
@@ -163,13 +163,13 @@ class AccountMergeStorageTests(unittest.TestCase):
         file.write_bytes(b"received media")
         with closing(HistoryStore(paths.snapshot_dir, media_dir=folder, output_dir=folder)) as store:
             store.record_media("flat", {"tweet_id": str(tweet), "num": 1, "type": "photo"}, file)
-        history = paths.snapshot_dir / ".xlikesaver-history.sqlite3"
+        history = paths.snapshot_dir / ".luvbox-history.sqlite3"
         if former:
             with closing(sqlite3.connect(history)) as db, db:
                 db.execute("INSERT OR REPLACE INTO catalog_meta VALUES ('allowed_media_roots',?)",
                            (json.dumps([str(former)]),))
         self.archive(paths.snapshot_dir, [tweet])
-        for path in (history, paths.snapshot_dir / ".xlikesaver-archive.flat.sqlite3"):
+        for path in (history, paths.snapshot_dir / ".luvbox-archive.flat.sqlite3"):
             info = path.stat()
             os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
         return file
@@ -180,7 +180,7 @@ class AccountMergeStorageTests(unittest.TestCase):
             self.archive(paths.record_dir, [tweet])
         publish_snapshot(self.target)
         self.shared_record(self.target, 401)
-        (self.b.record_dir / ".xlikesaver-archive.date.sqlite3").write_bytes(b"not a database")
+        (self.b.record_dir / ".luvbox-archive.date.sqlite3").write_bytes(b"not a database")
         before = self.digest(self.target.record_dir)
         source = [self.digest(paths.record_dir) for paths in (self.a, self.b)]
         with self.assertRaises(MigrationError):
@@ -193,7 +193,7 @@ class AccountMergeStorageTests(unittest.TestCase):
 
     def test_single_merge_failure_does_not_create_an_empty_target_catalog(self):
         self.record(self.a, 100)
-        (self.a.record_dir / ".xlikesaver-archive.date.sqlite3").write_bytes(b"not a database")
+        (self.a.record_dir / ".luvbox-archive.date.sqlite3").write_bytes(b"not a database")
         with self.assertRaises(MigrationError):
             merge_account_records(self.target, "old_a")
         self.assertFalse(self.target.record_dir.exists())
@@ -223,7 +223,7 @@ class AccountMergeStorageTests(unittest.TestCase):
         self.assertEqual(merge_account_records(self.target, "old_a"), {"records": 2, "added": 0, "keys": 0})
 
     def test_unreadable_valid_snapshot_and_publication_error_leave_target_unchanged(self):
-        from xlikesaver import storage
+        from luvbox import storage
         self.record(self.target, 400)
         self.record(self.a, 100)
         self.archive(self.a.record_dir, [100])
@@ -233,14 +233,14 @@ class AccountMergeStorageTests(unittest.TestCase):
         original = storage._backup_database
 
         def unreadable(source, destination):
-            if source == self.a.snapshot_dir / ".xlikesaver-history.sqlite3":
+            if source == self.a.snapshot_dir / ".luvbox-history.sqlite3":
                 raise PermissionError("private sync lock fixture")
             return original(source, destination)
 
-        with patch("xlikesaver.storage._backup_database", side_effect=unreadable), self.assertRaises(MigrationError):
+        with patch("luvbox.storage._backup_database", side_effect=unreadable), self.assertRaises(MigrationError):
             merge_account_records(self.target, "old_a")
         self.assertEqual(self.digest(self.target.record_dir), before)
-        with patch("xlikesaver.storage._publish_records", side_effect=PermissionError("private publish fixture")), \
+        with patch("luvbox.storage._publish_records", side_effect=PermissionError("private publish fixture")), \
                 self.assertRaises(MigrationError):
             merge_account_records(self.target, "old_a")
         self.assertEqual(self.digest(self.target.record_dir), before)
@@ -269,16 +269,16 @@ class AccountMergeStorageTests(unittest.TestCase):
                              ("", gif["path"], gif["saved_at"], gif["metadata_status"]))
             self.assertIn(("101", 1, "animated_gif"), store.ignored_media())
             self.assertEqual(len(store.runs()), 1)
-        with closing(sqlite3.connect(self.target.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.target.record_dir / ".luvbox-history.sqlite3")) as db:
             marker = db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone()[0]
             self.assertEqual(marker, str(run))
         self.assertEqual(merge_accounts_records(self.target, ["old_a", "old_b"]),
                          {"records": 3, "added": 0, "keys": 0})
-        with closing(sqlite3.connect(self.target.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.target.record_dir / ".luvbox-history.sqlite3")) as db:
             self.assertEqual(db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone()[0], marker)
 
     def test_successful_publication_survives_private_snapshot_cleanup_error(self):
-        from xlikesaver import storage
+        from luvbox import storage
         self.record(self.target, 400)
         self.record(self.a, 100)
         self.archive(self.a.record_dir, [100])
@@ -298,12 +298,12 @@ class AccountMergeStorageTests(unittest.TestCase):
                 temporary.cleanup = cleanup
             return temporary, files
 
-        with patch("xlikesaver.storage._merge_snapshot_copies", side_effect=cleanup_fails):
+        with patch("luvbox.storage._merge_snapshot_copies", side_effect=cleanup_fails):
             self.assertEqual(merge_account_records(self.target, "old_a")["added"], 2)
         self.assertEqual({row["tweet_id"] for row in self.rows(self.target)[0]}, {"100", "101", "400"})
 
     def test_snapshot_union_preserves_pending_quick_scans_without_importing_cleared_run_ids(self):
-        from xlikesaver import storage
+        from luvbox import storage
 
         def runs(paths, count, month):
             with closing(HistoryStore.for_storage(paths)) as store:
@@ -316,7 +316,7 @@ class AccountMergeStorageTests(unittest.TestCase):
 
         def marker(paths, value):
             if value is not None:
-                with closing(sqlite3.connect(paths.record_dir / ".xlikesaver-history.sqlite3")) as db, db:
+                with closing(sqlite3.connect(paths.record_dir / ".luvbox-history.sqlite3")) as db, db:
                     db.execute("INSERT INTO catalog_meta VALUES ('quick_scan_merge_run',?)", (str(value),))
 
         cases = (("source_pending", None, 1, 1, 11, "records-changed"),
@@ -334,9 +334,9 @@ class AccountMergeStorageTests(unittest.TestCase):
                 marker(target, target_marker)
                 marker(source, source_marker)
                 original = self.digest(source.record_dir)
-                storage._merge_database(".xlikesaver-history.sqlite3",
-                                        target.record_dir / ".xlikesaver-history.sqlite3",
-                                        source.record_dir / ".xlikesaver-history.sqlite3")
+                storage._merge_database(".luvbox-history.sqlite3",
+                                        target.record_dir / ".luvbox-history.sqlite3",
+                                        source.record_dir / ".luvbox-history.sqlite3")
                 with closing(HistoryStore.for_storage(target)) as store:
                     self.assertEqual(store.quick_scan_readiness("flat", "same"), expected)
                     self.assertEqual(len(store.runs()), 5 + source_runs)
@@ -353,9 +353,9 @@ class AccountMergeStorageTests(unittest.TestCase):
                 # Re-importing the same snapshot must not revive a cleared
                 # marker from the other PC or require another complete scan.
                 if expected == "ready":
-                    storage._merge_database(".xlikesaver-history.sqlite3",
-                                            target.record_dir / ".xlikesaver-history.sqlite3",
-                                            source.record_dir / ".xlikesaver-history.sqlite3")
+                    storage._merge_database(".luvbox-history.sqlite3",
+                                            target.record_dir / ".luvbox-history.sqlite3",
+                                            source.record_dir / ".luvbox-history.sqlite3")
                     with closing(HistoryStore.for_storage(target)) as store:
                         self.assertEqual(store.quick_scan_readiness("flat", "same"), "ready")
 
@@ -384,7 +384,7 @@ class AccountMergeStorageTests(unittest.TestCase):
         other = resolve_storage(self.root / "new-output", "current", True)
         other.output_dir.mkdir()
         other.record_dir.mkdir(parents=True)
-        shutil.copy2(paths.record_dir / ".xlikesaver-history.sqlite3", other.record_dir / ".xlikesaver-history.sqlite3")
+        shutil.copy2(paths.record_dir / ".luvbox-history.sqlite3", other.record_dir / ".luvbox-history.sqlite3")
         self.assertFalse(saved_media_missing(other))
 
 
@@ -406,7 +406,7 @@ class AccountMergeWindowTests(unittest.TestCase):
         self.root.withdraw()
         self.addCleanup(release_tk, self, "window", "root")
         self.addCleanup(destroy_tk, self.root)
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window = HistoryWindow(self.root, lambda: ("new_account", self.paths))
         self.window.withdraw()
 
@@ -419,8 +419,8 @@ class AccountMergeWindowTests(unittest.TestCase):
         self.assertIn("@old_account(기록 2개)", self.window.accounts_text.get())
         self.assertTrue(self.window.accounts_notice.winfo_manager())
         self.assertEqual(self.window.tile_values["files"].get(), "0")
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True) as ask, \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True) as ask, \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.merge_accounts()
         self.assertIn("@old_account · 기록 2개", ask.call_args.args[1])
         self.assertTrue(self.window.choice_active)
@@ -430,7 +430,7 @@ class AccountMergeWindowTests(unittest.TestCase):
         self.assertEqual(kind, "accounts-merged")
         self.assertIn("새로 더함 2개", message)
         self.window.results.put((generation, kind, message))
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window._poll()
         self.load()
         self.assertEqual(self.window.tile_values["files"].get(), "2")

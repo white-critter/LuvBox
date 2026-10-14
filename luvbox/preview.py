@@ -118,7 +118,7 @@ class PreviewLoader:
                     result = Thumbnail(None, "파일 위치를 확인할 수 없습니다. 기록을 새로고침해 주세요.")
                 else:
                     stat = path.stat()
-                    key = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+                    key = (str(path.resolve()), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
                     result = self.cache.get(key)
                     if result is None:
                         result = (Thumbnail(None, "파일이 클라우드에만 있습니다. 탐색기에서 내려받은 뒤 다시 확인해 주세요.")

@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from xlikesaver.preview import PREVIEW_SIZE, PreviewLoader, Thumbnail, thumbnail
+from luvbox.preview import PREVIEW_SIZE, PreviewLoader, Thumbnail, thumbnail
 
 
 class PreviewTests(unittest.TestCase):
@@ -55,7 +55,7 @@ class PreviewTests(unittest.TestCase):
         unknown = self.root / "file.txt"
         unknown.write_text("file")
         self.assertIn("지원", thumbnail(unknown).note)
-        with patch("xlikesaver.preview.MAX_PIXELS", 3):
+        with patch("luvbox.preview.MAX_PIXELS", 3):
             self.assertIn("큰 이미지", thumbnail(self.image()).note)
 
     def test_video_uses_bundled_decoder_bounded_filter_hidden_timeout_and_local_protocols(self):
@@ -64,8 +64,8 @@ class PreviewTests(unittest.TestCase):
         frame = BytesIO()
         Image.new("RGB", (220, 100), "green").save(frame, "BMP")
         completed = subprocess.CompletedProcess([], 0, stdout=frame.getvalue(), stderr=b"")
-        with patch("xlikesaver.media.ffmpeg_path", return_value=Path("bundled-ffmpeg.exe")), \
-                patch("xlikesaver.preview.subprocess.run", return_value=completed) as run:
+        with patch("luvbox.media.ffmpeg_path", return_value=Path("bundled-ffmpeg.exe")), \
+                patch("luvbox.preview.subprocess.run", return_value=completed) as run:
             result = thumbnail(path)
         self.assertEqual(result.image.size, (220, 100))
         args = run.call_args.args[0]
@@ -75,14 +75,14 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(args[args.index("-vcodec") + 1], "bmp")
         self.assertEqual(run.call_args.kwargs["timeout"], 8)
         self.assertEqual(run.call_args.kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        with patch("xlikesaver.media.ffmpeg_path", return_value=None):
+        with patch("luvbox.media.ffmpeg_path", return_value=None):
             self.assertIn("도구", thumbnail(path).note)
-        with patch("xlikesaver.media.ffmpeg_path", return_value=Path("bundled.exe")), \
-                patch("xlikesaver.preview.subprocess.run", side_effect=subprocess.TimeoutExpired([], 8)):
+        with patch("luvbox.media.ffmpeg_path", return_value=Path("bundled.exe")), \
+                patch("luvbox.preview.subprocess.run", side_effect=subprocess.TimeoutExpired([], 8)):
             self.assertIsNone(thumbnail(path).image)
 
     def test_bundled_decoder_reads_real_local_video_without_network(self):
-        from xlikesaver.media import ffmpeg_path
+        from luvbox.media import ffmpeg_path
         executable = ffmpeg_path()
         if executable is None:
             self.skipTest("Bundled video decoder is not installed")
@@ -105,7 +105,7 @@ class PreviewTests(unittest.TestCase):
     def test_loader_checks_permission_even_for_cache_and_invalidates_modified_file(self):
         path = self.image()
         results = queue.Queue(maxsize=2)
-        with patch("xlikesaver.preview.thumbnail", wraps=thumbnail):
+        with patch("luvbox.preview.thumbnail", wraps=thumbnail):
             loader = PreviewLoader(results, decoder=thumbnail)
         self.addCleanup(loader.close)
         with patch.object(loader, "decoder", wraps=thumbnail) as decode:
@@ -167,7 +167,7 @@ class PreviewTests(unittest.TestCase):
         stamp = (path.stat().st_size, path.stat().st_mtime_ns)
         results = queue.Queue(maxsize=2)
         ready = Thumbnail(Image.new("RGB", (10, 10)), "ready")
-        with patch("xlikesaver.preview.thumbnail", side_effect=[Thumbnail(None, "temporary failure"), ready]) as decode:
+        with patch("luvbox.preview.thumbnail", side_effect=[Thumbnail(None, "temporary failure"), ready]) as decode:
             loader = PreviewLoader(results, decoder=decode)
             try:
                 loader.request(1, path, lambda _: True)

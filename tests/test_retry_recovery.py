@@ -11,8 +11,8 @@ from gallery_dl import exception
 
 from tests import test_core, test_missing_files
 from tests.test_core import FakeHttpDownloader, SECRET
-from xlikesaver.core import run_worker
-from xlikesaver.history import HistoryStore
+from luvbox.core import run_worker
+from luvbox.history import HistoryStore
 
 
 class RetryRecoveryTests(unittest.TestCase):
@@ -95,7 +95,7 @@ class RetryRecoveryTests(unittest.TestCase):
         with closing(HistoryStore.for_storage(location)) as store:
             self.assertEqual(store.ignored_media(), {("200", 1, "photo")})
         # The folder snapshot carries the completed choice to another PC too.
-        with closing(sqlite3.connect(location.snapshot_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(location.snapshot_dir / ".luvbox-history.sqlite3")) as db:
             self.assertEqual(set(db.execute("SELECT tweet_id,num,media_type FROM missing_choices WHERE ignored=1")),
                              {("200", 1, "photo")})
 

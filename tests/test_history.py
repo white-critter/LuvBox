@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from xlikesaver.history import HistoryError, HistoryStore, _within
+from luvbox.history import HistoryError, HistoryStore, _within
 
 
 SECRET = "offline-cookie-never-store-in-history"
@@ -62,7 +62,7 @@ class HistoryTests(unittest.TestCase):
         path = self.file("100_1.jpg")
         self.store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo"}, path)
         self.store.close()
-        writer = sqlite3.connect(self.account / ".xlikesaver-history.sqlite3", isolation_level=None)
+        writer = sqlite3.connect(self.account / ".luvbox-history.sqlite3", isolation_level=None)
         self.addCleanup(writer.close)
         writer.execute("BEGIN IMMEDIATE")  # e.g. a save recording a file
         started = time.monotonic()
@@ -75,7 +75,7 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(migrated.records()[0]["source_url"], "https://x.com/i/web/status/100")
 
     def test_pages_match_one_sorted_joined_query_for_every_order_and_filter(self):
-        from xlikesaver.history import _JOINED, _ORDERS
+        from luvbox.history import _JOINED, _ORDERS
         for index in range(23):
             tweet = str(1000 + index % 9)  # several media per tweet and layout
             path = self.file(f"{tweet}_{index}.jpg")
@@ -107,7 +107,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_file_view_fast_path_matches_the_general_merge(self):
         import random
-        from xlikesaver.history import _identity
+        from luvbox.history import _identity
 
         def reference(rows):
             # General merge, with author completion scoped to the chosen identity.
@@ -222,7 +222,7 @@ class HistoryTests(unittest.TestCase):
                 "auth_token": SECRET, "cookies": {"auth_token": SECRET}}
 
     def archive(self, entries, mode="author"):
-        name = ".xlikesaver-archive.sqlite3" if mode == "author" else f".xlikesaver-archive.{mode}.sqlite3"
+        name = ".luvbox-archive.sqlite3" if mode == "author" else f".luvbox-archive.{mode}.sqlite3"
         path = self.account / name
         with closing(sqlite3.connect(path)) as db:
             db.execute("CREATE TABLE archive (entry TEXT PRIMARY KEY) WITHOUT ROWID")
@@ -232,7 +232,7 @@ class HistoryTests(unittest.TestCase):
 
     def test_mp4_gifs_are_listed_and_a_converted_file_keeps_its_save_time(self):
         mp4 = self.file("100_gif_1.mp4")
-        self.store.record_media("flat", dict(self.metadata(kind="animated_gif"), _xlikesaver_metadata_status="embedded"), mp4)
+        self.store.record_media("flat", dict(self.metadata(kind="animated_gif"), _luvbox_metadata_status="embedded"), mp4)
         self.store.record_media("flat", self.metadata(kind="animated_gif", ident="101"), self.file("101_gif_1.gif"))
         self.store.record_media("flat", self.metadata(kind="video", ident="102"), self.file("102_video_1.mp4"))
         self.assertEqual(self.store.summary()["mp4_gifs"], 1)
@@ -278,8 +278,8 @@ class HistoryTests(unittest.TestCase):
         data = self.metadata()
         data["author"]["id"] = 123456789
         data["user"] = {"name": "liking_account", "id": 999}
-        data["_xlikesaver_metadata_status"] = "embedded"
-        data["_xlikesaver_author_metadata_status"] = "embedded"
+        data["_luvbox_metadata_status"] = "embedded"
+        data["_luvbox_author_metadata_status"] = "embedded"
         self.store.record_media("flat", data, self.file("100_1.jpg"))
         original = self.store.records()[0]
         self.assertEqual((original["author"], original["author_id"]), ("alice", "123456789"))
@@ -298,7 +298,7 @@ class HistoryTests(unittest.TestCase):
         data = self.metadata()
         data.pop("author")
         data["user"] = {"name": "liking_account", "id": 999}
-        data["_xlikesaver_author_metadata_status"] = "unknown"
+        data["_luvbox_author_metadata_status"] = "unknown"
         self.store.record_media("flat", data, self.file("100_1.jpg"))
         row = self.store.records()[0]
         self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]), ("", "", "unknown"))
@@ -306,14 +306,14 @@ class HistoryTests(unittest.TestCase):
     def test_case_changed_author_stays_pending_through_refresh(self):
         data = self.metadata()
         data["author"] = {"name": "Writer", "id": 123}
-        data["_xlikesaver_metadata_status"] = "embedded"
-        data["_xlikesaver_author_metadata_status"] = "embedded"
+        data["_luvbox_metadata_status"] = "embedded"
+        data["_luvbox_author_metadata_status"] = "embedded"
         path = self.file("100_1.jpg")
         self.store.record_media("flat", data, path)
         original = self.store.records()[0]
 
         data["author"]["name"] = "writer"
-        data["_xlikesaver_author_metadata_status"] = "pending"
+        data["_luvbox_author_metadata_status"] = "pending"
         self.store.record_media("flat", data, path, status="existing")
         self.store.import_legacy(refresh=True)
         row = self.store.records()[0]
@@ -324,13 +324,13 @@ class HistoryTests(unittest.TestCase):
         # An unchanged author with no new write result still keeps the last
         # successful result when refreshing or importing a record.
         self.store.mark_metadata(row, "embedded", author_status="embedded")
-        del data["_xlikesaver_author_metadata_status"]
+        del data["_luvbox_author_metadata_status"]
         self.store.record_media("flat", data, path, status="existing")
         self.assertEqual(self.store.records()[0]["author_metadata_status"], "embedded")
 
     def test_author_columns_upgrade_old_database_without_losing_source_or_save_time(self):
         data = self.metadata()
-        data["_xlikesaver_metadata_status"] = "embedded"
+        data["_luvbox_metadata_status"] = "embedded"
         self.store.record_media("flat", data, self.file("100_1.jpg"))
         original = self.store.records()[0]
         self.store._db.execute("ALTER TABLE media DROP COLUMN author_id")
@@ -346,7 +346,7 @@ class HistoryTests(unittest.TestCase):
     def test_author_backfill_failure_preserves_source_save_time_and_relocation(self):
         data = self.metadata()
         data["author"]["id"] = 123
-        data["_xlikesaver_metadata_status"] = "embedded"
+        data["_luvbox_metadata_status"] = "embedded"
         self.store.record_media("flat", data, self.file("100_1.jpg"))
         relocated = self.relocated_store()
         original = relocated.records()[0]
@@ -363,7 +363,7 @@ class HistoryTests(unittest.TestCase):
         new_account.mkdir()
         new_file = new_account / "100_1.jpg"
         new_file.write_bytes(b"moved-local-media")
-        with closing(sqlite3.connect(new_account / ".xlikesaver-history.sqlite3")) as copied:
+        with closing(sqlite3.connect(new_account / ".luvbox-history.sqlite3")) as copied:
             self.store._db.backup(copied)
         copied = HistoryStore(new_account)
         self.addCleanup(copied.close)
@@ -375,9 +375,9 @@ class HistoryTests(unittest.TestCase):
     def relocated_store(self):
         """A verified catalog transfer authorizes its former selected output."""
         new_output = Path(self.temp.name) / "new-output"
-        records = new_output / ".xlikesaver" / "account"
+        records = new_output / ".luvbox" / "account"
         records.mkdir(parents=True)
-        with closing(sqlite3.connect(records / ".xlikesaver-history.sqlite3")) as copied:
+        with closing(sqlite3.connect(records / ".luvbox-history.sqlite3")) as copied:
             self.store._db.backup(copied)
             copied.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",
                            (json.dumps([str(self.account), str(new_output)]),))
@@ -412,7 +412,7 @@ class HistoryTests(unittest.TestCase):
         self.store.record_media("flat", self.metadata(), known)
         relocated = self.relocated_store()
         self.assertFalse(relocated.is_media_path(unrelated))
-        self.assertFalse(relocated.is_media_path(self.account / ".xlikesaver" / "100_1.jpg"))
+        self.assertFalse(relocated.is_media_path(self.account / ".luvbox" / "100_1.jpg"))
         self.assertFalse(relocated.is_download_path(known))
         with self.assertRaises(HistoryError):
             relocated.record_media("flat", self.metadata(number=2), unrelated)
@@ -490,9 +490,9 @@ class HistoryTests(unittest.TestCase):
 
     def test_duplicate_skip_enriches_without_replacing_known_saved_time(self):
         path = self.file("alice/100_1.jpg")
-        with patch("xlikesaver.history._now", return_value="2026-10-04T22:00:00+09:00"):
+        with patch("luvbox.history._now", return_value="2026-10-04T22:00:00+09:00"):
             self.store.record_media("author", self.metadata(author="", posted=None), path)
-        with patch("xlikesaver.history._now", return_value="2026-10-05T22:00:00+09:00"):
+        with patch("luvbox.history._now", return_value="2026-10-05T22:00:00+09:00"):
             self.store.record_media("author", self.metadata(posted=datetime(2024, 1, 1)), path, status="existing")
         row = self.store.records()[0]
         self.assertEqual(row["saved_at"], "2026-10-04T22:00:00+09:00")
@@ -580,7 +580,7 @@ class HistoryTests(unittest.TestCase):
         path = self.file(f"alice/{ident}_1.jpg")
         self.archive([f"twitter{ident}_1"])
         posted = datetime(2023, 12, 31, 23, tzinfo=timezone.utc)
-        with patch("xlikesaver.history._now", return_value="2026-10-04T23:00:00+09:00"):
+        with patch("luvbox.history._now", return_value="2026-10-04T23:00:00+09:00"):
             self.store.record_media("author", self.metadata(ident=ident, author="Alice", posted=posted), path)
         self.store.import_legacy()
         row = self.store.records()[0]
@@ -794,7 +794,7 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.store.summary()["files"], 0)
 
     def test_bad_archive_does_not_prevent_actual_file_import_and_is_not_modified(self):
-        archive = self.account / ".xlikesaver-archive.sqlite3"
+        archive = self.account / ".luvbox-archive.sqlite3"
         archive.write_bytes(b"bad archive " + SECRET.encode())
         self.file("alice/100_1.jpg")
         result = self.store.import_legacy()
@@ -845,7 +845,7 @@ class HistoryTests(unittest.TestCase):
             path = self.file("alice/" + name)
             metadata = self.metadata(ident=tweet, kind=kind, posted=datetime(2020, 1, 1, tzinfo=timezone.utc))
             metadata["author"]["id"] = 123
-            metadata.update(_xlikesaver_metadata_status="embedded", _xlikesaver_author_metadata_status="embedded")
+            metadata.update(_luvbox_metadata_status="embedded", _luvbox_author_metadata_status="embedded")
             for mode in ("author", "date", "flat"):
                 self.store.record_media(mode, metadata, path)
             if location == "former":
@@ -872,7 +872,7 @@ class HistoryTests(unittest.TestCase):
     def test_refresh_rechecks_missing_shared_gif_paths_and_preserves_history(self):
         path = self.file("100_gif_1.gif")
         metadata = self.metadata(kind="animated_gif", posted=datetime(2020, 1, 1, tzinfo=timezone.utc))
-        metadata.update(_xlikesaver_metadata_status="embedded", _xlikesaver_author_metadata_status="embedded")
+        metadata.update(_luvbox_metadata_status="embedded", _luvbox_author_metadata_status="embedded")
         for mode in ("author", "date", "flat"):
             self.store.record_media(mode, metadata, path)
         original = {row["folder_mode"]: row for row in self.store.records()}
@@ -927,7 +927,7 @@ class HistoryTests(unittest.TestCase):
             starts.append(store._db.in_transaction)
             return original(store, row, **kwargs)
 
-        with patch("xlikesaver.history._WRITE_BATCH", 1), patch.object(HistoryStore, "_upsert", observe):
+        with patch("luvbox.history._WRITE_BATCH", 1), patch.object(HistoryStore, "_upsert", observe):
             self.store.import_legacy(refresh=True)
         self.assertEqual(len(starts), 10)
         self.assertFalse(any(starts))  # Every row began a new, already-committed transaction.
@@ -954,7 +954,7 @@ class HistoryTests(unittest.TestCase):
     def test_runs_from_earlier_versions_gain_scan_columns_and_require_a_full_scan(self):
         legacy = Path(self.temp.name) / "legacy"
         legacy.mkdir()
-        with closing(sqlite3.connect(legacy / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(legacy / ".luvbox-history.sqlite3")) as db:
             db.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY AUTOINCREMENT, folder_mode TEXT NOT NULL, "
                        "started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, saved INTEGER NOT NULL DEFAULT 0, "
                        "skipped INTEGER NOT NULL DEFAULT 0, size_skipped INTEGER NOT NULL DEFAULT 0, "

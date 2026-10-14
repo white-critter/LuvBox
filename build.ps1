@@ -7,15 +7,15 @@ if ($LASTEXITCODE -ne 0) { throw 'ExifTool 준비에 실패했습니다.' }
 & $taskPython 'tools\ffmpeg\build.py' '--check'
 if ($LASTEXITCODE -ne 0) { throw '번들 GIF 변환 도구 확인에 실패했습니다. tools\ffmpeg\README.md를 확인하세요.' }
 
-$version = (& $taskPython -c "from xlikesaver import __version__; print(__version__)" | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw '버전을 읽지 못했습니다. xlikesaver\__init__.py를 확인하세요.' }
+$version = (& $taskPython -c "from luvbox import __version__; print(__version__)" | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw '버전을 읽지 못했습니다. luvbox\__init__.py를 확인하세요.' }
 $name = "LuvBox-$version"
 # A versioned name lets an older running build stay open. The same version
 # cannot be replaced while it runs, so stop with a clear message instead.
 $target = Join-Path $PSScriptRoot "release\$name\$name.exe"
 if (Test-Path -LiteralPath $target) {
     try { [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None').Close() }
-    catch { throw "$name.exe가 실행 중이라 덮어쓸 수 없습니다. 프로그램을 닫거나 xlikesaver\__init__.py의 버전을 올린 뒤 다시 빌드하세요." }
+    catch { throw "$name.exe가 실행 중이라 덮어쓸 수 없습니다. 프로그램을 닫고 다시 빌드하세요." }
 }
 
 # Collect only application dependencies and our pinned metadata helper. Never

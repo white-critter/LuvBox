@@ -79,7 +79,7 @@ def _recolor(value, target):
 
 def mode(root):
     """Return the appearance of the window's Tk interpreter."""
-    return getattr(root._root(), "_xlikesaver_theme_mode", "light")
+    return getattr(root._root(), "_luvbox_theme_mode", "light")
 
 
 def apply(root, mode="light"):
@@ -415,7 +415,7 @@ def _draw_assets(asset):
 
 
 def _control_images(root, style):
-    images = getattr(root._root(), "_xlikesaver_theme_images", {})
+    images = getattr(root._root(), "_luvbox_theme_images", {})
     def asset(name, data):
         if name in images:
             images[name].configure(data=data)
@@ -476,29 +476,29 @@ def _control_images(root, style):
     # the rounded client border and its antialiased corners.
     _image_element(style, "Soft.Notebook.client", [images["notebook_card"]], border=12, padding=12)
     # A PhotoImage is deleted by Tk when its Python object is collected.
-    root._root()._xlikesaver_theme_images = images
+    root._root()._luvbox_theme_images = images
     owner = root._root()
-    if not getattr(owner, "_xlikesaver_image_cleanup_bound", False):
+    if not getattr(owner, "_luvbox_image_cleanup_bound", False):
         def release(event):
             if event.widget is owner:
-                owner._xlikesaver_theme_images.clear()
-                owner._xlikesaver_surface_binding = None
+                owner._luvbox_theme_images.clear()
+                owner._luvbox_surface_binding = None
         owner.bind("<Destroy>", release, add="+")
-        owner._xlikesaver_image_cleanup_bound = True
+        owner._luvbox_image_cleanup_bound = True
 
 
 def apply_style(root: tk.Misc, mode=None) -> None:
     """Configure or recolor a Tk interpreter while keeping native semantics."""
     global _active_mode
     owner = root._root()
-    selected = mode if mode is not None else getattr(owner, "_xlikesaver_theme_mode", "light")
+    selected = mode if mode is not None else getattr(owner, "_luvbox_theme_mode", "light")
     if selected not in {"light", "dark"}:
         raise ValueError("appearance must be 'light' or 'dark'")
     _active_mode = selected
     globals().update(DARK if selected == "dark" else LIGHT)
-    if root.tk.call("info", "exists", "::xlikesaver_style") == 1 and getattr(owner, "_xlikesaver_theme_mode", None) == selected:
+    if root.tk.call("info", "exists", "::luvbox_style") == 1 and getattr(owner, "_luvbox_theme_mode", None) == selected:
         return
-    owner._xlikesaver_theme_mode = selected
+    owner._luvbox_theme_mode = selected
     root.option_add("*TCombobox*Listbox.font", BODY)
     root.option_add("*TCombobox*Listbox.background", CARD)
     root.option_add("*TCombobox*Listbox.foreground", INK)
@@ -634,7 +634,7 @@ def apply_style(root: tk.Misc, mode=None) -> None:
               relief="flat", borderwidth=0)
     mapping("TScrollbar", background=[("pressed", DISABLED), ("active", BUTTON_PRESSED)])
     _bind_surfaces(root, style)
-    root.tk.call("set", "::xlikesaver_style", 1)
+    root.tk.call("set", "::luvbox_style", 1)
     _refresh_widgets(owner, selected)
 
 
@@ -645,7 +645,7 @@ def _bind_surfaces(root, style):
     form. Derived styles retain native behavior and the chosen base style.
     """
     owner = root._root()
-    if hasattr(owner, "_xlikesaver_surface_binding"):
+    if hasattr(owner, "_luvbox_surface_binding"):
         return
     controls = {"TButton", "TEntry", "TSpinbox", "TCombobox", "TCheckbutton", "TRadiobutton", "TProgressbar"}
     card_layouts = set()
@@ -699,7 +699,7 @@ def _bind_surfaces(root, style):
         if widget.cget("style") != name:
             widget.configure(style=name)
 
-    owner._xlikesaver_surface_binding = mapped
+    owner._luvbox_surface_binding = mapped
     root.bind_all("<Map>", mapped, add="+")
 
 
@@ -779,7 +779,7 @@ def _refresh_classic(widget, selected):
 
 
 def _refresh_widgets(owner, selected):
-    binding = getattr(owner, "_xlikesaver_surface_binding", None)
+    binding = getattr(owner, "_luvbox_surface_binding", None)
     pending = [owner]
     while pending:
         widget = pending.pop()
@@ -813,7 +813,7 @@ class Progressbar(tk.Canvas):
         self._last_frame = self._phase_start
         self._variable = variable
         self._variable_trace = None
-        selected = getattr(parent._root(), "_xlikesaver_theme_mode", "light")
+        selected = getattr(parent._root(), "_luvbox_theme_mode", "light")
         palette = DARK if selected == "dark" else LIGHT
         background = palette["BG"]
         if isinstance(parent, ttk.Widget):

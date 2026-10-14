@@ -9,9 +9,9 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from xlikesaver import theme
-from xlikesaver.history_gui import HistoryWindow
-from xlikesaver.recycling import file_signature
+from luvbox import theme
+from luvbox.history_gui import HistoryWindow
+from luvbox.recycling import file_signature
 from tests import test_history_gui as history_tests
 
 
@@ -122,8 +122,8 @@ class FileSelectionGuiTests(unittest.TestCase):
                 self.root.update()
                 target = self.window.tree if view == "table" else self.window.grid_view.canvas
                 target.focus_force()
-                with patch("xlikesaver.history_gui.dialogs.confirm_delete", return_value=None) as confirmation, \
-                        patch("xlikesaver.history_gui.threading.Thread") as thread:
+                with patch("luvbox.history_gui.dialogs.confirm_delete", return_value=None) as confirmation, \
+                        patch("luvbox.history_gui.threading.Thread") as thread:
                     target.event_generate("<Delete>")
                     self.root.update()
                 confirmation.assert_called_once()
@@ -141,8 +141,8 @@ class FileSelectionGuiTests(unittest.TestCase):
         self.load()
         self.window.select_all_files()
         expected = file_signature(source)
-        with patch("xlikesaver.history_gui.dialogs.confirm_delete", return_value=False) as confirm, \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.confirm_delete", return_value=False) as confirm, \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.start_deletion()
         confirm.assert_called_once_with(1, source.stat().st_size, [source.name], parent=self.window)
         generation, location, files, keep = thread.call_args.kwargs["args"]
@@ -173,9 +173,9 @@ class FileSelectionGuiTests(unittest.TestCase):
         self.select(100)
         for offline, downloading in ((False, True), (True, False)):
             with self.subTest(offline=offline, downloading=downloading), \
-                    patch("xlikesaver.history_gui.dialogs.showinfo") as notice, \
-                    patch("xlikesaver.history_gui.dialogs.confirm_delete") as confirm, \
-                    patch("xlikesaver.history_gui.threading.Thread") as thread:
+                    patch("luvbox.history_gui.dialogs.showinfo") as notice, \
+                    patch("luvbox.history_gui.dialogs.confirm_delete") as confirm, \
+                    patch("luvbox.history_gui.threading.Thread") as thread:
                 self.window.media_offline = offline
                 self.window.is_downloading = lambda: downloading
                 self.window._update_file_actions()
@@ -191,9 +191,9 @@ class FileSelectionGuiTests(unittest.TestCase):
         self.prepare()
         self.select(100)
         with patch.object(self.window, "get_location", return_value=("other", self.account)), \
-                patch("xlikesaver.history_gui.dialogs.showinfo") as notice, \
-                patch("xlikesaver.history_gui.dialogs.confirm_delete") as confirm, \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+                patch("luvbox.history_gui.dialogs.showinfo") as notice, \
+                patch("luvbox.history_gui.dialogs.confirm_delete") as confirm, \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.start_deletion()
         notice.assert_called_once()
         confirm.assert_not_called()
@@ -223,9 +223,9 @@ class FileSelectionGuiTests(unittest.TestCase):
                 else:
                     self.window.get_location = lambda: ("other", self.account)
                 return True
-            with self.subTest(case=case), patch("xlikesaver.history_gui.dialogs.confirm_delete", side_effect=confirm), \
-                    patch("xlikesaver.history_gui.dialogs.showinfo"), \
-                    patch("xlikesaver.history_gui.threading.Thread") as thread:
+            with self.subTest(case=case), patch("luvbox.history_gui.dialogs.confirm_delete", side_effect=confirm), \
+                    patch("luvbox.history_gui.dialogs.showinfo"), \
+                    patch("luvbox.history_gui.threading.Thread") as thread:
                 self.window.start_deletion()
                 thread.assert_not_called()
                 self.assertFalse(self.window.delete_active)
@@ -242,8 +242,8 @@ class FileSelectionGuiTests(unittest.TestCase):
         def changed(*_args, **_kwargs):
             source.write_bytes(b"changed while the confirmation is open")
             return True
-        with patch("xlikesaver.history_gui.dialogs.confirm_delete", side_effect=changed), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.confirm_delete", side_effect=changed), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.start_deletion()
         [row] = thread.call_args.kwargs["args"][2]
         self.assertEqual(row["_delete_signature"], expected)
@@ -257,8 +257,8 @@ class FileSelectionGuiTests(unittest.TestCase):
         def appeared(*_args, **_kwargs):
             source.write_bytes(b"replacement file")
             return True
-        with patch("xlikesaver.history_gui.dialogs.confirm_delete", side_effect=appeared), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.confirm_delete", side_effect=appeared), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.start_deletion()
         [row] = thread.call_args.kwargs["args"][2]
         self.assertEqual(row["_delete_signature"], (0, 0, 0, 0))

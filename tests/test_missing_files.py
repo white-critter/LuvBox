@@ -16,13 +16,13 @@ from gallery_dl.extractor.message import Message
 
 from tests import test_core, test_gui, test_history_gui
 from tests.test_core import SECRET, FakeHttpDownloader
-from xlikesaver.core import JobOptions, run_worker
-from xlikesaver.history import HistoryStore, archive_key
-from xlikesaver.recovery import rebuild_history
-from xlikesaver.storage import _merge_history
+from luvbox.core import JobOptions, run_worker
+from luvbox.history import HistoryStore, archive_key
+from luvbox.recovery import rebuild_history
+from luvbox.storage import _merge_history
 
 
-ARCHIVE = ".xlikesaver-archive.flat.sqlite3"
+ARCHIVE = ".luvbox-archive.flat.sqlite3"
 
 
 def photo(store, mode, tweet, number, path, author="alice"):
@@ -94,7 +94,7 @@ class MissingRecordTests(unittest.TestCase):
                 db.execute("INSERT INTO missing_choices VALUES ('2',1,'photo',0,'2000-01-01')")
                 db.commit()
         with closing(sqlite3.connect(self.store.path)) as target, \
-                closing(sqlite3.connect(other_folder / ".xlikesaver-history.sqlite3")) as source:
+                closing(sqlite3.connect(other_folder / ".luvbox-history.sqlite3")) as source:
             with target:
                 _merge_history(target, source)
         self.assertEqual(self.store.ignored_media(), {("2", 1, "photo")})
@@ -266,7 +266,7 @@ class RetryWorkerTests(unittest.TestCase):
                 self.flat(targets=targets).validate()
         normalized = self.flat(targets=["5_1", "5_1", "6_video_2"], photo_limit=20).validate()
         self.assertEqual((normalized.targets, normalized.photo_limit), (("5_1", "6_video_2"), 0))
-        with patch("xlikesaver.core.RETRY_LIMIT", 1), self.assertRaises(ValueError):
+        with patch("luvbox.core.RETRY_LIMIT", 1), self.assertRaises(ValueError):
             self.flat(targets=["5_1", "6_1"]).validate()
         self.assertEqual(JobOptions("me", str(self.output)).targets, ())
 
@@ -277,11 +277,11 @@ class MissingTabTests(unittest.TestCase):
     records = test_history_gui.HistoryGuiTests.records
 
     def run_choice(self, ignored, confirm=True):
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=confirm) as ask,                 patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=confirm) as ask,                 patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.choose_missing(ignored)
         if thread.called:
             thread.call_args.kwargs["target"](*thread.call_args.kwargs["args"])
-            with patch("xlikesaver.history_gui.threading.Thread"):
+            with patch("luvbox.history_gui.threading.Thread"):
                 self.window._poll()
             self.load()
         return ask
@@ -332,17 +332,17 @@ class MissingTabTests(unittest.TestCase):
         self.window.select_all_missing()
         self.window._update_missing_actions()
         self.assertEqual(self.window.retry_button.cget("text"), "다시 받기 (1개)")
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=False) as ask:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=False) as ask:
             self.window.retry_missing_files()
         self.assertEqual(started, [])
         self.assertIn("트윗 1개", ask.call_args.args[1])
         self.assertIn("약 1분", ask.call_args.args[1])
         self.window.is_downloading = lambda: True
-        with patch("xlikesaver.history_gui.dialogs.showinfo") as notice:
+        with patch("luvbox.history_gui.dialogs.showinfo") as notice:
             self.window.retry_missing_files()
         notice.assert_called_once()
         self.window.is_downloading = lambda: False
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True):
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True):
             self.window.retry_missing_files()
         self.assertEqual(started, [(["100_1"], "offline", self.account)])
         self.assertIn("메인 화면", self.window.status_text.get())
@@ -358,14 +358,14 @@ class RetryStartTests(unittest.TestCase):
         self.app.folder_mode.set("저장일별 폴더")
         self.app.limited.set(True)
         account, paths = self.app._history_location()
-        with patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.threading.Thread") as thread:
             self.assertTrue(self.app.retry_missing(["100_1", "200_video_1"], account, paths))
         options = thread.call_args.kwargs["args"][0]
         self.assertEqual((options.targets, options.folder_mode, options.photo_limit),
                          (("100_1", "200_video_1"), "date", 0))
         self.assertIn("사라진 파일", self.app.status.get())
         self.assertTrue(self.app.running)
-        with patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.threading.Thread") as thread:
             self.assertFalse(self.app.retry_missing(["100_1"], account, paths))
         thread.assert_not_called()
         self.app.events.put({"type": "finished", "status": "finished", "saved": 1, "skipped": 0,

@@ -1674,7 +1674,7 @@ class HistoryWindow(tk.Toplevel):
         if self.current_account_dir is None:
             return
         snapshot = (str(self.current_storage.snapshot_dir) if isinstance(self.current_storage, StoragePaths)
-                    else "저장 폴더의 .xlikesaver")
+                    else "저장 폴더의 .luvbox")
         media_dir = self.current_storage.media_dir if isinstance(self.current_storage, StoragePaths) else self.current_account_dir
         dialogs.showinfo("기록 보관 위치", f"저장 폴더:\n{media_dir}\n\n이 PC의 기록:\n{self.current_account_dir}\n\n"
                          f"저장 폴더 안 기록 사본:\n{snapshot}\n\n"
@@ -2024,7 +2024,7 @@ class HistoryWindow(tk.Toplevel):
             store = HistoryWindow._store(directory)
             if isinstance(directory, StoragePaths):
                 for root in sorted(store.media_roots, key=lambda value: os.path.normcase(str(value))):
-                    guard = OutputGuard(root)
+                    guard = OutputGuard(root, group=output_guards[0] if output_guards else None)
                     output_guards.append(guard)
                     guard.acquire()
             tagging = available()
@@ -2076,6 +2076,7 @@ class HistoryWindow(tk.Toplevel):
                         if not source_unchanged(source, original):
                             raise OSError("GIF source changed")
                         os.utime(temporary, ns=(original.st_atime_ns, original.st_mtime_ns))
+                        produced = temporary.stat()
                         move_without_overwrite(temporary, destination)
                     except OSError:
                         failed += 1
@@ -2088,7 +2089,8 @@ class HistoryWindow(tk.Toplevel):
                         recorded = store.replace_media_file(row, destination, status, author_status=author_status)
                     except HistoryError:
                         recorded = False
-                    if recorded and (not source_unchanged(source, original) or not recycle(source)):
+                    if recorded and (not source_unchanged(source, original) or
+                                     not source_unchanged(destination, produced) or not recycle(source)):
                         restored = store.replace_media_file(dict(row, path=str(destination.resolve())), source,
                                                             row["metadata_status"], author_status=row["author_metadata_status"])
                         if not restored:
@@ -2097,7 +2099,11 @@ class HistoryWindow(tk.Toplevel):
                             raise HistoryError("GIF catalog changed during rollback")
                         recorded = False
                     if not recorded:
-                        destination.unlink(missing_ok=True)
+                        # A sync tool may have replaced the published GIF
+                        # while the catalog or Recycle Bin operation ran.
+                        # Roll back only the output this conversion created.
+                        if source_unchanged(destination, produced):
+                            destination.unlink(missing_ok=True)
                         failed += 1
                         continue
                     converted += 1
@@ -2139,7 +2145,7 @@ class HistoryWindow(tk.Toplevel):
                 # Records can refer to files retained in earlier output roots.
                 # Lock every such root before changing any file metadata.
                 for root in sorted(store.media_roots, key=lambda value: os.path.normcase(str(value))):
-                    guard = OutputGuard(root)
+                    guard = OutputGuard(root, group=output_guards[0] if output_guards else None)
                     output_guards.append(guard)
                     guard.acquire()
             # One resident ExifTool for the whole pass instead of three launches per file.

@@ -10,7 +10,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from xlikesaver.history import HistoryStore
+from luvbox.history import HistoryStore
 
 
 class FileStatisticsTests(unittest.TestCase):
@@ -33,8 +33,8 @@ class FileStatisticsTests(unittest.TestCase):
                 "author": {"name": author, "id": "12345"},
                 "date": datetime(2026, month, 1, tzinfo=timezone.utc)}
         if embedded:
-            data["_xlikesaver_metadata_status"] = "embedded"
-            data["_xlikesaver_author_metadata_status"] = "embedded"
+            data["_luvbox_metadata_status"] = "embedded"
+            data["_luvbox_author_metadata_status"] = "embedded"
         return data
 
     def record(self, path, mode="flat", **metadata):
@@ -205,10 +205,10 @@ class FileStatisticsTests(unittest.TestCase):
         self.record(former_path, "author")
         [original] = self.store.records()
         new_output = Path(self.temp.name) / "new-output"
-        records = new_output / ".xlikesaver" / "account"
+        records = new_output / ".luvbox" / "account"
         records.mkdir(parents=True)
         with closing(sqlite3.connect(self.store.path)) as source, \
-                closing(sqlite3.connect(records / ".xlikesaver-history.sqlite3")) as target:
+                closing(sqlite3.connect(records / ".luvbox-history.sqlite3")) as target:
             source.backup(target)
             target.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",
                            (json.dumps([str(self.output), str(new_output)]),))
@@ -263,7 +263,7 @@ class FileStatisticsTests(unittest.TestCase):
         self.assertEqual(self.store.records(), original)
 
     def test_archive_only_rows_are_history_rather_than_existing_files(self):
-        archive = self.output / ".xlikesaver-archive.sqlite3"
+        archive = self.output / ".luvbox-archive.sqlite3"
         with closing(sqlite3.connect(archive)) as db:
             db.execute("CREATE TABLE archive (entry TEXT PRIMARY KEY) WITHOUT ROWID")
             db.execute("INSERT INTO archive(entry) VALUES ('twitter100_1')")
@@ -331,10 +331,10 @@ class FileStatisticsTests(unittest.TestCase):
         path = self.file("100_1.jpg")
         self.record(path)
         new_output = Path(self.temp.name) / "new-output"
-        new_records = new_output / ".xlikesaver" / "account"
+        new_records = new_output / ".luvbox" / "account"
         new_records.mkdir(parents=True)
         with closing(sqlite3.connect(self.store.path)) as source, \
-                closing(sqlite3.connect(new_records / ".xlikesaver-history.sqlite3")) as target:
+                closing(sqlite3.connect(new_records / ".luvbox-history.sqlite3")) as target:
             source.backup(target)
             target.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",
                            (json.dumps([str(self.output), str(new_output)]),))

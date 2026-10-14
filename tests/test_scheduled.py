@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import entry
-from xlikesaver import scheduled
+from luvbox import scheduled
 
 
 class ScheduledRunTests(unittest.TestCase):
@@ -24,12 +24,12 @@ class ScheduledRunTests(unittest.TestCase):
         self.settings = {"account": "Offline_Test", "output_dir": str(self.output), "auth_mode": "managed",
                          "folder_mode": "date", "include_videos": False, "include_gifs": True,
                          "max_video_mb": 50, "separate_accounts": True, "scan_mode": "full"}
-        for target, value in (("xlikesaver.scheduled.log_directory", self.root / "logs"),
-                              ("xlikesaver.scheduled.last_run_path", self.root / "last-scheduled.json")):
+        for target, value in (("luvbox.scheduled.log_directory", self.root / "logs"),
+                              ("luvbox.scheduled.last_run_path", self.root / "last-scheduled.json")):
             patcher = patch(target, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
-        notify = patch("xlikesaver.scheduled._notify_failure")
+        notify = patch("luvbox.scheduled._notify_failure")
         self.notify = notify.start()
         self.addCleanup(notify.stop)
 
@@ -46,8 +46,8 @@ class ScheduledRunTests(unittest.TestCase):
                   "message": "새 Like 확인을 마쳤습니다.", "retry_at": ""})
             return 0
 
-        with patch("xlikesaver.scheduled.load_settings", return_value=settings), \
-                patch("xlikesaver.core.run_worker", side_effect=worker):
+        with patch("luvbox.scheduled.load_settings", return_value=settings), \
+                patch("luvbox.core.run_worker", side_effect=worker):
             code = scheduled.run_saved(**kwargs)
         logs = sorted((self.root / "logs").glob("scheduled-*.log"))
         return code, calls, logs[-1].read_text(encoding="utf-8") if logs else ""
@@ -91,8 +91,8 @@ class ScheduledRunTests(unittest.TestCase):
         self.assertEqual(self.run_saved(settings)[0], 0)
 
     def test_saved_preferences_never_restore_missing_folder_confirmation(self):
-        with patch("xlikesaver.protection.state_directory", return_value=self.root / "state"), \
-                patch("xlikesaver.storage.saved_media_missing", return_value=False):
+        with patch("luvbox.protection.state_directory", return_value=self.root / "state"), \
+                patch("luvbox.storage.saved_media_missing", return_value=False):
             for full in (False, True):
                 with self.subTest(full=full):
                     options = scheduled._options_from_settings(dict(self.settings, allow_recreate_media=True), full)
@@ -119,15 +119,15 @@ class ScheduledRunTests(unittest.TestCase):
         scheduled.mark_last_run_seen()
         self.assertTrue(scheduled.last_run()["seen"])
         # The app itself was saving: not a failure worth an alert.
-        from xlikesaver.protection import _BUSY_HELP
+        from luvbox.protection import _BUSY_HELP
 
         def busy(options, emit, stop_file=None):
             emit({"type": "finished", "status": "error", "saved": 0, "message": _BUSY_HELP})
             return 1
 
         self.notify.reset_mock()
-        with patch("xlikesaver.scheduled.load_settings", return_value=self.settings), \
-                patch("xlikesaver.core.run_worker", side_effect=busy):
+        with patch("luvbox.scheduled.load_settings", return_value=self.settings), \
+                patch("luvbox.core.run_worker", side_effect=busy):
             scheduled.run_saved()
         last = scheduled.last_run()
         self.assertEqual((last["busy"], last["failed"]), (True, False))
@@ -170,7 +170,7 @@ class ScheduledRunTests(unittest.TestCase):
             except Exception as error:
                 errors.append(error)
 
-        with patch("xlikesaver.scheduled.os.replace", side_effect=delayed_acknowledgment):
+        with patch("luvbox.scheduled.os.replace", side_effect=delayed_acknowledgment):
             worker = threading.Thread(target=acknowledge)
             worker.start()
             try:
@@ -208,7 +208,7 @@ class ScheduledRunTests(unittest.TestCase):
             except Exception as error:
                 errors.append(error)
 
-        with patch("xlikesaver.scheduled.os.replace", side_effect=delayed_acknowledgment):
+        with patch("luvbox.scheduled.os.replace", side_effect=delayed_acknowledgment):
             worker = threading.Thread(target=acknowledge)
             worker.start()
             try:
@@ -243,7 +243,7 @@ class ScheduledRunTests(unittest.TestCase):
 
     def test_identical_fast_runs_with_the_same_timestamp_need_separate_acknowledgments(self):
         fixed = datetime(2026, 10, 9, 0, 0, 0, tzinfo=timezone.utc)
-        with patch("xlikesaver.scheduled.datetime") as clock:
+        with patch("luvbox.scheduled.datetime") as clock:
             clock.now.return_value = fixed
             self.run_saved({})
             first = scheduled.last_run()
@@ -262,7 +262,7 @@ class ScheduledRunTests(unittest.TestCase):
 
 
 class TaskSchedulerTests(unittest.TestCase):
-    PROGRAM = r"C:\Program Files\한글 폴더\XlikeSaver-1.8.0.exe"
+    PROGRAM = r"C:\Program Files\한글 폴더\LuvBox-1.8.0.exe"
 
     def setUp(self):
         frozen = patch.object(sys, "frozen", True, create=True)
@@ -273,7 +273,7 @@ class TaskSchedulerTests(unittest.TestCase):
         self.addCleanup(executable.stop)
 
     def powershell(self, stdout=b"", returncode=0):
-        return patch("xlikesaver.scheduled.subprocess.run",
+        return patch("luvbox.scheduled.subprocess.run",
                      return_value=subprocess.CompletedProcess([], returncode, stdout, b""))
 
     @staticmethod
@@ -302,7 +302,7 @@ class TaskSchedulerTests(unittest.TestCase):
                         "-MultipleInstances IgnoreNew", "-Daily"):
             self.assertIn(setting, script)
         self.assertNotIn(self.PROGRAM, script)
-        self.assertNotIn("XlikeSaver-1.8.0", " ".join(call.args[0]))
+        self.assertNotIn("LuvBox-1.8.0", " ".join(call.args[0]))
         with self.powershell() as run:
             scheduled.unregister_task()
         self.assertIn("Unregister-ScheduledTask", self.script(run.call_args))
@@ -319,7 +319,7 @@ class TaskSchedulerTests(unittest.TestCase):
         with self.powershell(json.dumps(data, ensure_ascii=False).encode("utf-8")):
             status = scheduled.task_status()
         self.assertEqual((status["current"], status["time"], status["next_run"]), (True, "07:30", "2026-10-07T07:30:00"))
-        old = dict(data, program=r"C:\old\XlikeSaver-1.7.1.exe", catch_up=False)
+        old = dict(data, program=r"C:\old\LuvBox-1.7.1.exe", catch_up=False)
         with self.powershell(json.dumps(old).encode("utf-8")):
             status = scheduled.task_status()
         self.assertEqual((status["current"], status["catch_up"]), (False, False))
@@ -347,7 +347,7 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertIn("$env:XLS_LEGACY", self.script(run.call_args))
 
     def test_entry_point_accepts_only_known_run_saved_arguments(self):
-        with patch("xlikesaver.scheduled.run_saved", return_value=0) as run:
+        with patch("luvbox.scheduled.run_saved", return_value=0) as run:
             for argv, code, full in ((["--run-saved"], 0, False), (["--run-saved", "--full"], 0, True)):
                 with self.subTest(argv=argv), patch.object(sys, "argv", ["entry.py", *argv]):
                     self.assertEqual(entry.main(), code)

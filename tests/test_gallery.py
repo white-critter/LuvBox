@@ -13,9 +13,9 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from xlikesaver import theme
-from xlikesaver.gallery import TILE, ThumbnailGrid, _GridDecoder
-from xlikesaver.preview import Thumbnail
+from luvbox import theme
+from luvbox.gallery import TILE, ThumbnailGrid, _GridDecoder
+from luvbox.preview import Thumbnail
 
 
 class GalleryDecoderTests(unittest.TestCase):
@@ -124,7 +124,7 @@ class GalleryDecoderTests(unittest.TestCase):
             with self.subTest(failure=type(failure).__name__):
                 image = Image.new("RGB", (2, 2))
                 results = queue.Queue(maxsize=240)
-                with patch("xlikesaver.gallery.thumbnail", side_effect=[failure, Thumbnail(image, "ready")]) as decode:
+                with patch("luvbox.gallery.thumbnail", side_effect=[failure, Thumbnail(image, "ready")]) as decode:
                     decoder = _GridDecoder(results, decoder=decode)
                     try:
                         decoder.request(1, [("one", path)], set)

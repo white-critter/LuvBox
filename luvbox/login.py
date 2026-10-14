@@ -1,7 +1,7 @@
 """Locally validate and encrypt manually supplied X authentication cookies.
 
-This module does not launch a browser or connect to X. Session storage keeps
-the original DPAPI format so prior encrypted sessions remain readable.
+This module does not launch a browser or connect to X. New sessions use the
+LuvBox DPAPI format; prior headers and entropy remain readable for migration.
 """
 
 from __future__ import annotations
@@ -16,8 +16,10 @@ import time
 from pathlib import Path
 
 
-_HEADER = b"XlikeSaver-DPAPI-v1\0"
-_ENTROPY = b"XlikeSaver.session.v1"
+_HEADER = b"LuvBox-DPAPI-v1\0"
+_ENTROPY = b"LuvBox.session.v1"
+_LEGACY_HEADER = b"XlikeSaver-DPAPI-v1\0"
+_LEGACY_ENTROPY = b"XlikeSaver.session.v1"
 _MAX_SESSION_BYTES = 1024 * 1024
 _COOKIE_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 _SESSION_HELP = "저장한 auth_token 연결을 사용할 수 없습니다. auth_token을 다시 입력해 주세요."
@@ -28,12 +30,11 @@ _MAX_TOKEN_LENGTH = 4096
 
 def session_path() -> Path:
     """Return this app's per-user encrypted session file, never a Chrome file."""
-    local = os.environ.get("LOCALAPPDATA")
-    base = Path(local) if local else Path.home() / "AppData" / "Local"
-    return base / "XlikeSaver" / "session.bin"
+    from .settings import app_directory
+    return app_directory() / "session.bin"
 
 
-def _dpapi(data: bytes, *, protect: bool) -> bytes:
+def _dpapi(data: bytes, *, protect: bool, entropy: bytes | None = None) -> bytes:
     """Protect/unprotect bytes with Windows DPAPI's current-user scope."""
     if os.name != "nt":
         raise ValueError("auth_token 연결 정보 저장은 Windows에서 사용할 수 있습니다.")
@@ -58,14 +59,15 @@ def _dpapi(data: bytes, *, protect: bool) -> bytes:
     kernel32.LocalFree.restype = ctypes.c_void_p
 
     source_buffer = ctypes.create_string_buffer(data)
-    entropy_buffer = ctypes.create_string_buffer(_ENTROPY)
+    entropy_value = _ENTROPY if entropy is None else entropy
+    entropy_buffer = ctypes.create_string_buffer(entropy_value)
     source = DataBlob(len(data), ctypes.cast(source_buffer, ctypes.POINTER(ctypes.c_ubyte)))
-    entropy = DataBlob(len(_ENTROPY), ctypes.cast(entropy_buffer, ctypes.POINTER(ctypes.c_ubyte)))
+    entropy = DataBlob(len(entropy_value), ctypes.cast(entropy_buffer, ctypes.POINTER(ctypes.c_ubyte)))
     target = DataBlob()
     try:
         # UI_FORBIDDEN; deliberately do not use LOCAL_MACHINE scope.
         if protect:
-            ok = protect_data(ctypes.byref(source), "XlikeSaver X login",
+            ok = protect_data(ctypes.byref(source), "LuvBox X login",
                               ctypes.byref(entropy), None, None, 1, ctypes.byref(target))
         else:
             ok = unprotect_data(ctypes.byref(source), None, ctypes.byref(entropy),
@@ -171,9 +173,15 @@ def load_session_cookies() -> list[dict]:
     try:
         with session_path().open("rb") as file:
             encrypted = file.read(_MAX_SESSION_BYTES + 1)
-        if len(encrypted) > _MAX_SESSION_BYTES or not encrypted.startswith(_HEADER):
+        if len(encrypted) > _MAX_SESSION_BYTES:
             raise ValueError
-        payload = json.loads(_dpapi(encrypted[len(_HEADER):], protect=False).decode("utf-8"))
+        if encrypted.startswith(_HEADER):
+            decrypted = _dpapi(encrypted[len(_HEADER):], protect=False)
+        elif encrypted.startswith(_LEGACY_HEADER):
+            decrypted = _dpapi(encrypted[len(_LEGACY_HEADER):], protect=False, entropy=_LEGACY_ENTROPY)
+        else:
+            raise ValueError
+        payload = json.loads(decrypted.decode("utf-8"))
         if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
             raise ValueError
         clean = _x_cookies(payload.get("cookies"))

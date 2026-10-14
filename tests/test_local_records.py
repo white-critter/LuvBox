@@ -10,12 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import test_core
-from xlikesaver.history import HistoryStore
-from xlikesaver.storage import (MigrationError, migrate_records, prepare_storage,
+from luvbox.history import HistoryStore
+from luvbox.storage import (MigrationError, migrate_records, prepare_storage,
                                publish_snapshot, resolve_storage)
 
-HISTORY = ".xlikesaver-history.sqlite3"
-ARCHIVE = ".xlikesaver-archive.flat.sqlite3"
+HISTORY = ".luvbox-history.sqlite3"
+ARCHIVE = ".luvbox-archive.flat.sqlite3"
 
 
 def count(path, table="media"):
@@ -39,7 +39,7 @@ class LocalRecordTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        protection = patch("xlikesaver.protection.state_directory", return_value=self.root / "pc" / "request-protection")
+        protection = patch("luvbox.protection.state_directory", return_value=self.root / "pc" / "request-protection")
         protection.start()
         self.addCleanup(protection.stop)
         self.output = self.root / "Google Drive" / "사진"
@@ -164,7 +164,7 @@ class LocalRecordTests(unittest.TestCase):
         self.changed_archive_snapshot()
         shared = self.paths.snapshot_dir / ARCHIVE
         before = shared.read_bytes()
-        with patch("xlikesaver.storage._backup_database", side_effect=PermissionError("sync file lock")):
+        with patch("luvbox.storage._backup_database", side_effect=PermissionError("sync file lock")):
             prepare_storage(self.paths, protected=True)
             with self.assertRaises(MigrationError):
                 publish_snapshot(self.paths)
@@ -202,7 +202,7 @@ class LocalRecordWorkerTests(unittest.TestCase):
         snapshot = resolve_storage(self.output, "myaccount").snapshot_dir
         self.assertFalse(self.record_dir.is_relative_to(self.output))
         self.assertEqual(count(snapshot / HISTORY), 1)
-        self.assertEqual(count(snapshot / ".xlikesaver-archive.sqlite3", "archive"), 1)
+        self.assertEqual(count(snapshot / ".luvbox-archive.sqlite3", "archive"), 1)
         self.assertFalse(list(snapshot.glob("*-wal")))
         self.assertFalse([event for event in events if event.get("level") == "warning"])
 

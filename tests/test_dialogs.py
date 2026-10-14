@@ -7,7 +7,7 @@ import weakref
 from unittest.mock import patch
 
 from tests.test_gui import destroy_tk, release_tk
-from xlikesaver import dialogs, theme
+from luvbox import dialogs, theme
 
 
 class DialogTests(unittest.TestCase):

@@ -11,8 +11,8 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from xlikesaver import theme
-from xlikesaver import fonts
+from luvbox import theme
+from luvbox import fonts
 
 
 class ThemeTests(unittest.TestCase):
@@ -146,7 +146,7 @@ class ThemeTests(unittest.TestCase):
     def test_installed_app_reuses_drawn_images_for_both_appearances(self):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.object(sys, "frozen", True, create=True), \
-                patch("xlikesaver.settings.app_directory", return_value=Path(folder)), \
+                patch("luvbox.settings.app_directory", return_value=Path(folder)), \
                 patch.dict(theme._ASSET_CACHE, clear=True):
             cache = Path(folder) / "cache"
             cache.mkdir()
@@ -177,7 +177,7 @@ class ThemeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.object(sys, "frozen", True, create=True), \
                 patch.object(theme, "__file__", str(Path(folder) / "theme.pyc")), \
-                patch("xlikesaver.settings.app_directory", return_value=Path(folder)), \
+                patch("luvbox.settings.app_directory", return_value=Path(folder)), \
                 patch.dict(theme._ASSET_CACHE, clear=True):
             cache = Path(folder) / "cache"
             executable = Path(folder) / "LuvBox-1.0.0.exe"
@@ -213,7 +213,7 @@ class ThemeTests(unittest.TestCase):
                              ("missing-image", without_button), ("broken-png", damaged)):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as folder, \
                     patch.object(sys, "frozen", True, create=True), \
-                    patch("xlikesaver.settings.app_directory", return_value=Path(folder)), \
+                    patch("luvbox.settings.app_directory", return_value=Path(folder)), \
                     patch.dict(theme._ASSET_CACHE, clear=True):
                 location = theme._asset_cache_path(theme._asset_key())
                 location.parent.mkdir()
@@ -230,7 +230,7 @@ class ThemeTests(unittest.TestCase):
                         self.assertEqual(draw.call_count, int(attempt == "recovery"))
                         button = ttk.Button(window, text="Save", style="Primary.TButton")
                         self.assertIn("Soft.Primary", ttk.Style(window).layout("Primary.TButton")[0][0])
-                        self.assertEqual(set(window._xlikesaver_theme_images), set(original))
+                        self.assertEqual(set(window._luvbox_theme_images), set(original))
                         self.assertEqual(theme._read_asset_cache(theme._asset_key()), original)
                         button.destroy()
                     finally:
@@ -240,7 +240,7 @@ class ThemeTests(unittest.TestCase):
     def test_installed_app_recovers_broken_png_during_theme_switch(self):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.object(sys, "frozen", True, create=True), \
-                patch("xlikesaver.settings.app_directory", return_value=Path(folder)), \
+                patch("luvbox.settings.app_directory", return_value=Path(folder)), \
                 patch.dict(theme._ASSET_CACHE, clear=True):
             theme.apply_style(self.root, mode="dark")
             location = theme._asset_cache_path(theme._asset_key())
@@ -257,7 +257,7 @@ class ThemeTests(unittest.TestCase):
             self.assertEqual(draw.call_count, 1)
             self.assertEqual(theme._read_asset_cache(theme._asset_key()), original)
             self.assertEqual(set(map(str, self.root.tk.call("image", "names"))), image_names)
-            images = self.root._xlikesaver_theme_images
+            images = self.root._luvbox_theme_images
             for name, color in (("button", theme.DARK["BG"]), ("button_card", theme.DARK["CARD"]),
                                 ("radio_on_disabled_card", theme.DARK["CARD"])):
                 self.assertEqual("#%02x%02x%02x" % tuple(images[name].get(0, 0)), color)
@@ -286,7 +286,7 @@ class ThemeTests(unittest.TestCase):
                         self.assertEqual(style.lookup(widget.cget("style"), "background", state), background)
         # Images are opaque (fast to draw on Windows); each surface has its
         # own copy whose rounded corners are blended onto that surface.
-        images = self.root._xlikesaver_theme_images
+        images = self.root._luvbox_theme_images
         for name, surface in (("button", theme.BG), ("button_card", theme.CARD)):
             self.assertFalse(images[name].transparency_get(0, 0))
             self.assertEqual("#%02x%02x%02x" % tuple(images[name].get(0, 0)), surface)
@@ -350,7 +350,7 @@ class ThemeTests(unittest.TestCase):
             self.assertEqual(style.layout("Card.TNotebook.Tab")[0][0], "Soft.Tab.card")
             for state in ((), ("selected",), ("active",), ("focus",), ("disabled",)):
                 self.assertEqual(style.lookup("Card.TNotebook.Tab", "background", state), palette["CARD"])
-            image = self.root._xlikesaver_theme_images["notebook_card"]
+            image = self.root._luvbox_theme_images["notebook_card"]
             color = lambda x, y: "#%02x%02x%02x" % tuple(image.get(x, y))
             self.assertEqual(color(0, 0), palette["CARD"])
             self.assertEqual(color(20, 0), palette["LINE"])
@@ -364,7 +364,7 @@ class ThemeTests(unittest.TestCase):
                 self.assertGreaterEqual(notebook.winfo_width() - page.winfo_x() - page.winfo_width(), 12)
                 self.assertGreaterEqual(notebook.winfo_height() - page.winfo_y() - page.winfo_height(), 12)
             for name in ("tab_card", "tab_selected_card", "tab_active_card", "tab_focus_card"):
-                tab = self.root._xlikesaver_theme_images[name]
+                tab = self.root._luvbox_theme_images[name]
                 self.assertEqual("#%02x%02x%02x" % tuple(tab.get(0, 0)), palette["CARD"])
 
     def test_library_notebook_removes_extra_gap_below_the_tab_buttons(self):
@@ -403,7 +403,7 @@ class ThemeTests(unittest.TestCase):
         popup_button.pack()
         self.root.update()
         image_names = set(map(str, self.root.tk.call("image", "names")))
-        image = self.root._xlikesaver_theme_images["card"]
+        image = self.root._luvbox_theme_images["card"]
         original_center = image.get(80, 48)
         style = ttk.Style(self.root)
         for appearance in ("dark", "light", "dark", "light"):
@@ -426,7 +426,7 @@ class ThemeTests(unittest.TestCase):
                 self.assertEqual(style.lookup(button.cget("style"), "foreground"), palette["PRIMARY_INK"])
                 # Regenerating colors must update existing assets without
                 # losing references or creating hundreds of leaked images.
-                self.assertIs(self.root._xlikesaver_theme_images["card"], image)
+                self.assertIs(self.root._luvbox_theme_images["card"], image)
                 self.assertEqual(image_names, set(map(str, self.root.tk.call("image", "names"))))
                 self.assertEqual(image.get(80, 48) == original_center, appearance == "light")
         theme.apply(self.root, "dark")
@@ -574,7 +574,7 @@ class ThemeTests(unittest.TestCase):
                     self.assertEqual(style.lookup(button.cget("style"), "background", state), surface)
             for name, surface in (("ghost", palette["BG"]), ("ghost_card", palette["CARD"]),
                                   ("selected", palette["BG"]), ("selected_card", palette["CARD"])):
-                image = self.root._xlikesaver_theme_images[name]
+                image = self.root._luvbox_theme_images[name]
                 self.assertEqual("#%02x%02x%02x" % tuple(image.get(0, 0)), surface)
 
     def test_progress_caps_use_their_window_theme_when_another_interpreter_switches(self):

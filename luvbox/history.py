@@ -20,7 +20,8 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .storage import StoragePaths, prepare_storage, records_root
+from .storage import (_RECORD_FOLDERS, StoragePaths, migrate_legacy_databases,
+                      prepare_storage, records_root)
 
 
 _KOREA = timezone(timedelta(hours=9))
@@ -30,9 +31,9 @@ _HISTORY_HELP = "저장 내역을 읽거나 기록하지 못했습니다. 저장
 _INTERRUPTED_MESSAGE = "이전 작업이 비정상 종료되어 중단으로 정리했습니다. 받은 파일과 진행 수치는 그대로입니다."
 _ENTRY = re.compile(r"(?:twitter)?([0-9]{1,20})_(?:(video|animated_gif|gif)_)?([0-9]{1,5})\Z")
 _FILENAME = re.compile(r"([0-9]{1,20})_(?:(video|gif|animated_gif)_)?([0-9]{1,5})\.(jpg|jpeg|png|webp|gif|mp4)\Z", re.I)
-_ARCHIVES = {"author": ".xlikesaver-archive.sqlite3",
-             "date": ".xlikesaver-archive.date.sqlite3",
-             "flat": ".xlikesaver-archive.flat.sqlite3"}
+_ARCHIVES = {"author": ".luvbox-archive.sqlite3",
+             "date": ".luvbox-archive.date.sqlite3",
+             "flat": ".luvbox-archive.flat.sqlite3"}
 # Rows per write transaction while importing; small enough that a concurrent
 # download's single-row write never waits near SQLite's busy timeout.
 _WRITE_BATCH = 200
@@ -208,7 +209,8 @@ class HistoryStore:
         records = records_root().resolve()
         self._app_data = (records, records.parent / "backups")
         self.account_dir.mkdir(parents=True, exist_ok=True)
-        self.path = self.account_dir / ".xlikesaver-history.sqlite3"
+        migrate_legacy_databases(self.account_dir)
+        self.path = self.account_dir / ".luvbox-history.sqlite3"
         self._db = sqlite3.connect(self.path, timeout=5)
         self._db.row_factory = sqlite3.Row
         try:
@@ -405,7 +407,8 @@ class HistoryStore:
                     return None
                 candidate = cache[key] / supplied.name
             record_roots = getattr(self, "_media_roots", (self.output_dir,))
-            if self._isolated_records and any(_within(candidate, parent / ".xlikesaver") for parent in record_roots):
+            if self._isolated_records and any(_within(candidate, parent / folder)
+                                              for parent in record_roots for folder in _RECORD_FOLDERS):
                 return None
             if any(_within(candidate, folder) for folder in self._app_data):
                 return None
@@ -662,11 +665,11 @@ class HistoryStore:
                "author": author, "author_id": author_id, "filename": filename, "posted_at": posted,
                "posted_source": "metadata" if posted else "", "saved_at": _now() if status == "saved" else None,
                "path": actual_path, "filesize": filesize, "status": status, "record_source": status}
-        metadata_status = metadata.get("_xlikesaver_metadata_status", "pending")
+        metadata_status = metadata.get("_luvbox_metadata_status", "pending")
         if metadata_status not in {"embedded", "failed", "unsupported", "pending"}:
             raise HistoryError(_HISTORY_HELP)
         row["metadata_status"] = metadata_status
-        author_status = metadata.get("_xlikesaver_author_metadata_status", "pending")
+        author_status = metadata.get("_luvbox_author_metadata_status", "pending")
         if author_status not in {"embedded", "unknown", "error", "pending"}:
             raise HistoryError(_HISTORY_HELP)
         row["author_metadata_status"] = author_status
@@ -808,8 +811,11 @@ class HistoryStore:
     def _scan_files(self, root, restricted):
         pending = [root]
         account_names = set()
-        if restricted and (self.output_dir / ".xlikesaver").is_dir():
-            account_names = {path.name for path in (self.output_dir / ".xlikesaver").iterdir() if path.is_dir()}
+        if restricted:
+            for folder in _RECORD_FOLDERS:
+                records = self.output_dir / folder
+                if records.is_dir() and not self._linked(records):
+                    account_names.update(path.name for path in records.iterdir() if path.is_dir())
         if self.legacy_dir is not None:
             account_names.add(self.legacy_dir.name)
         while pending:
@@ -824,7 +830,7 @@ class HistoryStore:
                     if entry.is_symlink() or junction:
                         continue
                     if entry.is_dir(follow_symlinks=False):
-                        if (entry.name == ".xlikesaver" or (restricted and directory == root and entry.name in account_names)
+                        if (entry.name in _RECORD_FOLDERS or (restricted and directory == root and entry.name in account_names)
                                 or path in self._app_data):
                             continue
                         pending.append(path)

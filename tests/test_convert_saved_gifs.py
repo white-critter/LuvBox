@@ -11,9 +11,9 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from xlikesaver import media, metadata
-from xlikesaver.history import HistoryError, HistoryStore
-from xlikesaver.history_gui import HistoryWindow
+from luvbox import media, metadata
+from luvbox.history import HistoryError, HistoryStore
+from luvbox.history_gui import HistoryWindow
 
 
 ORIGINAL_TIME = 1_600_000_000
@@ -49,8 +49,8 @@ class ConvertSavedGifTests(unittest.TestCase):
 
     def convert(self, *, recycle=None, can_recycle=True, stop=None, size="original", max_mb=200):
         results = queue.Queue()
-        with patch("xlikesaver.media.recycle", side_effect=recycle or self.recycle) as recycled, \
-                patch("xlikesaver.media.can_recycle", return_value=can_recycle), \
+        with patch("luvbox.media.recycle", side_effect=recycle or self.recycle) as recycled, \
+                patch("luvbox.media.can_recycle", return_value=can_recycle), \
                 patch("requests.Session.request") as network:
             HistoryWindow._convert_worker(results, stop or threading.Event(), 1, self.account, size, max_mb)
         network.assert_not_called()
@@ -63,7 +63,7 @@ class ConvertSavedGifTests(unittest.TestCase):
         return next(row for row in self.store.records() if row["tweet_id"] == tweet)
 
     def assert_no_temporary_files(self):
-        self.assertFalse([path for path in self.account.iterdir() if path.name.startswith(".xlikesaver-gif")])
+        self.assertFalse([path for path in self.account.iterdir() if path.name.startswith(".luvbox-gif")])
 
     def test_mp4_gifs_become_gifs_and_originals_go_to_the_recycle_bin(self):
         good = self.movie("100_gif_1.mp4")
@@ -190,7 +190,7 @@ class ConvertSavedGifTests(unittest.TestCase):
             path.write_bytes(changed)
             return result
 
-        with patch("xlikesaver.media.convert_mp4_to_gif", side_effect=edit_after_conversion):
+        with patch("luvbox.media.convert_mp4_to_gif", side_effect=edit_after_conversion):
             messages, recycled = self.convert()
         recycled.assert_not_called()
         self.assertIn("실패 1개", messages[-1][2])
@@ -238,22 +238,62 @@ class ConvertSavedGifTests(unittest.TestCase):
         self.assertEqual(self.row("100")["path"], str(destination.resolve()))
         self.assert_no_temporary_files()
 
+    def test_external_gif_restored_during_recycle_failure_is_preserved(self):
+        source = self.movie("100_gif_1.mp4")
+        self.record("100", source)
+        destination = source.with_suffix(".gif")
+        external = b"GIF89a restored by another application"
+
+        def restore_other_gif(_):
+            destination.unlink()
+            destination.write_bytes(external)
+            return False
+
+        messages, _ = self.convert(recycle=restore_other_gif)
+        self.assertTrue(source.is_file())
+        self.assertTrue(destination.is_file())
+        self.assertEqual(destination.read_bytes(), external)
+        self.assertEqual(self.row("100")["path"], str(source.resolve()))
+        self.assertIn("실패 1개", messages[-1][2])
+
+    def test_external_gif_replacement_before_recycle_keeps_original_mp4(self):
+        source = self.movie("100_gif_1.mp4")
+        self.record("100", source)
+        destination = source.with_suffix(".gif")
+        external = b"GIF89a restored before recycling"
+        replace_file = HistoryStore.replace_media_file
+
+        def restore_after_record(store, row, path, *args, **options):
+            updated = replace_file(store, row, path, *args, **options)
+            if Path(path) == destination:
+                destination.unlink()
+                destination.write_bytes(external)
+            return updated
+
+        with patch.object(HistoryStore, "replace_media_file", side_effect=restore_after_record, autospec=True):
+            messages, recycled = self.convert()
+        recycled.assert_not_called()
+        self.assertTrue(source.is_file())
+        self.assertEqual(destination.read_bytes(), external)
+        self.assertEqual(self.row("100")["path"], str(source.resolve()))
+        self.assertIn("실패 1개", messages[-1][2])
+
     def test_no_recycle_bin_existing_gif_or_size_limit_keep_the_mp4_untouched(self):
         source = self.movie("100_gif_1.mp4")
         self.record("100", source)
-        with patch("xlikesaver.media.convert_mp4_to_gif") as convert:
+        with patch("luvbox.media.convert_mp4_to_gif") as convert:
             messages, recycled = self.convert(can_recycle=False)
         convert.assert_not_called()
         recycled.assert_not_called()
         self.assertIn("MP4로 둠 1개", messages[-1][2])
         other = self.account / "100_gif_1.gif"
         other.write_bytes(b"GIF89a someone else's file")
-        with patch("xlikesaver.media.convert_mp4_to_gif") as convert:
+        with patch("luvbox.media.convert_mp4_to_gif") as convert:
             messages, _ = self.convert()
         convert.assert_not_called()
         self.assertEqual(other.read_bytes(), b"GIF89a someone else's file")
         other.unlink()
-        with patch("xlikesaver.media.convert_mp4_to_gif", side_effect=media.ConversionSizeLimit()):
+        with patch("luvbox.media.convert_mp4_to_gif", side_effect=media.ConversionSizeLimit()):
             messages, recycled = self.convert(max_mb=1)
         recycled.assert_not_called()
         self.assertIn("MP4로 둠 1개", messages[-1][2])
@@ -272,7 +312,7 @@ class ConvertSavedGifTests(unittest.TestCase):
             # The running conversion notices the stop and removes its output.
             return real_convert(source, **kwargs)
 
-        with patch("xlikesaver.media.convert_mp4_to_gif", side_effect=convert_then_stop):
+        with patch("luvbox.media.convert_mp4_to_gif", side_effect=convert_then_stop):
             messages, recycled = self.convert(stop=stop)
         recycled.assert_not_called()
         self.assertIn("GIF 변환 중단 · 바꿈 0개", messages[-1][2])

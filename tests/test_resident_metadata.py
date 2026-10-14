@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tests.test_metadata import PNG, image_payload
-from xlikesaver import metadata
+from luvbox import metadata
 
 
 class ResidentShutdownTests(unittest.TestCase):
@@ -131,7 +131,7 @@ class BundledWriterTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0)
             self.assertEqual(metadata.read_source(media), "https://x.com/i/web/status/100")
         self.assertEqual(image_payload(media.read_bytes(), ".png"), image_payload(PNG, ".png"))
-        self.assertFalse(list(media.parent.glob(".xlikesaver-source-*")))
+        self.assertFalse(list(media.parent.glob(".luvbox-source-*")))
 
 
 if __name__ == "__main__":

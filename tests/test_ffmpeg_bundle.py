@@ -11,7 +11,7 @@ import unittest
 
 from PIL import Image
 
-from xlikesaver.media import convert_mp4_to_gif, ffmpeg_path
+from luvbox.media import convert_mp4_to_gif, ffmpeg_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,7 +48,7 @@ class FFmpegBundleTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows native FFmpeg bundle")
     def test_real_conversion_and_thumbnail_from_native_synthetic_mp4(self):
-        with tempfile.TemporaryDirectory(prefix="xlikesaver-영상-") as directory:
+        with tempfile.TemporaryDirectory(prefix="luvbox-영상-") as directory:
             source = Path(directory) / "테스트 동영상.mp4"
             self.run_ffmpeg("-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
                             "testsrc2=size=96x64:rate=10", "-t", "0.8", "-c:v", "mpeg4",

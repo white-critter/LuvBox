@@ -1732,7 +1732,7 @@ class App:
     def _run_process(self, options):
         return_code = 1
         try:
-            with tempfile.TemporaryDirectory(prefix="xlikesaver-") as job_dir:
+            with tempfile.TemporaryDirectory(prefix="luvbox-") as job_dir:
                 directory = Path(job_dir)
                 request, events, stop = (directory / name for name in ("request.json", "events.jsonl", "stop.flag"))
                 request.write_text(json.dumps(asdict(options), ensure_ascii=False), encoding="utf-8")
@@ -1967,9 +1967,17 @@ class App:
 
 
 def launch():
+    from .settings import AppDataError
+
     root = tk.Tk()
-    app = App(root)
+    app = None
     try:
+        try:
+            app = App(root)
+        except AppDataError as exc:
+            dialogs.showerror("기존 데이터 이전 확인", str(exc), parent=root)
+            root.destroy()
+            return
         root.mainloop()
     finally:
         app = None

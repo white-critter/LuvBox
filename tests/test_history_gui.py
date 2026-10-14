@@ -19,13 +19,13 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from xlikesaver.gui import App
-from xlikesaver.history import HistoryStore
-from xlikesaver.history_gui import HistoryWindow, NO_SELECTION, NO_RUN_SELECTION
-from xlikesaver.preview import PreviewLoader, Thumbnail
-from xlikesaver import theme
-from xlikesaver.protection import AccountGuard, ProtectionError
-from xlikesaver.storage import OutputGuard, StoragePaths, resolve_storage
+from luvbox.gui import App
+from luvbox.history import HistoryStore
+from luvbox.history_gui import HistoryWindow, NO_SELECTION, NO_RUN_SELECTION
+from luvbox.preview import PreviewLoader, Thumbnail
+from luvbox import theme
+from luvbox.protection import AccountGuard, ProtectionError
+from luvbox.storage import OutputGuard, StoragePaths, resolve_storage
 from tests.test_gui import destroy_tk, release_tk
 
 
@@ -33,7 +33,7 @@ class HistoryGuiTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        protection = patch("xlikesaver.protection.state_directory", return_value=Path(self.temporary.name) / "protection")
+        protection = patch("luvbox.protection.state_directory", return_value=Path(self.temporary.name) / "protection")
         protection.start()
         self.addCleanup(protection.stop)
         self.account = Path(self.temporary.name) / "offline"
@@ -41,9 +41,9 @@ class HistoryGuiTests(unittest.TestCase):
         self.root.withdraw()
         self.addCleanup(release_tk, self, "window", "root")
         self.addCleanup(destroy_tk, self.root)
-        with patch("xlikesaver.gui.load_settings", return_value={}), patch("xlikesaver.gui.has_session", return_value=False):
+        with patch("luvbox.gui.load_settings", return_value={}), patch("luvbox.gui.has_session", return_value=False):
             App(self.root)
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window = HistoryWindow(self.root, lambda: ("offline", self.account))
         self.window.withdraw()
 
@@ -70,7 +70,7 @@ class HistoryGuiTests(unittest.TestCase):
                 try:
                     with patch.object(HistoryWindow, "winfo_screenwidth", return_value=screen[0]), \
                             patch.object(HistoryWindow, "winfo_screenheight", return_value=screen[1]), \
-                            patch("xlikesaver.history_gui.threading.Thread"):
+                            patch("luvbox.history_gui.threading.Thread"):
                         window = HistoryWindow(self.root, lambda: ("offline", self.account))
                     window.attributes("-alpha", 0)
                     window.update_idletasks()
@@ -220,7 +220,7 @@ class HistoryGuiTests(unittest.TestCase):
 
     def test_selected_record_displays_source_and_open_requires_user_action(self):
         self.records()
-        with patch("xlikesaver.history_gui.webbrowser.open") as browser:
+        with patch("luvbox.history_gui.webbrowser.open") as browser:
             self.load()
             browser.assert_not_called()
             self.window.tree.selection_set("0")
@@ -242,7 +242,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._display(store.summary(), [other_mode, rows[1], selected], [])
         self.assertEqual(self.window.tree.selection(), ("2",))
         self.assertEqual(self.window.selected(), selected)
-        with patch("xlikesaver.history_gui.webbrowser.open") as browser:
+        with patch("luvbox.history_gui.webbrowser.open") as browser:
             self.window.open_tweet()
         browser.assert_called_once_with("https://x.com/i/web/status/" + selected["tweet_id"])
         self.window._display(store.summary(), [other_mode, rows[1]], [])
@@ -274,7 +274,7 @@ class HistoryGuiTests(unittest.TestCase):
             path.write_bytes(b"different-image")
             store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo"}, path)
         self.window.get_location = lambda: ("next_account", next_account)
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.refresh()
         self.assertEqual(self.window.tree.get_children(), ())
         self.assertEqual(self.window.selection_text.get(), NO_SELECTION)
@@ -289,7 +289,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.tree.selection_set("0")
         self.window.select_record()
         self.window.get_location = lambda: (_ for _ in ()).throw(ValueError("invalid account"))
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.refresh()
         thread.assert_not_called()
         self.assertEqual(self.window.tree.get_children(), ())
@@ -299,14 +299,14 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertIsNone(self.window.current_account_dir)
         self.assertEqual(str(self.window.export_button.cget("state")), "disabled")
         self.assertEqual(str(self.window.backfill_button.cget("state")), "disabled")
-        with patch("xlikesaver.history_gui.webbrowser.open") as browser:
+        with patch("luvbox.history_gui.webbrowser.open") as browser:
             self.window.open_tweet()
         browser.assert_not_called()
 
     def test_catalog_preview_remains_openable_while_csv_and_backfill_are_disabled(self):
         store = self.records()
         self.load()
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window.refresh(import_legacy=True)
         self.window.results.put((self.window.generation, "preview",
                                  (self.account, store.summary(), store.records(), [], 0)))
@@ -315,7 +315,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.export_button.cget("state")), "disabled")
         self.assertEqual(str(self.window.backfill_button.cget("state")), "disabled")
         self.window.tree.selection_set("0")
-        with patch("xlikesaver.history_gui.os.startfile", create=True) as opened:
+        with patch("luvbox.history_gui.os.startfile", create=True) as opened:
             self.window.open_file()
         opened.assert_called_once_with(store.records()[0]["path"])
         self.window.results.put((self.window.generation, "loaded",
@@ -327,7 +327,7 @@ class HistoryGuiTests(unittest.TestCase):
     def test_pagination_ignores_repeated_clicks_until_requested_page_loads(self):
         self.records(105)
         self.load()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.change_page(1)
             arguments = thread.call_args.kwargs["args"]
             self.window.change_page(1)
@@ -350,14 +350,14 @@ class HistoryGuiTests(unittest.TestCase):
             for change in (lambda: self.window.change_page(1),
                            lambda: (self.window.query.set("104"), self.window.search()),
                            lambda: self.window.change_page_size()):
-                with patch("xlikesaver.history_gui.threading.Thread") as thread:
+                with patch("luvbox.history_gui.threading.Thread") as thread:
                     change()
                 self.window._load(*thread.call_args.kwargs["args"])
                 self.window._poll()
             overview.assert_not_called()
         self.assertEqual(self.window.page_text.get(), "기록 1개 · 1 / 1페이지")
         self.assertEqual(self.window.tile_values["files"].get(), tiles)
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.refresh()
         self.assertIsNone(thread.call_args.kwargs["args"][-1])  # data refresh: totals are rebuilt
 
@@ -365,16 +365,16 @@ class HistoryGuiTests(unittest.TestCase):
         self.records(3)
         self.load()
         self.assertEqual(self.window.auto_refresh_delay(), 2000)
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.refresh()  # a full load, e.g. a save's automatic refresh
-        with patch("xlikesaver.history_gui.time.monotonic", return_value=self.window._load_started + 1.5):
+        with patch("luvbox.history_gui.time.monotonic", return_value=self.window._load_started + 1.5):
             self.window._load(*thread.call_args.kwargs["args"])
             self.window._poll()
         self.assertAlmostEqual(self.window.last_load_seconds, 1.5)
         self.assertEqual(self.window.auto_refresh_delay(), 4500)
         self.window.last_load_seconds = 600
         self.assertEqual(self.window.auto_refresh_delay(), 30000)
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window.change_page_size()  # view-only loads reuse totals and are not measured
         self.assertIsNone(self.window._load_started)
 
@@ -415,7 +415,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.sample_view.show(list(self.window.sample_rows.items()), set)
         old_token = self.window._sample_token
         self.window.author_tree.selection_set("1")
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window._show_author_samples()
         self.assertEqual(self.window.sample_rows, {})
         self.assertEqual(self.window.sample_view.order, [])
@@ -445,7 +445,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(len(self.window.author_tree.get_children()), 10)
         self.window.author_query.set("alice")
         [key] = self.window.author_tree.get_children()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.author_tree.selection_set(key)
             self.window._show_author_samples()
         self.window._samples_worker(self.window._sample_results, *thread.call_args.kwargs["args"])
@@ -456,7 +456,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(newest, [str(309 - index) for index in range(10)])
         self.assertIn("@alice · 파일 10개", self.window.sample_text.get())
         self.assertFalse(self.window.sample_more_button.winfo_manager())
-        with patch("xlikesaver.history_gui.os.startfile") as start:
+        with patch("luvbox.history_gui.os.startfile") as start:
             self.window._open_sample(next(iter(self.window.sample_rows)))
         start.assert_called_once_with(str(self.account / "309_1.jpg"))
 
@@ -472,14 +472,14 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.tabs.select(2)
         self.load()
         [key] = self.window.author_tree.get_children()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.author_tree.selection_set(key)
             self.window._show_author_samples()
         self.window._samples_worker(self.window._sample_results, *thread.call_args.kwargs["args"])
         self.window._poll_samples()
 
     def test_many_author_files_are_added_a_batch_at_a_time(self):
-        with patch("xlikesaver.history_gui.SAMPLE_STEP", 4):
+        with patch("luvbox.history_gui.SAMPLE_STEP", 4):
             self.author_gallery(10)
             self.assertEqual(len(self.window.sample_view.tiles), 4)
             self.assertIn("파일 10개 중 최근 4개", self.window.sample_text.get())
@@ -496,13 +496,13 @@ class HistoryGuiTests(unittest.TestCase):
     def test_author_gallery_keeps_its_tiles_and_length_when_the_library_refreshes(self):
         # A save refreshes the library every few seconds; the gallery the user
         # is looking through must not empty itself or fall back to the top.
-        with patch("xlikesaver.history_gui.SAMPLE_STEP", 4):
+        with patch("luvbox.history_gui.SAMPLE_STEP", 4):
             self.author_gallery(10)
             self.window.more_samples()
             tiles = dict(self.window.sample_view.tiles)
             self.assertEqual(len(tiles), 8)
             (self.account / "305_1.jpg").unlink()  # Only this test's fixture.
-            with patch("xlikesaver.history_gui.threading.Thread") as thread:
+            with patch("luvbox.history_gui.threading.Thread") as thread:
                 self.load()
                 self.window._show_author_samples()
             self.assertEqual(self.window.sample_view.tiles, tiles)
@@ -525,7 +525,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._update_sample_actions()
         self.assertEqual(str(self.window.sample_delete_button.cget("state")), "normal")
         self.assertEqual(self.window.sample_delete_button.cget("text"), "휴지통으로 보내기 (2개)")
-        with patch("xlikesaver.history_gui.dialogs.confirm_delete", return_value=None) as confirm:
+        with patch("luvbox.history_gui.dialogs.confirm_delete", return_value=None) as confirm:
             self.window.delete_samples()
         self.assertEqual(confirm.call_args.args[:2], (2, len(b"offline-image") * 2))
         # Delete key and the right-click menu work on the same chosen tiles.
@@ -555,7 +555,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.tabs.select(2)
         self.load()
         [key] = self.window.author_tree.get_children()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.author_tree.selection_set(key)
             self.window._show_author_samples()
             token = self.window._sample_token
@@ -584,7 +584,7 @@ class HistoryGuiTests(unittest.TestCase):
         commands["선택한 파일 경로 복사"][0]()
         self.assertEqual(set(self.window.clipboard_get().splitlines()),
                          {self.window.rows[key]["path"] for key in keys[:2]})
-        with patch("xlikesaver.history_gui.webbrowser.open") as open_tweet:
+        with patch("luvbox.history_gui.webbrowser.open") as open_tweet:
             commands["트윗 열기"][0]()
         open_tweet.assert_called_once_with("https://x.com/i/web/status/"+self.window.rows[keys[1]]["tweet_id"])
         self.assertTrue(commands["휴지통으로 보내기"][1])
@@ -650,7 +650,7 @@ class HistoryGuiTests(unittest.TestCase):
         commands = {label:(callback,enabled) for label,callback,enabled in post.call_args.args[1]}
         for label in ("다시 받기","다시 받지 않기","숨김 해제"):
             self.assertFalse(commands[label][1])
-        with patch("xlikesaver.history_gui.webbrowser.open") as open_tweet:
+        with patch("luvbox.history_gui.webbrowser.open") as open_tweet:
             commands["트윗 열기"][0]()
         open_tweet.assert_called_once_with("https://x.com/i/web/status/102")
 
@@ -674,14 +674,14 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._author_choices()
         self.assertEqual(list(self.window.author_combo.cget("values")), ["작성자 전체", "@alice · 2개"])
         self.window.author_choice.set("@alice · 2개")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window._choose_author()
         self.assertEqual(thread.call_args.kwargs["args"][-2], "alice")
         self.assertEqual(self.window.author_choice.get(), "@alice")
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.window.author_choice.set("작성자 전체")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window._choose_author()
         self.assertEqual(thread.call_args.kwargs["args"][-2], "")
         self.window._load(*thread.call_args.kwargs["args"])
@@ -693,7 +693,7 @@ class HistoryGuiTests(unittest.TestCase):
     def test_pending_search_does_not_relabel_previous_page_results(self):
         self.records(105)
         self.load()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.change_page(1)
             arguments = thread.call_args.kwargs["args"]
             self.window.query.set("104")
@@ -717,41 +717,41 @@ class HistoryGuiTests(unittest.TestCase):
         self.records(105)
         self.load()
         self.window.page_size.set("50")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.change_page_size()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual(len(self.window.rows), 50)
         self.assertEqual(self.window.page_text.get(), "기록 105개 · 1 / 3페이지")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.last_button.invoke()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual((self.window.page, len(self.window.rows)), (2, 5))
         self.assertEqual(str(self.window.last_button.cget("state")), "disabled")
         self.window.page_input.set("999")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.jump_page()
         thread.assert_not_called()
         self.assertEqual(self.window.page_input.get(), "3")
         self.window.page_input.set("2")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.jump_page()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual((self.window.page, len(self.window.rows)), (1, 50))
         self.window.page_input.set("invalid")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.jump_page()
         thread.assert_not_called()
         self.assertEqual(self.window.page_input.get(), "2")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.first_button.invoke()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual(self.window.page, 0)
         self.window.query.set("absent")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.search()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
@@ -766,20 +766,20 @@ class HistoryGuiTests(unittest.TestCase):
         self.load()
         self.assertEqual(len(self.window.run_rows), 100)
         self.assertEqual(self.window.run_page_text.get(), "총 105회 · 1 / 2페이지")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.run_last_button.invoke()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual([row["id"] for row in self.window.run_rows.values()], ids[4::-1])
         self.window.run_tree.selection_set("0")
         self.window.select_run()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.refresh()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual(self.window.run_rows[self.window.run_tree.selection()[0]]["id"], ids[4])
         self.window.page_size.set("200")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.change_page_size()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
@@ -790,7 +790,7 @@ class HistoryGuiTests(unittest.TestCase):
     def test_page_size_changed_during_load_discards_older_preview_and_result(self):
         self.records(105)
         self.load()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.change_page(1)
             old_args = thread.call_args.kwargs["args"]
             self.window.page_size.set("50")
@@ -817,20 +817,20 @@ class HistoryGuiTests(unittest.TestCase):
         buttons = self.window.page_buttons
         self.assertEqual([button.cget("text") for button in buttons], ["2", "3", "4", "5", "6"])
         self.assertEqual(buttons[2].cget("style"), "CompactPrimary.TButton")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             buttons[3].invoke()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual(self.window.displayed_page, 4)
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             result = self.window._page_key(SimpleNamespace(widget=self.window.page_entry, keysym="Home"))
         thread.assert_not_called()
         self.assertIsNone(result)
         # Without Ctrl the table keeps its own row scrolling.
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.assertIsNone(self.window._page_key(SimpleNamespace(widget=self.window.tree, keysym="Home", state=0)))
         thread.assert_not_called()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.assertEqual(self.window._page_key(SimpleNamespace(widget=self.window.tree, keysym="Home", state=0x4)),
                              "break")
         self.window._load(*thread.call_args.kwargs["args"])
@@ -877,8 +877,8 @@ class HistoryGuiTests(unittest.TestCase):
         Image.new("RGB", (800, 600), "orange").save(path)
         self.load()
         with patch("requests.Session.request") as network, \
-                patch("xlikesaver.history_gui.os.startfile", create=True) as opened, \
-                patch("xlikesaver.history_gui.webbrowser.open") as browser:
+                patch("luvbox.history_gui.os.startfile", create=True) as opened, \
+                patch("luvbox.history_gui.webbrowser.open") as browser:
             self.window.tree.selection_set("0")
             self.window.select_record()
             deadline = time.monotonic() + 3
@@ -972,7 +972,7 @@ class HistoryGuiTests(unittest.TestCase):
         window = None
         try:
             root.tk.call("tk", "scaling", 2.0)
-            with patch("xlikesaver.history_gui.threading.Thread"):
+            with patch("luvbox.history_gui.threading.Thread"):
                 window = HistoryWindow(root, lambda: ("offline", self.account))
             window.attributes("-alpha", 0)
             window.geometry("1200x860")
@@ -1018,7 +1018,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(self.window.filter_panel.winfo_manager(), "pack")
         self.window.period_from.set("2026-10-01")
         self.window.period_to.set("2026-10-06")
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window.search()
         self.assertEqual(self.window.applied_period, ("posted", "2026-10-01", "2026-10-06"))
         self.assertEqual(self.window._escape(), "break")
@@ -1098,7 +1098,7 @@ class HistoryGuiTests(unittest.TestCase):
         window = None
         try:
             root.tk.call("tk", "scaling", 2.0)
-            with patch("xlikesaver.history_gui.threading.Thread"):
+            with patch("luvbox.history_gui.threading.Thread"):
                 window = HistoryWindow(root, lambda: ("offline", self.account))
             window.attributes("-alpha", 0)
             window.geometry("760x640")
@@ -1129,7 +1129,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.load(page=1)
         store._db.execute("DELETE FROM media WHERE tweet_id!='100'")
         store._db.commit()
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.refresh()
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
@@ -1148,7 +1148,7 @@ class HistoryGuiTests(unittest.TestCase):
                 window = None
                 try:
                     root.tk.call("tk", "scaling", scaling)
-                    with patch("xlikesaver.history_gui.threading.Thread"):
+                    with patch("luvbox.history_gui.threading.Thread"):
                         window = HistoryWindow(root, lambda: ("offline", self.account))
                     window.attributes("-alpha", 0)
                     window.geometry("860x720")
@@ -1211,7 +1211,7 @@ class HistoryGuiTests(unittest.TestCase):
                 window = None
                 try:
                     root.tk.call("tk", "scaling", scaling)
-                    with patch("xlikesaver.history_gui.threading.Thread"):
+                    with patch("luvbox.history_gui.threading.Thread"):
                         window = HistoryWindow(root, lambda: ("offline", self.account))
                     window.attributes("-alpha", 0)
                     window.geometry("860x720")
@@ -1285,7 +1285,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.records()
         self.load()
         self.window.query.set("  @alice  ")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.search()
         arguments = thread.call_args.kwargs["args"]
         self.assertEqual(arguments[3], "alice")
@@ -1293,14 +1293,14 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._poll()
         self.assertEqual([row["author"] for row in self.window.rows.values()], ["alice"])
         self.window.query.set("@alice_1.jpg")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.search()
         self.assertEqual(thread.call_args.kwargs["args"][3], "@alice_1.jpg")
 
     def test_backfill_is_disabled_while_downloading(self):
         self.window.busy = False
         self.window.is_downloading = lambda: True
-        with patch("xlikesaver.history_gui.dialogs.showinfo") as notice, patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.showinfo") as notice, patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.backfill()
         notice.assert_called_once()
         thread.assert_not_called()
@@ -1317,29 +1317,29 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(str(self.window.convert_button.cget("state")), "normal")
         self.assertIn("1개", self.window.convert_button.cget("text"))
         self.window.get_gif_options = lambda: ("720", 50)
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=False) as ask, \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=False) as ask, \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.convert_gifs()
         thread.assert_not_called()
         self.assertIn("1개", ask.call_args.args[1])
         self.assertIn("최대 720px", ask.call_args.args[1])
         self.assertIn("휴지통", ask.call_args.args[1])
         self.window.is_downloading = lambda: True
-        with patch("xlikesaver.history_gui.dialogs.showinfo") as notice, \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.showinfo") as notice, \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.convert_gifs()
         notice.assert_called_once()
         thread.assert_not_called()
         self.window.is_downloading = lambda: False
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.convert_gifs()
         self.assertEqual(thread.call_args.kwargs["args"][2:], ("720", 50))
         self.assertTrue(self.window.metadata_active)
         self.assertEqual(self.window.source_stop_button.cget("text"), "GIF 변환 중단")
         self.assertEqual(str(self.window.convert_button.cget("state")), "disabled")
         self.window.results.put((self.window.generation, "converted", "GIF 변환 끝 · 바꿈 1개"))
-        with patch("xlikesaver.history_gui.threading.Thread") as refresh:
+        with patch("luvbox.history_gui.threading.Thread") as refresh:
             self.window._poll()
         refresh.assert_called_once()
         self.assertFalse(self.window.metadata_active)
@@ -1355,7 +1355,7 @@ class HistoryGuiTests(unittest.TestCase):
         store.finish_run(run, "finished")
         self.load()
         self.window.order.set("Like한 순")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.search()
         args = thread.call_args.kwargs["args"]
         self.assertEqual(args[-4:-1], ("liked", None, ""))
@@ -1369,7 +1369,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.period_field.set("저장일")
         self.window.period_from.set("2026.9.2")
         self.window.period_to.set("20260901")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.search()
         self.assertEqual(thread.call_args.kwargs["args"][-3], ("saved", "2026-09-01", "2026-09-02"))
         self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("2026-09-01", "2026-09-02"))
@@ -1377,11 +1377,11 @@ class HistoryGuiTests(unittest.TestCase):
         self.window._poll()
         self.assertEqual(self.window.tree.get_children(), ())
         self.window.period_to.set("9월 2일")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.search()
         thread.assert_not_called()
         self.assertIn("연-월-일", self.window.status_text.get())
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.clear_period()
         self.assertIsNone(thread.call_args.kwargs["args"][-3])
         self.assertEqual((self.window.period_from.get(), self.window.period_to.get()), ("", ""))
@@ -1435,14 +1435,14 @@ class HistoryGuiTests(unittest.TestCase):
         expected = "오늘의 고양이 #cat" if row["tweet_id"] == "100" else "기록 전"
         self.assertIn(expected, detail)
         self.assertEqual(str(self.window.author_button.cget("state")), "normal")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.filter_selected_author()
         self.assertEqual(thread.call_args.kwargs["args"][-2], "alice")
         self.assertEqual(self.window.author_choice.get(), "@alice")
         self.window._load(*thread.call_args.kwargs["args"])
         self.window._poll()
         self.assertEqual(str(self.window.author_button.cget("state")), "disabled")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.clear_author()
         self.assertEqual(thread.call_args.kwargs["args"][-2], "")
         self.assertEqual(self.window.author_choice.get(), "작성자 전체")
@@ -1453,7 +1453,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.root.update()
         self.assertEqual(self.window.author_tree.item("0", "values")[1:3], ("@alice", "2"))
         self.window.author_tree.selection_set("0")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.show_ranked_author()
         self.assertEqual(thread.call_args.kwargs["args"][-2], "alice")
         self.assertEqual(self.window.tabs.index("current"), 0)
@@ -1473,7 +1473,7 @@ class HistoryGuiTests(unittest.TestCase):
             with self.subTest(downloading=downloading):
                 self.window.busy = False
                 self.window.is_downloading = lambda: downloading
-                with patch("xlikesaver.history_gui.threading.Thread") as thread:
+                with patch("luvbox.history_gui.threading.Thread") as thread:
                     self.window.refresh(import_legacy=True)
                 self.assertIs(thread.call_args.kwargs["args"][5], expected)
                 if downloading:
@@ -1495,7 +1495,7 @@ class HistoryGuiTests(unittest.TestCase):
         selection_text.set("late selection text")
 
     def test_closed_history_releases_ui_variables_and_widget_cycles_on_main_thread(self):
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             window = HistoryWindow(self.root, lambda: ("offline", self.account))
         worker = thread.call_args.kwargs["target"]
         self.assertIs(worker.func, HistoryWindow._load_worker)
@@ -1540,7 +1540,7 @@ class HistoryGuiTests(unittest.TestCase):
                 store.record_media("flat", {"tweet_id": tweet_id, "num": 1, "type": "photo"}, media)
         self.window.busy = False
         self.window.get_location = lambda: ("first", first)
-        with patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.threading.Thread"):
             self.window.refresh()
         with patch("requests.Session.request") as network:
             self.window._load(self.window.generation, first, "all", "", 0, True)
@@ -1553,7 +1553,7 @@ class HistoryGuiTests(unittest.TestCase):
 
     def test_backfill_respects_other_process_using_same_output_folder(self):
         paths = resolve_storage(Path(self.temporary.name) / "shared", "offline")
-        with patch("xlikesaver.history_gui.OutputGuard") as guard, patch("xlikesaver.metadata.embed_source") as embed:
+        with patch("luvbox.history_gui.OutputGuard") as guard, patch("luvbox.metadata.embed_source") as embed:
             guard.return_value.acquire.side_effect = ProtectionError("다른 저장 작업이 실행 중입니다.")
             self.window._backfill(self.window.generation, paths)
         embed.assert_not_called()
@@ -1584,7 +1584,7 @@ class HistoryGuiTests(unittest.TestCase):
         guard = OutputGuard(old_root)
         guard.acquire()
         try:
-            with patch("xlikesaver.metadata.embed_source") as embed:
+            with patch("luvbox.metadata.embed_source") as embed:
                 self.window._backfill(self.window.generation, paths)
             embed.assert_not_called()
             self.assertEqual(media.read_bytes(), b"offline-image")
@@ -1609,7 +1609,7 @@ class HistoryGuiTests(unittest.TestCase):
         account.root.mkdir(parents=True, exist_ok=True)
         cooldown = json.dumps({"until": time.time() + 3600})
         account.state_path.write_text(cooldown, encoding="utf-8")
-        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
+        with patch("luvbox.metadata.embed_source", return_value={"status": "embedded", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, paths)
         embed.assert_called_once_with(media, "100", author="", author_id="")
         network.assert_not_called()
@@ -1624,7 +1624,7 @@ class HistoryGuiTests(unittest.TestCase):
         account = AccountGuard("offline", sleep=lambda *_: None)
         account.acquire(respect_cooldown=False)
         try:
-            with patch("xlikesaver.metadata.embed_source") as embed:
+            with patch("luvbox.metadata.embed_source") as embed:
                 self.window._backfill(self.window.generation, paths)
             embed.assert_not_called()
             self.assertEqual(self.window.results.get_nowait()[1], "error")
@@ -1637,13 +1637,13 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.rows["0"] = {"path": str(media)}
         self.window.tree.insert("", "end", iid="0")
         self.window.tree.selection_set("0")
-        with patch("xlikesaver.history_gui.os.startfile", create=True) as opened:
+        with patch("luvbox.history_gui.os.startfile", create=True) as opened:
             self.window.open_file()
         opened.assert_called_once_with(str(media))
         unknown = old_root / "999_1.jpg"
         unknown.write_bytes(b"unrelated-file")
         self.window.rows["0"]["path"] = str(unknown)
-        with patch("xlikesaver.history_gui.os.startfile", create=True) as opened, patch("xlikesaver.history_gui.dialogs.showinfo") as notice:
+        with patch("luvbox.history_gui.os.startfile", create=True) as opened, patch("luvbox.history_gui.dialogs.showinfo") as notice:
             self.window.open_file()
         opened.assert_not_called()
         notice.assert_called_once()
@@ -1717,7 +1717,7 @@ class HistoryGuiTests(unittest.TestCase):
         store = self.records()
         original = store.records()[0]
         self.window.busy = False
-        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "url": "https://x.com/i/web/status/100", "message": "ok", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
+        with patch("luvbox.metadata.embed_source", return_value={"status": "embedded", "url": "https://x.com/i/web/status/100", "message": "ok", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, self.account)
         embed.assert_called_once_with(Path(original["path"]), "100", author="alice", author_id="")
         network.assert_not_called()
@@ -1727,7 +1727,7 @@ class HistoryGuiTests(unittest.TestCase):
         outside.write_bytes(b"untouched-outside-file")
         store._db.execute("UPDATE media SET path=?,metadata_status='pending'", (str(outside),))
         store._db.commit()
-        with patch("xlikesaver.metadata.embed_source") as embed:
+        with patch("luvbox.metadata.embed_source") as embed:
             self.window._backfill(self.window.generation, self.account)
         embed.assert_not_called()
         self.assertEqual(outside.read_bytes(), b"untouched-outside-file")
@@ -1738,7 +1738,7 @@ class HistoryGuiTests(unittest.TestCase):
         store.mark_metadata(original, "embedded")
         store._db.execute("UPDATE media SET author_id='123456789'")
         store._db.commit()
-        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
+        with patch("luvbox.metadata.embed_source", return_value={"status": "embedded", "author_status": "embedded"}) as embed, patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, self.account)
             embed.assert_called_once_with(Path(original["path"]), "100", author="alice", author_id="123456789")
             self.window._backfill(self.window.generation, self.account)
@@ -1758,7 +1758,7 @@ class HistoryGuiTests(unittest.TestCase):
         store._db.execute("UPDATE media SET author='고양이 폴더'")
         store._db.commit()
         original = store.records()[0]
-        with patch("xlikesaver.metadata.embed_source", return_value={"status": "embedded", "author_status": "unknown"}) as embed, \
+        with patch("luvbox.metadata.embed_source", return_value={"status": "embedded", "author_status": "unknown"}) as embed, \
                 patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, self.account)
             embed.assert_called_once_with(Path(original["path"]), "100", author="", author_id="")
@@ -1773,7 +1773,7 @@ class HistoryGuiTests(unittest.TestCase):
         store = self.records()
         store._db.execute("UPDATE media SET author='',metadata_status='embedded'")
         store._db.commit()
-        with patch("xlikesaver.metadata.embed_source") as embed, patch("requests.Session.request") as network:
+        with patch("luvbox.metadata.embed_source") as embed, patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, self.account)
         embed.assert_not_called()
         network.assert_not_called()
@@ -1783,7 +1783,7 @@ class HistoryGuiTests(unittest.TestCase):
         store = self.records()
         original = store.records()[0]
         store.mark_metadata(original, "embedded")
-        with patch("xlikesaver.metadata.embed_source", return_value={"status": "failed", "author_status": "error"}), patch("requests.Session.request") as network:
+        with patch("luvbox.metadata.embed_source", return_value={"status": "failed", "author_status": "error"}), patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, self.account)
         network.assert_not_called()
         row = store.records()[0]
@@ -1805,7 +1805,7 @@ class HistoryGuiTests(unittest.TestCase):
                          "reason_message": secret, "message": secret},
                         {"status": "failed", "author_status": "error", "reason": "busy"},
                         {"status": "failed", "author_status": "error", "reason": "permission"}])
-        with patch("xlikesaver.metadata.embed_source", side_effect=lambda *args, **kwargs: next(results)), \
+        with patch("luvbox.metadata.embed_source", side_effect=lambda *args, **kwargs: next(results)), \
                 patch("requests.Session.request") as network:
             self.window._backfill(self.window.generation, self.account)
         network.assert_not_called()
@@ -1826,7 +1826,7 @@ class HistoryGuiTests(unittest.TestCase):
             with self.subTest(status=returned["status"], reason=returned.get("reason")):
                 store._db.execute("UPDATE media SET metadata_status='pending',author_metadata_status='pending'")
                 store._db.commit()
-                with patch("xlikesaver.metadata.embed_source", return_value=returned):
+                with patch("luvbox.metadata.embed_source", return_value=returned):
                     self.window._backfill(self.window.generation, self.account)
                 message = self.backfill_message()
                 self.assertNotIn(secret, message)
@@ -1847,24 +1847,24 @@ class LocalChangeWorkerTests(unittest.TestCase):
         self.delete_fixture = root / "offline-delete.jpg"
         self.delete_fixture.write_bytes(b"offline deletion test fixture")
         self.location = StoragePaths(root, root, root / "records", root / "legacy", "offline", False,
-                                     root / ".xlikesaver" / "offline")
+                                     root / ".luvbox" / "offline")
         self.store = Mock(media_roots=[root])
         self.store.records.return_value = []
         self.store.mp4_gif_records.return_value = []
         self.store.reconcile_deletions.return_value = {"interrupted": 0}
         self.account_guard, self.output_guard = Mock(), Mock()
         patchers = [
-            patch("xlikesaver.history_gui.HistoryWindow._store", return_value=self.store),
-            patch("xlikesaver.protection.AccountGuard", return_value=self.account_guard),
-            patch("xlikesaver.history_gui.OutputGuard", return_value=self.output_guard),
-            patch("xlikesaver.metadata.persistent", side_effect=lambda: nullcontext()),
-            patch("xlikesaver.metadata.available", return_value=False),
-            patch("xlikesaver.recovery.repair_history", return_value={"counts": {}, "kept": root / "kept"}),
-            patch("xlikesaver.deletion.HistoryStore.for_storage", return_value=self.store),
-            patch("xlikesaver.deletion.OutputGuard", return_value=self.output_guard),
-            patch("xlikesaver.deletion.AccountGuard", return_value=self.account_guard),
-            patch("xlikesaver.deletion.backup_catalog", return_value=root / "backup"),
-            patch("xlikesaver.deletion.recycle_file", return_value=str(root / "mock-bin")),
+            patch("luvbox.history_gui.HistoryWindow._store", return_value=self.store),
+            patch("luvbox.protection.AccountGuard", return_value=self.account_guard),
+            patch("luvbox.history_gui.OutputGuard", return_value=self.output_guard),
+            patch("luvbox.metadata.persistent", side_effect=lambda: nullcontext()),
+            patch("luvbox.metadata.available", return_value=False),
+            patch("luvbox.recovery.repair_history", return_value={"counts": {}, "kept": root / "kept"}),
+            patch("luvbox.deletion.HistoryStore.for_storage", return_value=self.store),
+            patch("luvbox.deletion.OutputGuard", return_value=self.output_guard),
+            patch("luvbox.deletion.AccountGuard", return_value=self.account_guard),
+            patch("luvbox.deletion.backup_catalog", return_value=root / "backup"),
+            patch("luvbox.deletion.recycle_file", return_value=str(root / "mock-bin")),
         ]
         for patcher in patchers:
             patcher.start()
@@ -1913,8 +1913,8 @@ class LocalChangeWorkerTests(unittest.TestCase):
                     except BaseException as exc:
                         errors.append(exc)
 
-                target = ("xlikesaver.deletion.publish_snapshot" if operation == "deleted"
-                          else "xlikesaver.history_gui._publish")
+                target = ("luvbox.deletion.publish_snapshot" if operation == "deleted"
+                          else "luvbox.history_gui._publish")
                 with patch(target, side_effect=publish):
                     thread = threading.Thread(target=run)
                     thread.start()
@@ -1952,8 +1952,8 @@ class LocalChangeWorkerTests(unittest.TestCase):
                     except BaseException as exc:
                         errors.append(exc)
 
-                failure = ("xlikesaver.recovery.repair_history" if operation == "repaired"
-                           else "xlikesaver.history_gui.HistoryWindow._store")
+                failure = ("luvbox.recovery.repair_history" if operation == "repaired"
+                           else "luvbox.history_gui.HistoryWindow._store")
                 with patch(failure, side_effect=RuntimeError(secret)), \
                         patch.object(self.account_guard, "close", side_effect=close):
                     thread = threading.Thread(target=run)
@@ -2001,10 +2001,10 @@ class HistoryLifecycleTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as directory:
                 root = tk.Tk()
                 root.withdraw()
-                with patch("xlikesaver.gui.load_settings", return_value={"output_dir": directory}), \
-                        patch("xlikesaver.gui.has_session", return_value=False):
+                with patch("luvbox.gui.load_settings", return_value={"output_dir": directory}), \
+                        patch("luvbox.gui.has_session", return_value=False):
                     app = App(root)
-                with patch("xlikesaver.history_gui.threading.Thread"):
+                with patch("luvbox.history_gui.threading.Thread"):
                     window = HistoryWindow(root, lambda: ("offline", Path(directory)))
                 app.history_window = window
                 window._preview_token = 1

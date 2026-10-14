@@ -5,7 +5,7 @@ import os
 import tkinter as tk
 import unittest
 from PIL import Image
-from xlikesaver import app_icon
+from luvbox import app_icon
 
 
 def rendered_icon(handle, size):

@@ -8,11 +8,11 @@ import unittest
 from unittest.mock import Mock, patch
 
 from tests import test_gui, test_history_gui
-from xlikesaver.history import HistoryStore
-from xlikesaver.history_gui import HistoryWindow
-from xlikesaver.protection import AccountGuard, ProtectionError, _BUSY_HELP
-from xlikesaver.recovery import latest_backup
-from xlikesaver.storage import OutputGuard, publish_snapshot, resolve_storage
+from luvbox.history import HistoryStore
+from luvbox.history_gui import HistoryWindow
+from luvbox.protection import AccountGuard, ProtectionError, _BUSY_HELP
+from luvbox.recovery import latest_backup
+from luvbox.storage import OutputGuard, publish_snapshot, resolve_storage
 
 
 def missing_item(index, ignored=False):
@@ -36,7 +36,7 @@ class MissingWorkflowTests(unittest.TestCase):
         self.assertEqual(self.window.missing_total_pages, 51)
         self.window.select_all_missing()
         self.assertEqual(len(self.window._missing_selection()), 100)
-        with patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.go_page(None, missing=True)
         thread.assert_not_called()  # Page turns use the loaded snapshot.
         self.assertEqual(list(self.window.missing_rows), ["5100_1"])
@@ -90,8 +90,8 @@ class MissingWorkflowTests(unittest.TestCase):
         self.window._update_missing_actions()
         self.assertEqual(str(self.window.ignore_button.cget("state")), "disabled")
         self.assertEqual(str(self.window.unignore_button.cget("state")), "disabled")
-        with patch("xlikesaver.history_gui.threading.Thread") as thread, \
-                patch("xlikesaver.history_gui.dialogs.showinfo") as notice:
+        with patch("luvbox.history_gui.threading.Thread") as thread, \
+                patch("luvbox.history_gui.dialogs.showinfo") as notice:
             self.window.choose_missing(True)
             self.window.choose_missing(False)
         thread.assert_not_called()
@@ -110,12 +110,12 @@ class MissingWorkflowTests(unittest.TestCase):
             self.window.generation += 1
             return True
 
-        with patch("xlikesaver.history_gui.dialogs.askyesno", side_effect=changed_catalog), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", side_effect=changed_catalog), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.choose_missing(True)
         thread.assert_not_called()
         self.window.retry_missing = Mock(return_value=True)
-        with patch("xlikesaver.history_gui.dialogs.askyesno", side_effect=changed_catalog):
+        with patch("luvbox.history_gui.dialogs.askyesno", side_effect=changed_catalog):
             self.window.retry_missing_files()
         self.window.retry_missing.assert_not_called()
 
@@ -123,8 +123,8 @@ class MissingWorkflowTests(unittest.TestCase):
             self.window.is_downloading = lambda: True
             return True
 
-        with patch("xlikesaver.history_gui.dialogs.askyesno", side_effect=began_saving), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", side_effect=began_saving), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.choose_missing(True)
         thread.assert_not_called()
         self.assertFalse(self.window.choice_active)
@@ -132,8 +132,8 @@ class MissingWorkflowTests(unittest.TestCase):
     def test_choice_flag_remains_active_until_worker_result_and_close_waits(self):
         self.show_items()
         self.window.select_all_missing()
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True), \
-                patch("xlikesaver.history_gui.threading.Thread"):
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True), \
+                patch("luvbox.history_gui.threading.Thread"):
             self.window.choose_missing(True)
         self.assertTrue(self.window.choice_active)
         self.window.close()
@@ -145,8 +145,8 @@ class MissingWorkflowTests(unittest.TestCase):
 
     def test_record_repair_finishes_before_the_library_window_closes(self):
         self.load()
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.repair_records()
         thread.assert_called_once()
         self.assertTrue(self.window.repair_active)
@@ -170,8 +170,8 @@ class MissingWorkflowTests(unittest.TestCase):
         self.show_items()
         self.window.current_storage = resolve_storage(self.account, "offline")
         self.window.select_all_missing()
-        with patch("xlikesaver.history_gui.dialogs.askyesno", return_value=True), \
-                patch("xlikesaver.history_gui.threading.Thread") as thread:
+        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True), \
+                patch("luvbox.history_gui.threading.Thread") as thread:
             self.window.choose_missing(True)
         self.assertTrue(self.window.busy)
         self.assertTrue(self.window.choice_active)
@@ -221,7 +221,7 @@ class RetryContextTests(unittest.TestCase):
                 self.app.account.set(new_account)
                 self.app.folder.set(folder)
                 with patch.object(self.app, "start") as start, \
-                        patch("xlikesaver.gui.dialogs.showinfo") as notice:
+                        patch("luvbox.gui.dialogs.showinfo") as notice:
                     self.assertFalse(self.app.retry_missing(["100_1"], account, paths))
                 start.assert_not_called()
                 notice.assert_called_once()
@@ -233,7 +233,7 @@ class RetryContextTests(unittest.TestCase):
         self.app.account.set("@OFFLINE_TEST")
         self.app.folder_mode.set("작성자별 폴더")
         self.app.separate_accounts.set(True)
-        with patch("xlikesaver.gui.threading.Thread") as thread:
+        with patch("luvbox.gui.threading.Thread") as thread:
             self.assertTrue(self.app.retry_missing(["100_1"], account, paths))
         options = thread.call_args.kwargs["args"][0]
         self.assertEqual((options.account, options.folder_mode, options.separate_accounts),
@@ -244,14 +244,14 @@ class RetryContextTests(unittest.TestCase):
         self.session_mock.return_value = True
         self.app.history_window = Mock(metadata_active=False, delete_active=False, choice_active=True, repair_active=False)
         self.app.history_window.winfo_exists.return_value = True
-        with patch("xlikesaver.gui.threading.Thread") as thread, \
-                patch("xlikesaver.gui.dialogs.showinfo") as notice:
+        with patch("luvbox.gui.threading.Thread") as thread, \
+                patch("luvbox.gui.dialogs.showinfo") as notice:
             self.assertFalse(self.app.start())
         thread.assert_not_called()
         notice.assert_called_once()
         self.app.history_window.choice_active = False
         self.app.history_window.busy = True  # A read-only load is not a mutation.
-        with patch("xlikesaver.gui.threading.Thread"):
+        with patch("luvbox.gui.threading.Thread"):
             self.assertTrue(self.app.start())
         self.app.history_window._update_missing_actions.assert_called_once()
 
@@ -261,8 +261,8 @@ class RetryContextTests(unittest.TestCase):
         self.app.history_window = Mock(metadata_active=False, delete_active=False, choice_active=False,
                                        repair_active=True)
         self.app.history_window.winfo_exists.return_value = True
-        with patch("xlikesaver.gui.threading.Thread") as thread, \
-                patch("xlikesaver.gui.dialogs.showinfo") as notice:
+        with patch("luvbox.gui.threading.Thread") as thread, \
+                patch("luvbox.gui.dialogs.showinfo") as notice:
             self.assertFalse(self.app.start())
         thread.assert_not_called()
         notice.assert_called_once()
@@ -297,7 +297,7 @@ class ChoiceCopyTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        state = patch("xlikesaver.protection.state_directory", return_value=Path(self.temp.name) / "state")
+        state = patch("luvbox.protection.state_directory", return_value=Path(self.temp.name) / "state")
         state.start()
         self.addCleanup(state.stop)
         self.paths = resolve_storage(Path(self.temp.name) / "media", "offline")
@@ -344,8 +344,8 @@ class ChoiceCopyTests(unittest.TestCase):
         self.assertEqual(self.choose()[1], "missing-choice")
 
     def test_copy_failure_keeps_local_choice_and_reports_warning(self):
-        with patch("xlikesaver.history_gui.publish_snapshot", side_effect=OSError), \
-                patch("xlikesaver.recovery.backup_catalog", side_effect=OSError):
+        with patch("luvbox.history_gui.publish_snapshot", side_effect=OSError), \
+                patch("luvbox.recovery.backup_catalog", side_effect=OSError):
             result = self.choose()
         self.assertEqual(result[1], "missing-choice")
         self.assertIn("선택은 이 PC에 저장", result[2])
@@ -391,7 +391,7 @@ class ChoiceCopyTests(unittest.TestCase):
         guard = Mock()
         guard.acquire.side_effect = ProtectionError(_BUSY_HELP)
         guard.close.side_effect = OSError("offline account cleanup failure")
-        with patch("xlikesaver.protection.AccountGuard", return_value=guard):
+        with patch("luvbox.protection.AccountGuard", return_value=guard):
             generation, kind, message = self.choose()
         self.assertEqual((generation, kind, message), (1, "error", _BUSY_HELP))
         guard.close.assert_called_once_with()

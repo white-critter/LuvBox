@@ -13,9 +13,9 @@ from unittest.mock import Mock, patch
 from PIL import Image
 
 from tests.test_gui import destroy_tk, release_tk
-from xlikesaver import theme
-from xlikesaver.review_gui import ReviewWindow
-from xlikesaver.review_preview import ReviewFrame
+from luvbox import theme
+from luvbox.review_gui import ReviewWindow
+from luvbox.review_preview import ReviewFrame
 
 
 class ReviewGuiTests(unittest.TestCase):
@@ -34,7 +34,7 @@ class ReviewGuiTests(unittest.TestCase):
         self.finished = Event()
         self.finished.set()
         self.decoder = SimpleNamespace(frames=queue.Queue(maxsize=3), finished=self.finished, close=Mock())
-        self.patch_preview = patch("xlikesaver.review_gui.ReviewPreview", return_value=self.decoder)
+        self.patch_preview = patch("luvbox.review_gui.ReviewPreview", return_value=self.decoder)
         self.factory = self.patch_preview.start()
         self.addCleanup(self.patch_preview.stop)
 

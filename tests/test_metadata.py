@@ -17,7 +17,7 @@ from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from xlikesaver import metadata
+from luvbox import metadata
 
 
 URL = "https://x.com/i/web/status/100"
@@ -133,12 +133,12 @@ class MetadataTransactionTests(unittest.TestCase):
         empty = {"author": "", "author_id": "", "profile_url": ""}
         for tags in (
             {"XMP-dc:Creator": "@writer", "XMP-dc:Relation": "https://x.com/writer"},
-            {"XMP-xmp:Identifier": "xlikesaver:x-author:writer"},
-            {"XMP-xmp:Identifier": ["xlikesaver:x-author:writer", "xlikesaver:x-author:other"],
+            {"XMP-xmp:Identifier": "luvbox:x-author:writer"},
+            {"XMP-xmp:Identifier": ["luvbox:x-author:writer", "luvbox:x-author:other"],
              "XMP-dc:Creator": ["@writer", "@other"],
              "XMP-dc:Relation": ["https://x.com/writer", "https://x.com/other"]},
-            {"XMP-xmp:Identifier": "xlikesaver:x-author:writer\n" + SECRET},
-            {"XMP-xmp:Identifier": "xlikesaver:x-user-id:123"},
+            {"XMP-xmp:Identifier": "luvbox:x-author:writer\n" + SECRET},
+            {"XMP-xmp:Identifier": "luvbox:x-user-id:123"},
         ):
             with self.subTest(tags=tags), patch.object(metadata, "available", return_value=True), \
                     patch.object(metadata, "_read_tags", return_value=tags):
@@ -152,7 +152,7 @@ class MetadataTransactionTests(unittest.TestCase):
                  "XMP-dc:Description": URL + "\nX author: @writer (https://x.com/writer)",
                  "XMP-dc:Creator": ["Original creator", "@writer"],
                  "XMP-dc:Relation": ["https://original.example/", "https://x.com/writer"],
-                 "XMP-xmp:Identifier": ["original-id", "xlikesaver:x-author:writer"]}
+                 "XMP-xmp:Identifier": ["original-id", "luvbox:x-author:writer"]}
         for tag in ("XMP-dc:Creator", "XMP-dc:Relation", "XMP-xmp:Identifier"):
             incomplete = {**valid, tag: []}
             def fake(arguments, deadline):
@@ -185,7 +185,7 @@ class MetadataTransactionTests(unittest.TestCase):
     def test_external_failure_timeout_and_verification_failure_preserve_original(self):
         for failure in ("write", "timeout", "read", "mismatch"):
             def fake(arguments, deadline):
-                if "-overwrite_original" in arguments:
+                if "-overwrite_original_in_place" in arguments:
                     Path(arguments[-1]).write_bytes(b"changed-only-temp")
                     if failure == "timeout":
                         raise subprocess.TimeoutExpired(SECRET, 20, output=SECRET)
@@ -204,7 +204,7 @@ class MetadataTransactionTests(unittest.TestCase):
         reads = 0
         def fake(arguments, deadline):
             nonlocal reads
-            if "-overwrite_original" in arguments:
+            if "-overwrite_original_in_place" in arguments:
                 self.path.write_bytes(b"concurrent-local-change")
                 return subprocess.CompletedProcess([], 0, "", "")
             reads += 1
@@ -268,7 +268,7 @@ class MetadataTransactionTests(unittest.TestCase):
             self.assertEqual(metadata.read_source(self.path), "")
 
     def test_frozen_bundle_is_resolved_next_to_application(self):
-        with patch.object(metadata.sys, "frozen", True, create=True), patch.object(metadata.sys, "executable", str(self.root / "XlikeSaver.exe")):
+        with patch.object(metadata.sys, "frozen", True, create=True), patch.object(metadata.sys, "executable", str(self.root / "LuvBox.exe")):
             self.assertEqual(metadata.exiftool_path(), self.root / "tools" / "exiftool" / "runtime" / "exiftool.exe")
 
     def test_description_and_comment_do_not_confuse_longer_url_with_source(self):
@@ -325,7 +325,7 @@ class ResidentStdinTests(unittest.TestCase):
         return session
 
     def run_embed(self, session):
-        markers = [f"xlikesaver:x-author:old{index:011d}" for index in range(2000)]
+        markers = [f"luvbox:x-author:old{index:011d}" for index in range(2000)]
         self.assertTrue(all(metadata._identity_marker(marker) for marker in markers))
         results = []
         with patch.object(metadata, "available", return_value=True), \
@@ -511,16 +511,16 @@ class ActualExifToolTests(unittest.TestCase):
                         self.assertEqual(metadata._values(first["XMP-dc:Creator"]), ["원본 작가", "@photographer", "@Example_User"])
                         self.assertEqual(set(metadata._values(first["XMP-dc:Relation"])),
                                          {"https://original.example/source", "https://x.com/Example_User", "https://x.com/i/user/1234567890"})
-                        ownership = {"xlikesaver:owned-author:v1:creator:Example_User",
-                                     "xlikesaver:owned-author:v1:profile:Example_User",
-                                     "xlikesaver:owned-author:v1:user-url:1234567890",
-                                     "xlikesaver:owned-author:v1:description-handle:Example_User",
-                                     "xlikesaver:owned-author:v1:description-id:1234567890"}
+                        ownership = {"luvbox:owned-author:v1:creator:Example_User",
+                                     "luvbox:owned-author:v1:profile:Example_User",
+                                     "luvbox:owned-author:v1:user-url:1234567890",
+                                     "luvbox:owned-author:v1:description-handle:Example_User",
+                                     "luvbox:owned-author:v1:description-id:1234567890"}
                         if suffix == ".mp4":
-                            ownership.update({"xlikesaver:owned-author:v1:comment-handle:Example_User",
-                                              "xlikesaver:owned-author:v1:comment-id:1234567890"})
+                            ownership.update({"luvbox:owned-author:v1:comment-handle:Example_User",
+                                              "luvbox:owned-author:v1:comment-id:1234567890"})
                         self.assertEqual(set(metadata._values(first["XMP-xmp:Identifier"])),
-                                         {"original:123", "xlikesaver:x-author:Example_User", "xlikesaver:x-user-id:1234567890"} | ownership)
+                                         {"original:123", "luvbox:x-author:Example_User", "luvbox:x-user-id:1234567890"} | ownership)
                         self.assertIn("원본 설명\nSource: " + URL, first["XMP-dc:Description"])
                         self.assertIn("X author: @Example_User (https://x.com/Example_User)", first["XMP-dc:Description"])
                         self.assertEqual(metadata.embed_source(path, "100", "Example_User", "1234567890")["author_status"], "embedded")
@@ -537,7 +537,7 @@ class ActualExifToolTests(unittest.TestCase):
                         if suffix == ".mp4":
                             self.assertIn("X author: @Example_User", first["ItemList:Comment"])
                             self.assertEqual(first["UserData:Comment"], "Separate comment")
-                        self.assertFalse(list(self.root.glob(".xlikesaver-source-*")))
+                        self.assertFalse(list(self.root.glob(".luvbox-source-*")))
 
     def test_numeric_author_id_without_handle_is_recorded_without_guessing_a_handle(self):
         path = self.root / "100_numeric.png"
@@ -562,12 +562,12 @@ class ActualExifToolTests(unittest.TestCase):
         self.assertEqual(set(metadata._values(tags["XMP-dc:Relation"])),
                          {"https://example.com/album", "https://x.com/current_name", "https://x.com/i/user/67890"})
         self.assertEqual(set(metadata._values(tags["XMP-xmp:Identifier"])),
-                         {"urn:other:1", "xlikesaver:x-author:current_name", "xlikesaver:x-user-id:67890",
-                          "xlikesaver:owned-author:v1:creator:current_name",
-                          "xlikesaver:owned-author:v1:profile:current_name",
-                          "xlikesaver:owned-author:v1:user-url:67890",
-                          "xlikesaver:owned-author:v1:description-handle:current_name",
-                          "xlikesaver:owned-author:v1:description-id:67890"})
+                         {"urn:other:1", "luvbox:x-author:current_name", "luvbox:x-user-id:67890",
+                          "luvbox:owned-author:v1:creator:current_name",
+                          "luvbox:owned-author:v1:profile:current_name",
+                          "luvbox:owned-author:v1:user-url:67890",
+                          "luvbox:owned-author:v1:description-handle:current_name",
+                          "luvbox:owned-author:v1:description-id:67890"})
         self.assertEqual(tags["XMP-dc:Description"], URL + "\nX author: @current_name (https://x.com/current_name)\n"
                                                       "X user ID: 67890 (https://x.com/i/user/67890)")
 
@@ -584,8 +584,8 @@ class ActualExifToolTests(unittest.TestCase):
     def test_matching_external_author_values_are_not_claimed_or_removed(self):
         old_lines = "X author: @previous_name (https://x.com/previous_name)\nX user ID: 12345 (https://x.com/i/user/12345)"
         external_text = "외부 설명\r\n" + old_lines
-        unrelated = ["urn:external:1", "xlikesaver:x-author:old name", "xlikesaver:x-user-id:unknown",
-                     "xlikesaver:owned-author:v1:external:previous_name"]
+        unrelated = ["urn:external:1", "luvbox:x-author:old name", "luvbox:x-user-id:unknown",
+                     "luvbox:owned-author:v1:external:previous_name"]
         with metadata.persistent():
             for suffix in (".jpg", ".png", ".webp", ".mp4"):
                 with self.subTest(suffix=suffix):
@@ -608,7 +608,7 @@ class ActualExifToolTests(unittest.TestCase):
                     self.assertEqual(metadata.embed_source(path, "100", "previous_name", "12345")["author_status"], "embedded")
                     first = metadata._read_tags(path, time.monotonic() + 20)
                     self.assertEqual(set(metadata._values(first["XMP-xmp:Identifier"])),
-                                     set(unrelated) | {"xlikesaver:x-author:previous_name", "xlikesaver:x-user-id:12345"})
+                                     set(unrelated) | {"luvbox:x-author:previous_name", "luvbox:x-user-id:12345"})
                     self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
                     changed = metadata._read_tags(path, time.monotonic() + 20)
                     self.assertEqual(metadata._values(changed["XMP-dc:Creator"]), ["@previous_name", "@current_name"])
@@ -640,8 +640,8 @@ class ActualExifToolTests(unittest.TestCase):
         arguments = ["-overwrite_original", "-XMP-dc:Source=" + URL,
                      "-XMP-dc:Creator=@previous_name", "-XMP-dc:Relation=https://x.com/previous_name",
                      "-XMP-dc:Relation+=https://x.com/i/user/12345", f"-XMP-dc:Description-x-default<={text_path}",
-                     "-XMP-xmp:Identifier=xlikesaver:x-author:previous_name",
-                     "-XMP-xmp:Identifier+=xlikesaver:x-user-id:12345"]
+                     "-XMP-xmp:Identifier=luvbox:x-author:previous_name",
+                     "-XMP-xmp:Identifier+=luvbox:x-user-id:12345"]
         self.assertEqual(metadata._run(arguments + [str(path)], time.monotonic() + 20).returncode, 0)
         with metadata.persistent():
             self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
@@ -650,8 +650,8 @@ class ActualExifToolTests(unittest.TestCase):
             self.assertTrue(tags["XMP-dc:Description"].startswith(legacy_description + "\n"))
             self.assertIn("https://x.com/previous_name", metadata._values(tags["XMP-dc:Relation"]))
             self.assertIn("https://x.com/i/user/12345", metadata._values(tags["XMP-dc:Relation"]))
-            self.assertNotIn("xlikesaver:x-author:previous_name", metadata._values(tags["XMP-xmp:Identifier"]))
-            self.assertNotIn("xlikesaver:x-user-id:12345", metadata._values(tags["XMP-xmp:Identifier"]))
+            self.assertNotIn("luvbox:x-author:previous_name", metadata._values(tags["XMP-xmp:Identifier"]))
+            self.assertNotIn("luvbox:x-user-id:12345", metadata._values(tags["XMP-xmp:Identifier"]))
             self.assertEqual(metadata.read_author(path), {"author": "current_name", "author_id": "67890",
                                                          "profile_url": "https://x.com/current_name"})
 
@@ -703,7 +703,7 @@ class ActualExifToolTests(unittest.TestCase):
                 self.assertEqual(metadata.read_source(path), URL)
                 self.assertEqual(image_payload(path.read_bytes(), suffix), before)
                 self.assertEqual(path.stat().st_mtime_ns, mtime)
-                self.assertFalse(list(self.root.glob(".xlikesaver-source-*")))
+                self.assertFalse(list(self.root.glob(".luvbox-source-*")))
                 self.assertFalse(list(self.root.glob("*_original")))
 
     def test_existing_multilingual_description_is_preserved_and_url_not_duplicated(self):
@@ -762,7 +762,7 @@ class ActualExifToolTests(unittest.TestCase):
                     self.assertEqual(image_payload(path.read_bytes(), suffix), image_payload(payload, suffix))
         self.assertEqual(popen.call_count, 1)
         self.assertIsNone(metadata._session)
-        self.assertFalse(list(self.root.glob(".xlikesaver-source-*")))
+        self.assertFalse(list(self.root.glob(".luvbox-source-*")))
 
     def test_resident_exiftool_reports_failures_and_falls_back_when_its_process_dies(self):
         path = self.root / "300_1.png"

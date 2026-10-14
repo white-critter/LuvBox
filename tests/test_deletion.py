@@ -10,19 +10,19 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
-from xlikesaver import deletion
-from xlikesaver.history import HistoryError, HistoryStore
-from xlikesaver.protection import AccountGuard, ProtectionError
-from xlikesaver.recycling import RecyclingError, file_signature
-from xlikesaver.storage import OutputGuard, resolve_storage
+from luvbox import deletion
+from luvbox.history import HistoryError, HistoryStore
+from luvbox.protection import AccountGuard, ProtectionError
+from luvbox.recycling import RecyclingError, file_signature
+from luvbox.storage import OutputGuard, resolve_storage
 
 
 class DeletionWorkerTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="xlikesaver-deletion-test-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="luvbox-deletion-test-")
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name)
-        self.protection = patch("xlikesaver.protection.state_directory",
+        self.protection = patch("luvbox.protection.state_directory",
                                 return_value=self.base / "app" / "request-protection")
         self.protection.start()
         self.addCleanup(self.protection.stop)
@@ -213,7 +213,7 @@ class DeletionWorkerTests(unittest.TestCase):
         outside = self.base / "outside.jpg"
         outside.write_bytes(b"fixture must remain")
         row["path"] = str(outside)
-        with closing(sqlite3.connect(self.paths.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.paths.record_dir / ".luvbox-history.sqlite3")) as db:
             db.execute("UPDATE media SET path=?", (str(outside),))
             db.commit()
         result = self.run_worker([row])
@@ -225,7 +225,7 @@ class DeletionWorkerTests(unittest.TestCase):
         row = self.row("100")
         changed = self.output / "other.jpg"
         changed.write_bytes(b"new fixture path")
-        with closing(sqlite3.connect(self.paths.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.paths.record_dir / ".luvbox-history.sqlite3")) as db:
             db.execute("UPDATE media SET path=?", (str(changed),))
             db.commit()
         result = self.run_worker([row])
@@ -236,7 +236,7 @@ class DeletionWorkerTests(unittest.TestCase):
 
     def test_missing_catalog_identity_never_deletes_surviving_file(self):
         row = self.row("100")
-        with closing(sqlite3.connect(self.paths.record_dir / ".xlikesaver-history.sqlite3")) as db:
+        with closing(sqlite3.connect(self.paths.record_dir / ".luvbox-history.sqlite3")) as db:
             db.execute("DELETE FROM media")
             db.commit()
         result = self.run_worker([row])
@@ -376,7 +376,7 @@ class DeletionWorkerTests(unittest.TestCase):
         row = self.row("100")
 
         def recycle(path, expected=None):
-            with closing(sqlite3.connect(self.paths.record_dir / ".xlikesaver-history.sqlite3")) as db:
+            with closing(sqlite3.connect(self.paths.record_dir / ".luvbox-history.sqlite3")) as db:
                 item = db.execute("SELECT status,path,signature FROM deletion_items").fetchone()
             self.assertEqual(item[:2], ("pending", row["path"]))
             self.assertEqual(json.loads(item[2]), list(expected))
@@ -426,7 +426,7 @@ class DeletionWorkerTests(unittest.TestCase):
     def test_snapshot_contains_completed_journal_and_choices(self):
         row = self.row("100")
         self.run_worker([row])
-        snapshot = self.paths.snapshot_dir / ".xlikesaver-history.sqlite3"
+        snapshot = self.paths.snapshot_dir / ".luvbox-history.sqlite3"
         self.assertTrue(snapshot.exists())
         with closing(sqlite3.connect(f"file:{snapshot.as_posix()}?mode=ro", uri=True)) as db:
             self.assertEqual(db.execute("SELECT status FROM deletion_items").fetchone()[0], "recycled")

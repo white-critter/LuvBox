@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from xlikesaver.review_preview import FRAME_QUEUE_SIZE, ReviewFrame, ReviewPreview
+from luvbox.review_preview import FRAME_QUEUE_SIZE, ReviewFrame, ReviewPreview
 
 
 class FakeProcess:
@@ -91,12 +91,12 @@ class ReviewPreviewTests(unittest.TestCase):
                 result = self.preview(path).frames.get(timeout=3)
                 self.assertIsNone(result.image)
                 self.assertIn("미리보기", result.note)
-        with patch("xlikesaver.review_preview.cloud_only", return_value=True), \
-                patch("xlikesaver.review_preview.Image.open") as image:
+        with patch("luvbox.review_preview.cloud_only", return_value=True), \
+                patch("luvbox.review_preview.Image.open") as image:
             result = self.preview(self.photo()).frames.get(timeout=3)
             self.assertIsNone(result.image)
             image.assert_not_called()
-        with patch("xlikesaver.review_preview.MAX_PIXELS", 100):
+        with patch("luvbox.review_preview.MAX_PIXELS", 100):
             result = self.preview(self.photo()).frames.get(timeout=3)
             self.assertIsNone(result.image)
             self.assertIn("커서", result.note)
@@ -104,7 +104,7 @@ class ReviewPreviewTests(unittest.TestCase):
     def test_changed_photo_is_not_displayed_as_the_original_selection(self):
         path = self.photo()
         real_signature = (path.stat().st_dev, path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns)
-        with patch("xlikesaver.review_preview._signature", side_effect=[real_signature, (0, 0, 0, 0)]):
+        with patch("luvbox.review_preview._signature", side_effect=[real_signature, (0, 0, 0, 0)]):
             result = self.preview(path).frames.get(timeout=3)
         self.assertIsNone(result.image)
         self.assertIn("변경", result.note)
@@ -122,8 +122,8 @@ class ReviewPreviewTests(unittest.TestCase):
             processes.append(process)
             return process
 
-        with patch("xlikesaver.media.ffmpeg_path", return_value=Path("bundled.exe")), \
-                patch("xlikesaver.review_preview.subprocess.Popen", side_effect=launch) as popen:
+        with patch("luvbox.media.ffmpeg_path", return_value=Path("bundled.exe")), \
+                patch("luvbox.review_preview.subprocess.Popen", side_effect=launch) as popen:
             preview = self.preview(path, "video", size=(16, 16))
             result = preview.frames.get(timeout=3)
             self.assertEqual(result.image.getpixel((1, 1)), (80, 100, 120))
@@ -156,9 +156,9 @@ class ReviewPreviewTests(unittest.TestCase):
         path = self.root / "stall.part"
         path.write_bytes(b"offline mp4")
         process = FakeProcess(blocked=True)
-        with patch("xlikesaver.media.ffmpeg_path", return_value=Path("bundled.exe")), \
-                patch("xlikesaver.review_preview.DECODER_TIMEOUT", .15), \
-                patch("xlikesaver.review_preview.subprocess.Popen", return_value=process):
+        with patch("luvbox.media.ffmpeg_path", return_value=Path("bundled.exe")), \
+                patch("luvbox.review_preview.DECODER_TIMEOUT", .15), \
+                patch("luvbox.review_preview.subprocess.Popen", return_value=process):
             preview = self.preview(path, "video", size=(16, 16))
             result = preview.frames.get(timeout=3)
             self.assertIsNone(result.image)
@@ -178,8 +178,8 @@ class ReviewPreviewTests(unittest.TestCase):
             release.wait(3)
             return process
 
-        with patch("xlikesaver.media.ffmpeg_path", return_value=Path("bundled.exe")), \
-                patch("xlikesaver.review_preview.subprocess.Popen", side_effect=launch):
+        with patch("luvbox.media.ffmpeg_path", return_value=Path("bundled.exe")), \
+                patch("luvbox.review_preview.subprocess.Popen", side_effect=launch):
             preview = self.preview(path, "video", size=(16, 16))
             self.assertTrue(entered.wait(3))
             started = time.monotonic()
@@ -193,7 +193,7 @@ class ReviewPreviewTests(unittest.TestCase):
 
     def test_missing_decoder_and_unsupported_type_are_safe_notices(self):
         path = self.photo()
-        with patch("xlikesaver.media.ffmpeg_path", return_value=None):
+        with patch("luvbox.media.ffmpeg_path", return_value=None):
             result = self.preview(path, "video").frames.get(timeout=3)
             self.assertIsNone(result.image)
             self.assertIn("도구", result.note)
@@ -207,7 +207,7 @@ class ReviewPreviewTests(unittest.TestCase):
                 ReviewPreview(self.root / "missing.part", "photo", size=size)
 
     def test_real_video_and_gif_play_multiple_frames_and_close_handles(self):
-        from xlikesaver.media import ffmpeg_path
+        from luvbox.media import ffmpeg_path
         executable = ffmpeg_path()
         if executable is None:
             self.skipTest("Bundled FFmpeg is not installed")

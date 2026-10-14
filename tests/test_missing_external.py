@@ -9,9 +9,9 @@ from unittest.mock import patch
 
 from tests import test_core
 from tests.test_missing_files import FakeTweetExtractor
-from xlikesaver.core import run_worker
-from xlikesaver.history import HistoryStore
-from xlikesaver.storage import migrate_records, resolve_storage
+from luvbox.core import run_worker
+from luvbox.history import HistoryStore
+from luvbox.storage import migrate_records, resolve_storage
 
 
 class ExternalMissingRetryTests(unittest.TestCase):
@@ -103,10 +103,10 @@ class ExternalMissingRetryTests(unittest.TestCase):
         original.write_bytes(b"GIF89aoffline original")
         with closing(HistoryStore.for_storage(old)) as store:
             store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "animated_gif",
-                                       "author": {"name": "alice"}, "_xlikesaver_metadata_status": "embedded",
-                                       "_xlikesaver_author_metadata_status": "embedded"}, original)
+                                       "author": {"name": "alice"}, "_luvbox_metadata_status": "embedded",
+                                       "_luvbox_author_metadata_status": "embedded"}, original)
             [before] = store.records()
-        with closing(sqlite3.connect(old.record_dir / ".xlikesaver-archive.flat.sqlite3")) as db:
+        with closing(sqlite3.connect(old.record_dir / ".luvbox-archive.flat.sqlite3")) as db:
             db.execute("CREATE TABLE archive(entry TEXT PRIMARY KEY) WITHOUT ROWID")
             db.execute("INSERT INTO archive VALUES ('twitter100_animated_gif_1')")
             db.commit()
