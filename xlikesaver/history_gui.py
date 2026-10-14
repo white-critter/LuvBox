@@ -2119,12 +2119,13 @@ class HistoryWindow(tk.Toplevel):
 
     @staticmethod
     def _backfill_worker(results, metadata_stop, generation, directory):
-        from .metadata import author_identity, embed_source, persistent
+        from .metadata import author_identity, embed_source, failure_message, persistent
         from .protection import AccountGuard, ProtectionError
         store = None
         account_guard = None
         output_guards = []
         success = failed = unavailable = 0
+        reasons = {}
         kind = "error"
         message = "메타데이터 기록을 마치지 못했습니다. 기록 DB와 파일 접근 권한을 확인해 주세요."
         try:
@@ -2173,13 +2174,22 @@ class HistoryWindow(tk.Toplevel):
                             success += 1
                         else:
                             failed += 1
+                            if result["status"] == "failed":
+                                reason = result.get("reason")
+                                reasons[reason] = reasons.get(reason, 0) + 1
                         results.put((generation, "metadata-progress", f"출처·작성자 기록 · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개"))
                     if metadata_stop.is_set():
                         break
                     offset += len(rows)
             state = "중단" if metadata_stop.is_set() else "종료"
             kind = "backfilled"
-            message = f"출처·작성자 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개. X 요청은 보내지 않았습니다."
+            message = f"출처·작성자 기록 {state} · 완료 {success:,}개 / 실패·미지원 {failed:,}개 / 파일 없음 {unavailable:,}개."
+            if reasons:
+                # Only fixed text for the most frequent reason code, so a retry
+                # says what to fix (e.g. a viewer holding the file).
+                reason = max(reasons, key=reasons.get)
+                message += f" {'실패 이유' if len(reasons) == 1 else '가장 많은 실패 이유'}: {failure_message(reason)}"
+            message += " X 요청은 보내지 않았습니다."
         except ProtectionError as exc:
             message = str(exc)
         except Exception:

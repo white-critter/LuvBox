@@ -62,7 +62,7 @@ class InteractiveSaveTests(unittest.TestCase):
 
     def convert(self, source, **kwargs):
         self.assertTrue(source.name.endswith(".mp4.part"))
-        self.assertTrue(core._gif_source_complete(source))
+        self.assertTrue(core._transfer_complete(source))
         kwargs["check_stop"]()
         target = source.parent / ".test-review.gif"
         Image.new("RGB", (10, 10), "green").save(target, "GIF")
@@ -385,7 +385,7 @@ class InteractiveSaveTests(unittest.TestCase):
         path = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"completed-local-gif")
-        core._mark_gif_source_complete(path)
+        core._mark_transfer_complete(path)
         marker = Path(str(path) + ".xlikesaver-complete")
 
         with patch("xlikesaver.thumbcache.Recorder.add",
@@ -610,7 +610,7 @@ class InteractiveSaveTests(unittest.TestCase):
         path = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"completed-local-gif")
-        core._mark_gif_source_complete(path)
+        core._mark_transfer_complete(path)
         with patch("xlikesaver.core.convert_mp4_to_gif") as convert:
             result, events = self.worker([("100", 1, "animated_gif", "alice")], review=Review(("skip",)),
                                          options=self.options_all())
@@ -625,7 +625,7 @@ class InteractiveSaveTests(unittest.TestCase):
         path = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
         path.parent.mkdir(parents=True)
         path.write_bytes(b"completed-local-gif")
-        core._mark_gif_source_complete(path)
+        core._mark_transfer_complete(path)
         marker = Path(str(path) + ".xlikesaver-complete")
 
         def edit_marker(path, media, check_stop):

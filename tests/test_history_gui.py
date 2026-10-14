@@ -1790,6 +1790,52 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "error"))
         self.assertEqual(row["saved_at"], original["saved_at"])
 
+    def backfill_message(self):
+        messages = []
+        while not self.window.results.empty():
+            messages.append(self.window.results.get_nowait())
+        _generation, kind, message = messages[-1]
+        self.assertEqual(kind, "backfilled")
+        return message
+
+    def test_backfill_failure_names_the_fixed_reason_without_tool_text(self):
+        store = self.records(3)
+        secret = r"C:\Users\private\exiftool: Error renaming temporary file"
+        results = iter([{"status": "failed", "author_status": "error", "reason": "busy",
+                         "reason_message": secret, "message": secret},
+                        {"status": "failed", "author_status": "error", "reason": "busy"},
+                        {"status": "failed", "author_status": "error", "reason": "permission"}])
+        with patch("xlikesaver.metadata.embed_source", side_effect=lambda *args, **kwargs: next(results)), \
+                patch("requests.Session.request") as network:
+            self.window._backfill(self.window.generation, self.account)
+        network.assert_not_called()
+        message = self.backfill_message()
+        self.assertIn("실패·미지원 3개", message)
+        self.assertIn("가장 많은 실패 이유: 다른 프로그램이 파일을 사용 중입니다.", message)
+        self.assertNotIn("권한", message)
+        self.assertNotIn(secret, message)
+        self.assertTrue(message.endswith("X 요청은 보내지 않았습니다."))
+        self.assertEqual({row["metadata_status"] for row in store.records()}, {"failed"})
+
+        # A single kind of failure, an unknown code and success or unsupported alone.
+        for returned, expected in ((
+                {"status": "failed", "author_status": "error", "reason": "timeout"}, "실패 이유: 출처 기록 도구의 응답"),
+                ({"status": "failed", "author_status": "error", "reason": secret}, "실패 이유: 출처 기록을 완료하지"),
+                ({"status": "unsupported", "author_status": "unknown"}, None),
+                ({"status": "embedded", "author_status": "embedded"}, None)):
+            with self.subTest(status=returned["status"], reason=returned.get("reason")):
+                store._db.execute("UPDATE media SET metadata_status='pending',author_metadata_status='pending'")
+                store._db.commit()
+                with patch("xlikesaver.metadata.embed_source", return_value=returned):
+                    self.window._backfill(self.window.generation, self.account)
+                message = self.backfill_message()
+                self.assertNotIn(secret, message)
+                if expected is None:
+                    self.assertNotIn("실패 이유", message)
+                else:
+                    self.assertIn(expected, message)
+                    self.assertNotIn("가장 많은", message)
+
 
 class LocalChangeWorkerTests(unittest.TestCase):
     """Completion must let the UI close or start a save without a live writer."""
