@@ -21,7 +21,7 @@ import warnings
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .preview import MAX_PIXELS
+from .preview import MAX_PIXELS, oriented_thumbnail
 from .thumbcache import cloud_only
 
 
@@ -37,6 +37,41 @@ class ReviewFrame:
     image: Image.Image | None
     duration_ms: int = 0
     note: str = ""
+
+
+class _GifSampler:
+    """Sample a continuous GIF timeline without rounding away loop tails."""
+
+    def __init__(self, size, interval, send, note):
+        self.size = size
+        self.interval = interval
+        self.send = send
+        self.note = note
+        self.duration = 0
+        self.image = None
+
+    def add(self, original, duration):
+        while duration:
+            if self.image is None:
+                self.image = ImageOps.contain(original, self.size, Image.Resampling.LANCZOS).convert("RGBA")
+            # A long source frame needs one held image, rather than a copy
+            # for every sampling interval in which its pixels stay the same.
+            consumed = (duration // self.interval * self.interval
+                        if not self.duration and duration >= self.interval
+                        else min(duration, self.interval - self.duration))
+            duration -= consumed
+            self.duration += consumed
+            if self.duration >= self.interval:
+                image, self.image = self.image, None
+                elapsed, self.duration = self.duration, 0
+                if not self.send(ReviewFrame(image, elapsed, self.note)):
+                    return False
+        return True
+
+    def close(self):
+        if self.image is not None:
+            self.image.close()
+            self.image = None
 
 
 def _signature(path: Path) -> tuple[int, int, int, int]:
@@ -188,10 +223,7 @@ class ReviewPreview:
                 if original.width * original.height > MAX_PIXELS:
                     self._send(ReviewFrame(None, note="이미지가 커서 미리보기를 표시할 수 없습니다."))
                     return
-                original.draft("RGB", self.size)
-                image = ImageOps.exif_transpose(original)
-                image.thumbnail(self.size, Image.Resampling.LANCZOS)
-                image = image.convert("RGBA")
+                image = oriented_thumbnail(original, self.size)
         if _signature(self.path) != signature:
             image.close()
             self._send(ReviewFrame(None, note="파일이 변경되었습니다. 이번 항목을 건너뛰어 주세요."))
@@ -210,21 +242,24 @@ class ReviewPreview:
         """Read one GIF frame at a time; sample fast GIFs without slowing them."""
         note = f"GIF · 소리 없이 재생 · 처음 {LOOP_SECONDS}초 반복"
         interval = max(1, round(1000 / PLAYBACK_FPS))
+        sampler = _GifSampler(self.size, interval, self._send, note)
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(self.path) as original:
                 if original.width * original.height > MAX_PIXELS:
                     self._send(ReviewFrame(None, note="이미지가 커서 미리보기를 표시할 수 없습니다."))
                     return
-                while not self.stop.is_set():
-                    if _signature(self.path) != signature:
-                        self._send(ReviewFrame(None, note="파일이 변경되었습니다. 이번 항목을 건너뛰어 주세요."))
-                        return
-                    selected = None
-                    duration = elapsed = emitted = 0
-                    try:
+                try:
+                    while not self.stop.is_set():
+                        if _signature(self.path) != signature:
+                            self._send(ReviewFrame(None, note="파일이 변경되었습니다. 이번 항목을 건너뛰어 주세요."))
+                            return
+                        elapsed = 0
+                        seen = False
                         # At most 3,000 10ms input frames per 30-second loop.
-                        # Sampling changes displayed FPS rather than GIF speed.
+                        # Keep the sampler's partial interval across loops:
+                        # resetting it would freeze short, fast animations on
+                        # the same first frame or stretch their last frame.
                         for index in range(LOOP_SECONDS * 100):
                             if self.stop.is_set():
                                 return
@@ -232,30 +267,18 @@ class ReviewPreview:
                                 original.seek(index)
                             except EOFError:
                                 break
-                            if selected is None:
-                                selected = ImageOps.contain(original, self.size, Image.Resampling.LANCZOS).convert("RGBA")
+                            seen = True
                             frame_duration = max(10, min(60_000, int(original.info.get("duration") or 100)))
                             frame_duration = min(frame_duration, LOOP_SECONDS * 1000 - elapsed)
-                            duration += frame_duration
                             elapsed += frame_duration
-                            if duration >= interval or elapsed >= LOOP_SECONDS * 1000:
-                                image, selected = selected, None
-                                if not self._send(ReviewFrame(image, duration, note)):
-                                    return
-                                emitted += 1
-                                duration = 0
+                            if not sampler.add(original, frame_duration):
+                                return
                             if elapsed >= LOOP_SECONDS * 1000:
                                 break
-                        if selected is not None:
-                            image, selected = selected, None
-                            if not self._send(ReviewFrame(image, max(interval, duration), note)):
-                                return
-                            emitted += 1
-                        if not emitted:
+                        if not seen:
                             raise OSError("empty GIF")
-                    finally:
-                        if selected is not None:
-                            selected.close()
+                finally:
+                    sampler.close()
 
     def _video(self, signature):
         from .media import ffmpeg_path

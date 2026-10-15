@@ -90,6 +90,43 @@ class GifConversionTests(unittest.TestCase):
         with patch.dict(os.environ, {"IMAGEIO_FFMPEG_EXE": "C:/untrusted/ffmpeg.exe"}):
             self.assertEqual(media.ffmpeg_path(), self.executable)
 
+    def test_both_conversion_passes_force_the_mp4_source_format(self):
+        with patch.object(media, "_run", wraps=media._run) as run:
+            converted = media.convert_mp4_to_gif(self.source)
+        try:
+            self.assertEqual(run.call_count, 2)
+            for call in run.call_args_list:
+                arguments = call.args[0]
+                source_input = arguments.index("-i")
+                self.assertEqual(arguments[source_input - 2:source_input + 2],
+                                 ["-f", "mov", "-i", str(self.source)])
+        finally:
+            converted.unlink()
+        self.assert_source_only()
+
+    def test_development_decoder_rejects_a_playlist_disguised_as_mp4(self):
+        import imageio_ffmpeg
+        from luvbox.preview import thumbnail
+
+        directory = Path(imageio_ffmpeg.__file__).resolve().parent / "binaries"
+        fallback = next((path for path in sorted(directory.glob("ffmpeg-*"))
+                         if path.is_file() and (os.name != "nt" or path.suffix == ".exe")), None)
+        if fallback is None:
+            self.skipTest("Development FFmpeg binary is not installed")
+        playlist = self.directory / "playlist.mp4.part"
+        playlist.write_text(f"ffconcat version 1.0\nfile '{self.source.name}'\n", encoding="ascii")
+        before = playlist.read_bytes()
+        try:
+            with patch.object(media, "ffmpeg_path", return_value=fallback):
+                self.assertIsNone(thumbnail(playlist, suffix=".mp4").image)
+                with self.assertRaises(media.ConversionError):
+                    media.convert_mp4_to_gif(playlist)
+            self.assertEqual(playlist.read_bytes(), before)
+            self.assertEqual(sorted(self.directory.iterdir()), sorted([self.source, playlist]))
+        finally:
+            playlist.unlink()
+        self.assert_source_only()
+
     def test_output_size_failure_cleans_generated_files_and_keeps_mp4(self):
         with self.assertRaises(media.ConversionSizeLimit):
             media.convert_mp4_to_gif(self.source, max_bytes=32)

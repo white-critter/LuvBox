@@ -24,6 +24,24 @@ class Thumbnail:
     note: str
 
 
+def oriented_thumbnail(original: Image.Image, size) -> Image.Image:
+    """Shrink before copying/rotating pixels; return a detached RGBA preview.
+
+    EXIF quarter turns swap the decoder's target bounds. Reducing the open
+    image first avoids a full-size copy for formats without JPEG's draft
+    decoding, while preserving the displayed orientation and aspect ratio.
+    """
+    orientation = original.getexif().get(274)
+    bounds = size[::-1] if orientation in (5, 6, 7, 8) else size
+    original.draft("RGB", bounds)
+    original.thumbnail(bounds, Image.Resampling.LANCZOS)
+    image = ImageOps.exif_transpose(original)
+    try:
+        return image.convert("RGBA")
+    finally:
+        image.close()
+
+
 def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Thumbnail:
     """Decode one image/frame, with bounded output and no external protocols.
 
@@ -44,7 +62,7 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
                 return Thumbnail(None, "동영상 미리보기 도구가 없습니다. 파일 열기로 확인해 주세요.")
             result = subprocess.run(
                 [str(executable), "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
-                 "-threads", "1", "-i", str(path.resolve()), "-an", "-sn", "-dn", "-frames:v", "1",
+                 "-threads", "1", "-f", "mov", "-i", str(path.resolve()), "-an", "-sn", "-dn", "-frames:v", "1",
                  "-vf", f"scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease",
                  "-f", "image2pipe", "-vcodec", "bmp", "pipe:1"],
                 capture_output=True, timeout=8,
@@ -63,10 +81,7 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
             with Image.open(source) as original:
                 if original.width * original.height > MAX_PIXELS:
                     return Thumbnail(None, "큰 이미지입니다. 파일 열기로 확인해 주세요.")
-                original.draft("RGB", size)
-                image = ImageOps.exif_transpose(original)
-                image.thumbnail(size, Image.Resampling.LANCZOS)
-                image = image.convert("RGBA")
+                image = oriented_thumbnail(original, size)
         return Thumbnail(image, note)
     except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError,
             Image.DecompressionBombWarning, subprocess.SubprocessError):
@@ -89,10 +104,17 @@ class PreviewLoader:
     def request(self, token, path, permitted, *, remember=None, recall=None):
         """``remember(image)`` keeps a decoded preview; ``recall()`` returns a
         kept one when the file itself cannot be read. Both run on this thread."""
+        self._request(token, Path(path), permitted, remember, recall)
+
+    def request_cached(self, token, recall):
+        """Read only a kept preview, on the same coalescing worker thread."""
+        self._request(token, None, None, None, recall)
+
+    def _request(self, token, path, permitted, remember, recall):
         with self.condition:
             if self.closed:
                 return
-            self.pending = (token, Path(path), permitted, remember, recall)
+            self.pending = (token, path, permitted, remember, recall)
             if self.thread is None:
                 self.thread = Thread(target=self._work, daemon=True, name="local-media-preview")
                 self.thread.start()
@@ -114,7 +136,9 @@ class PreviewLoader:
                 token, path, permitted, remember, recall = self.pending
                 self.pending = None
             try:
-                if not permitted(path):
+                if path is None:
+                    result = Thumbnail(None, "저장해 둔 미리보기가 없습니다.")
+                elif not permitted(path):
                     result = Thumbnail(None, "파일 위치를 확인할 수 없습니다. 기록을 새로고침해 주세요.")
                 else:
                     stat = path.stat()

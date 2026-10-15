@@ -7,7 +7,7 @@ from threading import Event
 import unittest
 from unittest.mock import patch
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageOps, ImageStat
 
 from luvbox.preview import PREVIEW_SIZE, PreviewLoader, Thumbnail, thumbnail
 
@@ -47,6 +47,37 @@ class PreviewTests(unittest.TestCase):
         self.assertIn("첫 프레임", result.note)
         self.assertEqual(result.image.getpixel((10, 10)), (255, 0, 0, 255))
 
+    def test_all_exif_orientations_preserve_pixels_aspect_and_source(self):
+        # A non-square image with four different corners catches mirrored
+        # rotations as well as accidentally using the unswapped size bounds.
+        image = Image.new("RGB", (400, 600), "red")
+        image.paste("green", (200, 0, 400, 300))
+        image.paste("blue", (0, 300, 200, 600))
+        image.paste("yellow", (200, 300, 400, 600))
+        self.addCleanup(image.close)
+        for orientation in range(1, 9):
+            with self.subTest(orientation=orientation):
+                path = self.root / f"orientation-{orientation}.png"
+                exif = Image.Exif()
+                exif[274] = orientation
+                image.save(path, exif=exif)
+                before = path.read_bytes(), path.stat().st_mtime_ns
+                with Image.open(path) as original:
+                    expected = ImageOps.exif_transpose(original)
+                    expected.thumbnail((101, 73), Image.Resampling.LANCZOS)
+                    expected = expected.convert("RGBA")
+                result = thumbnail(path, (101, 73))
+                self.assertEqual(result.image.size, expected.size)
+                difference = ImageChops.difference(result.image, expected)
+                # Swapping Pillow's horizontal/vertical resampling passes can
+                # round a few boundary pixels differently; the displayed
+                # orientation and image remain equivalent.
+                self.assertLess(max(ImageStat.Stat(difference).mean), .02)
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+                result.image.close()
+                expected.close()
+                difference.close()
+
     def test_missing_corrupt_unsupported_and_large_image_have_clear_notices(self):
         self.assertIn("삭제", thumbnail(self.root / "missing.jpg").note)
         corrupt = self.root / "broken.jpg"
@@ -71,6 +102,7 @@ class PreviewTests(unittest.TestCase):
         args = run.call_args.args[0]
         self.assertEqual(args[0], "bundled-ffmpeg.exe")
         self.assertEqual(args[args.index("-protocol_whitelist") + 1], "file,pipe")
+        self.assertEqual(args[args.index("-i") - 2:args.index("-i")], ["-f", "mov"])
         self.assertIn("scale=220:168:force_original_aspect_ratio=decrease", args)
         self.assertEqual(args[args.index("-vcodec") + 1], "bmp")
         self.assertEqual(run.call_args.kwargs["timeout"], 8)
@@ -188,6 +220,57 @@ class PreviewTests(unittest.TestCase):
                 if loader.thread is not None:
                     loader.thread.join(3)
                     self.assertFalse(loader.thread.is_alive())
+
+    def test_cache_only_reads_are_background_coalesced_and_do_not_touch_media(self):
+        started, release = Event(), Event()
+        calls = []
+        image = Image.new("RGBA", (12, 8), "blue")
+
+        def recall(token):
+            calls.append(token)
+            if token == 1:
+                started.set()
+                release.wait(3)
+            return image
+
+        loader = PreviewLoader(queue.Queue(maxsize=2))
+        self.addCleanup(loader.close)
+        self.addCleanup(release.set)
+        with patch.object(Path, "stat", side_effect=AssertionError("cache-only request touched media")), \
+                patch.object(loader, "decoder", side_effect=AssertionError("cache-only request decoded media")):
+            loader.request_cached(1, lambda: recall(1))
+            self.assertTrue(started.wait(3))
+            worker = loader.thread
+            loader.request_cached(2, lambda: recall(2))
+            loader.request_cached(3, lambda: recall(3))
+            release.set()
+            self.assertIs(loader.results.get(timeout=3)[1].image, image)
+            self.assertEqual(loader.results.get(timeout=3)[0], 3)
+        self.assertIs(loader.thread, worker)
+        self.assertEqual(calls, [1, 3])
+        self.assertFalse(loader.cache)
+        loader.close()
+        worker.join(3)
+        self.assertFalse(worker.is_alive())
+
+    def test_close_discards_inflight_cache_only_result(self):
+        started, release = Event(), Event()
+        loader = PreviewLoader(queue.Queue(maxsize=2))
+        self.addCleanup(loader.close)
+        self.addCleanup(release.set)
+
+        def recall():
+            started.set()
+            release.wait(3)
+            return Image.new("RGB", (8, 8), "red")
+
+        loader.request_cached(1, recall)
+        self.assertTrue(started.wait(3))
+        loader.close()
+        release.set()
+        loader.thread.join(3)
+        self.assertFalse(loader.thread.is_alive())
+        self.assertTrue(loader.results.empty())
 
 
 if __name__ == "__main__":

@@ -118,7 +118,9 @@ def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | N
         deadline = time.monotonic() + CONVERSION_TIMEOUT
         # With a frame cap, the first pass also reports the source duration.
         report = ["-loglevel", "info"] if fps else []
-        diagnostics = _run([*common, *report, "-i", str(source), "-map", "0:v:0", "-vf",
+        # Keep the development decoder on MP4 too; format autodetection can
+        # otherwise follow a playlist's references to other local files.
+        diagnostics = _run([*common, *report, "-f", "mov", "-i", str(source), "-map", "0:v:0", "-vf",
                             (scale + "," if scale else "") + "palettegen=max_colors=256:reserve_transparent=0",
                             "-frames:v", "1", str(palette)],
                            check_stop=check_stop, deadline=deadline)
@@ -130,7 +132,7 @@ def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | N
                 hours, minutes, seconds = int(found[1]), int(found[2]), float(found[3])
                 timing += ["-t", f"{hours * 3600 + minutes * 60 + seconds:.3f}"]
         frames = f"[0:v:0]{scale}[v];[v][1:v:0]" if scale else "[0:v:0][1:v:0]"
-        _run([*common, "-i", str(source), "-i", str(palette), "-lavfi",
+        _run([*common, "-f", "mov", "-i", str(source), "-i", str(palette), "-lavfi",
               frames + "paletteuse=dither=sierra2_4a", "-an", *timing,
               "-loop", "0", "-f", "gif", str(output)],
              check_stop=check_stop, deadline=deadline, output=output, max_bytes=max_bytes)

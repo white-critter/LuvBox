@@ -100,7 +100,8 @@ class RecoveryTests(unittest.TestCase):
         recovery.backup_catalog(self.account, "myaccount")
         damage_media_table(self.live)
         with self.assertRaises(CatalogDamaged) as failure:
-            HistoryStore(self.account).summary()
+            with closing(HistoryStore(self.account)) as store:
+                store.summary()
         self.assertIn("기록 복구", str(failure.exception))
         tables = recovery.salvage(self.live)
         self.assertEqual(tables["media"]["method"], "pages")
@@ -136,6 +137,37 @@ class RecoveryTests(unittest.TestCase):
         with self.assertRaises(HistoryError) as failure:
             HistoryStore(self.account)
         self.assertNotIsInstance(failure.exception, CatalogDamaged)
+
+    def test_valid_catalog_with_undecodable_text_is_not_structural_damage(self):
+        with closing(sqlite3.connect(self.live)) as connection:
+            connection.execute("UPDATE media SET filename=CAST(X'FF' AS TEXT) WHERE tweet_id='1000'")
+            connection.commit()
+            self.assertEqual(connection.execute("PRAGMA quick_check").fetchall(), [("ok",)])
+        with closing(HistoryStore(self.account)) as store:
+            with self.assertRaises(HistoryError) as failure:
+                store.summary(verify_files=False)
+            self.assertNotIsInstance(failure.exception, CatalogDamaged)
+            self.assertEqual(store.runs()[0]["saved"], 600)
+
+    def test_healthy_reads_and_operational_errors_do_not_scan_for_damage(self):
+        with closing(HistoryStore(self.account)) as store:
+            statements = []
+            store._db.set_trace_callback(statements.append)
+            store.summary(verify_files=False)
+            for message in ("database is locked", "attempt to write a readonly database", "no such table: offline"):
+                with self.subTest(message=message):
+                    with patch.object(store, "_file_snapshot", side_effect=sqlite3.OperationalError(message)):
+                        with self.assertRaises(HistoryError) as failure:
+                            store.summary(verify_files=False)
+                    self.assertNotIsInstance(failure.exception, CatalogDamaged)
+                    self.assertEqual(store.runs()[0]["saved"], 600)
+            self.assertFalse(any("quick_check" in statement.lower() for statement in statements), statements)
+            store._db.execute("CREATE TRIGGER deny_run_update BEFORE UPDATE ON runs "
+                              "BEGIN SELECT RAISE(ABORT, 'offline constraint fixture'); END")
+            with self.assertRaises(HistoryError) as failure:
+                store.update_run(store.runs()[0]["id"], saved=601)
+            self.assertNotIsInstance(failure.exception, CatalogDamaged)
+            self.assertEqual(store.runs()[0]["saved"], 600)
 
     def test_repair_rebuilds_a_verified_database_and_keeps_the_damaged_one(self):
         damage_media_table(self.live)
@@ -179,6 +211,34 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(backups), 7)
         self.assertEqual(backups[-1], target)
         self.assertEqual(recovery.latest_backup("myaccount", self.account), target)
+
+    def test_busy_backup_stops_at_deadline_and_preserves_the_last_good_copy(self):
+        target = recovery.backup_catalog(self.account, "myaccount")
+        previous = target.read_bytes()
+        connect = sqlite3.connect
+        observed = []
+
+        class BusyConnection(sqlite3.Connection):
+            def backup(self, destination, *, pages=-1, progress=None, sleep=0.25):
+                observed.append((pages, sleep))
+                for _ in range(3):
+                    progress(sqlite3.SQLITE_BUSY, 0, 0)
+                raise AssertionError("busy retries did not stop at the deadline")
+
+        def busy_source(database, *args, **kwargs):
+            if kwargs.get("uri"):
+                kwargs["factory"] = BusyConnection
+            return connect(database, *args, **kwargs)
+
+        with patch("luvbox.recovery.sqlite3.connect", side_effect=busy_source), \
+                patch("luvbox.recovery.time.monotonic", side_effect=[100.0, 100.1, 104.9, 105.1]):
+            with self.assertRaises(sqlite3.OperationalError):
+                recovery.backup_catalog(self.account, "myaccount")
+        self.assertEqual(observed, [(256, 0.05)])
+        self.assertEqual(target.read_bytes(), previous)
+        self.assertEqual(recovery._integrity(target), "ok")
+        self.assertEqual(list(target.parent.glob(".history-*.partial")), [])
+        self.assertEqual(recovery.backup_catalog(self.account, "myaccount"), target)
 
     def test_same_account_catalogs_have_separate_backups_and_repairs(self):
         first = recovery.backup_catalog(self.account, "myaccount")

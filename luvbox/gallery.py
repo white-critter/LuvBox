@@ -79,6 +79,59 @@ class _GridDecoder:
             except queue.Empty:
                 return
 
+    def _cache_image(self, stamp, image):
+        """Promote a successful thumbnail while ``condition`` is held."""
+        self.cache[stamp] = image
+        self.cache.move_to_end(stamp)
+        while len(self.cache) > _CACHE_SIZE:
+            self.cache.popitem(last=False)
+
+    def _load_thumbnail(self, path, retained, stop):
+        """Read one permitted path, rechecking its current file identity."""
+        try:
+            status = os.stat(path)
+            stamp = (path, status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size)
+        except OSError:
+            status = stamp = None
+        with self.condition:
+            # A slow stat can finish after the user has switched galleries.
+            if self.closed or stop.is_set():
+                return None, False
+            image = self.cache.get(stamp, retained.get(stamp)) if stamp is not None else None
+            if image is not None:
+                self._cache_image(stamp, image)
+                return image, False
+        try:
+            image = (self.decoder(Path(path), TILE).image
+                     if status is None or not cloud_only(path, status=status) else None)
+        except Exception:
+            image = None
+        with self.condition:
+            if self.closed:
+                return None, False
+            # Retry failed reads on the next refresh; restored access need
+            # not change the file's metadata.
+            if stamp is not None and image is not None:
+                self._cache_image(stamp, image)
+        return image, image is not None
+
+    def _deliver(self, result, stop):
+        """Wait for bounded result space; cancellation interrupts the wait."""
+        while not stop.is_set():
+            with self.condition:
+                if self.closed or stop.is_set():
+                    return False
+                try:
+                    self.results.put_nowait(result)
+                except queue.Full:
+                    pass
+                else:
+                    return True
+            # A large author gallery can exceed the queue. Keep every current
+            # thumbnail until the UI drains it, a new request or close arrives.
+            stop.wait(0.05)
+        return False
+
     def _work(self):
         while True:
             with self.condition:
@@ -87,6 +140,10 @@ class _GridDecoder:
                     return
                 token, stop, jobs, permitted, remember, recall = self.pending
                 self.pending = None
+                # Keep at most one cache's worth of existing image references
+                # for this batch. Decoding its first uncached tiles must not
+                # evict later tiles before the batch has a chance to reuse them.
+                retained = dict(self.cache)
             try:
                 allowed = set(permitted([job[1] for job in jobs]))
             except Exception:
@@ -99,32 +156,9 @@ class _GridDecoder:
                 image = None
                 decoded = False
                 if path in allowed:
-                    try:
-                        status = os.stat(path)
-                        stamp = (path, status.st_dev, status.st_ino, status.st_mtime_ns, status.st_size)
-                    except OSError:
-                        status = stamp = None
-                    with self.condition:
-                        hit = stamp is not None and stamp in self.cache
-                        if hit:
-                            self.cache.move_to_end(stamp)
-                            image = self.cache[stamp]
-                    if not hit:
-                        try:
-                            if status is None or not cloud_only(path, status=status):
-                                image = self.decoder(Path(path), TILE).image
-                        except Exception:
-                            image = None
-                        decoded = image is not None
-                        with self.condition:
-                            if self.closed:
-                                return
-                            # Retry failed reads on the next refresh; restored
-                            # access need not change the file's metadata.
-                            if stamp is not None and image is not None:
-                                self.cache[stamp] = image
-                                while len(self.cache) > _CACHE_SIZE:
-                                    self.cache.popitem(last=False)
+                    image, decoded = self._load_thumbnail(path, retained, stop)
+                if stop.is_set():
+                    break
                 if identity is not None:
                     try:
                         if decoded and remember is not None:
@@ -133,18 +167,9 @@ class _GridDecoder:
                             image = recall(identity)
                     except Exception:
                         pass
-                with self.condition:
-                    if self.closed:
-                        return
-                    if stop.is_set():
-                        break
-                    # Only a page is retained if the UI is temporarily busy.
-                    if self.results.full():
-                        try:
-                            self.results.get_nowait()
-                        except queue.Empty:
-                            pass
-                    self.results.put_nowait((token, key, image))
+                if not self._deliver((token, key, image), stop):
+                    break
+            retained.clear()
 
 
 class DragBox:
@@ -311,6 +336,7 @@ class ThumbnailGrid(ttk.Frame):
         self.order: list[str] = []
         self.selected = None
         self.selected_keys: tuple[str, ...] = ()
+        self._selected_set: set[str] = set()
         self._anchor = None
         self.columns = 0
         self._weighted_columns = 0
@@ -362,8 +388,10 @@ class ThumbnailGrid(ttk.Frame):
             day = str(row.get("posted_at") or "")[:10] or "게시일 미확인"
             caption = f"{author}\n{day}"
             if key not in self.tiles:
-                tile = tk.Label(self.inner, image=self.placeholder, text=caption, compound="top",
-                                background=theme.CARD, foreground=theme.INK, font=theme.SMALL, justify="center",
+                chosen = key in self._selected_set
+                tile = tk.Label(self.inner, image=self.placeholder, text=("✓ " if chosen else "") + caption, compound="top",
+                                background=theme._tone(_SELECTED) if chosen else theme.CARD,
+                                foreground=theme._tone(_SELECTED_INK) if chosen else theme.INK, font=theme.SMALL, justify="center",
                                 wraplength=TILE[0], padx=4, pady=4, cursor="hand2", takefocus=True)
                 self._bind_pointer(tile, key)
                 tile.bind("<Double-1>", lambda _, key=key: self.on_open(key))
@@ -423,10 +451,11 @@ class ThumbnailGrid(ttk.Frame):
         synchronize each other without re-entering selection handlers.
         """
         requested = set(keys)
-        previous = set(self.selected_keys)
+        previous = self._selected_set
         previous_focus = self.selected
         self.selected_keys = tuple(key for key in self.order if key in requested)
         selected = set(self.selected_keys)
+        self._selected_set = selected
         self.selected = focus if focus in selected else (
             self.selected if self.selected in selected else next(iter(self.selected_keys), None)
         )
@@ -434,7 +463,9 @@ class ThumbnailGrid(ttk.Frame):
             not _preserve_anchor and (previous != selected or previous_focus != self.selected)
         ):
             self._anchor = self.selected
-        for key in previous | selected:
+        # Focus changes and repeated table/gallery synchronization do not
+        # change tile appearance. Repaint only tiles whose selection changed.
+        for key in previous ^ selected:
             if key in self.tiles:
                 chosen = key in selected
                 self.tiles[key].configure(
@@ -449,7 +480,7 @@ class ThumbnailGrid(ttk.Frame):
         """The caption; a check mark makes each chosen tile obvious."""
         author, _, day = self._captions.get(key, "").partition("\n")
         second = "미리보기 없음" if key in self._unavailable else day
-        return ("✓ " if key in self.selected_keys else "") + author + "\n" + second
+        return ("✓ " if key in self._selected_set else "") + author + "\n" + second
 
     def _notify(self, key=None):
         if self.on_selection is not None:
@@ -647,6 +678,7 @@ class ThumbnailGrid(ttk.Frame):
         self.order.clear()
         self.selected = self._anchor = None
         self.selected_keys = ()
+        self._selected_set.clear()
         self.placeholder = None
         self.on_select = self.on_open = self.on_selection = None
 

@@ -7,6 +7,7 @@ import queue
 import sqlite3
 import string
 import tempfile
+import time
 import threading
 import tkinter as tk
 import unittest
@@ -291,6 +292,10 @@ class MissingTabTests(StateTestCase):
         self.window.missing_tree.selection_set(key)
         self.window.missing_tree.focus(key)
         self.window._missing_selected()
+        deadline = time.monotonic() + 3
+        while self.window._missing_image is None and time.monotonic() < deadline:
+            self.window._poll_missing_previews()
+            time.sleep(.01)
         detail = self.window.missing_detail.get()
         self.assertIn("저장해 둔 미리보기입니다", detail)
         self.assertIn(str(self.paths.media_dir), detail.replace("\n", ""))   # wrapped at separators

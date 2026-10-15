@@ -1,6 +1,8 @@
 """Local thumbnail paging, resize and shutdown without catalog or X access."""
 
 import gc
+from contextlib import ExitStack
+import os
 from pathlib import Path
 import queue
 import tempfile
@@ -16,6 +18,21 @@ from PIL import Image
 from luvbox import theme
 from luvbox.gallery import TILE, ThumbnailGrid, _GridDecoder
 from luvbox.preview import Thumbnail
+
+
+class _FullQueue(queue.Queue):
+    """Signal when the worker encounters a full queue, without sleeps."""
+
+    def __init__(self, maxsize):
+        super().__init__(maxsize=maxsize)
+        self.blocked = threading.Event()
+
+    def put_nowait(self, item):
+        try:
+            return super().put_nowait(item)
+        except queue.Full:
+            self.blocked.set()
+            raise
 
 
 class GalleryDecoderTests(unittest.TestCase):
@@ -63,6 +80,59 @@ class GalleryDecoderTests(unittest.TestCase):
         self.assertIsNotNone(image)
         self.assertEqual(decoded, [paths[0], paths[3]])
 
+    def test_request_superseded_during_stat_skips_the_old_decode(self):
+        paths = [self.path(f"{index}.jpg") for index in range(2)]
+        started, resume = threading.Event(), threading.Event()
+        original_stat = os.stat
+        decoded = []
+
+        def stat(path, *args, **kwargs):
+            if str(path) == paths[0]:
+                started.set()
+                resume.wait(3)
+            return original_stat(path, *args, **kwargs)
+
+        def decode(path, size):
+            decoded.append(str(path))
+            return Thumbnail(Image.new("RGB", (2, 2)), "ready")
+
+        decoder = _GridDecoder(self.results, decoder=decode)
+        self.addCleanup(self.stop, decoder)
+        self.addCleanup(resume.set)
+        with patch("luvbox.gallery.os.stat", side_effect=stat):
+            decoder.request(1, [("old", paths[0])], set)
+            self.assertTrue(started.wait(2))
+            decoder.request(2, [("latest", paths[1])], set)
+            resume.set()
+            token, key, image = self.results.get(timeout=3)
+        self.assertEqual((token, key), (2, "latest"))
+        self.assertIsNotNone(image)
+        self.assertEqual(decoded, [paths[1]])
+
+    def test_request_superseded_during_decode_skips_optional_cache_write(self):
+        paths = [self.path(f"{index}.jpg") for index in range(2)]
+        started, resume = threading.Event(), threading.Event()
+        remembered = []
+
+        def decode(path, size):
+            if str(path) == paths[0]:
+                started.set()
+                resume.wait(3)
+            return Thumbnail(Image.new("RGB", (2, 2)), "ready")
+
+        decoder = _GridDecoder(self.results, decoder=decode)
+        self.addCleanup(self.stop, decoder)
+        self.addCleanup(resume.set)
+        decoder.request(1, [("old", paths[0], ("123", 1, "photo"))], set,
+                        remember=lambda key, image: remembered.append(key))
+        self.assertTrue(started.wait(2))
+        decoder.request(2, [("latest", paths[1])], set)
+        resume.set()
+        token, key, image = self.results.get(timeout=3)
+        self.assertEqual((token, key), (2, "latest"))
+        self.assertIsNotNone(image)
+        self.assertEqual(remembered, [])
+
     def test_close_discards_an_inflight_result_and_cache(self):
         started, resume = threading.Event(), threading.Event()
         path = self.path("one.jpg")
@@ -103,6 +173,19 @@ class GalleryDecoderTests(unittest.TestCase):
         self.assertIsNotNone(self.results.get(timeout=3)[2])
         self.assertEqual(len(calls), 1)
 
+    def test_changed_file_is_not_reused_from_the_retained_cache(self):
+        path = self.path("changed.jpg")
+        pictures = [Image.new("RGB", (2, 2), color) for color in ("red", "blue")]
+        with patch("luvbox.gallery.thumbnail", side_effect=[Thumbnail(image, "ready") for image in pictures]) as decode:
+            decoder = _GridDecoder(self.results, decoder=decode)
+            self.addCleanup(self.stop, decoder)
+            decoder.request(1, [("one", path)], set)
+            self.assertIs(self.results.get(timeout=3)[2], pictures[0])
+            Path(path).write_bytes(b"changed local fixture")
+            decoder.request(2, [("one", path)], set)
+            self.assertIs(self.results.get(timeout=3)[2], pictures[1])
+            self.assertEqual(decode.call_count, 2)
+
     def test_one_bad_decode_does_not_stop_the_rest_of_the_page(self):
         paths = [self.path(f"{index}.jpg") for index in range(2)]
 
@@ -139,6 +222,72 @@ class GalleryDecoderTests(unittest.TestCase):
                         self.assertEqual((Path(path).stat().st_size, Path(path).stat().st_mtime_ns), stamp)
                     finally:
                         self.stop(decoder)
+
+    def test_gallery_larger_than_result_queue_delivers_every_thumbnail(self):
+        paths = [self.path(f"{index}.jpg") for index in range(300)]
+        results = _FullQueue(240)
+        image = Image.new("RGB", (2, 2))
+        decoder = _GridDecoder(results, decoder=lambda path, size: Thumbnail(image, "ready"))
+        self.addCleanup(self.stop, decoder)
+        decoder.request(1, list(enumerate(paths)), set)
+        # Deliberately leave the UI idle until the queue is full.
+        self.assertTrue(results.blocked.wait(3))
+        self.assertEqual(results.qsize(), 240)
+        delivered = [results.get(timeout=3) for _ in paths]
+        self.assertEqual([(token, key) for token, key, _ in delivered], [(1, key) for key in range(300)])
+        self.assertTrue(all(picture is image for _, _, picture in delivered))
+        self.assertEqual(len(decoder.cache), 240)
+
+    def test_new_request_and_close_interrupt_a_full_result_queue(self):
+        paths = [self.path(f"{index}.jpg") for index in range(4)]
+        for action in ("request", "close"):
+            with self.subTest(action=action):
+                results = _FullQueue(1)
+                decoded = []
+
+                def decode(path, size):
+                    decoded.append(str(path))
+                    return Thumbnail(Image.new("RGB", (2, 2)), "ready")
+
+                decoder = _GridDecoder(results, decoder=decode)
+                try:
+                    decoder.request(1, list(enumerate(paths[:3])), set)
+                    self.assertTrue(results.blocked.wait(3))
+                    if action == "request":
+                        decoder.request(2, [("latest", paths[3])], set)
+                        token, key, image = results.get(timeout=3)
+                        self.assertEqual((token, key), (2, "latest"))
+                        self.assertIsNotNone(image)
+                        self.assertEqual(decoded, [*paths[:2], paths[3]])
+                    else:
+                        decoder.close()
+                        decoder.thread.join(3)
+                        self.assertFalse(decoder.thread.is_alive())
+                        self.assertEqual(decoded, paths[:2])
+                        self.assertFalse(decoder.cache)
+                    self.assertTrue(results.empty())
+                finally:
+                    self.stop(decoder)
+
+    def test_appending_large_gallery_reuses_bounded_cache_without_cyclic_eviction(self):
+        paths = [self.path(f"{index}.jpg") for index in range(400)]
+        image = Image.new("RGB", (2, 2))
+        with patch("luvbox.gallery.thumbnail", return_value=Thumbnail(image, "ready")) as decode:
+            decoder = _GridDecoder(self.results, decoder=decode)
+            self.addCleanup(self.stop, decoder)
+            decoder.request(1, list(enumerate(paths[:300])), set)
+            for key in range(300):
+                self.assertEqual(self.results.get(timeout=3)[:2], (1, key))
+            self.assertEqual(decode.call_count, 300)
+            self.assertEqual(len(decoder.cache), 240)
+            decode.reset_mock()
+            decoder.request(2, list(enumerate(paths)), set)
+            for key in range(400):
+                self.assertEqual(self.results.get(timeout=3)[:2], (2, key))
+            # 60 previous tiles fell outside the cache; 100 are new. The 240
+            # retained tiles remain reusable even if the first 60 evict them.
+            self.assertEqual(decode.call_count, 160)
+            self.assertEqual(len(decoder.cache), 240)
 
 
 class GalleryLayoutTests(unittest.TestCase):
@@ -284,6 +433,43 @@ class GalleryLayoutTests(unittest.TestCase):
         self.assertEqual((self.grid.selected_keys, self.grid.selected), (("2",), "2"))
         self.grid.select(None)
         self.assertEqual((self.grid.selected_keys, self.grid.selected), ((), None))
+
+    def test_selection_sync_repaints_only_tiles_that_change_selection(self):
+        self.selection_rows()
+        self.grid.select_many(("0", "2", "4"), focus="0", scroll=False)
+        with ExitStack() as stack:
+            repaint = {key: stack.enter_context(patch.object(tile, "configure", wraps=tile.configure))
+                       for key, tile in self.grid.tiles.items()}
+            # A focus-only synchronization does not change any tile's color
+            # or check mark, even when the requested keys arrive out of order.
+            self.grid.select_many(("4", "2", "0", "2"), focus="2", scroll=False)
+            self.assertEqual((self.grid.selected_keys, self.grid.selected), (("0", "2", "4"), "2"))
+            for call in repaint.values():
+                call.assert_not_called()
+            self.grid.select_many(("5", "4", "0"), focus="5", scroll=False)
+            self.assertEqual((self.grid.selected_keys, self.grid.selected), (("0", "4", "5"), "5"))
+            for key, call in repaint.items():
+                self.assertEqual(call.call_count, int(key in {"2", "5"}))
+            self.assertFalse(self.grid.tiles["2"].cget("text").startswith("✓ "))
+            self.assertTrue(self.grid.tiles["5"].cget("text").startswith("✓ "))
+
+    def test_recreated_selected_tile_keeps_selection_appearance_in_each_theme(self):
+        with patch.object(self.grid._decoder, "request"):
+            for appearance in ("light", "dark"):
+                with self.subTest(appearance=appearance):
+                    theme.apply(self.root, appearance)
+                    row = {"path": "first-fixture.jpg", "author": "offline", "posted_at": "2026-10-01"}
+                    self.grid.show([("one", row), ("two", row)], set)
+                    self.grid.select("one")
+                    original = self.grid.tiles["one"]
+                    colors = tuple(original.cget(key) for key in ("background", "foreground"))
+                    self.grid.show([("one", dict(row, path="second-fixture.jpg", author="updated")), ("two", row)], set)
+                    replacement = self.grid.tiles["one"]
+                    self.assertIsNot(replacement, original)
+                    self.assertEqual((self.grid.selected_keys, self.grid.selected), (("one",), "one"))
+                    self.assertEqual(tuple(replacement.cget(key) for key in ("background", "foreground")), colors)
+                    self.assertEqual(replacement.cget("text"), "✓ @updated\n2026-10-01")
+                    self.assertNotEqual(replacement.cget("background"), self.grid.tiles["two"].cget("background"))
 
     def test_external_selection_sets_range_anchor_but_callback_sync_preserves_it(self):
         self.selection_rows()

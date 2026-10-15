@@ -171,6 +171,23 @@ def format_day(value: str | None) -> str:
         return "–"
 
 
+def _missing_description(item, preview):
+    """Describe the selected missing file independently of its async image."""
+    last = item.get("last_path") or ""
+    since = format_short(item.get("missing_since")) if item.get("missing_since") else "알 수 없음"
+    removed = item.get("removed")
+    when = {"recycled": "휴지통으로 보낸 때", "interrupted": "휴지통으로 옮기다 멈춘 때",
+            "declined": "저장하지 않기로 한 때"}.get(removed, "사라진 것을 안 때")
+    after = {"recycled": "\n\nWindows 휴지통에서 복원한 뒤 ‘새로고침’을 누르면 다시 나옵니다.",
+             "interrupted": "\n\n파일과 Windows 휴지통을 확인해 주세요.",
+             "declined": "\n\n필요하면 ‘다시 받기’로 받을 수 있습니다."}.get(removed, "")
+    note = ("저장해 둔 미리보기를 불러오는 중입니다." if preview is None else
+            "저장해 둔 미리보기입니다." if preview else
+            "저장해 둔 미리보기가 없습니다. ‘트윗 열기’로 확인해 주세요.")
+    return (note + f"\n\n{when}\n{since}\n\n{'저장하려던 위치' if removed == 'declined' else '원래 위치'}\n"
+            + (wrap_path(str(Path(last).parent)) if last else "기록 없음") + after)
+
+
 class HistoryWindow(tk.Toplevel):
     def __init__(self, parent, get_location, is_downloading=lambda: False,
                  get_gif_options=lambda: ("original", 200), retry_missing=None):
@@ -276,6 +293,9 @@ class HistoryWindow(tk.Toplevel):
         self.missing_detail = tk.StringVar(self, value=MISSING_PICK)
         self._missing_image = None
         self._missing_focus = None
+        self._missing_token = 0
+        self._missing_results = queue.Queue(maxsize=2)
+        self._missing_loader = PreviewLoader(self._missing_results)
         self.media_filter = tk.StringVar(self, value="전체")
         self.query = tk.StringVar(self)
         self.order = tk.StringVar(self, value=ORDER_LABELS["saved"])
@@ -1281,6 +1301,14 @@ class HistoryWindow(tk.Toplevel):
         return (HistoryStore.for_storage(location, create_media=False) if isinstance(location, StoragePaths)
                 else HistoryStore(location))
 
+    @staticmethod
+    def _permitted_paths(location, paths):
+        """Check current catalog permissions without retaining a Tk owner."""
+        if location is None:
+            return set()
+        with closing(HistoryWindow._store(location)) as store:
+            return {path for path in paths if store.is_media_path(path)}
+
     def _load(self, generation, directory, kind, query, page, do_import, page_size=PAGE_SIZE, run_page=0,
               order="saved", period=None, author="", summary=None):
         return self._load_worker(self.results, generation, directory, kind, query, page, do_import, page_size, run_page,
@@ -1416,6 +1444,7 @@ class HistoryWindow(tk.Toplevel):
         except queue.Empty:
             pass
         self._poll_previews()
+        self._poll_missing_previews()
         self._poll_samples()
         if self.view_mode == "grid":
             self.grid_view.poll()
@@ -1607,8 +1636,7 @@ class HistoryWindow(tk.Toplevel):
         location = self.current_storage
 
         def permitted(path):
-            with closing(HistoryWindow._store(location)) as store:
-                return store.is_media_path(path)
+            return path in HistoryWindow._permitted_paths(location, [path])
 
         hooks = {}
         account = self._cache_account()
@@ -2235,9 +2263,11 @@ class HistoryWindow(tk.Toplevel):
         self._destroyed = True
         self.delete_stop.set()
         self._preview_loader.close()
+        self._missing_loader.close()
         self.grid_view.release()
         self.sample_view.release()
         self._preview_image = None
+        self._missing_image = None
         self.selection_text.trace_remove("write", self._selection_trace)
         if self._pager_layout_timer is not None:
             self.tk.call("after", "cancel", self._pager_layout_timer)
@@ -2295,15 +2325,9 @@ class HistoryWindow(tk.Toplevel):
 
     def _show_grid(self):
         location = self.current_storage
-
-        def permitted(paths):
-            if location is None:
-                return set()
-            with closing(HistoryWindow._store(location)) as store:
-                return {path for path in paths if store.is_media_path(path)}
-
         rows = [(key, self.rows[key]) for key in self.tree.get_children()]
-        self.grid_view.show(rows, permitted, empty_text=self.table_note.get() or "표시할 파일이 없습니다.",
+        self.grid_view.show(rows, partial(HistoryWindow._permitted_paths, location),
+                            empty_text=self.table_note.get() or "표시할 파일이 없습니다.",
                             **self._preview_hooks())
 
     def _preview_hooks(self):
@@ -2833,14 +2857,8 @@ class HistoryWindow(tk.Toplevel):
         shown = self._sample_shown
         self.sample_rows = {self._path_key(row["path"]): row for row in samples[:shown]}
         location = self.current_storage
-
-        def permitted(paths):
-            if location is None:
-                return set()
-            with closing(HistoryWindow._store(location)) as store:
-                return {path for path in paths if store.is_media_path(path)}
-
-        self.sample_view.show(list(self.sample_rows.items()), permitted, empty_text="저장된 파일이 없습니다.",
+        self.sample_view.show(list(self.sample_rows.items()), partial(HistoryWindow._permitted_paths, location),
+                              empty_text="저장된 파일이 없습니다.",
                               **self._preview_hooks())
         if not samples:
             self.sample_text.set(f"@{author} · 지금 있는 파일이 없습니다.")
@@ -2961,6 +2979,7 @@ class HistoryWindow(tk.Toplevel):
         if item is self._missing_focus and item is not None:
             return
         self._missing_focus = item
+        self._missing_token += 1
         self._missing_image = None
         self.missing_preview.configure(image="", text="미리보기")
         if item is None:
@@ -2968,25 +2987,29 @@ class HistoryWindow(tk.Toplevel):
             self.missing_folder_button.configure(state="disabled")
             return
         account = self._cache_account()
-        image = thumbcache.recall(account, (item["tweet_id"], item["num"], item["media_type"])) if account else None
-        if image is not None:
-            self._missing_image = ImageTk.PhotoImage(image, master=self)
-            self.missing_preview.configure(image=self._missing_image, text="")
+        if account:
+            key = (item["tweet_id"], item["num"], item["media_type"])
+            self._missing_loader.request_cached(self._missing_token, partial(thumbcache.recall, account, key))
         else:
             self.missing_preview.configure(text="미리보기 없음")
-        last = item.get("last_path") or ""
-        since = format_short(item.get("missing_since")) if item.get("missing_since") else "알 수 없음"
-        removed = item.get("removed")
-        when = {"recycled": "휴지통으로 보낸 때", "interrupted": "휴지통으로 옮기다 멈춘 때",
-                "declined": "저장하지 않기로 한 때"}.get(removed, "사라진 것을 안 때")
-        after = {"recycled": "\n\nWindows 휴지통에서 복원한 뒤 ‘새로고침’을 누르면 다시 나옵니다.",
-                 "interrupted": "\n\n파일과 Windows 휴지통을 확인해 주세요.",
-                 "declined": "\n\n필요하면 ‘다시 받기’로 받을 수 있습니다."}.get(removed, "")
-        self.missing_detail.set(
-            ("저장해 둔 미리보기입니다." if image is not None else "저장해 둔 미리보기가 없습니다. ‘트윗 열기’로 확인해 주세요.") +
-            f"\n\n{when}\n{since}\n\n{'저장하려던 위치' if removed == 'declined' else '원래 위치'}\n"
-            f"{wrap_path(str(Path(last).parent)) if last else '기록 없음'}" + after)
-        self.missing_folder_button.configure(state="normal" if last else "disabled")
+        self.missing_detail.set(_missing_description(item, None if account else False))
+        self.missing_folder_button.configure(state="normal" if item.get("last_path") else "disabled")
+
+    def _poll_missing_previews(self):
+        if self._destroyed:
+            return
+        while True:
+            try:
+                token, result = self._missing_results.get_nowait()
+            except queue.Empty:
+                break
+            if token != self._missing_token or self._missing_focus is None:
+                continue
+            self._missing_image = (ImageTk.PhotoImage(result.image, master=self)
+                                   if result.image is not None else None)
+            self.missing_preview.configure(image=self._missing_image or "",
+                                           text="" if self._missing_image else "미리보기 없음")
+            self.missing_detail.set(_missing_description(self._missing_focus, result.image is not None))
 
     def open_missing_folder(self):
         item = self._missing_focus

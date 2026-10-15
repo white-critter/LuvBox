@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from luvbox.review_preview import FRAME_QUEUE_SIZE, ReviewFrame, ReviewPreview
+from luvbox.review_preview import FRAME_QUEUE_SIZE, ReviewFrame, ReviewPreview, _GifSampler
 
 
 class FakeProcess:
@@ -34,6 +34,53 @@ class FakeProcess:
     def wait(self, timeout=None):
         self.killed.wait(timeout)
         return self.returncode
+
+
+class GifSamplerTests(unittest.TestCase):
+    def test_sampling_preserves_elapsed_time_and_carries_partial_intervals(self):
+        emitted = []
+
+        def send(frame):
+            emitted.append(frame)
+            self.addCleanup(frame.image.close)
+            return True
+
+        sampler = _GifSampler((16, 16), 83, send, "GIF")
+        self.addCleanup(sampler.close)
+        elapsed = 0
+        with Image.new("RGB", (16, 16), "red") as red, Image.new("RGB", (16, 16), "blue") as blue:
+            for image, duration in ((red, 80), (blue, 120), (red, 49)):
+                self.assertTrue(sampler.add(image, duration))
+                elapsed += duration
+                self.assertEqual(sum(frame.duration_ms for frame in emitted) + sampler.duration, elapsed)
+            self.assertEqual([frame.duration_ms for frame in emitted], [83, 83, 83])
+            self.assertEqual([frame.image.getpixel((1, 1)) for frame in emitted],
+                             [(255, 0, 0, 255), (0, 0, 255, 255), (0, 0, 255, 255)])
+
+    def test_long_source_frames_are_held_without_redundant_output(self):
+        emitted = []
+
+        def send(frame):
+            emitted.append(frame)
+            self.addCleanup(frame.image.close)
+            return True
+
+        sampler = _GifSampler((16, 16), 83, send, "GIF")
+        self.addCleanup(sampler.close)
+        with Image.new("RGB", (16, 16), "red") as image:
+            sampler.add(image, 1000)
+        self.assertEqual([frame.duration_ms for frame in emitted], [996])
+        self.assertEqual(sampler.duration, 4)
+
+    def test_close_releases_the_frame_not_yet_queued(self):
+        sampler = _GifSampler((16, 16), 83, lambda _: True, "GIF")
+        with Image.new("RGB", (16, 16), "red") as image:
+            sampler.add(image, 20)
+        pending = sampler.image
+        sampler.close()
+        sampler.close()
+        with self.assertRaises(ValueError):
+            pending.getpixel((1, 1))
 
 
 class ReviewPreviewTests(unittest.TestCase):
@@ -81,6 +128,19 @@ class ReviewPreviewTests(unittest.TestCase):
         preview = self.preview(path)
         result = preview.frames.get(timeout=3)
         self.assertGreater(result.image.width, result.image.height)
+        result.image.close()
+
+    def test_rotated_png_fits_review_bounds_and_preserves_transparency(self):
+        path = self.root / "rotated.png.part"
+        exif = Image.Exif()
+        exif[274] = 6
+        with Image.new("RGBA", (400, 800), (0, 0, 255, 128)) as image:
+            image.save(path, "PNG", exif=exif)
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        result = self.preview(path, size=(150, 112)).frames.get(timeout=3)
+        self.assertEqual(result.image.size, (150, 75))
+        self.assertEqual(result.image.getpixel((50, 30)), (0, 0, 255, 128))
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
         result.image.close()
 
     def test_missing_corrupt_cloud_only_and_large_photos_return_notices(self):
@@ -205,6 +265,29 @@ class ReviewPreviewTests(unittest.TestCase):
         for size in ((0, 400), (640, 0), (99999, 400), (640, 99999)):
             with self.subTest(size=size), self.assertRaises(ValueError):
                 ReviewPreview(self.root / "missing.part", "photo", size=size)
+
+    def test_short_fast_gif_keeps_animating_across_loop_boundaries(self):
+        path = self.root / "fast-loop.gif.part"
+        colors = ((255, 0, 0), (0, 0, 255), (0, 128, 0), (255, 255, 0), (128, 0, 128))
+        images = [Image.new("RGB", (16, 16), color) for color in colors]
+        try:
+            images[0].save(path, "GIF", save_all=True, append_images=images[1:], duration=20, loop=0)
+        finally:
+            for image in images:
+                image.close()
+        preview = self.preview(path, "animated_gif", size=(16, 16))
+        frames = [preview.frames.get(timeout=3) for _ in range(6)]
+        try:
+            self.assertEqual([frame.duration_ms for frame in frames], [83] * 6)
+            # Samples at 0,83,166,... ms span successive 100ms input loops.
+            expected = [colors[(index * 83 % 100) // 20] + (255,) for index in range(6)]
+            self.assertEqual([frame.image.getpixel((1, 1)) for frame in frames], expected)
+            self.close_preview(preview)
+            self.assertTrue(preview.frames.empty())
+            path.unlink()
+        finally:
+            for frame in frames:
+                frame.image.close()
 
     def test_real_video_and_gif_play_multiple_frames_and_close_handles(self):
         from luvbox.media import ffmpeg_path

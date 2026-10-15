@@ -110,6 +110,8 @@ Windows 파일 점유는 전체 제한 시간 안에서 최대 약 1초 재시�
 ## 검사와 배포
 
 프로젝트 루트에서 실행합니다. 테스트는 자체 임시 파일·앱 데이터를 사용하며 실제 X 다운로드는 별도 검증입니다.
+기록 조회·갤러리·미리보기의 성능 개선과 재현 명령은 [성능 검증](performance.md)에 있습니다.
+후속 구조 정리·오류 재현·화면 검수는 [리팩토링 검수](refactoring-review.md)에 있습니다.
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v

@@ -21,6 +21,7 @@ SOURCE_FILES = (
     "requirements-dev.txt", "requirements-lock.txt", "README.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "LuvBox.code-workspace",
     "tools/exiftool/download.py", "tools/package_release.py", "tools/ui_qa.py",
+    "tools/benchmark_history.py", "tools/benchmark_preview.py",
     "tools/ffmpeg/build.py", "tools/ffmpeg/README.md", "tools/ffmpeg/manifest.json",
     "tools/ffmpeg/configure-flags.json", "tools/ffmpeg/build-info.txt", "tools/ffmpeg/LICENSE.LGPLv2.1.txt",
     "tools/ffmpeg/COPYING.MinGW-w64-runtime.txt", "tools/ffmpeg/COPYING.GCC-runtime-exception.txt",
@@ -69,7 +70,10 @@ def package() -> None:
             for name in SOURCE_FILES:
                 archive.write(ROOT / name, "source/" + name)
             # Ship the current guide and verification, without obsolete reports.
-            for name in ("docs/사용안내.txt", "docs/development.md", "docs/verification.md"):
+            for name in (
+                "docs/사용안내.txt", "docs/development.md", "docs/verification.md",
+                "docs/performance.md", "docs/refactoring-review.md",
+            ):
                 archive.write(ROOT / name, "source/" + name)
             for folder, pattern in (("luvbox", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):
                 for path in sorted((ROOT / folder).glob(pattern)):

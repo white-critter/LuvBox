@@ -14,6 +14,7 @@ import hashlib
 import shutil
 import sqlite3
 import struct
+import time
 from contextlib import closing
 from datetime import datetime
 from itertools import groupby
@@ -330,9 +331,17 @@ def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
     day = datetime.now().strftime("%Y%m%d")
     target, temporary = folder / f"history-{day}.sqlite3", folder / f".history-{day}.partial"
     temporary.unlink(missing_ok=True)
+    deadline = time.monotonic() + 5
+
+    def progress(status, remaining, total):
+        # Connection.timeout does not bound backup's own SQLITE_BUSY retries.
+        if time.monotonic() > deadline:
+            raise sqlite3.OperationalError("기록 백업 제한 시간을 초과했습니다. 다음 저장 때 다시 시도합니다.")
+
     try:
-        with closing(sqlite3.connect(live.as_uri() + "?mode=ro", uri=True, timeout=5)) as source,                 closing(sqlite3.connect(temporary)) as copy:
-            source.backup(copy)
+        with (closing(sqlite3.connect(live.as_uri() + "?mode=ro", uri=True, timeout=5)) as source,
+              closing(sqlite3.connect(temporary)) as copy):
+            source.backup(copy, pages=256, progress=progress, sleep=0.05)
             healthy = copy.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         if not healthy:
             return None

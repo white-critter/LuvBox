@@ -14,9 +14,10 @@ import os
 import re
 import sqlite3
 import stat
+import tempfile
 import uuid
 from collections import Counter
-from contextlib import closing
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -57,6 +58,15 @@ _ORDERS = {
     "posted": "COALESCE(media.posted_at,'') DESC,media.tweet_id DESC",
     "posted_oldest": "media.posted_at IS NULL,media.posted_at,media.tweet_id",
 }
+# Follow the default page sort, including its identity tie-breakers. Keep
+# optional date sorts unindexed to bound catalog size and bulk-write cost.
+_MEDIA_READ_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS media_saved_order ON media("
+    "COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num,folder_mode,media_type,(path=''))",
+    "CREATE INDEX IF NOT EXISTS media_author ON media(author COLLATE NOCASE)",
+    # Usually empty: every catalog open probes this migration condition.
+    "CREATE INDEX IF NOT EXISTS media_source_url_missing ON media(source_url) WHERE source_url=''",
+)
 _PERIOD_FIELDS = {"posted": "media.posted_at", "saved": "media.saved_at"}
 # 'retry' runs download chosen missing files by tweet, not the Like list.
 _SCAN_MODES = {"full", "quick", "retry"}
@@ -77,6 +87,23 @@ _DAMAGED_HELP = ("기록 DB가 손상됐습니다. ‘기록 · 통계’에서 
 _DAMAGED_CODES = {11, 26}
 
 
+def _catalog_damage(error: sqlite3.DatabaseError, database=None) -> bool:
+    if (getattr(error, "sqlite_errorcode", 0) or 0) & 0xFF in _DAMAGED_CODES:
+        return True
+    # SQLite can report damaged cells as a constraint violation or Python's
+    # UTF-8 decoding error without SQLITE_CORRUPT. Verify only those error
+    # paths; locks, ordinary SQL failures and healthy reads need no scan.
+    ambiguous = isinstance(error, sqlite3.IntegrityError) or (
+        isinstance(error, sqlite3.OperationalError) and str(error).startswith("Could not decode to UTF-8"))
+    if database is None or not ambiguous:
+        return False
+    try:
+        checked = database.execute("PRAGMA quick_check").fetchall()
+    except sqlite3.DatabaseError as verification:
+        return (getattr(verification, "sqlite_errorcode", 0) or 0) & 0xFF in _DAMAGED_CODES
+    return len(checked) != 1 or checked[0][0] != "ok"
+
+
 def _safe(method):
     @functools.wraps(method)
     def call(*args, **kwargs):
@@ -85,7 +112,11 @@ def _safe(method):
         except HistoryError:
             raise
         except sqlite3.DatabaseError as exc:
-            if (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF in _DAMAGED_CODES:
+            owner = args[0] if args else None
+            database = getattr(owner, "_db", None)
+            if database is None:
+                database = getattr(getattr(owner, "_store", None), "_db", None)
+            if _catalog_damage(exc, database):
                 raise CatalogDamaged(_DAMAGED_HELP) from None
             raise HistoryError(_HISTORY_HELP) from None
         except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):
@@ -298,6 +329,10 @@ class HistoryStore:
                 if "missing_since" not in columns:
                     # When this PC first found the file gone ('' if unknown).
                     self._db.execute("ALTER TABLE media ADD COLUMN missing_since TEXT NOT NULL DEFAULT ''")
+                # Install after old primary-key/column migrations: their table
+                # replacement would otherwise discard the new indexes.
+                for statement in _MEDIA_READ_INDEX_SQL:
+                    self._db.execute(statement)
                 # Write only when an old row needs it. An UPDATE always waits
                 # for the write lock, so every open (even a file opened from
                 # the library while a save writes) used to wait up to 5 s.
@@ -312,18 +347,11 @@ class HistoryStore:
                 if "media_signature" not in run_columns:
                     self._db.execute("ALTER TABLE runs ADD COLUMN media_signature TEXT NOT NULL DEFAULT ''")
             self._media_roots = self._read_media_roots()
-        except sqlite3.IntegrityError:
-            # A damaged row can reach a NOT NULL check before SQLite reports
-            # SQLITE_CORRUPT during the source-URL migration. Verify only this
-            # error path; normal catalog opens need no full integrity scan.
+        except sqlite3.DatabaseError as exc:
+            # Check ambiguous failures before closing this constructor's
+            # connection; ordinary catalog opens never run an integrity scan.
             try:
-                try:
-                    checked = self._db.execute("PRAGMA quick_check").fetchall()
-                except sqlite3.DatabaseError as exc:
-                    damaged = (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF in _DAMAGED_CODES
-                else:
-                    damaged = len(checked) != 1 or checked[0][0] != "ok"
-                if damaged:
+                if _catalog_damage(exc, self._db):
                     raise CatalogDamaged(_DAMAGED_HELP) from None
             finally:
                 self._db.close()
@@ -339,6 +367,21 @@ class HistoryStore:
         prepare_storage(paths, protected=protected, create_media=create_media)
         return cls(paths.record_dir, media_dir=paths.media_dir, output_dir=paths.output_dir,
                    legacy_dir=paths.legacy_dir)
+
+    def _read_rows(self, statement: str, parameters=()) -> list[dict]:
+        """Materialize a list while owning its cursor, including decode failures."""
+        with closing(self._db.execute(statement, parameters)) as rows:
+            return [dict(row) for row in rows]
+
+    @contextmanager
+    def _read_snapshot(self):
+        """Join an existing transaction or own one consistent catalog read."""
+        if self._db.in_transaction:
+            yield
+        else:
+            with self._db:
+                self._db.execute("BEGIN")
+                yield
 
     def _read_media_roots(self) -> tuple[Path, ...]:
         roots = [self.output_dir]
@@ -751,9 +794,9 @@ class HistoryStore:
     @_safe
     def mp4_gif_records(self) -> list[dict]:
         """Animated GIF tweets that are still stored as MP4 files."""
-        return [dict(row) for row in self._db.execute(
+        return self._read_rows(
             "SELECT * FROM media WHERE media_type='animated_gif' AND lower(path) LIKE '%.mp4' "
-            "ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num")]
+            "ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num")
 
     @_safe
     def replace_media_file(self, row: dict, path: Path | str, status: str, *, author_status: str) -> bool:
@@ -1129,11 +1172,14 @@ class HistoryStore:
     def _file_snapshot(self, *, verify_files: bool) -> tuple[list[dict], list[dict], int, set]:
         # Plain tuples zipped with the column names convert a whole library
         # noticeably faster than sqlite3.Row objects.
-        cursor = self._db.cursor()
-        cursor.row_factory = None
-        cursor.execute("SELECT * FROM media")
-        names = [column[0] for column in cursor.description]
-        rows = [dict(zip(names, values)) for values in cursor]
+        # A decode failure keeps this frame in its error traceback. Finalize
+        # the cursor explicitly so it cannot keep the database file locked
+        # after its owner closes the connection to recover the catalog.
+        with closing(self._db.cursor()) as cursor:
+            cursor.row_factory = None
+            cursor.execute("SELECT * FROM media")
+            names = [column[0] for column in cursor.description]
+            rows = [dict(zip(names, values)) for values in cursor]
         files, matched, found = self._unique_files(rows, verify_files=verify_files)
         return rows, files, matched, found
 
@@ -1177,10 +1223,11 @@ class HistoryStore:
     @_safe
     def overview(self, *, verify_files: bool = True, top: int | None = 20) -> dict:
         """Summary, charts and missing files share one snapshot, even during downloads."""
-        rows, files, matched, found = self._file_snapshot(verify_files=verify_files)
-        result = self._summary(rows, files, matched, found)
-        result["stats"] = self._statistics(files, top)
-        result["missing"] = self._missing(rows, found)
+        with self._read_snapshot():
+            rows, files, matched, found = self._file_snapshot(verify_files=verify_files)
+            result = self._summary(rows, files, matched, found)
+            result["stats"] = self._statistics(files, top)
+            result["missing"] = self._missing(rows, found)
         return result
 
     @_safe
@@ -1389,8 +1436,7 @@ class HistoryStore:
 
     @_safe
     def pending_deletions(self) -> list[dict]:
-        return [dict(row) for row in self._db.execute(
-            "SELECT * FROM deletion_items WHERE status='pending' ORDER BY created_at,id")]
+        return self._read_rows("SELECT * FROM deletion_items WHERE status='pending' ORDER BY created_at,id")
 
     @_safe
     def reconcile_deletions(self) -> dict:
@@ -1413,8 +1459,8 @@ class HistoryStore:
     @_safe
     def deletion_page(self, page=0, page_size=100) -> dict:
         def reader(limit, offset):
-            return [dict(row) for row in self._db.execute(
-                "SELECT * FROM deletion_items ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (limit, offset))]
+            return self._read_rows(
+                "SELECT * FROM deletion_items ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?", (limit, offset))
         return self._page("deletion_items", (), page, page_size, reader)
 
     @staticmethod
@@ -1430,8 +1476,11 @@ class HistoryStore:
         if not include_deleted:
             # A review refusal has never been saved. It belongs to the
             # hidden missing list until a real copy is downloaded/restored.
-            clauses.append("NOT (media.path='' AND media.record_source='declined')")
-            clauses.append("NOT (media.path='' AND media.last_path!='' AND EXISTS ("
+            # The explicit boolean comparison reads the indexed path flag
+            # while paging. Present files then skip the other deletion checks
+            # without looking up every skipped row's full path in the table.
+            clauses.append("NOT ((media.path='')=1 AND media.record_source='declined')")
+            clauses.append("NOT ((media.path='')=1 AND media.last_path!='' AND EXISTS ("
                            "SELECT 1 FROM deletion_items WHERE deletion_items.tweet_id=media.tweet_id "
                            "AND deletion_items.num=media.num AND deletion_items.media_type=media.media_type "
                            "AND deletion_items.path=media.last_path "
@@ -1479,21 +1528,20 @@ class HistoryStore:
         # of each page's time in a large library. Only Like order and a text
         # search need the other tables while choosing.
         source = _JOINED if query or order == "liked" else "media"
-        rows = self._db.execute("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,"
+        return self._read_rows("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,"
                                 "tweets.content,tweets.hashtags FROM (SELECT media.rowid AS chosen FROM " +
                                 source + where + order_by + " LIMIT ? OFFSET ?) AS page "
                                 "JOIN media ON media.rowid=page.chosen "
                                 "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
                                 "LEFT JOIN tweets ON tweets.tweet_id=media.tweet_id" + order_by,
                                 (*params, limit, offset))
-        return [dict(row) for row in rows]
 
     @_safe
     def runs(self, limit=20, offset=0) -> list[dict]:
         if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000 or
                 isinstance(offset, bool) or not isinstance(offset, int) or offset < 0):
             raise HistoryError(_HISTORY_HELP)
-        return [dict(row) for row in self._db.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))]
+        return self._read_rows("SELECT * FROM runs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset))
 
     @_safe
     def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None,
@@ -1515,8 +1563,7 @@ class HistoryStore:
             raise HistoryError(_HISTORY_HELP)
         # A short read snapshot keeps totals and rows consistent while the
         # downloader writes new records through a separate WAL connection.
-        with self._db:
-            self._db.execute("BEGIN")
+        with self._read_snapshot():
             total = self._db.execute("SELECT COUNT(*) FROM " + table, params).fetchone()[0]
             pages = (total + page_size - 1) // page_size
             page = min(page, max(0, pages - 1))
@@ -1526,14 +1573,27 @@ class HistoryStore:
     @_safe
     def export_records(self, destination: Path | str) -> int:
         exported = 0
-        with Path(destination).open("w", newline="", encoding="utf-8-sig") as file:
-            writer = csv.writer(file)
-            writer.writerow(_CSV_FIELDS + _CSV_LIKE_FIELDS + _CSV_TWEET_FIELDS)
-            columns = ",".join(["media." + name for name in _CSV_FIELDS] + ["likes." + name for name in _CSV_LIKE_FIELDS] +
-                               ["tweets." + name for name in _CSV_TWEET_FIELDS])
-            for row in self._db.execute("SELECT " + columns + " FROM " + _JOINED + " ORDER BY media.tweet_id,media.num"):
-                writer.writerow([_csv_cell(value) for value in row])
-                exported += 1
+        destination = Path(destination)
+        temporary = None
+        try:
+            # Stage beside the destination so publishing stays atomic, even
+            # when decoding a later row or writing the CSV fails midway.
+            with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8-sig", delete=False,
+                                             prefix=".luvbox-export-", suffix=".csv", dir=destination.parent) as file:
+                temporary = Path(file.name)
+                writer = csv.writer(file)
+                writer.writerow(_CSV_FIELDS + _CSV_LIKE_FIELDS + _CSV_TWEET_FIELDS)
+                columns = ",".join(["media." + name for name in _CSV_FIELDS] + ["likes." + name for name in _CSV_LIKE_FIELDS] +
+                                   ["tweets." + name for name in _CSV_TWEET_FIELDS])
+                with closing(self._db.execute("SELECT " + columns + " FROM " + _JOINED +
+                                              " ORDER BY media.tweet_id,media.num")) as rows:
+                    for row in rows:
+                        writer.writerow([_csv_cell(value) for value in row])
+                        exported += 1
+            os.replace(temporary, destination)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
         return exported
 
     @_safe
@@ -1612,18 +1672,19 @@ class HistoryStore:
         if own_cache:
             self._folder_cache = {}
         try:
-            for row in self._db.execute(
+            with closing(self._db.execute(
                     "SELECT * FROM media WHERE author=? COLLATE NOCASE AND path!='' "
-                    "ORDER BY COALESCE(posted_at,'') DESC,tweet_id DESC,num,folder_mode", (author,)):
-                key = self._file_key(row["path"])
-                if key in seen:
-                    continue
-                path = self._media_path(row["path"])
-                if path is not None and path.is_file():
-                    seen.add(key)
-                    samples.append(dict(row))
-                    if len(samples) == limit:
-                        break
+                    "ORDER BY COALESCE(posted_at,'') DESC,tweet_id DESC,num,folder_mode", (author,))) as rows:
+                for row in rows:
+                    key = self._file_key(row["path"])
+                    if key in seen:
+                        continue
+                    path = self._media_path(row["path"])
+                    if path is not None and path.is_file():
+                        seen.add(key)
+                        samples.append(dict(row))
+                        if len(samples) == limit:
+                            break
         finally:
             if own_cache:
                 self._folder_cache = None

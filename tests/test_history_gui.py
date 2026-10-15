@@ -892,6 +892,60 @@ class HistoryGuiTests(unittest.TestCase):
         opened.assert_not_called()
         browser.assert_not_called()
 
+    def test_missing_preview_ignores_older_selection_and_clears_image(self):
+        store = self.records(2)
+        for row in store.records():
+            Path(row["path"]).unlink()
+        self.load()
+        keys = self.window.missing_tree.get_children()
+        with patch.object(self.window._missing_loader, "request_cached") as request:
+            self.window.missing_tree.selection_set(keys[0])
+            self.window._missing_selected()
+            previous = request.call_args.args[0]
+            self.window.missing_tree.selection_set(keys[1])
+            self.window._missing_selected()
+            current = request.call_args.args[0]
+        self.assertGreater(current, previous)
+        self.assertIn("불러오는 중", self.window.missing_detail.get())
+        self.window._missing_results.put((previous, Thumbnail(Image.new("RGBA", (10, 10)), "old")))
+        self.window._missing_results.put((current, Thumbnail(Image.new("RGBA", (22, 15)), "current")))
+        self.window._poll_missing_previews()
+        self.assertEqual((self.window._missing_image.width(), self.window._missing_image.height()), (22, 15))
+        self.assertIn("저장해 둔 미리보기입니다", self.window.missing_detail.get())
+        self.window.missing_tree.selection_remove(*keys)
+        self.window._missing_selected()
+        self.window._missing_results.put((current, Thumbnail(Image.new("RGBA", (22, 15)), "late")))
+        self.window._poll_missing_previews()
+        self.assertIsNone(self.window._missing_image)
+        self.assertFalse(self.window.missing_preview.cget("image"))
+
+    def test_slow_missing_preview_does_not_block_ui_and_close_discards_result(self):
+        store = self.records()
+        Path(store.records()[0]["path"]).unlink()
+        self.load()
+        started, release = threading.Event(), threading.Event()
+
+        def recall(*_):
+            started.set()
+            release.wait(3)
+            return Image.new("RGBA", (20, 12), "blue")
+
+        self.addCleanup(release.set)
+        loader = self.window._missing_loader
+        with patch("luvbox.history_gui.thumbcache.recall", side_effect=recall):
+            self.window.missing_tree.selection_set(self.window.missing_tree.get_children()[0])
+            self.window._missing_selected()
+            self.assertTrue(started.wait(3))
+            # The main thread can update controls while cache I/O is blocked.
+            self.window.status_text.set("UI remains responsive")
+            self.window.update_idletasks()
+            self.assertFalse(release.is_set())
+            self.window.destroy()
+            release.set()
+            loader.thread.join(3)
+        self.assertFalse(loader.thread.is_alive())
+        self.assertTrue(loader.results.empty())
+
     def test_preview_permission_uses_recorded_locations_and_excludes_unknown_paths(self):
         paths, old_root, media = self.relocated_record()
         self.window.busy = False

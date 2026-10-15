@@ -9,6 +9,7 @@ import time
 import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+from itertools import product
 from pathlib import Path
 from unittest.mock import patch
 
@@ -73,6 +74,79 @@ class HistoryTests(unittest.TestCase):
         writer.execute("COMMIT")
         with closing(HistoryStore(self.account)) as migrated:
             self.assertEqual(migrated.records()[0]["source_url"], "https://x.com/i/web/status/100")
+
+    def test_saved_pages_and_migration_probe_do_not_sort_or_scan_the_catalog(self):
+        from luvbox.history import _ORDERS
+
+        sql = ("SELECT media.rowid FROM media ORDER BY " + _ORDERS["saved"] +
+               ",media.num,media.folder_mode,media.media_type LIMIT 100 OFFSET 10000")
+        details = [row[3] for row in self.store._db.execute("EXPLAIN QUERY PLAN " + sql)]
+        self.assertTrue(any("USING COVERING INDEX" in detail for detail in details), details)
+        self.assertFalse(any("TEMP B-TREE" in detail for detail in details), details)
+        where, params = self.store._record_filter("all", "", include_deleted=False)
+        visible = ("SELECT media.rowid FROM media" + where + " ORDER BY " + _ORDERS["saved"] +
+                   ",media.num,media.folder_mode,media.media_type LIMIT 100 OFFSET 10000")
+        program = self.store._db.execute("EXPLAIN " + visible, params).fetchall()
+        media_page = self.store._db.execute(
+            "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='media'").fetchone()[0]
+        media_cursors = {row["p1"] for row in program if row["opcode"] == "OpenRead" and row["p2"] == media_page}
+        path_column = next(row["cid"] for row in self.store._db.execute("PRAGMA table_info(media)")
+                           if row["name"] == "path")
+        self.assertFalse(any(row["opcode"] == "Column" and row["p1"] in media_cursors and row["p2"] == path_column
+                             for row in program), "paging must read the empty-path flag from the index")
+        migration = [row[3] for row in self.store._db.execute(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM media WHERE source_url='' LIMIT 1")]
+        self.assertTrue(any("SEARCH media USING COVERING INDEX" in detail for detail in migration), migration)
+        author = [row[3] for row in self.store._db.execute(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM media WHERE author=? COLLATE NOCASE", ("ALICE",))]
+        self.assertTrue(any("SEARCH media USING COVERING INDEX" in detail for detail in author), author)
+
+    def test_indexed_deletion_filter_preserves_null_and_restored_file_semantics(self):
+        where, _ = self.store._record_filter("all", "", include_deleted=False)
+        collation = " COLLATE NOCASE" if os.name == "nt" else ""
+        reference = (" WHERE NOT (media.path='' AND media.record_source='declined') "
+                     "AND NOT (media.path='' AND media.last_path!='' AND EXISTS ("
+                     "SELECT 1 FROM deletion_items WHERE deletion_items.tweet_id=media.tweet_id "
+                     "AND deletion_items.num=media.num AND deletion_items.media_type=media.media_type "
+                     "AND deletion_items.path=media.last_path" + collation +
+                     " AND deletion_items.status IN ('recycled','interrupted')))")
+        fixture = ("WITH media(tweet_id,num,media_type,path,record_source,last_path) AS (VALUES (?,?,?,?,?,?)),"
+                   "deletion_items(tweet_id,num,media_type,path,status) AS (VALUES (?,?,?,?,?)) "
+                   "SELECT EXISTS(SELECT 1 FROM media")
+        for path, source, last_path, receipt in product(
+                ("", "present.jpg", None), ("saved", "declined", None),
+                ("", "removed.jpg", "REMOVED.JPG", None), (None, "pending", "recycled", "interrupted")):
+            values = ("100", 1, "photo", path, source, last_path, "100", 1, "photo", "removed.jpg", receipt)
+            with self.subTest(path=path, source=source, last_path=last_path, receipt=receipt):
+                actual = self.store._db.execute(fixture + where + ")", values).fetchone()[0]
+                expected = self.store._db.execute(fixture + reference + ")", values).fetchone()[0]
+                self.assertEqual(actual, expected)
+
+    def test_read_indexes_survive_early_primary_key_and_column_migrations(self):
+        early = self.account / "early"
+        early.mkdir()
+        with closing(sqlite3.connect(early / ".luvbox-history.sqlite3")) as db:
+            db.execute("""CREATE TABLE media (
+                folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                media_type TEXT NOT NULL, author TEXT NOT NULL DEFAULT '',
+                filename TEXT NOT NULL DEFAULT '', posted_at TEXT, posted_source TEXT NOT NULL DEFAULT '',
+                saved_at TEXT, path TEXT NOT NULL DEFAULT '', filesize INTEGER,
+                status TEXT NOT NULL, record_source TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(folder_mode,tweet_id,num)
+            )""")
+            db.execute("INSERT INTO media(folder_mode,tweet_id,num,media_type,status,record_source,updated_at) "
+                       "VALUES ('flat','100',1,'photo','saved','saved','2026-01-01')")
+            db.commit()
+        with closing(HistoryStore(early)) as migrated:
+            row = migrated.records()[0]
+            self.assertEqual(row["source_url"], "https://x.com/i/web/status/100")
+            indices = {row["name"] for row in migrated._db.execute("PRAGMA index_list(media)")}
+            self.assertTrue({"media_saved_order", "media_author", "media_source_url_missing"}.issubset(indices))
+            # The migrated unique identity still accepts a distinct media kind.
+            path = early / "100_video_1.mp4"
+            path.write_bytes(b"offline")
+            migrated.record_media("flat", {"tweet_id": "100", "num": 1, "type": "video"}, path)
+            self.assertEqual(len(migrated.records()), 2)
 
     def test_pages_match_one_sorted_joined_query_for_every_order_and_filter(self):
         from luvbox.history import _JOINED, _ORDERS
@@ -688,6 +762,60 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("'@danger", [row["author"] for row in rows])
         self.assertNotIn(SECRET, destination.read_text(encoding="utf-8-sig"))
 
+    def test_existing_csv_survives_a_later_undecodable_row_without_leaving_a_stage(self):
+        for tweet in ("100", "200"):
+            self.store.record_media("flat", self.metadata(ident=tweet), self.file(f"{tweet}_1.jpg"))
+        with self.store._db:
+            self.store._db.execute("UPDATE media SET filename=CAST(X'FF' AS TEXT) WHERE tweet_id='200'")
+        destination = Path(self.temp.name) / "history.csv"
+        destination.write_bytes(b"previous complete report")
+        with self.assertRaises(HistoryError):
+            self.store.export_records(destination)
+        self.assertEqual(destination.read_bytes(), b"previous complete report")
+        self.assertEqual(list(destination.parent.glob(".luvbox-export-*")), [])
+
+    def test_existing_csv_survives_write_and_publication_failures(self):
+        self.store.record_media("flat", self.metadata(), self.file("100_1.jpg"))
+        destination = Path(self.temp.name) / "history.csv"
+        destination.write_bytes(b"previous complete report")
+        writer_factory = csv.writer
+
+        class FailingWriter:
+            def __init__(self, file):
+                self.writer = writer_factory(file)
+                self.count = 0
+
+            def writerow(self, row):
+                self.count += 1
+                if self.count == 2:
+                    raise OSError("offline disk-full fixture")
+                return self.writer.writerow(row)
+
+        for failure in (patch("luvbox.history.csv.writer", FailingWriter),
+                        patch("luvbox.history.os.replace", side_effect=PermissionError("offline locked report"))):
+            with failure, self.assertRaises(HistoryError):
+                self.store.export_records(destination)
+            self.assertEqual(destination.read_bytes(), b"previous complete report")
+            self.assertEqual(list(destination.parent.glob(".luvbox-export-*")), [])
+
+    def test_list_and_sample_decode_failures_release_cursors_while_errors_are_retained(self):
+        readers = (lambda store: store.records(), lambda store: store.mp4_gif_records(),
+                   lambda store: store.author_samples("alice"))
+        for index, read in enumerate(readers):
+            with self.subTest(reader=index):
+                with closing(HistoryStore(self.account / f"decode-{index}")) as store:
+                    path = store.media_dir / "100_gif_1.mp4"
+                    path.write_bytes(b"offline")
+                    store.record_media("flat", self.metadata(kind="animated_gif"), path)
+                    with store._db:
+                        store._db.execute("UPDATE media SET filename=CAST(X'FF' AS TEXT)")
+                    with self.assertRaises(HistoryError) as failure:
+                        read(store)
+                # Windows refuses this rename while a cursor in the retained
+                # translated exception still pins the closed connection.
+                store.path.rename(store.path.with_suffix(".closed"))
+                self.assertIsNotNone(failure.exception)
+
     def test_pages_use_filtered_totals_and_clamp_empty_or_outdated_positions(self):
         for number, kind, author in ((1, "photo", "bob_50%"), (2, "photo", "bob_50%"),
                                      (3, "video", "bob_50%"), (4, "photo", "other")):
@@ -717,6 +845,43 @@ class HistoryTests(unittest.TestCase):
             page = self.store.record_page()
         self.assertEqual((page["total"], len(page["rows"])), (1, 1))
         self.assertEqual(self.store.record_page()["total"], 2)
+
+    def test_overview_shares_choices_snapshot_without_blocking_another_writer(self):
+        self.store.record_media("flat", self.metadata(), self.file("100_1.jpg"))
+        with self.store._db:
+            self.store._db.execute("UPDATE media SET path='',filesize=NULL")
+        other = HistoryStore(self.account)
+        self.addCleanup(other.close)
+        original = self.store._ignored
+        calls = 0
+
+        def concurrent_choice():
+            nonlocal calls
+            ignored = original()
+            calls += 1
+            if calls == 1:
+                other.set_missing_ignored([("100", 1, "photo")], True)
+            return ignored
+
+        with patch.object(self.store, "_ignored", side_effect=concurrent_choice):
+            snapshot = self.store.overview(verify_files=False)
+        self.assertEqual((snapshot["missing_files"], snapshot["ignored_missing"]), (1, 0))
+        self.assertFalse(snapshot["missing"][0]["ignored"])
+        current = self.store.overview(verify_files=False)
+        self.assertEqual((current["missing_files"], current["ignored_missing"]), (0, 1))
+        self.assertTrue(current["missing"][0]["ignored"])
+
+    def test_overview_and_pages_join_an_existing_transaction_without_ending_it(self):
+        self.store.record_media("flat", self.metadata(), self.file("100_1.jpg"))
+        self.store._db.execute("BEGIN")
+        try:
+            self.assertEqual(self.store.overview(verify_files=False)["record_count"], 1)
+            self.assertEqual(self.store.record_page()["total"], 1)
+            self.assertEqual(self.store.run_page()["total"], 0)
+            self.assertEqual(self.store.deletion_page()["total"], 0)
+            self.assertTrue(self.store._db.in_transaction)
+        finally:
+            self.store._db.rollback()
 
     def test_page_boundaries_have_stable_order_when_saved_times_tie(self):
         path = self.file("100_1.jpg")
