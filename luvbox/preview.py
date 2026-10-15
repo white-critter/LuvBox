@@ -16,6 +16,7 @@ from .thumbcache import cloud_only
 
 PREVIEW_SIZE = (220, 168)
 MAX_PIXELS = 60_000_000
+PHOTO_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,9 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
             return Thumbnail(None, "미리보기를 지원하지 않는 파일입니다.")
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(source) as original:
+            # Inspect only our supported raster formats. A renamed EPS file
+            # must never dispatch to Pillow's external Ghostscript renderer.
+            with Image.open(source, formats=("BMP",) if kind == ".mp4" else PHOTO_FORMATS) as original:
                 if original.width * original.height > MAX_PIXELS:
                     return Thumbnail(None, "큰 이미지입니다. 파일 열기로 확인해 주세요.")
                 image = oriented_thumbnail(original, size)

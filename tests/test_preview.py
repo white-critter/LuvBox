@@ -33,6 +33,13 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(result.image.mode, "RGBA")
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
 
+    def test_disguised_eps_never_dispatches_an_external_renderer(self):
+        path = self.root / "photo.jpg"
+        path.write_bytes(b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 16 16\nshowpage\n")
+        with patch("PIL.EpsImagePlugin.Ghostscript", side_effect=AssertionError("external renderer")) as renderer:
+            self.assertIsNone(thumbnail(path).image)
+        renderer.assert_not_called()
+
     def test_orientation_and_gif_first_frame(self):
         path = self.root / "rotated.jpg"
         exif = Image.Exif()

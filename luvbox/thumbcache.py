@@ -16,7 +16,9 @@ import re
 import sqlite3
 import tempfile
 import threading
+import time
 import uuid
+from collections import OrderedDict
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +33,8 @@ _TYPES = frozenset({"photo", "video", "animated_gif"})
 # file's data is in the cloud (OneDrive "online-only" and similar).
 _CLOUD_ATTRIBUTES = 0x1000 | 0x40000 | 0x400000
 _PRUNE_EVERY = 200
+_RECORDER_PENDING = 32
+_RECORDER_RETRY_SECONDS = 1.0
 
 # Identities already stored, per cache file: the gallery need not ask again.
 _known: dict[str, set] = {}
@@ -130,7 +134,7 @@ def decode(data: bytes):
     from PIL import Image
 
     try:
-        with Image.open(io.BytesIO(data)) as picture:
+        with Image.open(io.BytesIO(data), formats=("JPEG", "WEBP")) as picture:
             if picture.width > SIZE[0] * 2 or picture.height > SIZE[1] * 2:
                 return None
             picture.load()
@@ -293,31 +297,95 @@ def recall(account: str, key):
 
 
 class Recorder:
-    """Keep previews of files a save run has just written (worker thread)."""
+    """Keep downloaded/encountered previews, retrying a bounded failed batch."""
 
     def __init__(self, account: str):
         self.account = account
         self._cache = None
-        self._disabled = False
+        self._pending = OrderedDict()
+        self._retry_at = 0.0
+        self._dropped = 0
+        self._closed = False
 
-    def add(self, key, path: Path | str, *, suffix: str | None = None) -> None:
-        if self._disabled:
-            return
+    @property
+    def failed(self) -> int:
+        """Previews whose cache write still failed, excluding unreadable media."""
+        return self._dropped + len(self._pending)
+
+    def _cache_failed(self):
+        if self._cache is not None:
+            try:
+                self._cache.close()
+            except Exception:
+                pass
+            self._cache = None
+        self._retry_at = time.monotonic() + _RECORDER_RETRY_SECONDS
+
+    def _open_cache(self):
+        if self._cache is None:
+            self._cache = Cache(self.account)
+        return self._cache
+
+    def _flush(self, *, force=False):
+        if not self._pending:
+            return True
+        if not force and time.monotonic() < self._retry_at:
+            return False
+        try:
+            cache = self._open_cache()
+            for key in tuple(self._pending):
+                image = self._pending[key]
+                cache.put(key, image)
+                self._pending.pop(key).close()
+        except Exception:
+            # A busy cache must not disable every later preview in this run.
+            # Back off, then retry the small batch on a later file or close.
+            self._cache_failed()
+            return False
+        self._retry_at = 0.0
+        return True
+
+    def add(self, key, path: Path | str, *, suffix: str | None = None, only_missing=False) -> bool:
+        if self._closed:
+            return False
         try:
             key = identity(*key)
+            if only_missing:
+                if known(self.account, key):
+                    return True
+                if time.monotonic() < self._retry_at or cloud_only(path):
+                    return False
+                try:
+                    if self._open_cache().stored([key]):
+                        return True
+                except Exception:
+                    self._cache_failed()
+                    return False
             image = make(path, suffix=suffix)
             if image is None:
-                return
-            if self._cache is None:
-                self._cache = Cache(self.account)
-            self._cache.put(key, image)
-        except (OSError, sqlite3.Error):
-            # The cache is optional; never slow a save with repeated failures.
-            self._disabled = True
+                return False
+            previous = self._pending.pop(key, None)
+            if previous is not None:
+                previous.close()
+            self._pending[key] = image
+            while len(self._pending) > _RECORDER_PENDING:
+                _, dropped = self._pending.popitem(last=False)
+                dropped.close()
+                self._dropped += 1
+            self._flush()
+            return key not in self._pending
         except Exception:
-            pass
+            return False
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._flush(force=True)
+        self._closed = True
+        self._dropped += len(self._pending)
+        while self._pending:
+            _, image = self._pending.popitem(last=False)
+            image.close()
         if self._cache is not None:
             try:
                 self._cache.close()

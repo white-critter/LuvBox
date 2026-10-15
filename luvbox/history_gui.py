@@ -580,16 +580,18 @@ class HistoryWindow(tk.Toplevel):
         self._tools_window.bind("<Escape>", lambda _: self._tools_window.withdraw())
         tools = theme.card(self._tools_window, fill="both", expand=True, padx=18, pady=18)
         ttk.Label(tools, text="파일 관리", style="CardHeading.TLabel").pack(anchor="w", pady=(0, 10))
-        self.backfill_button = ttk.Button(tools, text="파일에 출처·작성자 기록", command=lambda: self._run_tool(self.backfill))
+        self.backfill_button = ttk.Button(tools, text="이전 파일 출처·작성자 보완", command=lambda: self._run_tool(self.backfill))
         self.backfill_button.pack(fill="x")
-        ttk.Label(tools, text="예전에 받은 파일에도 출처를 남깁니다.", style="CardMuted.TLabel").pack(anchor="w", pady=(6, 18))
+        ttk.Label(tools, text="새 파일은 저장할 때 자동 기록합니다. 이전 파일이나 기록하지 못한 항목만 보완합니다.",
+                  style="CardMuted.TLabel", wraplength=420, justify="left").pack(anchor="w", pady=(6, 18))
         self.convert_button = ttk.Button(tools, text="MP4 GIF를 GIF로", command=lambda: self._run_tool(self.convert_gifs))
         self.convert_button.pack(fill="x")
         ttk.Label(tools, text="기존 MP4 애니메이션을 GIF로 바꿉니다.", style="CardMuted.TLabel").pack(anchor="w", pady=(6, 18))
-        self.previews_button = ttk.Button(tools, text="작은 미리보기 저장", command=lambda: self._run_tool(self.save_previews))
+        self.previews_button = ttk.Button(tools, text="이전 파일 미리보기 보완", command=lambda: self._run_tool(self.save_previews))
         self.previews_button.pack(fill="x")
-        ttk.Label(tools, text="파일을 지워도 ‘사라진 파일’에서 어떤 그림이었는지 보입니다.",
-                  style="CardMuted.TLabel").pack(anchor="w", pady=(6, 18))
+        ttk.Label(tools, text="새 파일은 저장할 때 자동으로 남기고, 기존 파일도 열어볼 때 보완합니다.\n"
+                  "이 기능은 아직 미리보기가 없는 이전 파일을 한꺼번에 보완합니다.",
+                  style="CardMuted.TLabel", wraplength=420, justify="left").pack(anchor="w", pady=(6, 18))
         self.merge_button = ttk.Button(tools, text="다른 계정 기록 합치기", command=lambda: self._run_tool(self.merge_accounts))
         self.merge_button.pack(fill="x")
         ttk.Label(tools, text="같은 저장 폴더를 쓰던 다른 계정의 기록을 이 계정으로 합칩니다.",
@@ -1890,7 +1892,7 @@ class HistoryWindow(tk.Toplevel):
         account = self._cache_account()
         if self.busy or self.current_storage is None or not files or account is None:
             return
-        if self._offline_blocked("작은 미리보기 저장"):
+        if self._offline_blocked("이전 파일 미리보기 보완"):
             return
         if self.is_downloading():
             dialogs.showinfo("저장 진행 중", "저장 작업이 끝난 뒤 미리보기를 저장해 주세요. 새로 받는 파일은 저장할 때 자동으로 만듭니다.",
@@ -1898,8 +1900,9 @@ class HistoryWindow(tk.Toplevel):
             return
         location, generation, current = self.current_storage, self.generation, self.current_account
         if not dialogs.askyesno(
-                "작은 미리보기 저장",
-                f"지금 있는 파일 {files:,}개의 작은 미리보기를 이 PC에 저장합니다.\n\n"
+                "이전 파일 미리보기 보완",
+                "새로 받는 파일의 미리보기는 저장할 때 자동으로 남깁니다.\n"
+                f"지금 있는 파일 {files:,}개 중 미리보기가 없는 항목만 보완합니다.\n\n"
                 "· 파일을 지우거나 옮겨도 ‘사라진 파일’에서 어떤 그림이었는지 볼 수 있습니다.\n"
                 f"· 한 장에 약 1~4 KB, 모두 합쳐 약 {format_bytes(files * 3 * 1024)}입니다.\n"
                 "· 이미 저장한 것은 건너뛰며 언제든 멈출 수 있습니다.\n"

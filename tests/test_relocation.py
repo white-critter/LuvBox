@@ -113,6 +113,25 @@ class RelocationTests(unittest.TestCase):
         self.assertEqual((self.a.record_dir / "snapshot.json").read_bytes(), state)
         self.assertFalse(list(self.b.record_dir.parent.glob(".snapshot-union-*")))
 
+    def test_snapshot_only_relocation_approves_only_the_selected_source_and_destination(self):
+        outside = self.root / "not-selected"
+        outside.mkdir()
+        victim = outside / "100_1.jpg"
+        victim.write_bytes(b"outside synthetic file")
+        with closing(HistoryStore(self.a.snapshot_dir, media_dir=outside, output_dir=outside)) as supplied:
+            supplied.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo"}, victim)
+            with supplied._db:
+                supplied._db.execute("INSERT OR REPLACE INTO catalog_meta VALUES ('allowed_media_roots',?)",
+                                     (json.dumps([str(outside)]),))
+        source = self.a.snapshot_dir / ".luvbox-history.sqlite3"
+        previous = source.read_bytes()
+        migrate_records(self.a, self.b)
+        with closing(HistoryStore.for_storage(self.b)) as store:
+            self.assertEqual(set(store.media_roots), {self.a.output_dir, self.b.output_dir})
+            self.assertFalse(store.is_media_path(victim))
+        self.assertEqual(source.read_bytes(), previous)
+        self.assertEqual(victim.read_bytes(), b"outside synthetic file")
+
     def test_unreadable_changed_snapshot_cannot_publish_a_partial_relocation(self):
         from luvbox import storage
         self.record(self.a, 100)

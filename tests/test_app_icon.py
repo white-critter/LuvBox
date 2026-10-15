@@ -130,8 +130,9 @@ class AppIconTests(unittest.TestCase):
                                 wanted = rendered_icon(reference, size)
                                 self.assertEqual(rendered_icon(send(handle, 0x007F, slot, 0), size), wanted)
                                 self.assertEqual(rendered_icon(get_class(handle, class_slot), size), wanted)
-                    self.assertEqual(app_icon._taskbar_properties(int(root.wm_frame(), 16), None),
-                                     app_icon._taskbar_values(str(app_icon.asset_directory() / "luvbox.ico")))
+                    for window in (root, child):
+                        self.assertEqual(app_icon._taskbar_properties(int(window.wm_frame(), 16), None),
+                                         app_icon._taskbar_values(str(app_icon.asset_directory() / "luvbox.ico")))
             finally:
                 for icon in expected:
                     user.DestroyIcon(icon)
@@ -145,6 +146,46 @@ class AppIconTests(unittest.TestCase):
                 free = ctypes.windll.ole32.CoTaskMemFree
                 free.argtypes = (ctypes.c_void_p,)
                 free(pointer)
+        finally:
+            root.destroy()
+
+    @unittest.skipUnless(os.name == "nt", "Windows wrapper lifecycle")
+    def test_recreated_wrappers_and_dialogs_keep_the_application_identity(self):
+        root = tk.Tk()
+        root.attributes("-alpha", 0)
+        try:
+            self.assertTrue(app_icon.install(root))
+            child = tk.Toplevel(root)
+            child.attributes("-alpha", 0)
+            root.update()
+            expected = app_icon._taskbar_values(str(app_icon.asset_directory() / "luvbox.ico"))
+            transitions = (
+                lambda: root.attributes("-toolwindow", True),
+                lambda: root.attributes("-toolwindow", False),
+                lambda: root.overrideredirect(True),
+                lambda: root.overrideredirect(False),
+                lambda: child.transient(root),
+                lambda: child.transient(""),
+            )
+            for change in transitions:
+                change()
+                root.update()
+                for window in (root, child):
+                    handle = int(window.wm_frame(), 16)
+                    self.assertEqual(window._luvbox_taskbar_handle, handle)
+                    self.assertEqual(app_icon._taskbar_properties(handle, None), expected)
+            # A child gets the same cleanup as the root, before its HWND dies.
+            from unittest.mock import patch
+            original = app_icon._taskbar_properties
+            cleared = []
+            def tracked(handle, values):
+                if values == {}:
+                    cleared.append((handle, bool(child.winfo_exists())))
+                return original(handle, values)
+            child_handle = int(child.wm_frame(), 16)
+            with patch.object(app_icon, "_taskbar_properties", side_effect=tracked):
+                child.destroy()
+            self.assertEqual(cleared, [(child_handle, True)])
         finally:
             root.destroy()
 

@@ -198,13 +198,18 @@ class AccountMergeStorageTests(unittest.TestCase):
             merge_account_records(self.target, "old_a")
         self.assertFalse(self.target.record_dir.exists())
 
-    def test_changed_source_and_target_snapshot_union_preserves_former_roots_and_sources(self):
+    def test_changed_snapshot_union_preserves_locally_approved_former_roots_and_sources(self):
+        former = self.root / "former-output"
         for paths, tweet in ((self.target, 400), (self.a, 100)):
             self.record(paths, tweet)
             self.archive(paths.record_dir, [tweet])
+            if paths == self.a:
+                # This PC previously approved the former root during relocation.
+                with closing(sqlite3.connect(paths.record_dir / ".luvbox-history.sqlite3")) as db, db:
+                    db.execute("INSERT OR REPLACE INTO catalog_meta VALUES ('allowed_media_roots',?)",
+                               (json.dumps([str(former)]),))
             publish_snapshot(paths)
         self.shared_record(self.target, 401)
-        former = self.root / "former-output"
         old_file = self.shared_record(self.a, 101, former=former)
         local_before, shared_before = self.digest(self.a.record_dir), self.digest(self.a.snapshot_dir)
         result = merge_account_records(self.target, "old_a")
@@ -221,6 +226,38 @@ class AccountMergeStorageTests(unittest.TestCase):
         self.assertEqual(self.digest(self.a.record_dir), local_before)
         self.assertEqual(self.digest(self.a.snapshot_dir), shared_before)
         self.assertEqual(merge_account_records(self.target, "old_a"), {"records": 2, "added": 0, "keys": 0})
+
+    def test_snapshot_only_account_merge_does_not_approve_its_declared_outside_root(self):
+        self.record(self.target, 400)
+        outside = self.root / "not-selected"
+        victim = self.shared_record(self.a, 101, former=outside)
+        shared_before = self.digest(self.a.snapshot_dir)
+        self.assertFalse(self.a.record_dir.exists())
+        merge_account_records(self.target, "old_a")
+        with closing(HistoryStore.for_storage(self.target)) as store:
+            self.assertNotIn(outside, store.media_roots)
+            self.assertFalse(store.is_media_path(victim))
+            self.assertEqual(store.overview(verify_files=True)["files"], 1)
+            self.assertEqual({row["tweet_id"] for row in store.records()}, {"101", "400"})
+        self.assertEqual(self.digest(self.a.snapshot_dir), shared_before)
+        self.assertEqual(victim.read_bytes(), b"received media")
+
+    def test_changed_snapshot_union_cannot_add_a_root_that_local_records_never_approved(self):
+        self.record(self.target, 400)
+        self.record(self.a, 100)
+        publish_snapshot(self.a)
+        outside = self.root / "not-selected"
+        victim = self.shared_record(self.a, 101, former=outside)
+        local_before = self.digest(self.a.record_dir)
+        shared_before = self.digest(self.a.snapshot_dir)
+        merge_account_records(self.target, "old_a")
+        with closing(HistoryStore.for_storage(self.target)) as store:
+            self.assertNotIn(outside, store.media_roots)
+            self.assertFalse(store.is_media_path(victim))
+            self.assertEqual(store.overview(verify_files=True)["files"], 2)
+            self.assertEqual({row["tweet_id"] for row in store.records()}, {"100", "101", "400"})
+        self.assertEqual(self.digest(self.a.record_dir), local_before)
+        self.assertEqual(self.digest(self.a.snapshot_dir), shared_before)
 
     def test_unreadable_valid_snapshot_and_publication_error_leave_target_unchanged(self):
         from luvbox import storage

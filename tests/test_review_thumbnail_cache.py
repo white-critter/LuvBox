@@ -1,6 +1,7 @@
 """Declined local .part media retain a bounded preview after removal."""
 
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -89,6 +90,21 @@ class ReviewThumbnailCacheTests(unittest.TestCase):
             recorder.close()
         self.assertFalse(self.directory.exists())
         self.assertEqual(path.read_bytes(), b"private local placeholder fixture")
+
+    def test_temporary_cache_lock_retries_after_the_declined_original_is_removed(self):
+        path = self.root / "photo.jpg.part"
+        with Image.new("RGB", (480, 320), "red") as image:
+            image.save(path, "JPEG")
+        key = ("100", 1, "photo")
+        recorder = thumbcache.Recorder("offline")
+        with patch.object(thumbcache.Cache, "put", side_effect=sqlite3.OperationalError("offline locked cache")):
+            self.assertFalse(recorder.add(key, path, suffix=".jpg"))
+        path.unlink()
+        recorder.close()
+        self.assertEqual(recorder.failed, 0)
+        kept = thumbcache.recall("offline", key)
+        self.assertIsNotNone(kept)
+        kept.close()
 
 
 if __name__ == "__main__":

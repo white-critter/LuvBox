@@ -5,10 +5,12 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -51,6 +53,30 @@ class ResidentShutdownTests(unittest.TestCase):
         self.assertTrue(stream.closed)
         self.assertEqual((lines.get_nowait(), lines.get_nowait()), ("one line\n", None))
 
+    def test_reader_bounds_one_line_before_decoding_or_queueing_it(self):
+        stream, lines = io.BytesIO(b"x" * 1024), queue.Queue()
+        with patch.object(metadata, "_OUTPUT_LIMIT_BYTES", 64):
+            metadata._ExifToolSession._pump(stream, lines)
+        self.assertTrue(stream.closed)
+        self.assertIsInstance(lines.get_nowait(), metadata._OutputLimitExceeded)
+        self.assertIsNone(lines.get_nowait())
+        self.assertTrue(lines.empty())
+
+    def test_reader_bounds_total_output_and_short_line_count(self):
+        for data, byte_limit, line_limit in ((b"x" * 40 + b"\n" + b"y" * 40, 64, 100),
+                                              (b"\n" * 100, 4096, 4)):
+            with self.subTest(data=data[:3]):
+                stream, lines = io.BytesIO(data), queue.Queue()
+                with patch.object(metadata, "_OUTPUT_LIMIT_BYTES", byte_limit), \
+                        patch.object(metadata, "_OUTPUT_LIMIT_LINES", line_limit):
+                    metadata._ExifToolSession._pump(stream, lines)
+                output = []
+                while not lines.empty():
+                    output.append(lines.get_nowait())
+                self.assertIsInstance(output[-2], metadata._OutputLimitExceeded)
+                self.assertIsNone(output[-1])
+                self.assertLessEqual(sum(len(line.encode()) for line in output if isinstance(line, str)), byte_limit)
+
     def test_broken_resident_pipe_stops_the_writer_before_fallback(self):
         session = metadata._ExifToolSession.__new__(metadata._ExifToolSession)
         session._lock, session._counter = threading.RLock(), 0
@@ -68,6 +94,19 @@ class ResidentShutdownTests(unittest.TestCase):
         session._process.kill.assert_called_once()
         self.assertEqual(closed_by, [session._writer.ident])
         self.assertFalse(session._writer.is_alive())
+
+    def test_stderr_overflow_stops_a_tool_without_waiting_for_stdout(self):
+        command = [sys.executable, "-c", "import sys,time; sys.stderr.buffer.write(b'x'*65536); "
+                   "sys.stderr.buffer.flush(); time.sleep(30)"]
+        with patch.object(metadata, "_tool_command", return_value=(command, {})), \
+                patch.object(metadata, "_OUTPUT_LIMIT_BYTES", 1024):
+            session = metadata._ExifToolSession()
+            self.addCleanup(session.close, force=True)
+            started = time.monotonic()
+            with self.assertRaises(metadata._OutputLimitExceeded):
+                session.execute(["-ver"], time.monotonic() + 5)
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertIsNotNone(session._process.poll())
 
     def test_older_or_nonwindows_runtime_retains_executable_compatibility(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -97,6 +136,31 @@ class BundledWriterTests(unittest.TestCase):
         self.assertTrue(all(not reader.is_alive() for reader in session._readers))
         self.assertTrue(session._process.stdout.closed)
         self.assertTrue(session._process.stderr.closed)
+
+    def test_compressed_metadata_is_bounded_in_resident_and_standalone_calls(self):
+        from PIL import Image, PngImagePlugin
+        payload = "A" * (metadata._OUTPUT_LIMIT_BYTES + 1024)
+        xmp = ('<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF '
+               'xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description '
+               'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:description><rdf:Alt>'
+               '<rdf:li xml:lang="x-default">' + payload +
+               '</rdf:li></rdf:Alt></dc:description></rdf:Description></rdf:RDF></x:xmpmeta>')
+        path = self.root / "compressed.png"
+        info = PngImagePlugin.PngInfo()
+        info.add_itxt("XML:com.adobe.xmp", xmp, zip=True)
+        with Image.new("RGB", (1, 1), "red") as image:
+            image.save(path, pnginfo=info)
+        original = path.read_bytes()
+        self.assertLess(len(original), 8192)
+        for resident in (False, True):
+            with self.subTest(resident=resident), (metadata.persistent() if resident else nullcontext()):
+                with self.assertRaises(metadata._OutputLimitExceeded):
+                    metadata._read_tags(path, time.monotonic() + 10)
+                self.assertEqual(path.read_bytes(), original)
+                # Retiring the bad command must not disable later clean files.
+                clean = self.root / "clean.png"
+                clean.write_bytes(PNG)
+                self.assertEqual(metadata.embed_source(clean, "100")["status"], "embedded")
 
     def test_unicode_install_reads_writes_and_times_out_without_a_launcher_child(self):
         source = metadata.exiftool_path()

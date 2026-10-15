@@ -108,13 +108,15 @@ def _database_sources(paths: StoragePaths, name: str) -> tuple[Path, ...]:
     return tuple(source for directory in directories for source in _database_aliases(directory, name))
 
 
-def _copy_database_once(source: Path, destination: Path) -> bool:
+def _copy_database_once(source: Path, destination: Path, *, shared_history: bool = False) -> bool:
     """Publish a SQLite backup without overwriting another process's database."""
     descriptor, filename = tempfile.mkstemp(prefix=".migrate-", suffix=".sqlite3", dir=destination.parent)
     os.close(descriptor)
     staged = Path(filename)
     try:
         _backup_database(source, staged)
+        if shared_history:
+            _sanitize_shared_history(staged)
         try:
             if os.name == "nt":
                 staged.rename(destination)
@@ -222,7 +224,9 @@ def prepare_storage(paths: StoragePaths, *, protected: bool = False, create_medi
                        and _legacy_source(path, checked.output_dir)), None)
         if source is None:
             continue
-        if _copy_database_once(source, destination) and source == _snapshot_source(checked, name):
+        copied = _copy_database_once(source, destination,
+                                     shared_history=name == _HISTORY_DB and source.parent != checked.record_dir)
+        if copied and source == _snapshot_source(checked, name):
             imported[name] = _file_state(source)
     if imported:
         state = _snapshot_state(checked)
@@ -519,6 +523,16 @@ def _merge_snapshot_copies(files: dict[str, Path], paths: StoragePaths, parent: 
     try:
         for name, original in files.items():
             shared = _snapshot_source(paths, name)
+            if name == _HISTORY_DB and original.parent != paths.record_dir:
+                # A shared/legacy catalog carries file records, not approval
+                # to manage arbitrary former roots on this PC. Work only on
+                # a private copy; local catalogs retain their approved roots.
+                if temporary is None:
+                    temporary = tempfile.TemporaryDirectory(prefix=".snapshot-union-", dir=parent)
+                copied = Path(temporary.name) / name
+                _backup_database(original, copied)
+                _sanitize_shared_history(copied)
+                merged[name] = copied
             if (name == _LEGACY_SYNC or original == shared
                     or shared is None
                     or state.get(name) == _file_state(shared)):
@@ -538,17 +552,11 @@ def _merge_snapshot_copies(files: dict[str, Path], paths: StoragePaths, parent: 
                         raise
                     continue  # only a confirmed corrupt shared copy may be skipped
                 copied = folder / name
-                _backup_database(original, copied)
-                roots = []
-                if name == _HISTORY_DB:
-                    for catalog in (copied, incoming):
-                        with closing(sqlite3.connect(catalog.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
-                            roots.extend(_valid_roots(db, paths.output_dir))
+                if merged[name] != copied:
+                    _backup_database(merged[name], copied)
+                # _merge_history deliberately keeps the destination's local
+                # root approvals and ignores the incoming root declaration.
                 _merge_database(name, copied, incoming)
-                if roots:
-                    with closing(sqlite3.connect(copied, timeout=1)) as db, db:
-                        db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",
-                                   (json.dumps(sorted(set(roots)), ensure_ascii=False),))
                 merged[name] = copied
             finally:
                 incoming.unlink(missing_ok=True)
@@ -576,6 +584,28 @@ def _backup_database(source: Path, destination: Path) -> None:
             old.backup(copied, pages=256, progress=progress, sleep=0.05)
             copied.execute("PRAGMA journal_mode=DELETE")
             _integrity(copied)
+
+
+def _sanitize_shared_history(path: Path) -> None:
+    """Remove shared root approvals and triggers from a private history copy.
+
+    Only this PC's existing local catalog and an explicit folder relocation
+    can approve former roots. Triggers are not part of LuvBox's schema; remove
+    them before deleting the declaration so a supplied trigger cannot restore
+    it during this import or a later catalog update. The source stays intact.
+    """
+    with closing(sqlite3.connect(path, timeout=1)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        metadata = db.execute("SELECT type FROM sqlite_master WHERE name='catalog_meta' COLLATE NOCASE").fetchone()
+        if metadata is not None and metadata[0] != "table":
+            raise MigrationError(_MIGRATION_HELP)
+        triggers = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='trigger'")]
+        for name in triggers:
+            db.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
+        if metadata is not None:
+            db.execute("DELETE FROM catalog_meta WHERE key='allowed_media_roots'")
+            if db.execute("SELECT 1 FROM catalog_meta WHERE key='allowed_media_roots' LIMIT 1").fetchone():
+                raise MigrationError(_MIGRATION_HELP)
 
 
 def _archive_only_catalog(files: dict[str, Path], paths: StoragePaths, parent: Path):

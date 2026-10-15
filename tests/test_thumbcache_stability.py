@@ -114,6 +114,38 @@ class ThumbCacheStabilityTests(unittest.TestCase):
         self.assertIn("readonly", str(raised.exception).lower())
         self.assertIsNone(thumbcache.recall("offline", ("101", 1, "photo")))
 
+    def test_failed_recorder_batch_is_bounded_and_releases_every_owned_image(self):
+        images = []
+
+        def make(*_args, **_kwargs):
+            image = self.image.copy()
+            images.append(image)
+            return image
+
+        recorder = thumbcache.Recorder("offline")
+        with patch.object(thumbcache, "_RECORDER_PENDING", 3), \
+                patch.object(thumbcache, "make", side_effect=make), \
+                patch.object(thumbcache.Cache, "put", side_effect=sqlite3.OperationalError("offline locked cache")):
+            for index in range(100, 106):
+                recorder.add((str(index), 1, "photo"), self.root / "fixture.jpg")
+            self.assertEqual(len(recorder._pending), 3)
+            self.assertEqual(recorder.failed, 6)
+            recorder.close()
+        recorder.close()
+        self.assertFalse(recorder._pending)
+        self.assertEqual(recorder.failed, 6)
+        for image in images:
+            with self.assertRaises(ValueError):
+                image.getpixel((0, 0))
+
+    def test_cache_decode_rejects_eps_without_invoking_its_external_renderer(self):
+        from PIL import EpsImagePlugin
+
+        payload = b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 16 16\n%%EndComments\nshowpage\n"
+        with patch.object(EpsImagePlugin, "Ghostscript") as renderer:
+            self.assertIsNone(thumbcache.decode(payload))
+        renderer.assert_not_called()
+
     @unittest.skipUnless(os.name == "nt", "Windows junction fixture")
     def test_linked_cache_directory_and_ancestor_are_refused(self):
         destination = self.root / "outside"

@@ -1125,13 +1125,19 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     emit({"type": "saved" if media_status == "saved" else "skipped", "path": media_path,
                           **_media_details(kwdict)})
                     if media_exists:
+                        # Keep the preview independently of catalog writes:
+                        # the file is already finalized even if recording it
+                        # fails. Visiting an old file fills only a missing
+                        # preview, without rescanning the rest of the folder.
+                        preview_key = (kwdict.get("tweet_id"), kwdict.get("num"), kwdict.get("type", "photo"))
+                        if media_status == "saved":
+                            previews.add(preview_key, media_path)
+                        else:
+                            previews.add(preview_key, media_path, only_missing=True)
                         try:
                             history.record_media(normalized.folder_mode, kwdict, media_path, status=media_status)
                         except HistoryError:
                             raise exception.AbortExtraction("history store unavailable") from None
-                        if media_status == "saved":
-                            previews.add((kwdict.get("tweet_id"), kwdict.get("num"), kwdict.get("type", "photo")),
-                                         media_path)
                         if targets:
                             recovered[kwdict["_luvbox_archive_key"]] = media_status
                     if media_status == "saved":
@@ -1761,6 +1767,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             finally:
                 if previews is not None:
                     previews.close()
+                    if previews.failed:
+                        emit({"type": "log", "level": "warning", "message":
+                              f"작은 미리보기 {previews.failed:,}개를 이 PC에 보관하지 못했습니다. "
+                              "다운로드한 원본은 그대로이며 라이브러리에서 파일을 열면 자동으로 다시 시도합니다."})
                 try:
                     history.close()
                 except HistoryError:

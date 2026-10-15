@@ -223,16 +223,11 @@ class MetadataTransactionTests(unittest.TestCase):
         self.assert_original()
 
     def test_process_uses_hidden_shell_free_utf8_stdin_and_shared_deadline(self):
-        with patch.object(metadata.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run:
-            metadata._run(["-j", str(self.path)], time.monotonic() + 10)
-        arguments, kwargs = run.call_args
-        self.assertEqual(arguments[0][-4:], ["-charset", "filename=UTF8", "-@", "-"])
-        self.assertFalse(kwargs["shell"])
-        self.assertEqual(kwargs["encoding"], "utf-8")
-        self.assertIn(str(self.path), kwargs["input"])
-        self.assertGreater(kwargs["timeout"], 0)
-        self.assertLessEqual(kwargs["timeout"], 10)
-        self.assertEqual(kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        deadline = time.monotonic() + 10
+        with patch.object(metadata, "_ExifToolSession") as session:
+            metadata._run(["-j", str(self.path)], deadline)
+        session.return_value.execute.assert_called_once_with(["-j", str(self.path)], deadline)
+        session.return_value.close.assert_called_once_with()
 
     def test_last_resident_borrower_cleanup_does_not_extend_fallback_deadline(self):
         clock = [100.0]
@@ -359,15 +354,19 @@ class ResidentStdinTests(unittest.TestCase):
     @unittest.skipUnless(metadata.available(), "Prepare bundled ExifTool for one-shot recovery.")
     def test_later_metadata_command_recovers_with_one_shot_after_stdin_timeout(self):
         session = self.sleeping_session()
-        with patch.object(metadata, "_ExifToolSession", return_value=session):
+        real_session = metadata._ExifToolSession
+        created = []
+        def start():
+            instance = real_session() if created else session
+            created.append(instance)
+            return instance
+        with patch.object(metadata, "_ExifToolSession", side_effect=start) as fallback:
             with metadata.persistent():
                 self.run_embed(session)
                 self.assertIs(metadata._session, session)
-                real_run = subprocess.run
-                with patch.object(metadata.subprocess, "run", side_effect=real_run) as fallback:
-                    result = metadata.embed_source(self.path, "100", "alice", "12345")
+                result = metadata.embed_source(self.path, "100", "alice", "12345")
                 self.assertEqual((result["status"], result["author_status"]), ("embedded", "embedded"))
-                self.assertEqual(fallback.call_count, 3)
+                self.assertEqual(fallback.call_count, 4)
         self.assertIsNone(metadata._session)
         self.assertEqual(metadata.read_source(self.path), URL)
         self.assertEqual(metadata.read_author(self.path)["author"], "alice")
@@ -415,6 +414,7 @@ class ResidentStdinTests(unittest.TestCase):
 
         process = Process()
         with patch.object(metadata, "_tool_command", return_value=(["offline-tool"], {})), \
+                patch("luvbox.process_limits.MetadataJob"), \
                 patch.object(metadata.subprocess, "Popen", return_value=process):
             session = metadata._ExifToolSession()
         self.sessions.append(session)

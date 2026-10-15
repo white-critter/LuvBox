@@ -22,6 +22,10 @@ from pathlib import Path
 SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4"})
 TIMEOUT_SECONDS = 20
 _SHUTDOWN_TIMEOUT = 5
+# Bound decoded tool output as well as elapsed time. Compressed metadata can
+# expand far beyond the input file's size, even for a one-pixel PNG.
+_OUTPUT_LIMIT_BYTES = 2 * 1024 * 1024
+_OUTPUT_LIMIT_LINES = 4096
 _ID = re.compile(r"[0-9]{1,20}\Z", re.ASCII)
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z", re.ASCII)
 _URL = re.compile(r"https://x\.com/i/web/status/[0-9]{1,20}\Z", re.ASCII)
@@ -268,6 +272,31 @@ class _SessionUnavailable(RuntimeError):
     """The resident ExifTool cannot run a command; use a one-shot process."""
 
 
+class _OutputLimitExceeded(ValueError):
+    """Reject excessive output without retrying the same input in a new tool."""
+
+
+class _OutputBudget:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.failed = False
+        self.size = self.lines = 0
+
+    def reset(self):
+        with self.lock:
+            if self.failed:
+                raise _OutputLimitExceeded("metadata output limit")
+            self.size = self.lines = 0
+
+    def add(self, size):
+        with self.lock:
+            self.size += size
+            self.lines += 1
+            self.failed |= self.size > _OUTPUT_LIMIT_BYTES or self.lines > _OUTPUT_LIMIT_LINES
+            if self.failed:
+                raise _OutputLimitExceeded("metadata output limit")
+
+
 class _ExifToolSession:
     """One resident ExifTool (-stay_open) reading UTF-8 argument lines on stdin.
 
@@ -286,6 +315,15 @@ class _ExifToolSession:
              "-common_args", "-charset", "filename=UTF8"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options)
+        from .process_limits import MetadataJob
+        try:
+            self._job = MetadataJob(self._process)
+        except BaseException:
+            self._process.kill()
+            self._process.wait(timeout=5)
+            for stream in (self._process.stdin, self._process.stdout, self._process.stderr):
+                stream.close()
+            raise
         # A stuck tool can stop reading while a large metadata argument list
         # fills stdin. The writer owns this buffered stream, including close,
         # so neither sending nor retiring the process can block the caller.
@@ -294,10 +332,12 @@ class _ExifToolSession:
                                         args=(self._process.stdin, self._writes), daemon=True)
         self._writer.start()
         self._lines = {"stdout": queue.Queue(), "stderr": queue.Queue()}
+        self._budgets = {name: _OutputBudget() for name in self._lines}
         self._readers = []
         for name in self._lines:
             reader = threading.Thread(target=self._pump,
-                                      args=(getattr(self._process, name), self._lines[name]), daemon=True)
+                                      args=(getattr(self._process, name), self._lines[name], self._budgets[name],
+                                            self._process.kill), daemon=True)
             self._readers.append(reader)
             reader.start()
 
@@ -338,10 +378,19 @@ class _ExifToolSession:
             raise _SessionUnavailable("exiftool pipe failed")
 
     @staticmethod
-    def _pump(stream, lines):
+    def _pump(stream, lines, budget=None, on_limit=None):
+        budget = budget or _OutputBudget()
         try:
-            for line in iter(stream.readline, b""):
+            while line := stream.readline(_OUTPUT_LIMIT_BYTES + 1):
+                budget.add(len(line))
                 lines.put(line.decode("utf-8", errors="replace"))
+        except _OutputLimitExceeded as exc:
+            lines.put(exc)
+            if on_limit is not None:
+                try:
+                    on_limit()
+                except OSError:
+                    pass
         except (OSError, ValueError):
             # Another thread may be closing a failed process's pipe.
             pass
@@ -365,8 +414,12 @@ class _ExifToolSession:
                 line = self._lines[name].get(timeout=remaining)
             except queue.Empty:
                 raise TimeoutError("metadata timeout") from None
+            if any(budget.failed for budget in getattr(self, "_budgets", {}).values()):
+                raise _OutputLimitExceeded("metadata output limit")
             if line is None:
                 raise _SessionUnavailable("exiftool exited")
+            if isinstance(line, _OutputLimitExceeded):
+                raise line
             if done(line):
                 return collected, line
             collected.append(line)
@@ -392,11 +445,13 @@ class _ExifToolSession:
             ready, finished = f"{{ready{number}}}", f"{{finished{number} "
             payload = "\n".join([*arguments, "-echo4", finished + "${status}}", f"-execute{number}"]) + "\n"
             try:
+                for budget in getattr(self, "_budgets", {}).values():
+                    budget.reset()
                 self._write(payload.encode("utf-8"), deadline)
                 stdout, _ = self._collect("stdout", lambda line: line.rstrip("\r\n") == ready, deadline)
                 stderr, marker = self._collect("stderr", lambda line: line.startswith(finished), deadline)
                 status = int(marker[len(finished):].strip().rstrip("}"))
-            except TimeoutError:
+            except (TimeoutError, _OutputLimitExceeded):
                 # Stop a stuck command now; never leave it writing a temporary
                 # copy. (TimeoutError is an OSError, so it is handled first.)
                 self.close(force=True)
@@ -425,6 +480,9 @@ class _ExifToolSession:
                     process.wait(timeout=5)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
+            job = getattr(self, "_job", None)
+            if job is not None:
+                job.close()
             self._writes.put(None)
             deadline = time.monotonic() + 0.5
             for reader in [self._writer, *self._readers]:
@@ -503,16 +561,15 @@ def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
                 raise TimeoutError("metadata timeout") from None
         finally:
             _release_session(session)
-    command, options = _tool_command()
-    remaining = deadline - time.monotonic()
-    if remaining <= 0:
+    # A standalone call needs the same bounded readers as a resident writer.
+    # communicate()/capture_output would collect arbitrary expanded metadata.
+    if time.monotonic() >= deadline:
         raise TimeoutError("metadata timeout")
-    return subprocess.run(
-        [*command, "-config", "", "-charset", "filename=UTF8", "-@", "-"],
-        input="\n".join(arguments) + "\n", capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=remaining, shell=False,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), **options,
-    )
+    session = _ExifToolSession()
+    try:
+        return session.execute(arguments, deadline)
+    finally:
+        session.close()
 
 
 def _read_tags(path: Path, deadline: float) -> dict:

@@ -205,9 +205,14 @@ class PreviewCacheTests(StateTestCase):
         with patch("luvbox.thumbcache.Cache", side_effect=sqlite3.OperationalError("locked")):
             [path] = self.saved(1)
             recorder.add(("100", 1, "photo"), path)
-        self.assertTrue(recorder._disabled)
-        recorder.add(("101", 1, "photo"), path)   # silently skipped
+        self.assertEqual(recorder.failed, 1)
+        recorder.add(("101", 1, "photo"), path)
         recorder.close()
+        self.assertEqual(recorder.failed, 0)
+        for tweet in ("100", "101"):
+            image = thumbcache.recall("offline", (tweet, 1, "photo"))
+            self.assertIsNotNone(image)
+            image.close()
 
     def test_gallery_keeps_decoded_previews_and_reuses_them_for_missing_files(self):
         [path] = self.saved(1)

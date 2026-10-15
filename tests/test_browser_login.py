@@ -1,10 +1,10 @@
-"""Dedicated login lifecycle and WebSocket tests, using only fake credentials."""
+"""Dedicated login lifecycle and inherited-pipe tests; only synthetic credentials."""
 
-import base64
-import hashlib
 import json
 from pathlib import Path
-import struct
+import os
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -29,22 +29,25 @@ class BrowserLoginTests(unittest.TestCase):
         self.directory = Path(temporary.name)
         self.addCleanup(patch.stopall)
         patch("luvbox.browser_login.app_directory", return_value=self.directory).start()
-        patch("luvbox.browser_login._unused_port", return_value=12345).start()
-        patch("luvbox.browser_login._browser_endpoint", return_value=(12345, "/devtools/browser/offline")).start()
+        self.connection = Mock(spec=login._PipeDevTools)
+        self.connection.launch.side_effect = self.pipe_launch
+        patch("luvbox.browser_login._PipeDevTools", return_value=self.connection).start()
         self.save = patch("luvbox.browser_login.save_auth_token").start()
         self.cancel = threading.Event()
         self.process = Mock()
         self.process.poll.return_value = None
         self.process.wait.return_value = 0
 
+    def pipe_launch(self, launch, args):
+        return launch([args[0], "--remote-debugging-pipe", "--remote-debugging-io-pipes=101,102", *args[1:]])
+
     def launch(self, args, **kwargs):
         self.args = args
         self.profile = Path(next(arg.split("=", 1)[1] for arg in args if arg.startswith("--user-data-dir=")))
-        (self.profile / "DevToolsActivePort").write_text("12345\n/devtools/browser/offline\n")
         return self.process
 
-    def call(self, port, path, method, **kwargs):
-        self.assertEqual((port, path), (12345, "/devtools/browser/offline"))
+    def call(self, connection, method, **kwargs):
+        self.assertIs(connection, self.connection)
         if method == "Storage.getCookies":
             return {"cookies": [cookie()]}
         if method == "Target.getTargets":
@@ -63,9 +66,10 @@ class BrowserLoginTests(unittest.TestCase):
         self.save.assert_called_once_with(TOKEN)
         self.assertFalse(self.profile.exists())
         self.assertTrue((other / "marker").exists())
-        self.assertIn("--remote-debugging-address=127.0.0.1", self.args)
-        self.assertIn("--remote-debugging-port=12345", self.args)
-        self.assertNotIn("--remote-debugging-port=0", self.args)
+        self.assertIn("--remote-debugging-pipe", self.args)
+        self.assertFalse(any(arg.startswith("--remote-debugging-port") for arg in self.args))
+        self.assertFalse(any(arg.startswith("--remote-debugging-address") for arg in self.args))
+        self.connection.close.assert_called_once_with()
         self.assertEqual(self.args[-1], login.LOGIN_URL)
         self.assertEqual(wire.call_args.args[-1], "Browser.close")
 
@@ -75,6 +79,27 @@ class BrowserLoginTests(unittest.TestCase):
                dict(cookie(), expires=float("nan")), dict(cookie(), domain="..x.com"), None]
         self.assertEqual(login._x_token(bad), "")
         self.assertEqual(login._x_token(bad + [cookie()]), TOKEN)
+
+    def test_login_never_uses_socket_or_http_discovery(self):
+        with patch("socket.socket", side_effect=AssertionError("login opened TCP")), \
+                patch("urllib.request.build_opener", side_effect=AssertionError("login used HTTP discovery")), \
+                patch("luvbox.browser_login.devtools_call", side_effect=self.call):
+            self.sign_in()
+        self.save.assert_called_once_with(TOKEN)
+
+    def test_unavailable_pipe_fails_closed_without_tcp_fallback_or_session_write(self):
+        def call(connection, method, **kwargs):
+            if method == "Browser.getVersion":
+                raise TimeoutError("synthetic unsupported pipe")
+            return {}
+        with patch("socket.socket", side_effect=AssertionError("login fell back to TCP")), \
+                patch("luvbox.browser_login.devtools_call", side_effect=call), \
+                self.assertRaises(login.SignInError) as error:
+            self.sign_in()
+        self.assertEqual(str(error.exception), login.NO_DEBUGGING)
+        self.save.assert_not_called()
+        self.connection.close.assert_called_once_with()
+        self.assertFalse(self.profile.exists())
 
     def test_exited_edge_launcher_does_not_cancel_browser_and_browser_still_closes(self):
         self.process.poll.return_value = 0
@@ -137,29 +162,41 @@ class BrowserLoginTests(unittest.TestCase):
                  {"url": "https://example.org/login", "targetId": "other"},
                  {"url": "https://x.com/home", "targetId": "home"}]
         for blank in (True, False, "true"):
-            with self.subTest(blank=blank), \
-                    patch("luvbox.browser_login.devtools_call", return_value={"result":{"value":{"ready":True,"blank":blank}}}) as wire:
-                self.assertTrue(login._recover_blank_login(12345, pages))
-                self.assertEqual(wire.call_count, 2 if blank is True else 1)
-                self.assertEqual(wire.call_args.args[1], "/devtools/page/offline")
+            def call(connection, method, **kwargs):
+                if method == "Target.attachToTarget":
+                    return {"sessionId": "synthetic-session"}
+                if method == "Runtime.evaluate":
+                    self.assertEqual(kwargs["session_id"], "synthetic-session")
+                    return {"result": {"value": {"ready": True, "blank": blank}}}
+                return {}
+            with self.subTest(blank=blank), patch("luvbox.browser_login.devtools_call", side_effect=call) as wire:
+                self.assertTrue(login._recover_blank_login(self.connection, pages))
+                self.assertEqual(wire.call_count, 4 if blank is True else 3)
+                self.assertEqual(wire.call_args.args[-1], "Target.detachFromTarget")
+                self.assertEqual(wire.call_args.kwargs["params"], {"sessionId": "synthetic-session"})
                 if blank is True:
-                    self.assertEqual(wire.call_args.args[-1], "Page.reload")
-                    self.assertEqual(wire.call_args.kwargs["params"], {"ignoreCache":True})
+                    reload = wire.call_args_list[-2]
+                    self.assertEqual(reload.args[-1], "Page.reload")
+                    self.assertEqual(reload.kwargs["params"], {"ignoreCache": True})
+                    self.assertEqual(reload.kwargs["session_id"], "synthetic-session")
 
     def test_login_recovery_waits_for_slow_document_without_spending_retry(self):
-        pages = [{"url":login.LOGIN_URL,"targetId":"offline"}]
-        with patch("luvbox.browser_login.devtools_call", return_value={"result":{"value":{"ready":False,"blank":True}}}) as wire:
-            self.assertFalse(login._recover_blank_login(12345,pages))
-        wire.assert_called_once()
+        pages = [{"url": login.LOGIN_URL, "targetId": "offline"}]
+        def call(connection, method, **kwargs):
+            if method == "Target.attachToTarget":
+                return {"sessionId": "synthetic-session"}
+            return {"result": {"value": {"ready": False, "blank": True}}}
+        with patch("luvbox.browser_login.devtools_call", side_effect=call) as wire:
+            self.assertFalse(login._recover_blank_login(self.connection, pages))
+        self.assertEqual(wire.call_count, 3)
+        self.assertEqual(wire.call_args.args[-1], "Target.detachFromTarget")
 
-    def test_partial_socket_receive_obeys_total_deadline(self):
-        wire = Mock()
-        wire.recv.return_value = b"a"
-        with patch("luvbox.browser_login.time.monotonic", side_effect=[1,2,4]), \
-                self.assertRaises(TimeoutError):
-            login._receive_exact(wire, 3, 3)
-        self.assertEqual(wire.recv.call_count, 2)
-        self.assertEqual([call.args[0] for call in wire.settimeout.call_args_list], [2,1])
+    def test_recovery_rejects_other_origins_before_attaching(self):
+        for url in ("https://x.com.evil/login", "https://x.com@evil.example/login", "http://x.com/login",
+                    "https://x.com:444/login", "https://other@x.com/login"):
+            with self.subTest(url=url), patch("luvbox.browser_login.devtools_call") as wire:
+                self.assertFalse(login._recover_blank_login(self.connection, [{"url": url, "targetId": "offline"}]))
+                wire.assert_not_called()
 
     def test_user_closes_all_pages_without_connecting(self):
         with patch("luvbox.browser_login.devtools_call", return_value={}), \
@@ -198,49 +235,176 @@ class BrowserLoginTests(unittest.TestCase):
         self.assertFalse(self.profile.exists())
         self.process.wait.assert_called_once()
 
-    def test_websocket_handles_partial_frames_ping_and_events(self):
-        class Wire:
-            def __init__(self):
-                self.buffer = b""
-                self.sent = []
 
-            def __enter__(self):
-                return self
 
-            def __exit__(self, *args):
-                pass
+class PipeDevToolsTests(unittest.TestCase):
+    def setUp(self):
+        self.connection = login._PipeDevTools()
+        self.addCleanup(self.connection.close)
+        self.commands = []
+        self.peer_errors = []
 
-            def settimeout(self, timeout):
-                pass
+    def peer(self, replies, *, count=1):
+        child_read, child_write = self.connection._child
+        def run():
+            try:
+                buffered = b""
+                for _ in range(count):
+                    while b"\0" not in buffered:
+                        chunk = os.read(child_read, 65536)
+                        if not chunk:
+                            return
+                        buffered += chunk
+                    raw, buffered = buffered.split(b"\0", 1)
+                    command = json.loads(raw)
+                    self.commands.append(command)
+                    for chunk in replies(command):
+                        os.write(child_write, chunk)
+            except OSError as exc:
+                self.peer_errors.append(type(exc).__name__)
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        return thread
 
-            def sendall(self, data):
-                self.sent.append(data)
-                if data.startswith(b"GET "):
-                    key = data.split(b"Sec-WebSocket-Key: ")[1].split(b"\r\n")[0]
-                    accept = base64.b64encode(hashlib.sha1(key + login._WEBSOCKET_GUID.encode()).digest())
-                    self.buffer = b"HTTP/1.1 101 Switching Protocols\r\nSec-WebSocket-Accept: " + accept + b"\r\n\r\n"
-                elif len(self.sent) == 2:
-                    result = json.dumps({"id": 1, "result": {"cookies": [cookie()]}}).encode()
-                    middle = len(result) // 2
-                    self.buffer += b'\x89\x02hi' + b'\x81\x02{}'
-                    self.buffer += bytes([0x01, middle]) + result[:middle]
-                    self.buffer += bytes([0x80, len(result) - middle]) + result[middle:]
+    def test_null_framing_fragmented_replies_events_and_session_routing(self):
+        def replies(command):
+            event = {"method": "Target.targetCreated", "params": {}}
+            wrong = {"id": command["id"], "sessionId": "other-session", "result": {"ignored": True}}
+            result = {"id": command["id"], "sessionId": command["sessionId"], "result": {"safe": True}}
+            content = b"\0".join(json.dumps(value).encode() for value in (event, wrong, result)) + b"\0"
+            return [content[:7], content[7:29], content[29:]]
+        thread = self.peer(replies)
+        self.assertEqual(self.connection.call("Runtime.evaluate", session_id="synthetic-session"), {"safe": True})
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(self.commands, [{"id": 1, "method": "Runtime.evaluate", "sessionId": "synthetic-session"}])
+        self.assertEqual(self.peer_errors, [])
 
-            def recv(self, size):
-                result, self.buffer = self.buffer[:min(size, 7)], self.buffer[min(size, 7):]
-                return result
+    def test_reads_timeout_and_cancellation_are_bounded(self):
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.connection.call("Browser.getVersion", timeout=.03)
+        self.assertLess(time.monotonic() - started, .5)
+        cancel = threading.Event()
+        cancel.set()
+        with self.assertRaisesRegex(login.SignInError, login.CANCELLED):
+            self.connection.call("Browser.getVersion", cancel=cancel)
 
-        wire = Wire()
-        with patch("luvbox.browser_login.socket.create_connection", return_value=wire) as connect:
-            result = login.devtools_call(12345, "/devtools/browser/offline", "Storage.getCookies")
-        connect.assert_called_once_with(("127.0.0.1", 12345), timeout=5.0)
-        self.assertEqual(result["cookies"][0]["value"], TOKEN)
-        frame = wire.sent[1]
-        self.assertTrue(frame[1] & 0x80)
-        mask, payload = frame[2:6], frame[6:]
-        command = json.loads(bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload)))
-        self.assertEqual(command, {"id": 1, "method": "Storage.getCookies"})
-        self.assertEqual(wire.sent[-1][0], 0x8A)
+    def test_cancellation_interrupts_an_inflight_read(self):
+        cancel = threading.Event()
+        timer = threading.Timer(.03, cancel.set)
+        self.addCleanup(timer.cancel)
+        timer.start()
+        started = time.monotonic()
+        with self.assertRaisesRegex(login.SignInError, login.CANCELLED):
+            self.connection.call("Browser.getVersion", timeout=3, cancel=cancel)
+        self.assertLess(time.monotonic() - started, .5)
+
+    def test_full_output_pipe_cannot_block_writes_past_deadline(self):
+        while True:
+            try:
+                os.write(self.connection._writer, b"x" * 1024)
+            except BlockingIOError:
+                break
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.connection.call("Browser.getVersion", timeout=.03)
+        self.assertLess(time.monotonic() - started, .5)
+
+    def test_oversized_reply_is_rejected(self):
+        self.connection._MAX_MESSAGE = 1024
+        thread = self.peer(lambda _: [b"x" * 2048])
+        with self.assertRaisesRegex(ConnectionError, "too large"):
+            self.connection.call("Browser.getVersion")
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+
+    def test_command_size_is_bounded_before_writing(self):
+        with self.assertRaisesRegex(ValueError, "too large"):
+            self.connection.call("Runtime.evaluate", params={"expression": "x" * 65536})
+
+    def test_close_releases_all_four_descriptors_and_is_repeatable(self):
+        descriptors = [self.connection._reader, self.connection._writer, *self.connection._child]
+        self.connection.close()
+        self.connection.close()
+        for fd in descriptors:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    def test_malformed_json_and_non_dictionary_result_are_rejected(self):
+        for content in (b"{invalid}\0", b'{"id":1,"result":[]}\0'):
+            with self.subTest(content=content):
+                connection = login._PipeDevTools()
+                try:
+                    os.write(connection._child[1], content)
+                    with self.assertRaises(ValueError):
+                        connection.call("Browser.getVersion")
+                finally:
+                    connection.close()
+
+    def test_protocol_errors_do_not_forward_peer_contents(self):
+        thread = self.peer(lambda command: [json.dumps({"id": command["id"], "error": {"message": TOKEN}}).encode() + b"\0"])
+        with self.assertRaises(ConnectionError) as error:
+            self.connection.call("Storage.getCookies")
+        self.assertNotIn(TOKEN, str(error.exception))
+        thread.join(2)
+
+    @unittest.skipUnless(os.name == "nt", "Windows inherited handle allowlist")
+    def test_launch_inherits_only_child_pipe_handles_and_closes_parent_copies(self):
+        import msvcrt
+        child = list(self.connection._child)
+        handles = [msvcrt.get_osfhandle(fd) for fd in child]
+        parent = [self.connection._reader, self.connection._writer]
+        def launch(arguments, **kwargs):
+            self.assertTrue(all(os.get_inheritable(fd) for fd in child))
+            self.assertTrue(all(not os.get_inheritable(fd) for fd in parent))
+            self.assertEqual(kwargs["startupinfo"].lpAttributeList, {"handle_list": handles})
+            self.assertTrue(kwargs["close_fds"])
+            self.assertIn("--remote-debugging-pipe", arguments)
+            self.assertIn("--remote-debugging-io-pipes=" + ",".join(str(value & 0xFFFFFFFF) for value in handles), arguments)
+            self.assertFalse(any(value.startswith("--remote-debugging-port") for value in arguments))
+            return "synthetic process"
+        self.assertEqual(self.connection.launch(launch, ["synthetic-edge.exe", "about:blank"]), "synthetic process")
+        self.assertEqual(self.connection._child, [])
+        for fd in child:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    @unittest.skipUnless(os.name == "nt", "Windows inherited handle allowlist")
+    def test_failed_launch_closes_inheritable_child_handles(self):
+        child = list(self.connection._child)
+        with self.assertRaises(OSError):
+            self.connection.launch(Mock(side_effect=OSError("synthetic launch failure")), ["synthetic-edge.exe"])
+        self.assertEqual(self.connection._child, [])
+        for fd in child:
+            with self.assertRaises(OSError):
+                os.fstat(fd)
+
+    @unittest.skipUnless(os.name == "nt", "Windows real inherited pipe child")
+    def test_real_child_can_read_only_the_inherited_pipe_protocol(self):
+        program = r'''
+import json, msvcrt, os, sys
+value = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--remote-debugging-io-pipes='))
+incoming, outgoing = (msvcrt.open_osfhandle(int(handle), os.O_BINARY) for handle in value.split(','))
+data = b''
+while b'\0' not in data:
+    data += os.read(incoming, 65536)
+command = json.loads(data.split(b'\0', 1)[0])
+os.write(outgoing, json.dumps({'id': command['id'], 'result': {'synthetic': True}}).encode() + b'\0')
+os.close(incoming)
+os.close(outgoing)
+'''
+        def launch(arguments, **kwargs):
+            return subprocess.Popen([sys.executable, "-c", program, *arguments[1:]], **kwargs)
+        process = self.connection.launch(launch, ["synthetic-child.exe"])
+        try:
+            self.assertEqual(self.connection.call("Browser.getVersion"), {"synthetic": True})
+            self.assertEqual(process.wait(timeout=3), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=3)
 
 
 if __name__ == "__main__":

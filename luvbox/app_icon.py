@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import threading
 import tkinter as tk
 import uuid
 import weakref
@@ -12,6 +13,7 @@ import weakref
 
 APP_ID = "LuvBox.Desktop"
 _native_icons = None
+_tk_icon_defaults = threading.local()
 
 
 class _Guid(ctypes.Structure):
@@ -83,7 +85,7 @@ def _taskbar_properties(handle: int, values: dict[int, str] | None) -> dict[int,
     return result
 
 
-def _windows_taskbar(root: tk.Tk, icon: str) -> None:
+def _windows_taskbar(root: tk.Misc, icon: str) -> None:
     handle = int(root.wm_frame(), 16)
     if getattr(root, "_luvbox_taskbar_handle", None) == handle:
         return
@@ -159,6 +161,14 @@ def install(root: tk.Tk) -> bool:
             identify.restype = ctypes.c_long
             identify(APP_ID)
             icon = str(asset_directory() / "luvbox.ico")
+            # Tk's own default is separate from WM_SETICON and the native
+            # class fallback. Native dialogs and newly created wrappers can
+            # consult it before Python receives their Map event. Tk retains
+            # this default per UI thread across interpreters; loading the
+            # multi-image ICO on every root would retain another icon block.
+            if getattr(_tk_icon_defaults, "icon", None) != icon:
+                root.iconbitmap(default=icon)
+                _tk_icon_defaults.icon = icon
             # Create Tk's native wrapper without loading the multi-image ICO
             # again for every window/map. Use our two cached native icons below.
             if not getattr(root, "_luvbox_icon_binding", False):
@@ -172,8 +182,7 @@ def install(root: tk.Tk) -> bool:
                     if isinstance(event.widget, (tk.Tk, tk.Toplevel)):
                         try:
                             _windows_icon(event.widget, icon)
-                            if isinstance(event.widget, tk.Tk):
-                                _windows_taskbar(event.widget, icon)
+                            _windows_taskbar(event.widget, icon)
                         except (OSError, AttributeError, ValueError, tk.TclError):
                             pass
                 for window_class in ("Tk", "Toplevel"):

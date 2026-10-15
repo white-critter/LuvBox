@@ -39,3 +39,19 @@ ZIP을 공백을 포함한 한글 경로에 풀어 실행한 EXE 자체 점검�
 실행 파일은 코드 서명되지 않았습니다. 첫 실행은 Windows Smart App Control에 차단됐고 Code Integrity 이벤트 3077·3033을 확인했습니다. 사용자가 해당 설정을 끈 뒤 동일한 EXE로 위 실행 점검을 통과했습니다. 공인 서명 환경에서의 검증은 포함하지 않습니다.
 
 개발 검증 자료는 `.test-output/release-build.log`, `.test-output/release-validation.json`, `.test-output/release-frozen-selftest.json`, `.test-output/release-packaged-source-selftest.json`에 있습니다. 최종 SHA256은 `release/SHA256-1.0.0.txt`로 제공합니다. 기존 v1.0.0 태그는 보존하고 수정판 소스 커밋을 릴리스 설명에 연결합니다.
+
+## 2026-10-16 자동 미리보기·아이콘·보안 경계 검증
+
+다운로드 완료 파일의 작은 미리보기를 자동 보관하며, 일시적인 캐시 잠금 뒤와 중단·건수 제한 종료 때도 재시도합니다. 기록 DB 쓰기 실패와 미리보기 보관을 분리했고, 방문한 기존 파일은 미리보기가 없을 때만 보완합니다. 수동 도구는 이전 파일·누락 항목을 위한 보완 기능으로 표시합니다. 사진·영상·GIF와 폴더 정리 3가지·계정별 폴더 여부의 조합을 생성 미디어로 검사했습니다.
+
+Tk 기본 아이콘과 모든 Tk/Toplevel의 작업표시줄 식별 정보를 보완했습니다. 아이콘 픽셀, native wrapper 재생성, 반복 창 생성·종료 시 핸들 정리를 검사했습니다. 사용자 화면의 깃털 자체는 소스 실행에서 직접 재현하지 못했으며, 기본 아이콘·독립 창의 식별 정보가 빠지는 경로를 재현해 보완했습니다.
+
+공유 기록의 외부 경로 권한 확대, 로그인 연결의 로컬 포트 선점, 위장 이미지의 외부 렌더러 선택, 압축 메타데이터의 무제한 출력·메모리 사용, 재패키징 시 임의 파일 포함 경로를 보완했습니다. 자세한 재현 조건·수정·남은 범위는 [보안 검토](security-review.md)에 있습니다. 실제 Edge의 새 임시 프로필·빈 페이지에서 전용 파이프 통신과 디버깅 TCP LISTEN 0개, 정상 종료·프로필 정리를 확인했습니다.
+
+전체 회귀 검사 **1,069개 중 1,064개 통과, 5개 생략**(`security-full-tests-final.log`, 404.577초). 생략 중 실제 Windows 휴지통 검사는 자체 임시 파일로 별도 실행해 **1개 통과**했고, 나머지 4개는 심볼릭 링크 생성 권한 제한입니다. 소스 자체 점검은 `ok: true`입니다. 라이트·다크의 기본 화면 8개와 1280×720 화면 6개를 검수했고 네트워크 시도는 두 실행 모두 0회였습니다. 고정 의존성 15개의 설치 버전 일치·OSV 조회 결과 0건, `pip check`, 소스·PowerShell 문법과 `git diff --check`를 확인했습니다.
+
+Windows EXE·ZIP을 재빌드했습니다. ZIP CRC·SHA256, EXE의 앱 모듈 **29개와 진입점**의 소스 일치, ZIP의 로컬 소스 **1,629개**·실행 폴더 파일 **2,924개**의 원본 일치와 개인정보 제외를 확인했습니다. 새 보안 검토 문서와 테스트·메모리 제한 모듈도 배포 소스에 포함합니다.
+
+한글·공백 경로에 푼 최종 EXE 자체 점검은 **종료 코드 0, `ok: true`, `frozen: true`**이며, 포함 소스 자체 점검도 `ok: true`입니다. 실제 X 계정 로그인·다운로드는 수행하지 않았고, 코드 서명은 적용하지 않았습니다. EXE 실행 검수는 Smart App Control이 꺼진 환경에서 수행했습니다.
+
+최종 자료는 `.test-output/security-full-tests-final.log`, `security-source-selftest.json`, `security-native-recycle.log`, `security-release-build.log`, `security-release-validation.json`, `security-release-frozen-selftest.json`, `security-release-packaged-source-selftest.json`과 `security-ui/manifest.json`, `security-ui-small/manifest.json`, `security-audit/`에 있습니다. 체크섬은 `release/SHA256-1.0.0.txt`로 제공하며 기존 v1.0.0 태그는 보존합니다.

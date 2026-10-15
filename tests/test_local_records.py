@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -65,6 +66,109 @@ class LocalRecordTests(unittest.TestCase):
         self.assertTrue(self.paths.record_dir.is_relative_to(self.root / "pc" / "records"))
         self.assertTrue(self.paths.record_dir.parent.name.startswith("사진-"))
         self.assertNotEqual(resolve_storage(self.root / "other" / "사진", "alice").record_dir, self.paths.record_dir)
+
+    def external_snapshot(self, *, restore_trigger=False, metadata_view=False):
+        outside = self.root / "not-selected"
+        outside.mkdir(exist_ok=True)
+        victim = outside / "100_1.jpg"
+        victim.write_bytes(b"synthetic outside file")
+        with closing(HistoryStore(self.paths.snapshot_dir, media_dir=outside, output_dir=outside)) as supplied:
+            supplied.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo"}, victim)
+            declaration = json.dumps([str(outside)])
+            with supplied._db:
+                supplied._db.execute("INSERT OR REPLACE INTO catalog_meta VALUES ('allowed_media_roots',?)",
+                                     (declaration,))
+                literal = "'" + declaration.replace("'", "''") + "'"
+                if restore_trigger:
+                    supplied._db.execute(
+                        'CREATE TRIGGER "restore""roots" AFTER DELETE ON catalog_meta '
+                        "WHEN old.key='allowed_media_roots' BEGIN INSERT OR REPLACE INTO catalog_meta "
+                        "VALUES ('allowed_media_roots'," + literal + "); END")
+                    supplied._db.execute(
+                        "CREATE TRIGGER grant_roots_later AFTER INSERT ON catalog_meta "
+                        "WHEN new.key='legacy_imported' BEGIN INSERT OR REPLACE INTO catalog_meta "
+                        "VALUES ('allowed_media_roots'," + literal + "); END")
+                    supplied._db.execute("ALTER TABLE catalog_meta RENAME TO metadata_case_temp")
+                    supplied._db.execute("ALTER TABLE metadata_case_temp RENAME TO Catalog_Meta")
+                if metadata_view:
+                    supplied._db.execute("DROP TABLE catalog_meta")
+                    supplied._db.execute("CREATE VIEW Catalog_Meta AS SELECT 'allowed_media_roots' AS key," +
+                                         literal + " AS value")
+        return victim
+
+    def test_first_shared_import_cannot_authorize_or_recycle_an_outside_file(self):
+        from luvbox.deletion import run_deletion
+
+        victim = self.external_snapshot(restore_trigger=True)
+        source = self.paths.snapshot_dir / HISTORY
+        previous = source.read_bytes()
+        for _ in range(2):
+            with closing(HistoryStore.for_storage(self.paths, create_media=False)) as imported:
+                self.assertEqual(imported.media_roots, (self.output,))
+                self.assertFalse(imported.is_media_path(victim))
+                self.assertIsNone(imported._media_path(victim))
+                self.assertEqual(imported.overview(verify_files=True)["files"], 0)
+                imported.import_legacy()
+                rows = imported.records()
+                self.assertEqual(imported._db.execute(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger'").fetchone()[0], 0)
+        self.assertEqual(source.read_bytes(), previous)
+        with patch("luvbox.deletion.recycle_file", side_effect=AssertionError("native recycle forbidden")) as recycle, \
+                patch("luvbox.deletion.publish_snapshot"):
+            result = run_deletion(self.paths, rows, True, threading.Event(), lambda event: None)
+        recycle.assert_not_called()
+        self.assertEqual((result["recycled"], result["failed"]), (0, 1))
+        self.assertEqual(victim.read_bytes(), b"synthetic outside file")
+
+    def test_shared_metadata_view_is_rejected_before_publishing_local_records(self):
+        victim = self.external_snapshot(metadata_view=True)
+        source = self.paths.snapshot_dir / HISTORY
+        previous = source.read_bytes()
+        with self.assertRaises(MigrationError):
+            prepare_storage(self.paths, create_media=False)
+        self.assertFalse((self.paths.record_dir / HISTORY).exists())
+        self.assertEqual(source.read_bytes(), previous)
+        self.assertEqual(victim.read_bytes(), b"synthetic outside file")
+
+    def test_shared_virtual_metadata_cannot_keep_root_authority_after_its_delete(self):
+        self.paths.snapshot_dir.mkdir(parents=True)
+        source = self.paths.snapshot_dir / HISTORY
+        with closing(sqlite3.connect(source)) as db, db:
+            db.execute("CREATE TABLE supplied_meta(key TEXT,value TEXT)")
+            db.execute("INSERT INTO supplied_meta VALUES ('allowed_media_roots',?)",
+                       (json.dumps([str(self.root / "not-selected")]),))
+            try:
+                db.execute("CREATE VIRTUAL TABLE catalog_meta USING fts5("
+                           "key,value,content='supplied_meta',content_rowid='rowid')")
+            except sqlite3.OperationalError as error:
+                if "no such module" in str(error):
+                    self.skipTest("SQLite FTS5 is unavailable")
+                raise
+            db.execute("INSERT INTO catalog_meta(rowid,key,value) SELECT rowid,key,value FROM supplied_meta")
+        previous = source.read_bytes()
+        with self.assertRaises(MigrationError):
+            prepare_storage(self.paths, create_media=False)
+        self.assertFalse((self.paths.record_dir / HISTORY).exists())
+        self.assertEqual(source.read_bytes(), previous)
+
+    def test_changed_shared_roots_do_not_replace_locally_approved_former_roots(self):
+        former = resolve_storage(self.root / "approved-former", "alice")
+        with closing(HistoryStore.for_storage(former)) as store:
+            old_file = former.media_dir / "200_1.jpg"
+            old_file.write_bytes(b"approved former file")
+            store.record_media("flat", {"tweet_id": "200", "num": 1, "type": "photo"}, old_file)
+        migrate_records(former, self.paths)
+        victim = self.external_snapshot()
+        written_later(self.paths.snapshot_dir / HISTORY)
+        prepare_storage(self.paths, protected=True)
+        with closing(HistoryStore.for_storage(self.paths, create_media=False)) as store:
+            self.assertIn(former.output_dir, store.media_roots)
+            self.assertNotIn(victim.parent, store.media_roots)
+            self.assertTrue(store.is_media_path(old_file))
+            self.assertFalse(store.is_media_path(victim))
+            other = former.media_dir / "999_1.jpg"
+            other.write_bytes(b"unrecorded former file")
+            self.assertFalse(store.is_media_path(other))
 
     def test_first_open_imports_the_media_folder_records_once(self):
         self.earlier_version_records(["100", "200"])

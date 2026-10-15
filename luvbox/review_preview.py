@@ -21,7 +21,7 @@ import warnings
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .preview import MAX_PIXELS, oriented_thumbnail
+from .preview import MAX_PIXELS, PHOTO_FORMATS, oriented_thumbnail
 from .thumbcache import cloud_only
 
 
@@ -219,7 +219,7 @@ class ReviewPreview:
     def _photo(self, signature):
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(self.path) as original:
+            with Image.open(self.path, formats=PHOTO_FORMATS) as original:
                 if original.width * original.height > MAX_PIXELS:
                     self._send(ReviewFrame(None, note="이미지가 커서 미리보기를 표시할 수 없습니다."))
                     return
@@ -245,7 +245,7 @@ class ReviewPreview:
         sampler = _GifSampler(self.size, interval, self._send, note)
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(self.path) as original:
+            with Image.open(self.path, formats=("GIF",)) as original:
                 if original.width * original.height > MAX_PIXELS:
                     self._send(ReviewFrame(None, note="이미지가 커서 미리보기를 표시할 수 없습니다."))
                     return
@@ -328,7 +328,7 @@ class ReviewPreview:
                     payload = self._read_exact(process.stdout, frame_bytes - 14)
                     if self.stop.is_set() or len(payload) != frame_bytes - 14:
                         break
-                    with Image.open(BytesIO(header + payload)) as source:
+                    with Image.open(BytesIO(header + payload), formats=("BMP",)) as source:
                         if source.width > width or source.height > height:
                             raise OSError("unbounded preview dimensions")
                         image = source.convert("RGB")

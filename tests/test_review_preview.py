@@ -120,6 +120,15 @@ class ReviewPreviewTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [path])
         result.image.close()
 
+    def test_disguised_eps_finishes_without_dispatching_an_external_renderer(self):
+        path = self.root / "photo.jpg.part"
+        path.write_bytes(b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 16 16\nshowpage\n")
+        with patch("PIL.EpsImagePlugin.Ghostscript", side_effect=AssertionError("external renderer")) as renderer:
+            preview = self.preview(path)
+            self.assertTrue(preview.finished.wait(3))
+            self.assertIsNone(preview.frames.get(timeout=1).image)
+        renderer.assert_not_called()
+
     def test_photo_orientation_is_applied_before_rendering(self):
         path = self.root / "rotated.part"
         exif = Image.Exif()
