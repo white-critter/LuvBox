@@ -1327,6 +1327,21 @@ class StartupMigrationTests(unittest.TestCase):
                 create_root.return_value.destroy.assert_called_once_with()
 
 
+    def test_closing_the_unfinished_window_during_a_data_dialog_exits_quietly(self):
+        from luvbox.gui import launch
+        from luvbox.settings import AppDataConflict, AppDataError
+
+        for error in (AppDataConflict("두 데이터 폴더"), AppDataError("기존 데이터를 보존했습니다")):
+            with self.subTest(error=type(error).__name__), patch("luvbox.gui.tk.Tk") as create_root, \
+                    patch("luvbox.gui.App", side_effect=error), \
+                    patch("luvbox.gui.dialogs.Dialog") as dialog, patch("luvbox.gui.dialogs.showerror"):
+                dialog.return_value.run.return_value = None
+                # The person closed the empty main window behind the dialog.
+                create_root.return_value.destroy.side_effect = tk.TclError("application has been destroyed")
+                launch()
+                create_root.return_value.mainloop.assert_not_called()
+
+
 class WorkerEventReaderTests(unittest.TestCase):
     def test_partially_written_character_never_stops_progress_updates(self):
         import queue

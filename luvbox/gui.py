@@ -1974,6 +1974,14 @@ def launch():
 
     root = tk.Tk()
     app = None
+
+    def close():
+        # Closing the unfinished main window during a dialog already destroyed it.
+        try:
+            root.destroy()
+        except tk.TclError:
+            pass
+
     try:
         try:
             try:
@@ -1985,13 +1993,13 @@ def launch():
                     "예전 버전의 실행 파일·바로가기는 더 이상 쓰지 마세요.", icon="warning",
                     buttons=(("닫기", None), ("옮기고 계속", True)), default=1).run()
                 if choice is not True:
-                    root.destroy()
+                    close()
                     return
                 set_aside_previous()
                 app = App(root)
         except AppDataError as exc:
             dialogs.showerror("기존 데이터 이전 확인", str(exc), parent=root)
-            root.destroy()
+            close()
             return
         root.mainloop()
     finally:
