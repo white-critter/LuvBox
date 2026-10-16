@@ -202,19 +202,27 @@ def _integrity(path: Path) -> str:
         connection.close()
 
 
-def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: Path | str | None = None) -> dict:
+def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: Path | str | None = None,
+                    skip_unreadable: bool = False) -> dict:
     """Write a new, verified records database at ``destination``.
 
     Rows come from ``damaged`` (by pages where needed); rows only found in an
     earlier backup (``fallback``) are added. Each file record keeps its most
     recent version (highest rowid). ``destination`` must not exist yet.
+    ``skip_unreadable`` rebuilds from the backup alone when nothing at all can
+    be read from ``damaged``.
     """
     from .history import HistoryStore
 
     damaged, destination = Path(damaged), Path(destination)
     if destination.exists():
         raise RecoveryError("destination exists")
-    sources = [salvage(damaged)]
+    try:
+        sources = [salvage(damaged)]
+    except (RecoveryError, sqlite3.Error, OSError):
+        if not skip_unreadable:
+            raise
+        sources = [{}]
     if fallback is not None and Path(fallback).is_file():
         try:
             sources.append(salvage(Path(fallback)))
@@ -392,7 +400,10 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
         rebuilt = record_dir / f".luvbox-history.repaired-{stamp}.sqlite3"
         # Old account-only backups cannot identify their output folder. Keep
         # them intact, but never mix an unrelated catalog into this repair.
-        result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir))
+        # An old-name file stays in place, so a copy SQLite cannot read at all
+        # must not block the backup-only rebuild that worked before.
+        result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir),
+                                 skip_unreadable=name != HISTORY_NAME)
         for suffix in ("-wal", "-shm"):
             (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
         os.replace(rebuilt, record_dir / HISTORY_NAME)

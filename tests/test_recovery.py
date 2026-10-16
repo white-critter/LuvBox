@@ -1,6 +1,7 @@
 """Damaged records databases are detected, kept, and rebuilt on this PC."""
 
 import queue
+import shutil
 import sqlite3
 import struct
 import tempfile
@@ -208,6 +209,42 @@ class RecoveryTests(unittest.TestCase):
             rows = store.records(limit=1000)
             self.assertEqual({row["tweet_id"]: row["saved_at"] for row in rows}, self.saved)
             self.assertEqual(store.runs()[0]["saved"], 600)
+
+    def test_old_name_catalog_sqlite_cannot_read_is_rebuilt_from_the_backup_and_kept(self):
+        from luvbox.storage import _OLD_DATABASES
+
+        old = self.account / _OLD_DATABASES[recovery.HISTORY_NAME]
+        for backup in (True, False):
+            with self.subTest(backup=backup):
+                if backup:
+                    recovery.backup_catalog(self.account, "myaccount")
+                else:
+                    for path in recovery._catalog_backups("myaccount", self.account).glob("history-*"):
+                        path.unlink()
+                for suffix in ("-wal", "-shm"):
+                    (self.account / (recovery.HISTORY_NAME + suffix)).unlink(missing_ok=True)
+                self.live.unlink()
+                old.write_bytes(b"damaged old database")
+                with self.assertRaises(CatalogDamaged):
+                    HistoryStore(self.account)
+                result = recovery.repair_history(self.account, "myaccount")
+                self.assertEqual(result["counts"].get("media", 0), 600 if backup else 0)
+                self.assertEqual((Path(result["kept"]) / old.name).read_bytes(), b"damaged old database")
+                self.assertEqual(old.read_bytes(), b"damaged old database")
+                with closing(HistoryStore(self.account)) as store:
+                    self.assertEqual(len(store.records(limit=1000)), 600 if backup else 0)
+                # Both cases may run within the same second as the kept folder name.
+                shutil.rmtree(result["kept"])
+
+    def test_unreadable_old_name_archive_is_not_offered_a_catalog_repair_that_cannot_fix_it(self):
+        from luvbox.storage import _OLD_DATABASES
+
+        archive = self.account / _OLD_DATABASES[".luvbox-archive.sqlite3"]
+        archive.write_bytes(b"damaged old database")
+        with self.assertRaises(HistoryError) as failure:
+            HistoryStore(self.account)
+        self.assertNotIsInstance(failure.exception, CatalogDamaged)
+        self.assertEqual(archive.read_bytes(), b"damaged old database")
 
     def test_records_window_offers_repair_and_reloads(self):
         damage_media_table(self.live)

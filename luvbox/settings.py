@@ -18,8 +18,10 @@ _MIGRATION_HELP = ("이전 앱 데이터를 LuvBox 폴더로 옮기지 못했습
 CONFLICT_HELP = ("이전 이름의 데이터 폴더(XlikeSaver)가 다시 생겼습니다. 예전 버전의 실행 파일이나 "
                  "자동 저장 등록이 다시 실행된 것으로 보입니다. 지금 쓰는 데이터는 LuvBox 폴더에 있습니다.")
 # What an older build writes by itself after the move, before anyone signs in
-# to it again: logs, its last scheduled outcome and rebuildable caches.
-_LEFTOVER_NAMES = frozenset({"logs", "last-scheduled.json", "cache", "request-protection", "thumbnails"})
+# to it again: logs, its last scheduled outcome, the window's acknowledgement
+# of that outcome (and their interrupted temporary files) and rebuildable caches.
+_LEFTOVER_NAMES = frozenset({"logs", "last-scheduled.json", "last-scheduled-seen", "cache",
+                             "request-protection", "thumbnails"})
 
 
 class AppDataError(OSError):
@@ -28,6 +30,10 @@ class AppDataError(OSError):
 
 class AppDataConflict(AppDataError):
     """Both data folders hold settings, a sign-in or records; the person decides."""
+
+
+def _leftover(name: str) -> bool:
+    return name in _LEFTOVER_NAMES or (name.startswith("last-scheduled-") and name.endswith(".tmp"))
 
 
 def _folders() -> tuple[Path, Path]:
@@ -85,7 +91,7 @@ def app_directory() -> Path:
                     # older build run after the move only leaves logs and caches
                     # behind; those are kept aside so it cannot lock this one out.
                     try:
-                        if not all(entry.name in _LEFTOVER_NAMES for entry in previous.iterdir()):
+                        if not all(_leftover(entry.name) for entry in previous.iterdir()):
                             raise AppDataConflict(CONFLICT_HELP)
                         _set_aside(previous, target)
                     except AppDataError:

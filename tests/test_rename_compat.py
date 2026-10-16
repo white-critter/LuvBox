@@ -77,6 +77,10 @@ class AppDataMigrationTests(unittest.TestCase):
         (self.old / "last-scheduled.json").write_text('{"failed": true}', encoding="utf-8")
         (self.old / "cache").mkdir()
         (self.old / "cache" / "theme-1.0.0-light-fixture.zip").write_bytes(b"theme-cache")
+        # Its window marks that failed run seen when the notice opens it.
+        (self.old / "last-scheduled-seen").mkdir()
+        (self.old / "last-scheduled-seen" / "0123abcd.json").write_text('{"outcome": {}}', encoding="utf-8")
+        (self.old / "last-scheduled-k3j2.tmp").write_bytes(b"interrupted write")
 
     def test_leftovers_of_an_older_build_after_the_move_are_kept_aside_without_a_lockout(self):
         self.old_data()

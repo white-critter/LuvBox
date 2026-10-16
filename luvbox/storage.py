@@ -149,6 +149,12 @@ def migrate_legacy_databases(directory: Path) -> None:
                 # The records window offers repair only for the catalog itself.
                 exc.database = name
                 raise
+            except sqlite3.DatabaseError as exc:
+                corrupt = (getattr(exc, "sqlite_errorcode", 0) or 0) & 0xFF in {11, 26}
+                if name == ".luvbox-history.sqlite3" or not corrupt:
+                    raise
+                # Repair rebuilds only the catalog; it cannot fix this file.
+                raise _DamagedDatabase("기록 파일이 손상되어 옮기지 못했습니다. 이전 파일은 보존했습니다.") from exc
 
 
 def records_root() -> Path:
