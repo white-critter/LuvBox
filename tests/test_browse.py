@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import test_core
-import app_data_isolation  # noqa: F401  (never this PC's real app data)
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import charts, storage
 from luvbox.core import run_worker
 from luvbox.history import HistoryError, HistoryStore

@@ -10,7 +10,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-import app_data_isolation  # noqa: F401  (never this PC's real app data)
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import HistoryStore
 
 

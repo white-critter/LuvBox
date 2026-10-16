@@ -13,7 +13,7 @@ from itertools import product
 from pathlib import Path
 from unittest.mock import patch
 
-import app_data_isolation  # noqa: F401  (never this PC's real app data)
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import HistoryError, HistoryStore, _within
 
 

@@ -7,7 +7,7 @@ import unittest
 
 # Discovery imports this module before any test runs, which isolates the
 # whole suite; modules that build records stores also import it directly.
-import app_data_isolation
+from tests import app_data_isolation
 from luvbox import settings
 
 

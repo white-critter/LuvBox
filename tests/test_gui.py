@@ -12,7 +12,7 @@ import unittest
 import weakref
 from unittest.mock import Mock, patch
 
-import app_data_isolation  # noqa: F401  (never this PC's real app data)
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.gui import App, AUTH_MODES, worker_command
 
 
@@ -59,6 +59,51 @@ class GuiTests(unittest.TestCase):
         preferences.start()
         self.addCleanup(preferences.stop)
         self.app = App(self.root)
+
+    def _check_help_taskbar_cleanup(self, close_with_button):
+        from luvbox import app_icon
+
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.app.help()
+        window = self.app.help_window
+        window.attributes("-alpha", 0)
+        self.root.update()
+        handle = int(window.wm_frame(), 16)
+        properties = app_icon._taskbar_properties
+        self.assertEqual(properties(handle, None)[5], app_icon.APP_ID)
+        cleared = []
+
+        def tracked(current, values):
+            result = properties(current, values)
+            if current == handle and values == {}:
+                cleared.append((bool(window.winfo_exists()), properties(current, None)))
+            return result
+
+        with patch.object(app_icon, "_taskbar_properties", side_effect=tracked):
+            if close_with_button:
+                pending = [window]
+                while pending:
+                    widget = pending.pop()
+                    if widget.winfo_class() == "TButton" and widget.cget("text") == "닫기":
+                        widget.invoke()
+                        break
+                    pending.extend(widget.winfo_children())
+                else:
+                    self.fail("Help close button is missing")
+            else:
+                self.root.tk.call(window.protocol("WM_DELETE_WINDOW"))
+        self.assertEqual(cleared, [(True, {2: "", 3: "", 4: "", 5: ""})])
+        self.assertFalse(window.winfo_exists())
+        self.assertTrue(self.root.winfo_exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows taskbar properties")
+    def test_help_close_button_clears_taskbar_properties_before_destroy(self):
+        self._check_help_taskbar_cleanup(close_with_button=True)
+
+    @unittest.skipUnless(os.name == "nt", "Windows taskbar properties")
+    def test_help_window_close_clears_taskbar_properties_before_destroy(self):
+        self._check_help_taskbar_cleanup(close_with_button=False)
 
     def test_help_window_close_button_and_title_bar_use_the_current_destroy(self):
         from tkinter import ttk

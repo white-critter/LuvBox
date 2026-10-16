@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from tests import test_core
-import app_data_isolation  # noqa: F401  (never this PC's real app data)
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import storage
 from luvbox.history import HistoryError, HistoryStore
 

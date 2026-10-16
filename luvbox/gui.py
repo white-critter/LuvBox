@@ -1291,6 +1291,10 @@ class App:
             window.lift()
             return
         popup = self.help_window = tk.Toplevel(self.root)
+        def close():
+            # Mapping installs native cleanup on destroy; resolve it at close time.
+            popup.destroy()
+        popup.protocol("WM_DELETE_WINDOW", close)
         popup.title("러브박스 사용 방법")
         width = min(800, max(600, self.root.winfo_screenwidth() - 80))
         height = min(800, max(480, self.root.winfo_screenheight() - 120))
@@ -1309,10 +1313,7 @@ class App:
         ttk.Button(links, text="자동 저장 예약", command=self.show_schedule).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 8))
         ttk.Button(links, text="자동 저장 실행 기록", command=self.open_schedule_logs).grid(row=0, column=1, sticky="ew", pady=(0, 8))
         ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).grid(row=1, column=0, sticky="w")
-        # Look destroy up when pressed: the icon hook replaces it on first map
-        # to clear taskbar properties before the window handle goes away.
-        ttk.Button(links, text="닫기", width=9, command=lambda: popup.destroy()).grid(row=1, column=1, sticky="e")
-        popup.protocol("WM_DELETE_WINDOW", lambda: popup.destroy())
+        ttk.Button(links, text="닫기", width=9, command=close).grid(row=1, column=1, sticky="e")
         body = theme.card(popup, fill="both", expand=True, padx=24, pady=(16, 0))
         content = tk.Text(body, wrap="word", background=theme.CARD, foreground=theme.INK, relief="flat", borderwidth=0,
                           highlightthickness=0, padx=4, pady=2, font=theme.BODY, spacing1=2, spacing3=4, cursor="arrow")
