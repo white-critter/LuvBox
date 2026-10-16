@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import recovery
 from luvbox.history import CatalogDamaged, HistoryError, HistoryStore
 from luvbox.history_gui import HistoryWindow
@@ -185,6 +186,28 @@ class RecoveryTests(unittest.TestCase):
             self.assertEqual(store.record_page(query="본문")["total"], 1)
             self.assertTrue(all(row["metadata_status"] == "embedded" for row in rows))
         self.assertFalse(list(self.account.glob("*.repaired-*")))
+
+    def test_repair_salvages_a_catalog_damaged_before_the_rename_under_its_old_name(self):
+        from luvbox.storage import _OLD_DATABASES
+
+        old = self.account / _OLD_DATABASES[recovery.HISTORY_NAME]
+        damage_media_table(self.live)
+        self.live.rename(old)
+        with self.assertRaises(CatalogDamaged):
+            HistoryStore(self.account)
+        results = queue.Queue()
+        HistoryWindow._load_worker(results, 1, self.account, "all", "", 0, False)
+        self.assertEqual(results.get_nowait()[1], "damaged")
+        self.assertFalse(self.live.exists())
+        result = recovery.repair_history(self.account, "myaccount")
+        self.assertEqual(result["counts"]["media"], 600)
+        self.assertTrue((Path(result["kept"]) / old.name).is_file())
+        self.assertTrue(old.is_file())
+        self.assertEqual(recovery._integrity(self.live), "ok")
+        with closing(HistoryStore(self.account)) as store:
+            rows = store.records(limit=1000)
+            self.assertEqual({row["tweet_id"]: row["saved_at"] for row in rows}, self.saved)
+            self.assertEqual(store.runs()[0]["saved"], 600)
 
     def test_records_window_offers_repair_and_reloads(self):
         damage_media_table(self.live)

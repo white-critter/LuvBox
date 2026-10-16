@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .settings import app_directory, load_settings
+from .settings import AppDataError, app_directory, load_settings
 
 
 TASK_NAME = "LuvBox 자동 저장"
@@ -308,8 +308,8 @@ def _notify_failure(outcome: dict) -> None:
             pass
         dialog = dialogs.Dialog(
             root, "러브박스 자동 저장 실패",
-            f"{outcome['finished_at'][:16].replace('T', ' ')} 자동 저장을 마치지 못했습니다.\n\n{outcome['message']}\n\n"
-            "자세한 내용은 앱의 ‘자동 저장 → 실행 기록’에 있습니다.",
+            f"{outcome['finished_at'][:16].replace('T', ' ')} 자동 저장을 마치지 못했습니다.\n\n{outcome['message']}"
+            + ("\n\n자세한 내용은 앱의 ‘자동 저장 → 실행 기록’에 있습니다." if outcome.get("log") else ""),
             icon="warning", buttons=(("앱 열기", "open"), ("닫기", None)))
         dialog.attributes("-topmost", True)
         choice = dialog.run()
@@ -322,7 +322,14 @@ def _notify_failure(outcome: dict) -> None:
 
 def run_saved(*, full: bool = False) -> int:
     """Run once and return the worker's exit code; 1 when nothing could start."""
-    directory = log_directory()
+    try:
+        directory = log_directory()
+    except AppDataError as exc:
+        # Nothing can be logged without the data folder; say why right away
+        # instead of ending in an unhandled error.
+        _notify_failure({"finished_at": datetime.now(_KOREA).isoformat(timespec="seconds"),
+                         "message": f"{exc}\n\n앱을 열어 데이터 폴더를 정리해 주세요.", "log": ""})
+        return 1
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(_KOREA).strftime("%Y%m%d-%H%M%S")
     path = directory / f"scheduled-{stamp}.log"

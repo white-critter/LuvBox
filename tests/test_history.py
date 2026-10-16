@@ -13,6 +13,7 @@ from itertools import product
 from pathlib import Path
 from unittest.mock import patch
 
+import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import HistoryError, HistoryStore, _within
 
 
@@ -81,7 +82,12 @@ class HistoryTests(unittest.TestCase):
         sql = ("SELECT media.rowid FROM media ORDER BY " + _ORDERS["saved"] +
                ",media.num,media.folder_mode,media.media_type LIMIT 100 OFFSET 10000")
         details = [row[3] for row in self.store._db.execute("EXPLAIN QUERY PLAN " + sql)]
-        self.assertTrue(any("USING COVERING INDEX" in detail for detail in details), details)
+        # SQLite before 3.49 does not report an index on expressions as
+        # covering, although paging still walks it in order without sorting.
+        # The app bundles a newer SQLite; the program check below still
+        # proves the page never reads the path column from the table.
+        used = "USING COVERING INDEX" if sqlite3.sqlite_version_info >= (3, 49) else "USING"
+        self.assertTrue(any(f"{used} " in detail and "media_saved_order" in detail for detail in details), details)
         self.assertFalse(any("TEMP B-TREE" in detail for detail in details), details)
         where, params = self.store._record_filter("all", "", include_deleted=False)
         visible = ("SELECT media.rowid FROM media" + where + " ORDER BY " + _ORDERS["saved"] +

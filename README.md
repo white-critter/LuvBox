@@ -104,4 +104,4 @@ GNU GPL 버전 2입니다([LICENSE](LICENSE)). 함께 들어 있는 프로그램
 .\build.ps1
 ```
 
-빌드는 `release/LuvBox-<버전>/`(exe와 `_internal`), 배포 ZIP과 SHA256 파일을 만듭니다. 동작 원리, 문제 해결, 1.0.0 이전 개발 버전 기록은 [docs/development.md](docs/development.md)에 있습니다.
+빌드는 `release/LuvBox-<버전>/`(exe와 `_internal`), 배포 ZIP과 SHA256 파일을 만듭니다. 동작 원리와 개발 절차는 [docs/development.md](docs/development.md), 최신 검사 결과는 [docs/verification.md](docs/verification.md)에 있습니다. 1.0.0 이전 개발 기록은 Git 이력에 남아 있습니다.

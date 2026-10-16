@@ -69,6 +69,61 @@ class AppDataMigrationTests(unittest.TestCase):
         self.assertEqual(fixture.read_text(), '{"account":"other"}')
         self.assertTrue((self.old / "session.bin").is_file())
 
+    def old_build_leftovers(self):
+        # What the previous build writes by itself after the move, e.g. from
+        # a daily task that still starts the old executable.
+        (self.old / "logs").mkdir(parents=True)
+        (self.old / "logs" / "scheduled-20261016-090000.log").write_text("old build log", encoding="utf-8")
+        (self.old / "last-scheduled.json").write_text('{"failed": true}', encoding="utf-8")
+        (self.old / "cache").mkdir()
+        (self.old / "cache" / "theme-1.0.0-light-fixture.zip").write_bytes(b"theme-cache")
+
+    def test_leftovers_of_an_older_build_after_the_move_are_kept_aside_without_a_lockout(self):
+        self.old_data()
+        self.assertEqual(settings.load_settings(), {"account": "fixture"})
+        for run in (1, 2):
+            with self.subTest(run=run):
+                self.old_build_leftovers()
+                self.assertEqual(settings.load_settings(), {"account": "fixture"})
+                self.assertFalse(self.old.exists())
+                kept = sorted((self.new / "legacy").iterdir())
+                self.assertEqual(len(kept), run)
+                self.assertTrue(all(path.name.startswith("XlikeSaver-") for path in kept))
+                self.assertEqual((kept[-1] / "logs" / "scheduled-20261016-090000.log").read_text(encoding="utf-8"),
+                                 "old build log")
+        self.assertEqual((self.new / "session.bin").read_bytes(), b"encrypted-session-fixture")
+
+    def test_old_build_settings_after_the_move_need_a_choice_and_are_only_moved_on_request(self):
+        self.old_data()
+        settings.load_settings()
+        self.old_build_leftovers()
+        (self.old / "settings.json").write_text('{"appearance":"dark"}', encoding="utf-8")
+        with self.assertRaises(settings.AppDataConflict) as raised:
+            settings.load_settings()
+        self.assertEqual(str(raised.exception), settings.CONFLICT_HELP)
+        self.assertTrue((self.old / "settings.json").is_file())
+        self.assertFalse((self.new / "legacy").exists())
+        kept = settings.set_aside_previous()
+        self.assertEqual(kept.parent, self.new / "legacy")
+        self.assertEqual((kept / "settings.json").read_text(encoding="utf-8"), '{"appearance":"dark"}')
+        self.assertEqual(settings.load_settings(), {"account": "fixture"})
+        self.assertIsNone(settings.set_aside_previous())
+
+    def test_scheduled_run_reports_a_data_folder_conflict_instead_of_crashing(self):
+        from luvbox import scheduled
+
+        self.old_data()
+        self.new.mkdir()
+        (self.new / "settings.json").write_text('{"account":"other"}', encoding="utf-8")
+        with patch("luvbox.scheduled._notify_failure") as notify, patch("luvbox.core.run_worker") as worker:
+            self.assertEqual(scheduled.run_saved(), 1)
+        worker.assert_not_called()
+        outcome = notify.call_args.args[0]
+        self.assertIn(settings.CONFLICT_HELP, outcome["message"])
+        self.assertFalse(outcome["log"])
+        self.assertTrue((self.old / "session.bin").is_file())
+        self.assertEqual((self.new / "settings.json").read_text(encoding="utf-8"), '{"account":"other"}')
+
     def test_old_dpapi_pair_is_read_and_new_writes_use_current_header(self):
         payload = {"version": 1, "cookies": [{"name": "auth_token", "value": "offline-fixture",
                     "domain": ".x.com", "path": "/", "expires": -1, "secure": True, "httpOnly": True}]}

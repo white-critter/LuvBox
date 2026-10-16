@@ -106,6 +106,10 @@ def _windows_taskbar(root: tk.Misc, icon: str) -> None:
                 pass
             destroy()
         root.destroy = close
+        # tkinter's default title-bar close is the original bound destroy,
+        # registered as "<id>destroy"; route it through the cleanup too.
+        if str(root.wm_protocol("WM_DELETE_WINDOW") or "destroy").endswith("destroy"):
+            root.wm_protocol("WM_DELETE_WINDOW", close)
         root._luvbox_taskbar_cleanup = True
 
 

@@ -143,7 +143,12 @@ def migrate_legacy_databases(directory: Path) -> None:
         if source.exists():
             if not _legacy_source(source, directory):
                 raise MigrationError(_MIGRATION_HELP)
-            _copy_database_once(source, destination)
+            try:
+                _copy_database_once(source, destination)
+            except _DamagedDatabase as exc:
+                # The records window offers repair only for the catalog itself.
+                exc.database = name
+                raise
 
 
 def records_root() -> Path:

@@ -1309,7 +1309,10 @@ class App:
         ttk.Button(links, text="자동 저장 예약", command=self.show_schedule).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 8))
         ttk.Button(links, text="자동 저장 실행 기록", command=self.open_schedule_logs).grid(row=0, column=1, sticky="ew", pady=(0, 8))
         ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).grid(row=1, column=0, sticky="w")
-        ttk.Button(links, text="닫기", width=9, command=popup.destroy).grid(row=1, column=1, sticky="e")
+        # Look destroy up when pressed: the icon hook replaces it on first map
+        # to clear taskbar properties before the window handle goes away.
+        ttk.Button(links, text="닫기", width=9, command=lambda: popup.destroy()).grid(row=1, column=1, sticky="e")
+        popup.protocol("WM_DELETE_WINDOW", lambda: popup.destroy())
         body = theme.card(popup, fill="both", expand=True, padx=24, pady=(16, 0))
         content = tk.Text(body, wrap="word", background=theme.CARD, foreground=theme.INK, relief="flat", borderwidth=0,
                           highlightthickness=0, padx=4, pady=2, font=theme.BODY, spacing1=2, spacing3=4, cursor="arrow")
@@ -1967,13 +1970,25 @@ class App:
 
 
 def launch():
-    from .settings import AppDataError
+    from .settings import AppDataConflict, AppDataError, set_aside_previous
 
     root = tk.Tk()
     app = None
     try:
         try:
-            app = App(root)
+            try:
+                app = App(root)
+            except AppDataConflict as exc:
+                choice = dialogs.Dialog(
+                    root, "이전 데이터 폴더 정리", f"{exc}\n\n‘옮기고 계속’을 누르면 지금 데이터로 앱을 엽니다. "
+                    "XlikeSaver 폴더는 지우지 않고 LuvBox 데이터 폴더의 legacy 안으로 옮겨 보관합니다.\n\n"
+                    "예전 버전의 실행 파일·바로가기는 더 이상 쓰지 마세요.", icon="warning",
+                    buttons=(("닫기", None), ("옮기고 계속", True)), default=1).run()
+                if choice is not True:
+                    root.destroy()
+                    return
+                set_aside_previous()
+                app = App(root)
         except AppDataError as exc:
             dialogs.showerror("기존 데이터 이전 확인", str(exc), parent=root)
             root.destroy()
