@@ -755,7 +755,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         elif previous_status == "embedded" and media_status == "existing":
             # An already saved file is rewritten during a run only to retry a
             # missing source. Adding or updating just its author is left to the
-            # explicit '출처·작성자 기록' action in the records window, so a complete scan
+            # explicit '이전 파일 출처·작성자 보완' file tool, so a complete scan
             # never rewrites a whole library (or makes cloud sync re-upload it).
             # The catalog keeps the current author for that action.
             metadata_status = "embedded"
@@ -1810,7 +1810,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     if author_deferred:
         emit({"type": "log", "level": "info",
               "message": f"이미 있던 파일 {author_deferred:,}개는 작성자를 기록에만 넣었습니다. "
-                         "파일에도 넣으려면 ‘기록 · 통계 → 출처·작성자 기록’을 누르세요."})
+                         "파일에도 넣으려면 ‘기록 · 통계 → 파일 관리 → 이전 파일 출처·작성자 보완’을 누르세요."})
     if status == "error":
         emit({"type": "log", "level": "error", "message": message})
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,

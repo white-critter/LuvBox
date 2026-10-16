@@ -21,7 +21,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .storage import (_RECORD_FOLDERS, StoragePaths, migrate_legacy_databases,
+from .storage import (_RECORD_FOLDERS, StoragePaths, _DamagedDatabase, migrate_legacy_databases,
                       prepare_storage, records_root)
 
 
@@ -117,6 +117,12 @@ def _safe(method):
             if database is None:
                 database = getattr(getattr(owner, "_store", None), "_db", None)
             if _catalog_damage(exc, database):
+                raise CatalogDamaged(_DAMAGED_HELP) from None
+            raise HistoryError(_HISTORY_HELP) from None
+        except _DamagedDatabase as exc:
+            # A catalog damaged under its pre-rename name fails the copy's
+            # integrity check before it can be opened; repair reads that file.
+            if getattr(exc, "database", None) == ".luvbox-history.sqlite3":
                 raise CatalogDamaged(_DAMAGED_HELP) from None
             raise HistoryError(_HISTORY_HELP) from None
         except (OSError, sqlite3.Error, ValueError, TypeError, OverflowError):

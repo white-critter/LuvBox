@@ -16,6 +16,7 @@ from gallery_dl.extractor.message import Message
 
 from tests import test_core, test_gui, test_history_gui
 from tests.test_core import SECRET, FakeHttpDownloader
+import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import JobOptions, run_worker
 from luvbox.history import HistoryStore, archive_key
 from luvbox.recovery import rebuild_history

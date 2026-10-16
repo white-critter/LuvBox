@@ -55,9 +55,28 @@ class ReleaseManifestTests(unittest.TestCase):
         self.assertIn(self.application / (self.name + ".exe"), files)
         self.assertIn(self.application / "_internal/tools/exiftool/runtime/exiftool_files/t/images/Geotag.log", files)
         for component in ("ffmpeg", "exiftool"):
-            runtime = self.root / "tools" / component / "runtime"
-            expected = {source.relative_to(runtime) for source in manifest.values() if source.is_relative_to(runtime)}
-            self.assertEqual(len(package_release._verified_files(runtime, expected)), 1)
+            self.assertEqual(len(package_release._runtime_files(manifest, component)), 1)
+
+    def test_build_through_another_path_to_the_project_still_finds_bundled_tools(self):
+        # A junction, substituted drive or mapped drive gives PyInstaller a
+        # different spelling of the same folder than the resolved ROOT.
+        alias = self.root.parent / (self.root.name + "-alias")
+        try:
+            os.symlink(self.root, alias, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("directory links are not available")
+        self.addCleanup(alias.unlink)
+        entries = [(name, source.replace(str(self.root), str(alias), 1), kind)
+                   for name, source, kind in self.entries]
+        self.write_toc(entries)
+        manifest = self.manifest()
+        self.assertFalse(any(source.is_relative_to(self.root) for source in manifest.values()))
+        for component in ("ffmpeg", "exiftool"):
+            self.assertEqual(len(package_release._runtime_files(manifest, component)), 1)
+        # A manifest that names no bundled tool at all is still refused.
+        self.write_toc([entry for entry in self.entries if "runtime" not in entry[0]])
+        with self.assertRaisesRegex(ValueError, "missing the bundled media tools"):
+            package_release._runtime_files(self.manifest(), "ffmpeg")
 
     def test_unexpected_personal_file_in_application_or_source_runtime_blocks_release(self):
         manifest = self.manifest()

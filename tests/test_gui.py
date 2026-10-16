@@ -12,6 +12,7 @@ import unittest
 import weakref
 from unittest.mock import Mock, patch
 
+import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.gui import App, AUTH_MODES, worker_command
 
 
@@ -58,6 +59,30 @@ class GuiTests(unittest.TestCase):
         preferences.start()
         self.addCleanup(preferences.stop)
         self.app = App(self.root)
+
+    def test_help_window_close_button_and_title_bar_use_the_current_destroy(self):
+        from tkinter import ttk
+
+        for close in ("button", "title"):
+            with self.subTest(close=close):
+                self.app.help()
+                popup = self.app.help_window
+                closed = []
+                # The icon hook replaces destroy after the window is created.
+                original = popup.destroy
+                popup.destroy = lambda: (closed.append(True), original())
+                if close == "button":
+                    stack = list(popup.winfo_children())
+                    while stack:
+                        widget = stack.pop()
+                        stack.extend(widget.winfo_children())
+                        if isinstance(widget, ttk.Button) and widget.cget("text") == "닫기":
+                            widget.invoke()
+                            break
+                else:
+                    popup.tk.call(popup.wm_protocol("WM_DELETE_WINDOW"))
+                self.assertEqual(closed, [True])
+                self.assertFalse(popup.winfo_exists())
 
     def test_unconnected_token_mode_requests_connection_before_download(self):
         with patch("luvbox.gui.threading.Thread") as thread:
@@ -1277,6 +1302,44 @@ class StartupMigrationTests(unittest.TestCase):
         create_root.return_value.destroy.assert_called_once_with()
         notice.assert_called_once_with("기존 데이터 이전 확인", "기존 데이터를 보존했습니다",
                                        parent=create_root.return_value)
+
+
+    def test_old_build_data_conflict_opens_the_app_only_after_the_person_moves_it_aside(self):
+        from luvbox.gui import launch
+        from luvbox.settings import AppDataConflict
+
+        for choice in (True, None):
+            with self.subTest(choice=choice), patch("luvbox.gui.tk.Tk") as create_root, \
+                    patch("luvbox.gui.App", side_effect=[AppDataConflict("두 데이터 폴더"), object()]) as app, \
+                    patch("luvbox.gui.dialogs.Dialog") as dialog, \
+                    patch("luvbox.settings.set_aside_previous") as set_aside:
+                dialog.return_value.run.return_value = choice
+                launch()
+            self.assertIn("두 데이터 폴더", dialog.call_args.args[2])
+            if choice:
+                set_aside.assert_called_once_with()
+                self.assertEqual(app.call_count, 2)
+                create_root.return_value.mainloop.assert_called_once_with()
+            else:
+                set_aside.assert_not_called()
+                self.assertEqual(app.call_count, 1)
+                create_root.return_value.mainloop.assert_not_called()
+                create_root.return_value.destroy.assert_called_once_with()
+
+
+    def test_closing_the_unfinished_window_during_a_data_dialog_exits_quietly(self):
+        from luvbox.gui import launch
+        from luvbox.settings import AppDataConflict, AppDataError
+
+        for error in (AppDataConflict("두 데이터 폴더"), AppDataError("기존 데이터를 보존했습니다")):
+            with self.subTest(error=type(error).__name__), patch("luvbox.gui.tk.Tk") as create_root, \
+                    patch("luvbox.gui.App", side_effect=error), \
+                    patch("luvbox.gui.dialogs.Dialog") as dialog, patch("luvbox.gui.dialogs.showerror"):
+                dialog.return_value.run.return_value = None
+                # The person closed the empty main window behind the dialog.
+                create_root.return_value.destroy.side_effect = tk.TclError("application has been destroyed")
+                launch()
+                create_root.return_value.mainloop.assert_not_called()
 
 
 class WorkerEventReaderTests(unittest.TestCase):

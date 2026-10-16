@@ -1568,7 +1568,7 @@ class HistoryWindow(tk.Toplevel):
         self._update_controls()
         warning = " ".join(summary.get("warnings", []))
         unmarked = max(0, files - (summary.get("embedded_sources", 0) or 0))
-        hint = (f"출처가 기록되지 않은 예전 파일 {unmarked:,}개 · ‘파일 관리 → 파일에 출처·작성자 기록’으로 넣을 수 있습니다."
+        hint = (f"출처가 기록되지 않은 예전 파일 {unmarked:,}개 · ‘파일 관리 → 이전 파일 출처·작성자 보완’으로 넣을 수 있습니다."
                 if unmarked and not offline else "")
         self.status_text.set(((self.completion_text + "\n" if self.completion_text else "") +
                               (warning + "\n" if warning else "") + hint).strip())
@@ -1740,7 +1740,7 @@ class HistoryWindow(tk.Toplevel):
     def backfill(self):
         if self.busy or self.current_account_dir is None:
             return
-        if self._offline_blocked("출처·작성자 기록"):
+        if self._offline_blocked("이전 파일 출처·작성자 보완"):
             return
         if self.is_downloading():
             dialogs.showinfo("다운로드 진행 중", "저장 작업이 끝난 뒤 출처·작성자를 기록해 주세요. 이 작업은 X에 요청하지 않습니다.", parent=self)
@@ -1751,7 +1751,7 @@ class HistoryWindow(tk.Toplevel):
             return
         account, location, generation = self.current_account, self.current_storage, self.generation
         if not dialogs.askyesno(
-                "출처·작성자 기록",
+                "이전 파일 출처·작성자 보완",
                 "예전에 받은 파일 안에 트윗 주소와 작성자를 기록합니다.\n\n"
                 "· 화질은 그대로이고 X에 요청하지 않습니다.\n"
                 "· 파일을 다시 쓰므로 동기화 폴더라면 다시 올라갑니다.\n"

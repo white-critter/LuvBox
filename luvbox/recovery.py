@@ -202,19 +202,27 @@ def _integrity(path: Path) -> str:
         connection.close()
 
 
-def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: Path | str | None = None) -> dict:
+def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: Path | str | None = None,
+                    skip_unreadable: bool = False) -> dict:
     """Write a new, verified records database at ``destination``.
 
     Rows come from ``damaged`` (by pages where needed); rows only found in an
     earlier backup (``fallback``) are added. Each file record keeps its most
     recent version (highest rowid). ``destination`` must not exist yet.
+    ``skip_unreadable`` rebuilds from the backup alone when nothing at all can
+    be read from ``damaged``.
     """
     from .history import HistoryStore
 
     damaged, destination = Path(damaged), Path(destination)
     if destination.exists():
         raise RecoveryError("destination exists")
-    sources = [salvage(damaged)]
+    try:
+        sources = [salvage(damaged)]
+    except (RecoveryError, sqlite3.Error, OSError):
+        if not skip_unreadable:
+            raise
+        sources = [{}]
     if fallback is not None and Path(fallback).is_file():
         try:
             sources.append(salvage(Path(fallback)))
@@ -359,19 +367,30 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
     The damaged files are kept first; media files and download archives are
     never touched. Returns row counts and where the damaged copy was kept.
     """
+    from .storage import _OLD_DATABASES
+
     record_dir = Path(record_dir)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    name = HISTORY_NAME
+    legacy = record_dir / _OLD_DATABASES[HISTORY_NAME]
+    if not (record_dir / HISTORY_NAME).is_file() and legacy.is_file() and not legacy.is_symlink():
+        # A catalog already damaged before the rename was never copied to its
+        # new name. Salvage it from the old name; that file stays where it is.
+        name = legacy.name
     kept = backup_directory() / f"{account}-{stamp}-damaged"
     kept.mkdir(parents=True)
     for suffix in ("", "-wal", "-shm"):
-        source = record_dir / (HISTORY_NAME + suffix)
+        source = record_dir / (name + suffix)
         if source.is_file():
             shutil.copy2(source, kept / source.name)
     work = kept / "work"
     work.mkdir()
     try:
-        for source in kept.glob(HISTORY_NAME + "*"):
-            shutil.copy2(source, work / source.name)
+        for suffix in ("", "-wal", "-shm"):
+            source = kept / (name + suffix)
+            if source.is_file():
+                # SQLite finds a WAL only beside the database name it belongs to.
+                shutil.copy2(source, work / (HISTORY_NAME + suffix))
         # Bring committed changes still in the WAL into the copy's pages.
         try:
             with closing(sqlite3.connect(work / HISTORY_NAME)) as connection:
@@ -381,7 +400,10 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
         rebuilt = record_dir / f".luvbox-history.repaired-{stamp}.sqlite3"
         # Old account-only backups cannot identify their output folder. Keep
         # them intact, but never mix an unrelated catalog into this repair.
-        result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir))
+        # An old-name file stays in place, so a copy SQLite cannot read at all
+        # must not block the backup-only rebuild that worked before.
+        result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir),
+                                 skip_unreadable=name != HISTORY_NAME)
         for suffix in ("-wal", "-shm"):
             (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
         os.replace(rebuilt, record_dir / HISTORY_NAME)

@@ -55,3 +55,16 @@ Windows EXE·ZIP을 재빌드했습니다. ZIP CRC·SHA256, EXE의 앱 모듈 **
 한글·공백 경로에 푼 최종 EXE 자체 점검은 **종료 코드 0, `ok: true`, `frozen: true`**이며, 포함 소스 자체 점검도 `ok: true`입니다. 실제 X 계정 로그인·다운로드는 수행하지 않았고, 코드 서명은 적용하지 않았습니다. EXE 실행 검수는 Smart App Control이 꺼진 환경에서 수행했습니다.
 
 최종 자료는 `.test-output/security-full-tests-final.log`, `security-source-selftest.json`, `security-native-recycle.log`, `security-release-build.log`, `security-release-validation.json`, `security-release-frozen-selftest.json`, `security-release-packaged-source-selftest.json`과 `security-ui/manifest.json`, `security-ui-small/manifest.json`, `security-audit/`에 있습니다. 체크섬은 `release/SHA256-1.0.0.txt`로 제공하며 기존 v1.0.0 태그는 보존합니다.
+
+## 2026-10-16 마무리 점검 보완
+
+같은 날 수정판(d45f7e1)을 다시 점검하고, 남은 문제를 재현 검사와 함께 보완했습니다. 버전은 **1.0.0**을 유지합니다.
+
+- 데이터 폴더를 LuvBox로 옮긴 뒤 예전 실행 파일이나 예전 경로의 자동 저장이 실행되면 `XlikeSaver` 폴더가 다시 생깁니다. 그러면 새 앱이 시작되지 않고 예약 실행도 처리되지 않은 오류로 끝났습니다. 이제 로그·실행 결과·확인 표식·캐시만 있으면 지우지 않고 `LuvBox\legacy` 안으로 옮긴 뒤 계속합니다. 설정·로그인·기록까지 있으면 앱을 열 때 사용자가 옮길지 고릅니다. 예약 실행은 알림으로 알립니다.
+- 업그레이드 전에 이미 손상된 기록 DB가 이전 이름으로만 남아 있으면 기록 복구가 빈 결과로 성공했다고 안내했습니다. 이제 그 파일에서 기록을 살리고, 전혀 읽을 수 없으면 백업으로 다시 만듭니다. 원본은 그대로 둡니다. 기록 복구로 고칠 수 없는 다른 이전 DB 손상에는 복구를 권하지 않습니다.
+- 도움말 창의 닫기 버튼·제목 표시줄 닫기와 tkinter 기본 닫기도 작업표시줄 속성 정리를 거칩니다.
+- ‘이전 파일 출처·작성자 보완’으로 바뀐 버튼 이름을 기록 창 안내·저장 완료 로그·개발 문서에 반영했습니다. README의 문서 안내와 개발 문서의 코드 구조도 현재 모듈 29개에 맞췄습니다.
+- 테스트 프로세스의 `LOCALAPPDATA`를 임시 폴더로 바꿨습니다. 이전에는 전체 테스트가 개발 PC의 실제 `XlikeSaver` 데이터 폴더를 LuvBox로 옮길 수 있었으며, 표식 폴더로 테스트 115개가 실제 앱 데이터 경로에 접근함을 재현했습니다. SQLite 3.49 미만에서만 실패하던 실행 계획 검사도 보정했습니다.
+- 연결 폴더·대체 드라이브·네트워크 드라이브 경로에서 빌드해도 배포 ZIP 단계가 번들 도구를 찾습니다. 파일 자체의 추가·누락·링크 검사는 그대로입니다.
+
+Linux 오프라인 전체 검사는 새 회귀 검사를 포함해 실행했고, 새로 생긴 실패는 없습니다. 남은 실패·생략은 Windows 전용 동작(휴지통·FFmpeg 실행 파일·드라이브 문자·탐색기 열기·창 크기와 포커스)입니다. Windows 전체 회귀 검사, EXE·ZIP 재빌드와 실행 점검은 이 보완에서 수행하지 않았습니다. 실제 X 계정 로그인·다운로드도 포함하지 않습니다.

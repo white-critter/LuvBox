@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 from PIL import Image
 
+import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.gui import App
 from luvbox.history import HistoryStore
 from luvbox.history_gui import HistoryWindow, NO_SELECTION, NO_RUN_SELECTION

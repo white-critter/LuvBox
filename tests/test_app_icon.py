@@ -189,6 +189,33 @@ class AppIconTests(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_default_title_bar_close_clears_taskbar_properties_before_destroying(self):
+        from unittest.mock import patch
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            child = tk.Toplevel(root)
+            calls = []
+            def tracked(handle, values):
+                calls.append((values, bool(child.winfo_exists())))
+            with patch.object(app_icon, "_taskbar_properties", side_effect=tracked), \
+                    patch.object(app_icon, "_taskbar_values", return_value={5: app_icon.APP_ID}):
+                app_icon._windows_taskbar(child, "luvbox.ico")
+                # Tk's default WM_DELETE_WINDOW would bypass the cleanup.
+                child.tk.call(child.wm_protocol("WM_DELETE_WINDOW"))
+            self.assertEqual(calls, [({5: app_icon.APP_ID}, True), ({}, True)])
+            self.assertFalse(child.winfo_exists())
+            # A window's own close handler is never replaced.
+            other = tk.Toplevel(root)
+            other.protocol("WM_DELETE_WINDOW", other.withdraw)
+            handler = other.wm_protocol("WM_DELETE_WINDOW")
+            with patch.object(app_icon, "_taskbar_properties"), \
+                    patch.object(app_icon, "_taskbar_values", return_value={}):
+                app_icon._windows_taskbar(other, "luvbox.ico")
+            self.assertEqual(other.wm_protocol("WM_DELETE_WINDOW"), handler)
+        finally:
+            root.destroy()
+
     @unittest.skipUnless(os.name == "nt", "Windows taskbar properties")
     def test_taskbar_properties_are_removed_before_the_window_is_destroyed(self):
         from unittest.mock import patch

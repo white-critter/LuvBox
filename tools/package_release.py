@@ -117,6 +117,23 @@ def _verified_files(directory: Path, expected) -> list[Path]:
     return sorted(actual.values())
 
 
+def _runtime_files(manifest: dict[Path, Path], component: str) -> list[Path]:
+    """The bundled tool's source files that PyInstaller actually collected."""
+    runtime = ROOT / "tools" / component / "runtime"
+    # PyInstaller keeps each source under the build's working path, which can
+    # be a junction or a substituted or mapped drive while ROOT is resolved.
+    # Compare real locations; the files themselves are still checked below.
+    real_runtime = Path(os.path.realpath(runtime))
+    expected = set()
+    for source in manifest.values():
+        real = Path(os.path.realpath(source))
+        if real.is_relative_to(real_runtime):
+            expected.add(real.relative_to(real_runtime))
+    if not expected:
+        raise ValueError("Build manifest is missing the bundled media tools")
+    return _verified_files(runtime, expected)
+
+
 def package() -> None:
     subprocess.run([sys.executable, str(ROOT / "tools/ffmpeg/build.py"), "--check"], check=True)
     output = ROOT / "release"
@@ -131,13 +148,7 @@ def package() -> None:
         raise FileNotFoundError("Build the application first")
     manifest = _collect_manifest(ROOT / "build/onedir" / application.name / "COLLECT-00.toc", application.name)
     application_files = _verified_files(application, manifest)
-    runtimes = {}
-    for component in ("ffmpeg", "exiftool"):
-        runtime = ROOT / "tools" / component / "runtime"
-        expected = {source.relative_to(runtime) for source in manifest.values() if source.is_relative_to(runtime)}
-        if not expected:
-            raise ValueError("Build manifest is missing the bundled media tools")
-        runtimes[component] = _verified_files(runtime, expected)
+    runtimes = {component: _runtime_files(manifest, component) for component in ("ffmpeg", "exiftool")}
     destination = output / f"LuvBox-{__version__}.zip"
     descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".zip", dir=output)
     os.close(descriptor)
