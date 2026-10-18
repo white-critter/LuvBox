@@ -112,6 +112,39 @@ class ThemeTests(unittest.TestCase):
         # The rounded image must not add its own 40px size to the text padding.
         self.assertLessEqual(button.winfo_height(), 60)
 
+    def test_buttons_have_a_visible_fill_and_border_before_hover(self):
+        for appearance, palette in (("light", theme.LIGHT), ("dark", theme.DARK)):
+            theme.apply(self.root, appearance)
+            for suffix, surface in (("", palette["BG"]), ("_card", palette["CARD"])):
+                for name, fill, line in (
+                        ("button", "BUTTON", "BUTTON_LINE"),
+                        ("ghost", "BUTTON", "BUTTON_LINE"),
+                        ("selected", "ACCENT_SOFT", "BLUE"),
+                        ("button_disabled", "FIELD_DISABLED", "DISABLED_LINE"),
+                        ("ghost_disabled", "FIELD_DISABLED", "DISABLED_LINE")):
+                    with self.subTest(appearance=appearance, surface=surface, kind=name):
+                        image = self.root._luvbox_theme_images[name + suffix]
+                        color = lambda x, y: "#%02x%02x%02x" % tuple(image.get(x, y))
+                        center = color(image.width() // 2, image.height() // 2)
+                        edge = color(image.width() // 2, 0)
+                        self.assertEqual(center, palette[fill])
+                        self.assertEqual(edge, palette[line])
+                        self.assertNotEqual(center, surface)
+                        self.assertNotEqual(edge, center)
+                        self.assertEqual(color(0, 0), surface)
+
+    def test_regular_and_view_switch_buttons_share_the_same_height(self):
+        buttons = [ttk.Button(self.root, text="보기", style=style) for style in
+                   ("TButton", "Ghost.TButton", "Segment.TButton", "SegmentSelected.TButton")]
+        for button in buttons:
+            button.pack()
+        for appearance in ("light", "dark"):
+            theme.apply(self.root, appearance)
+            self.root.update()
+            heights = {button.winfo_height() for button in buttons}
+            self.assertEqual(len(heights), 1)
+            self.assertNotIn(1, heights)
+
     def test_rounded_fields_keep_native_text_and_arrow_hit_targets(self):
         entry = ttk.Entry(self.root, font=theme.BODY)
         spin = ttk.Spinbox(self.root, from_=0, to=100, font=theme.BODY)
@@ -736,6 +769,7 @@ class ThemeTests(unittest.TestCase):
 
         for palette in (theme.LIGHT, theme.DARK):
             for text, surface in (("INK", "BG"), ("MUTED", "BG"), ("MUTED", "CARD"),
+                                  ("INK", "BUTTON"), ("INK", "BUTTON_HOVER"),
                                   ("PRIMARY_INK", "BLUE"), ("BLUE_ACTIVE", "ACCENT_SOFT")):
                 low, high = sorted((luminance(palette[text]), luminance(palette[surface])))
                 with self.subTest(text=text, surface=surface, palette=palette["BG"]):

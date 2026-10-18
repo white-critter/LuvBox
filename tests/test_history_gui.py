@@ -1146,6 +1146,39 @@ class HistoryGuiTests(unittest.TestCase):
         self.root.update()
         self.assertEqual(self.window.content_view.canvas.yview()[0], 0)
 
+    def test_search_view_buttons_keep_text_space_when_the_search_row_folds(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.window.attributes("-alpha", 0)
+        self.window.minsize(600, 600)
+        self.window.deiconify()
+        style = ttk.Style(self.window)
+        for width in (1400, 820, 660, 820, 1400):
+            with self.subTest(width=width):
+                self.window.geometry(f"{width}x720")
+                self.root.update()
+                for button in self.window.view_buttons.values():
+                    self.assertTrue(button.winfo_ismapped())
+                    self.assertGreaterEqual(button.winfo_width(), button.winfo_reqwidth())
+                    font = style.lookup(button.cget("style"), "font") or theme.SMALL
+                    text = int(self.window.tk.call("font", "measure", font, button.cget("text")))
+                    self.assertGreaterEqual(button.winfo_width(), text + 16)
+                    for parent in (button.master, self.window.search_query, self.window.search_controls):
+                        self.assertGreaterEqual(button.winfo_rootx(), parent.winfo_rootx())
+                        self.assertLessEqual(button.winfo_rootx() + button.winfo_width(),
+                                             parent.winfo_rootx() + parent.winfo_width())
+                self.assertGreaterEqual(self.window.search_entry.winfo_width(), 80)
+                if width == 1400:
+                    self.assertFalse(self.window._search_stacked)
+                elif width == 660:
+                    self.assertTrue(self.window._search_stacked)
+                settled = (self.window._search_stacked, self.window.search_controls.winfo_height(),
+                           self.window.search_entry.winfo_width())
+                self.window._queue_pager_layout()
+                self.root.update_idletasks()
+                self.assertEqual(settled, (self.window._search_stacked, self.window.search_controls.winfo_height(),
+                                           self.window.search_entry.winfo_width()))
+
     def test_filters_and_insights_reflow_with_large_font(self):
         root = tk.Tk()
         root.attributes("-alpha", 0)

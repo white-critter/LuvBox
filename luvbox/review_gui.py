@@ -81,11 +81,12 @@ class ReviewWindow(tk.Toplevel):
                                        (("auto", "이후 자동 저장"), ("stop", "전체 작업 중단")))):
             line = ttk.Frame(self.actions)
             line.pack(fill="x", pady=(0, 8) if row == 0 else (0, 0))
-            line.columnconfigure(tuple(range(len(choices))), weight=1, uniform=f"review-action-{row}")
+            line.columnconfigure(tuple(range(0, len(choices) * 2, 2)), weight=1, uniform=f"review-action-{row}")
+            line.columnconfigure(tuple(range(1, len(choices) * 2 - 1, 2)), minsize=6)
             for column, (action, label) in enumerate(choices):
                 button = ttk.Button(line, text=label, command=lambda action=action: self.choose(action),
-                                    style="Primary.TButton" if action == "save" else "TButton")
-                button.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 6, 0))
+                                    style="DialogPrimary.TButton" if action == "save" else "TButton")
+                button.grid(row=0, column=column * 2, sticky="nsew")
                 self.buttons[action] = button
 
         path = Path(candidate.get("path") or "")

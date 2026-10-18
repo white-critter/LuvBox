@@ -29,6 +29,7 @@ LIGHT = {
     "MUTED": "#667083", "BLUE": "#5954e8", "BLUE_ACTIVE": "#4641ce",
     "GREEN": "#24785b", "ORANGE": "#996321", "RED": "#b44454", "LOG_BG": "#f9fafc",
     "KNOB": "#ffffff", "PRIMARY_INK": "#ffffff", "BUTTON": "#f0f2f7",
+    "BUTTON_LINE": "#a9b5ca", "DISABLED_LINE": "#cbd3e0",
     "BUTTON_HOVER": "#e8ebf3", "BUTTON_PRESSED": "#dfe3ef", "DISABLED": "#9ca4b5",
     "ACCENT_SOFT": "#eeedff", "ACCENT_LINE": "#d8d5fb", "TRACK": "#e8eaf2",
     "FIELD_DISABLED": "#f3f4f8", "HEADER": "#f8f9fc",
@@ -38,6 +39,7 @@ DARK = {
     "MUTED": "#a5b0c3", "BLUE": "#aaa2ff", "BLUE_ACTIVE": "#bcb6ff",
     "GREEN": "#80d5b4", "ORANGE": "#efc184", "RED": "#f2a1ad", "LOG_BG": "#182131",
     "KNOB": "#f7f8ff", "PRIMARY_INK": "#151327", "BUTTON": "#293447",
+    "BUTTON_LINE": "#5b6b84", "DISABLED_LINE": "#43516a",
     "BUTTON_HOVER": "#33415a", "BUTTON_PRESSED": "#3d4a63", "DISABLED": "#738097",
     "ACCENT_SOFT": "#302e50", "ACCENT_LINE": "#4b456b", "TRACK": "#313c51",
     "FIELD_DISABLED": "#202b3e", "HEADER": "#222d40",
@@ -348,12 +350,12 @@ def _asset_specs():
     # Opaque, generously sized images: a card or button is a few fast tiles.
     card, button, field, tab = (640, 400), (320, 64), (480, 56), (240, 56)
     yield from panel("card", CARD, LINE, radius=18, width=48, height=48, size=card)
-    yield from panel("button", BUTTON, BUTTON, size=button)
-    yield from panel("button_active", BUTTON_HOVER, BUTTON_HOVER, size=button)
-    yield from panel("button_pressed", BUTTON_PRESSED, BUTTON_PRESSED, size=button)
+    yield from panel("button", BUTTON, BUTTON_LINE, size=button)
+    yield from panel("button_active", BUTTON_HOVER, BLUE, size=button)
+    yield from panel("button_pressed", BUTTON_PRESSED, BLUE, size=button)
     yield from panel("button_focus", BUTTON, BLUE, stroke=2, size=button)
     yield from panel("button_focus_active", BUTTON_HOVER, BLUE, stroke=2, size=button)
-    yield from panel("button_disabled", FIELD_DISABLED, FIELD_DISABLED, size=button)
+    yield from panel("button_disabled", FIELD_DISABLED, DISABLED_LINE, size=button)
     yield from panel("primary", BLUE, BLUE, size=button)
     yield from panel("primary_active", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
     yield from panel("primary_pressed", BLUE_ACTIVE, BLUE_ACTIVE, size=button)
@@ -376,24 +378,22 @@ def _asset_specs():
     for name, fill, outline, stroke in (("tab", CARD, CARD, 1), ("tab_focus", CARD, BLUE, 2)):
         yield name + "_card", _panel_png, dict(fill=fill, outline=outline, radius=11, surface=CARD, stroke=stroke, size=tab)
     yield "notebook_card", _panel_png, dict(fill=CARD, outline=LINE, radius=12, surface=CARD, size=card)
-    yield from panel("selected", ACCENT_SOFT, ACCENT_SOFT, size=button)
-    yield from panel("selected_active", ACCENT_LINE, ACCENT_LINE, size=button)
-    yield from panel("selected_pressed", ACCENT_LINE, ACCENT_LINE, size=button)
+    yield from panel("selected", ACCENT_SOFT, BLUE, size=button)
+    yield from panel("selected_active", ACCENT_LINE, BLUE, size=button)
+    yield from panel("selected_pressed", ACCENT_LINE, BLUE, size=button)
     yield from panel("selected_focus", ACCENT_SOFT, BLUE, stroke=2, size=button)
     yield from panel("selected_focus_active", ACCENT_LINE, BLUE, stroke=2, size=button)
-    yield from panel("selected_disabled", FIELD_DISABLED, FIELD_DISABLED, size=button)
-    for suffix, surface in surfaces:
-        # Quiet navigation has no resting button fill, including on white
-        # sidebars. Its entire image, not just its corners, follows the parent.
-        for name, fill, outline, stroke in (
-                ("ghost", surface, surface, 1),
-                ("ghost_active", BUTTON, BUTTON, 1),
-                ("ghost_pressed", BUTTON_HOVER, BUTTON_HOVER, 1),
-                ("ghost_focus", surface, BLUE, 2),
-                ("ghost_focus_active", BUTTON, BLUE, 2),
-                ("ghost_disabled", surface, surface, 1)):
-            yield name + suffix, _panel_png, dict(fill=fill, outline=outline, surface=surface,
-                                                stroke=stroke, size=button)
+    yield from panel("selected_disabled", FIELD_DISABLED, DISABLED_LINE, size=button)
+    # Secondary actions and navigation remain recognizable before hover.
+    # Only the rounded corners blend into their card/window surface.
+    for name, fill, outline, stroke in (
+            ("ghost", BUTTON, BUTTON_LINE, 1),
+            ("ghost_active", BUTTON_HOVER, BLUE, 1),
+            ("ghost_pressed", BUTTON_PRESSED, BLUE, 1),
+            ("ghost_focus", BUTTON, BLUE, 2),
+            ("ghost_focus_active", BUTTON_HOVER, BLUE, 2),
+            ("ghost_disabled", FIELD_DISABLED, DISABLED_LINE, 1)):
+        yield from panel(name, fill, outline, stroke=stroke, size=button)
     yield "progress_trough", _panel_png, dict(fill=TRACK, outline=TRACK, radius=7, width=28, height=14)
     yield "progress_bar", _panel_png, dict(fill=BLUE, outline=BLUE, radius=7, width=28, height=14)
     for kind, generator in (("switch", _switch_png), ("radio", _radio_png)):
@@ -563,15 +563,15 @@ def apply_style(root: tk.Misc, mode=None) -> None:
     style.map("Primary.TButton", foreground=[("disabled", MUTED), ("!disabled", PRIMARY_INK)])
     configure("Big.TButton", font=(FONT, 13), padding=(20, 10))
     configure("Compact.TButton", font=SMALL, padding=(8, 5))
-    configure("Ghost.TButton", font=BODY, padding=(12, 8), foreground=MUTED)
-    mapping("Ghost.TButton", foreground=[("disabled", DISABLED), ("active", INK), ("!disabled", MUTED)])
+    configure("Ghost.TButton", font=BODY, padding=(14, 8), foreground=INK)
+    mapping("Ghost.TButton", foreground=[("disabled", DISABLED), ("!disabled", INK)])
     for name in ("Nav.TButton", "NavSelected.TButton"):
         configure(name, font=BOLD, padding=(16, 12), anchor="w")
-    mapping("Nav.TButton", foreground=[("disabled", DISABLED), ("active", INK), ("!disabled", MUTED)])
+    mapping("Nav.TButton", foreground=[("disabled", DISABLED), ("!disabled", INK)])
     mapping("NavSelected.TButton", foreground=[("disabled", DISABLED), ("!disabled", BLUE_ACTIVE)])
     for name in ("Segment.TButton", "SegmentSelected.TButton"):
-        configure(name, font=SMALL, padding=(12, 7))
-    mapping("Segment.TButton", foreground=[("disabled", DISABLED), ("active", INK), ("!disabled", MUTED)])
+        configure(name, font=BODY, padding=(14, 8))
+    mapping("Segment.TButton", foreground=[("disabled", DISABLED), ("!disabled", INK)])
     mapping("SegmentSelected.TButton", foreground=[("disabled", DISABLED), ("!disabled", BLUE_ACTIVE)])
     configure("CompactPrimary.TButton", font=SMALL, padding=(8, 5))
     style.layout("CompactPrimary.TButton", style.layout("Primary.TButton"))

@@ -69,9 +69,12 @@ class Dialog(tk.Toplevel):
         row.pack(fill="x")
         self.buttons = []
         for index, (label, value) in enumerate(buttons):
+            row.columnconfigure(index * 2, weight=1, uniform="dialog-action")
+            if index:
+                row.columnconfigure(index * 2 - 1, minsize=8)
             button = ttk.Button(row, text=label, command=lambda value=value: self.choose(value),
                                 style="DialogPrimary.TButton" if index == default else "TButton")
-            button.pack(side="left", padx=(8 if index else 0, 0))
+            button.grid(row=0, column=index * 2, sticky="nsew")
             self.buttons.append(button)
         # Align the group with the right edge while preserving button order.
         row.pack_configure(anchor="e", fill="none")
@@ -133,8 +136,10 @@ class Dialog(tk.Toplevel):
         else:
             x = (self.winfo_screenwidth() - width) // 2
             y = (self.winfo_screenheight() - height) // 3
-        x = max(0, min(x, self.winfo_screenwidth() - width))
-        y = max(0, min(y, self.winfo_screenheight() - height - 40))
+        # Tk positions the outer frame; the client starts below its title bar.
+        # Keep the same screen reserve used by _fit for the frame and taskbar.
+        x = max(0, min(x, self.winfo_screenwidth() - width - 16))
+        y = max(0, min(y, self.winfo_screenheight() - height - 100))
         self.geometry(f"+{x}+{y}")
 
     def run(self):

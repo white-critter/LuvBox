@@ -17,7 +17,7 @@ import weakref
 from pathlib import Path
 from tkinter import ttk
 
-from PIL import ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from . import theme
 from .preview import thumbnail
@@ -32,6 +32,23 @@ _SELECTED_INK = "#314fbb"
 _DRAG_START = 6        # pixels the pointer moves before a press becomes a drag
 _SEE_THROUGH = "#010203"  # never a theme color; the drag box window shows through it
 _CONTROL = 0x0004
+
+
+def _tile_placeholder(master, *, loading):
+    """A quiet, shared panel instead of an apparently unfinished blank tile."""
+    palette = theme.DARK if theme.mode(master) == "dark" else theme.LIGHT
+    with Image.new("RGB", TILE, palette["HEADER"]) as image:
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((0, 0, TILE[0] - 1, TILE[1] - 1), radius=10,
+                               fill=palette["HEADER"], outline=palette["LINE"])
+        if loading:
+            for x in (63, 75, 87):
+                draw.ellipse((x - 3, 53, x + 3, 59), fill=palette["MUTED"])
+        else:
+            draw.rounded_rectangle((53, 36, 97, 74), radius=4, outline=palette["MUTED"], width=2)
+            draw.ellipse((80, 43, 86, 49), fill=palette["MUTED"])
+            draw.line((55, 67, 67, 53, 79, 66, 87, 58, 95, 68), fill=palette["MUTED"], width=2)
+        return ImageTk.PhotoImage(image, master=master)
 
 
 class _GridDecoder:
@@ -340,7 +357,7 @@ class ThumbnailGrid(ttk.Frame):
         self._anchor = None
         self.columns = 0
         self._weighted_columns = 0
-        self.placeholder = tk.PhotoImage(master=self, width=TILE[0], height=TILE[1])
+        self.placeholder = self.unavailable_placeholder = None
         self._results = queue.Queue(maxsize=_CACHE_SIZE)
         self._decoder = _GridDecoder(self._results)
         self._token = 0
@@ -351,12 +368,24 @@ class ThumbnailGrid(ttk.Frame):
         self._drag_scroll = None
         self._unavailable = set()
         self._band = DragBox(self)
+        # Classic canvases already redraw through the theme's normal walk.
+        self.canvas.theme_redraw = self._refresh_placeholders
+        self._refresh_placeholders()
         self.canvas.bind("<Configure>", lambda _: self._layout())
         for widget in (self.canvas, self.inner, self.empty):
             widget.bind("<MouseWheel>", self._wheel)
             self._bind_pointer(widget, None)
 
     # -------------------------------------------------------------- contents
+    def _refresh_placeholders(self):
+        if self._released:
+            return
+        self.placeholder = _tile_placeholder(self, loading=True)
+        self.unavailable_placeholder = _tile_placeholder(self, loading=False)
+        for key, tile in self.tiles.items():
+            if key not in self.images:
+                tile.configure(image=self.unavailable_placeholder if key in self._unavailable else self.placeholder)
+
     def show(self, rows, permitted, *, empty_text="표시할 파일이 없습니다.", remember=None, recall=None):
         """rows: [(key, record)] in display order. permitted(paths) runs on
         the decoding thread and returns the subset that may be read.
@@ -388,8 +417,15 @@ class ThumbnailGrid(ttk.Frame):
             day = str(row.get("posted_at") or "")[:10] or "게시일 미확인"
             caption = f"{author}\n{day}"
             if key not in self.tiles:
+                self._captions[key] = caption
+                if not row.get("path"):
+                    # No decoder job will arrive for a record without a path.
+                    self._source_images[key] = None
+                    self._unavailable.add(key)
                 chosen = key in self._selected_set
-                tile = tk.Label(self.inner, image=self.placeholder, text=("✓ " if chosen else "") + caption, compound="top",
+                tile = tk.Label(self.inner,
+                                image=self.unavailable_placeholder if key in self._unavailable else self.placeholder,
+                                text=self._tile_text(key), compound="top",
                                 background=theme._tone(_SELECTED) if chosen else theme.CARD,
                                 foreground=theme._tone(_SELECTED_INK) if chosen else theme.INK, font=theme.SMALL, justify="center",
                                 wraplength=TILE[0], padx=4, pady=4, cursor="hand2", takefocus=True)
@@ -397,7 +433,6 @@ class ThumbnailGrid(ttk.Frame):
                 tile.bind("<Double-1>", lambda _, key=key: self.on_open(key))
                 tile.bind("<MouseWheel>", self._wheel)
                 self.tiles[key] = tile
-                self._captions[key] = caption
             elif caption != self._captions[key]:
                 self._captions[key] = caption
                 self.tiles[key].configure(text=self._tile_text(key))
@@ -431,11 +466,15 @@ class ThumbnailGrid(ttk.Frame):
             self._source_images[key] = image
             if image is None:
                 self._unavailable.add(key)
-                tile.configure(image=self.placeholder, text=self._tile_text(key))
+                tile.configure(image=self.unavailable_placeholder, text=self._tile_text(key))
                 self.images.pop(key, None)
                 continue
             self._unavailable.discard(key)
-            self.images[key] = ImageTk.PhotoImage(image, master=self)
+            # Keep the same preview area for a wide photo and an empty panel;
+            # transparent margins also preserve the tile's selection color.
+            with Image.new("RGBA", TILE) as surface:
+                surface.paste(image, ((TILE[0] - image.width) // 2, (TILE[1] - image.height) // 2))
+                self.images[key] = ImageTk.PhotoImage(surface, master=self)
             tile.configure(image=self.images[key], text=self._tile_text(key))
 
     # ------------------------------------------------------------- selection
@@ -479,7 +518,8 @@ class ThumbnailGrid(ttk.Frame):
     def _tile_text(self, key):
         """The caption; a check mark makes each chosen tile obvious."""
         author, _, day = self._captions.get(key, "").partition("\n")
-        second = "미리보기 없음" if key in self._unavailable else day
+        second = ("미리보기 없음" if key in self._unavailable else
+                  "불러오는 중…" if key not in self._source_images else day)
         return ("✓ " if key in self._selected_set else "") + author + "\n" + second
 
     def _notify(self, key=None):
@@ -667,6 +707,7 @@ class ThumbnailGrid(ttk.Frame):
             self.after_cancel(self._drag_scroll)
             self._drag_scroll = None
         self._unavailable.clear()
+        self.canvas.theme_redraw = None
         self._decoder.close()
         self.images.clear()
         self._source_images.clear()
@@ -679,7 +720,7 @@ class ThumbnailGrid(ttk.Frame):
         self.selected = self._anchor = None
         self.selected_keys = ()
         self._selected_set.clear()
-        self.placeholder = None
+        self.placeholder = self.unavailable_placeholder = None
         self.on_select = self.on_open = self.on_selection = None
 
     def destroy(self):

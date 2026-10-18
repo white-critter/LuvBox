@@ -111,7 +111,7 @@ class FileSelectionGuiTests(unittest.TestCase):
         records = store.records()
         self.assertTrue(self.window.bind("<Delete>"))
         labels = {button.cget("text") for button in self.window.file_selection_actions.winfo_children()}
-        self.assertIn("휴지통으로 보내기", labels)
+        self.assertIn("휴지통으로 보내기 (2개)", labels)
         commands = {label: callback for label, callback, _enabled in self.window._file_menu_commands()}
         self.assertEqual(set(commands), {"파일 열기", "트윗 열기", "이 작성자 파일 보기",
                                          "선택한 파일 경로 복사", "이 페이지 모두 선택", "선택 해제", "휴지통으로 보내기"})

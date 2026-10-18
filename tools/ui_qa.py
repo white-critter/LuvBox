@@ -147,11 +147,11 @@ def make_contact_sheets(output, screenshots):
         "dashboard": ["dashboard-ready", "dashboard-running", "dashboard-compact", "dashboard-compact-log", "dashboard-error"],
         "connection-help": ["connect-browser", "connect-token", "connect-file", "schedule", "schedule-off", "help"],
         "settings": ["options-1", "options-2", "options-3"],
-        "dialogs": ["dialog-confirm", "dialog-long"],
+        "dialogs": ["dialog-confirm", "dialog-long", "review-photo"],
         "library-default": ["library-default-files", "library-maximized-files"],
-        "library-browse": ["library-files", "library-filters", "library-compact", "library-compact-detail", "library-gallery"],
+        "library-browse": ["library-files", "library-filters", "library-compact", "library-compact-detail", "library-gallery", "library-gallery-no-preview"],
         "library-history-stats": ["library-runs", "library-stats", "library-stats-compact", "library-tools"],
-        "library-selection-missing": ["library-selection", "library-gallery-selection", "library-missing", "library-missing-compact", "library-missing-hidden"],
+        "library-selection-missing": ["library-selection", "library-compact-selection", "library-gallery-selection", "library-missing", "library-missing-compact", "library-missing-compact-bottom", "library-missing-hidden"],
         "library-legacy-history": ["library-deletions", "library-deletions-compact"],
     }
     available = {row["name"] for row in screenshots}
@@ -261,6 +261,14 @@ class CaptureSession:
             if not window.winfo_viewable():
                 raise RuntimeError(f"UI QA {name} fixture is not viewable")
             if placement:
+                if not geometry:
+                    # A withdrawn popup may initially report a 1px client.
+                    # Recalculate its position after native restoration has
+                    # resolved the real size; keep the popup's own dimensions.
+                    width, height = window.winfo_width(), window.winfo_height()
+                    x = max(0, min(90, window.winfo_screenwidth() - width - 32))
+                    y = max(0, min(40, window.winfo_screenheight() - height - 100))
+                    placement = f"+{x}+{y}"
                 # Native activation/restoration can finish after the first
                 # placement. Apply it again to the now-visible fixture so its
                 # client bounds also fit the simulated short-screen region.
@@ -287,7 +295,7 @@ class CaptureSession:
             self.manifest.append({"name": name, "file": filename.name, "width": width, "height": height,
                                   "scaling": self.scale, "scroll": scroll, "window_state": window.state(), "viewable": True,
                                   "client_origin": {"x": x, "y": y},
-                                  "controls": self._geometry(window)})
+                                  "controls": self._geometry(window), "buttons": self._buttons(window)})
             print(f"Captured {name}: {width}x{height}", flush=True)
         finally:
             if window.winfo_exists():
@@ -297,7 +305,7 @@ class CaptureSession:
                     self.settle(minimum=.25)
 
     def _geometry(self, window):
-        """Record visibility of key controls, including ancestor scroll clips."""
+        """Record visibility of key controls, including all ancestor clips."""
         import tkinter as tk
         from tkinter import ttk
         widgets = {}
@@ -322,25 +330,11 @@ class CaptureSession:
                 widgets.setdefault("notebook", widget)
             pending.extend(widget.winfo_children())
         result = {}
-        left, top = window.winfo_rootx(), window.winfo_rooty()
         for name, widget in widgets.items():
             if not widget.winfo_ismapped():
                 continue
-            x, y = widget.winfo_rootx() - left, widget.winfo_rooty() - top
-            width, height = widget.winfo_width(), widget.winfo_height()
-            clip = [max(0, x), max(0, y), min(window.winfo_width(), x + width), min(window.winfo_height(), y + height)]
-            scrollable = False
-            parent = widget.master
-            while parent is not None and parent is not window:
-                if isinstance(parent, tk.Canvas):
-                    scrollable = True
-                    cx, cy = parent.winfo_rootx() - left, parent.winfo_rooty() - top
-                    clip = [max(clip[0], cx), max(clip[1], cy), min(clip[2], cx + parent.winfo_width()), min(clip[3], cy + parent.winfo_height())]
-                parent = parent.master
-            visible_area = max(0, clip[2] - clip[0]) * max(0, clip[3] - clip[1])
-            result[name] = {"x": x, "y": y, "width": width, "height": height,
-                            "visible_fraction": round(visible_area / max(1, width * height), 4),
-                            "in_scrollable_content": scrollable}
+            result[name] = self._bounds(window, widget)
+            width, height = result[name]["width"], result[name]["height"]
             if isinstance(widget, ttk.Notebook) and widget.select():
                 active = widget.nametowidget(widget.select())
                 tab_x = active.winfo_rootx() - widget.winfo_rootx()
@@ -350,6 +344,50 @@ class CaptureSession:
                     "right": width - tab_x - active.winfo_width(),
                     "bottom": height - tab_y - active.winfo_height()}
         return result
+
+    def _bounds(self, window, widget):
+        """Include clipping, so offscreen controls are not mistaken for visible ones."""
+        import tkinter as tk
+        left, top = window.winfo_rootx(), window.winfo_rooty()
+        x, y = widget.winfo_rootx() - left, widget.winfo_rooty() - top
+        width, height = widget.winfo_width(), widget.winfo_height()
+        clip = [max(0, x), max(0, y), min(window.winfo_width(), x + width), min(window.winfo_height(), y + height)]
+        scrollable = False
+        parent = widget.master
+        while parent is not None and parent is not window:
+            if isinstance(parent, tk.Canvas):
+                scrollable = True
+            cx, cy = parent.winfo_rootx() - left, parent.winfo_rooty() - top
+            clip = [max(clip[0], cx), max(clip[1], cy), min(clip[2], cx + parent.winfo_width()), min(clip[3], cy + parent.winfo_height())]
+            parent = parent.master
+        visible_area = max(0, clip[2] - clip[0]) * max(0, clip[3] - clip[1])
+        return {"x": x, "y": y, "width": width, "height": height,
+                "visible_fraction": round(visible_area / max(1, width * height), 4),
+                "in_scrollable_content": scrollable}
+
+    def _buttons(self, window):
+        """Keep every mapped button, even siblings with identical captions."""
+        import tkinter as tk
+        from tkinter import ttk
+        result = []
+        pending = list(window.winfo_children())
+        while pending:
+            widget = pending.pop()
+            if isinstance(widget, tk.Toplevel):
+                continue
+            pending.extend(widget.winfo_children())
+            if not isinstance(widget, ttk.Button) or not widget.winfo_ismapped():
+                continue
+            manager = widget.winfo_manager()
+            placement = widget.grid_info() if manager == "grid" else widget.pack_info() if manager == "pack" else {}
+            result.append({"widget": str(widget), "parent": str(widget.master),
+                           "text": str(widget.cget("text")), "style": str(widget.cget("style") or "TButton"),
+                           "state": list(widget.state()), "disabled": bool(widget.instate(("disabled",))),
+                           "requested_width": widget.winfo_reqwidth(), "requested_height": widget.winfo_reqheight(),
+                           "layout_manager": manager,
+                           "placement": {key: str(value) for key, value in placement.items() if key != "in"},
+                           **self._bounds(window, widget)})
+        return sorted(result, key=lambda row: (row["y"], row["x"], row["widget"]))
 
     def appearance(self, selected):
         from luvbox import theme
@@ -462,6 +500,16 @@ class CaptureSession:
         history.tree.selection_set(history.tree.get_children()[:3])
         history.select_record()
         self.capture(history, f"library-selection-{selected}", "1200x860")
+        selection_geometry = history.geometry()
+        selection_mode = history.select_several
+        try:
+            if not selection_mode:
+                history.toggle_select_several()
+            self.capture(history, f"library-compact-selection-{selected}", "820x700")
+        finally:
+            if history.select_several != selection_mode:
+                history.toggle_select_several()
+            history.geometry(selection_geometry)
         history.toggle_filters()
         self.capture(history, f"library-filters-{selected}", "1200x860")
         history.toggle_filters()
@@ -472,6 +520,23 @@ class CaptureSession:
         self.settle(lambda: len(history.grid_view.images) >= min(25, len(history.rows)), timeout=12)
         self.capture(history, f"library-gallery-{selected}", "1200x860")
         self.capture(history, f"library-gallery-selection-{selected}", "1200x860")
+        # Exercise a completed decode with no image, separately from loading.
+        # This input belongs to the isolated fixture and never enters the real
+        # catalog or preview cache. The normal page is restored afterwards.
+        unreadable = Path(history.current_storage.output_dir).parent / "ui-qa-no-preview.jpg"
+        unreadable.write_bytes(b"UI QA: this local fixture deliberately has no decodable image.\n")
+        no_preview_rows = [(key, dict(row, path=str(unreadable)))
+                           for key, row in list(history.rows.items())[:3]]
+        try:
+            history.grid_view.show(no_preview_rows, lambda paths: set(paths))
+            history.grid_view.select_many(())
+            self.settle(lambda: all(key in history.grid_view._source_images
+                                   and history.grid_view._source_images[key] is None
+                                   for key, _ in no_preview_rows), timeout=8)
+            self.capture(history, f"library-gallery-no-preview-{selected}", "1200x860")
+        finally:
+            history._show_grid()
+            history.grid_view.select_many(history.tree.selection(), focus=history.tree.focus())
         history.tabs.select(1)
         first_run = history.run_tree.get_children()[0]
         history.run_tree.selection_set(first_run)
@@ -488,7 +553,12 @@ class CaptureSession:
         history.missing_tree.selection_set(history.missing_tree.get_children()[:2])
         history._update_missing_actions()
         self.capture(history, f"library-missing-{selected}", "1200x860")
-        self.capture(history, f"library-missing-compact-{selected}", "820x700")
+        missing_geometry = history.geometry()
+        try:
+            self.capture(history, f"library-missing-compact-{selected}", "820x700")
+            self.capture(history, f"library-missing-compact-bottom-{selected}", "820x700", scroll="bottom")
+        finally:
+            history.geometry(missing_geometry)
         history.show_ignored.set(True)
         history._show_missing()
         # A file sent to the Recycle Bin from the app is listed with the rest.
@@ -507,6 +577,23 @@ class CaptureSession:
         history._tools_window.withdraw()
         history.close()
         self.app.history_window = None
+
+    def review(self, selected):
+        """Render the real local photo decoder without making a save choice."""
+        from luvbox.review_gui import ReviewWindow
+        self.appearance(selected)
+        path = next(path for path in sorted(Path(self.app.folder.get()).glob("*.jpg")) if path.is_file())
+        candidate = {"id": "ui-qa-photo", "path": str(path), "media_type": "photo",
+                     "author": "moon_studio", "filename": path.name, "posted_at": STAMP[:10]}
+        window = ReviewWindow(self.root, candidate, forbidden, lambda checked: checked == path)
+        try:
+            self.settle(lambda: window._photo is not None, timeout=8)
+            self.capture(window, f"review-photo-{selected}", "720x650")
+        finally:
+            preview = window.preview
+            window.destroy()
+            if preview is not None:
+                self.settle(lambda: preview.finished.is_set(), timeout=8, minimum=0)
 
     def dialogs(self):
         from luvbox import dialogs
@@ -619,6 +706,8 @@ def main():
                         capture.popups(selected, session_mock)
                     if wants(("library",)):
                         capture.library(selected)
+                    if wants(("review",)):
+                        capture.review(selected)
                 if wants(("dialog",)):
                     capture.dialogs()
                 if network_attempts:

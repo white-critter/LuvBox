@@ -257,6 +257,7 @@ class HistoryWindow(tk.Toplevel):
         self._filter_open = False
         self._stats_stacked = None
         self._toolbar_layout = None
+        self._search_stacked = None
         self._tools_window = None
         self.loaded_locations = set()
         self.results = queue.Queue()
@@ -364,7 +365,7 @@ class HistoryWindow(tk.Toplevel):
         self.refresh_button.pack(side="right")
         ttk.Button(heading, text="폴더 열기", style="Ghost.TButton", command=self.open_media_folder).pack(side="right", padx=8)
         self.source_stop_button = ttk.Button(heading, text="출처·작성자 기록 중단", command=self.stop_metadata, state="disabled")
-        self.repair_button = ttk.Button(heading, text="기록 복구", style="Primary.TButton", command=self.repair_records)
+        self.repair_button = ttk.Button(heading, text="기록 복구", style="DialogPrimary.TButton", command=self.repair_records)
         ttk.Label(body, textvariable=self.location_text, style="Muted.TLabel", wraplength=1000).grid(row=1, column=0, sticky="w", pady=(4, 16))
 
         overview = ttk.Frame(body)
@@ -417,31 +418,39 @@ class HistoryWindow(tk.Toplevel):
 
         filters = ttk.Frame(files)
         filters.grid(row=0, column=0, sticky="ew", pady=(0, 12))
-        search = ttk.Frame(filters)
+        search = self.search_controls = ttk.Frame(filters)
         search.pack(fill="x")
-        combo = ttk.Combobox(search, textvariable=self.media_filter, values=list(MEDIA_LABELS.values()),
+        search.columnconfigure(1, weight=1)
+        choices = self.search_filters = ttk.Frame(search)
+        choices.grid(row=0, column=0, sticky="w")
+        combo = ttk.Combobox(choices, textvariable=self.media_filter, values=list(MEDIA_LABELS.values()),
                              state="readonly", width=9, font=theme.BODY)
-        combo.pack(side="left")
+        combo.grid(row=0, column=0)
         combo.bind("<<ComboboxSelected>>", lambda _: self.search())
         # Type part of a handle and open the list to see only matching authors.
-        self.author_combo = ttk.Combobox(search, textvariable=self.author_choice, width=18, font=theme.BODY,
+        self.author_combo = ttk.Combobox(choices, textvariable=self.author_choice, width=18, font=theme.BODY,
                                          postcommand=self._author_choices)
-        self.author_combo.pack(side="left", padx=(8, 0))
+        self.author_combo.grid(row=0, column=1, padx=(8, 0))
         self.author_combo.bind("<<ComboboxSelected>>", lambda _: self._choose_author())
         self.author_combo.bind("<Return>", lambda _: self._choose_author())
-        entry = ttk.Entry(search, textvariable=self.query, font=theme.BODY)
-        entry.pack(side="left", fill="x", expand=True, padx=(8, 8))
+        query = self.search_query = ttk.Frame(search)
+        query.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        query.columnconfigure(0, weight=1)
+        entry = ttk.Entry(query, textvariable=self.query, width=1, font=theme.BODY)
+        entry.grid(row=0, column=0, sticky="ew")
         entry.bind("<Return>", lambda _: self.search())
         self.search_entry = entry
-        ttk.Button(search, text="검색", command=self.search).pack(side="left")
-        views = ttk.Frame(search)
-        views.pack(side="right", padx=(10, 0))
+        self.search_button = ttk.Button(query, text="검색", command=self.search)
+        self.search_button.grid(row=0, column=1, padx=(8, 0))
+        views = self.search_views = ttk.Frame(query)
+        views.grid(row=0, column=2, padx=(10, 0))
         self.view_buttons = {}
         for mode, label in (("table", "목록"), ("grid", "갤러리")):
-            button = ttk.Button(views, text=label, style="Segment.TButton", command=lambda mode=mode: self.set_view(mode))
+            button = ttk.Button(views, text=label, width=7, style="Segment.TButton", command=lambda mode=mode: self.set_view(mode))
             button.pack(side="left", padx=(0 if mode == "table" else 4, 0))
             self.view_buttons[mode] = button
         self._update_view_buttons()
+        search.bind("<Configure>", self._queue_pager_layout)
         toolbar = self.library_toolbar = ttk.Frame(filters)
         toolbar.pack(fill="x", pady=(8, 0))
         toolbar.columnconfigure(0, weight=1)
@@ -456,9 +465,9 @@ class HistoryWindow(tk.Toplevel):
         order.bind("<<ComboboxSelected>>", lambda _: self.search())
         self.filter_button = ttk.Button(self.sort_controls, text="기간 필터", style="Compact.TButton", command=self.toggle_filters)
         self.filter_button.pack(side="left")
-        self.tools_button = ttk.Button(self.tool_controls, text="파일 관리", style="Compact.TButton", command=self.show_tools)
+        self.tools_button = ttk.Button(self.tool_controls, text="파일 관리", width=12, style="Compact.TButton", command=self.show_tools)
         self.tools_button.pack(side="right")
-        self.export_button = ttk.Button(self.tool_controls, text="CSV 내보내기", style="Compact.TButton", command=self.export)
+        self.export_button = ttk.Button(self.tool_controls, text="CSV 내보내기", width=12, style="Compact.TButton", command=self.export)
         self.export_button.pack(side="right", padx=(0, 8))
         self.search_hint = ttk.Label(toolbar, text="작성자 · 파일명 · 본문 검색", style="Muted.TLabel")
         self.search_hint.grid(row=0, column=1, padx=12)
@@ -483,8 +492,8 @@ class HistoryWindow(tk.Toplevel):
             if variable is self.period_from:
                 ttk.Label(date_inputs, text="→", style="CardMuted.TLabel").pack(side="left", padx=5)
         ttk.Label(date_actions, text="예: 2026-10-06", style="CardMuted.TLabel").pack(side="left")
-        ttk.Button(date_actions, text="적용", style="CompactPrimary.TButton", command=self.search).pack(side="right", padx=(8, 0))
-        ttk.Button(date_actions, text="초기화", style="Compact.TButton", command=self.clear_period).pack(side="right")
+        ttk.Button(date_actions, text="적용", width=8, style="CompactPrimary.TButton", command=self.search).pack(side="right", padx=(8, 0))
+        ttk.Button(date_actions, text="초기화", width=8, style="Compact.TButton", command=self.clear_period).pack(side="right")
 
         columns = ("posted", "kind", "author", "filename", "size", "saved")
         self.file_browser = ttk.Frame(files)
@@ -523,14 +532,14 @@ class HistoryWindow(tk.Toplevel):
         self.preview_info.bind("<Configure>", self._wrap_preview_note, add="+")
         self.preview_actions = ttk.Frame(self.preview_card, style="Plain.TFrame")
         self.open_file_button = ttk.Button(self.preview_actions, text="파일 열기", command=self.open_file, style="Compact.TButton")
-        self.open_file_button.grid(row=0, column=0, sticky="ew")
+        self.open_file_button.grid(row=0, column=0, sticky="nsew", padx=(0, 3))
         self.open_tweet_button = ttk.Button(self.preview_actions, text="트윗 열기", command=self.open_tweet, style="Compact.TButton")
-        self.open_tweet_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        self.open_tweet_button.grid(row=0, column=1, sticky="nsew", padx=(3, 0))
         self.author_button = ttk.Button(self.preview_actions, text="이 작성자 파일", command=self.filter_selected_author,
                                        style="Compact.TButton")
         self.author_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         for column in (0, 1):
-            self.preview_actions.columnconfigure(column, weight=1)
+            self.preview_actions.columnconfigure(column, weight=1, uniform="preview-action")
         self.preview_details = ttk.Frame(self.preview_card, style="Plain.TFrame")
         self.preview_details.columnconfigure(0, weight=1)
         self.preview_details.rowconfigure(0, weight=1)
@@ -555,18 +564,20 @@ class HistoryWindow(tk.Toplevel):
         self.file_selection_label.grid(row=0, column=0, sticky="w", padx=(0, 12))
         self.file_selection_actions = ttk.Frame(selection_bar)
         self.file_selection_actions.grid(row=0, column=1, sticky="e")
+        self.file_selection_actions.columnconfigure((0, 2, 4, 6), weight=1, uniform="file-action")
+        self.file_selection_actions.columnconfigure((1, 3, 5), minsize=8)
         self.toggle_button = ttk.Button(self.file_selection_actions, text="여러 개 선택",
                                         command=self.toggle_select_several, style="Compact.TButton")
-        self.toggle_button.pack(side="left")
+        self.toggle_button.grid(row=0, column=0, sticky="nsew")
         self.file_clear_button = ttk.Button(self.file_selection_actions, text="선택 해제",
                                             command=self.clear_file_selection, style="Compact.TButton")
-        self.file_clear_button.pack(side="left", padx=(8, 0))
+        self.file_clear_button.grid(row=0, column=2, sticky="nsew")
         self.file_all_button = ttk.Button(self.file_selection_actions, text="이 페이지 모두 선택",
                                           command=self.select_all_files, style="Compact.TButton")
-        self.file_all_button.pack(side="left", padx=(8, 0))
+        self.file_all_button.grid(row=0, column=4, sticky="nsew")
         self.delete_button = ttk.Button(self.file_selection_actions, text="휴지통으로 보내기",
                                         command=self.start_deletion, style="Compact.TButton")
-        self.delete_button.pack(side="left", padx=(8, 0))
+        self.delete_button.grid(row=0, column=6, sticky="nsew")
         selection_bar.bind("<Configure>", self._queue_pager_layout)
         self._pagination(files, row=2)
 
@@ -654,13 +665,17 @@ class HistoryWindow(tk.Toplevel):
         self.sample_view.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(6, 10))
         sample_actions = ttk.Frame(ranking, style="Plain.TFrame")
         sample_actions.grid(row=4, column=0, columnspan=2, sticky="ew")
-        ttk.Button(sample_actions, text="이 작성자 파일 전체 보기", style="Compact.TButton",
-                   command=self.show_ranked_author).pack(side="left")
+        sample_actions.columnconfigure((0, 2), weight=1, uniform="sample-action")
+        sample_actions.columnconfigure(1, minsize=8)
+        ttk.Button(sample_actions, text="작성자 파일 보기", style="Compact.TButton",
+                   command=self.show_ranked_author).grid(row=0, column=0, sticky="nsew")
         self.sample_more_button = ttk.Button(sample_actions, text="더 보기", style="Compact.TButton",
                                              command=self.more_samples)
+        self.sample_more_button.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(8, 0))
+        self.sample_more_button.grid_remove()
         self.sample_delete_button = ttk.Button(sample_actions, text="휴지통으로 보내기", style="Compact.TButton",
                                                command=self.delete_samples, state="disabled")
-        self.sample_delete_button.pack(side="right")
+        self.sample_delete_button.grid(row=0, column=2, sticky="nsew")
         months = self.months_card = ttk.Frame(stats, style="Card.TFrame", padding=(16, 14))
         months.grid(row=0, column=1, sticky="nsew")
         months.columnconfigure(0, weight=1)
@@ -730,24 +745,26 @@ class HistoryWindow(tk.Toplevel):
         actions = ttk.Frame(page)
         self._pagination(page, row=3, missing=True)
         actions.grid(row=4, column=0, sticky="ew", pady=(10, 0))
+        actions.columnconfigure((0, 2, 4), weight=1, uniform="missing-action")
+        actions.columnconfigure((1, 3), minsize=8)
         self.missing_open_button = ttk.Button(actions, text="트윗 열기", style="Compact.TButton",
                                               command=self.open_missing_tweet)
-        self.missing_open_button.pack(side="left")
+        self.missing_open_button.grid(row=0, column=0, sticky="nsew")
         self.missing_all_button = ttk.Button(actions, text="이 페이지 모두 선택", style="Compact.TButton",
                                              command=self.select_all_missing)
-        self.missing_all_button.pack(side="left", padx=(8, 0))
+        self.missing_all_button.grid(row=0, column=2, sticky="nsew")
         self.missing_every_button = ttk.Button(actions, text="전체 선택", style="Compact.TButton",
                                                command=self.select_every_missing)
-        self.missing_every_button.pack(side="left", padx=(8, 0))
+        self.missing_every_button.grid(row=0, column=4, sticky="nsew")
         self.retry_button = ttk.Button(actions, text="다시 받기", style="CompactPrimary.TButton",
                                        command=self.retry_missing_files)
-        self.retry_button.pack(side="right")
+        self.retry_button.grid(row=1, column=4, sticky="nsew", pady=(8, 0))
         self.ignore_button = ttk.Button(actions, text="다시 받지 않기", style="Compact.TButton",
                                         command=lambda: self.choose_missing(True))
-        self.ignore_button.pack(side="right", padx=(0, 8))
+        self.ignore_button.grid(row=1, column=2, sticky="nsew", pady=(8, 0))
         self.unignore_button = ttk.Button(actions, text="숨김 해제", style="Compact.TButton",
                                           command=lambda: self.choose_missing(False))
-        self.unignore_button.pack(side="right", padx=(0, 8))
+        self.unignore_button.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         page.bind("<Configure>", self._queue_pager_layout)
         self._show_missing()
 
@@ -820,7 +837,7 @@ class HistoryWindow(tk.Toplevel):
                 callback = lambda dest=destination: self.go_page(dest, runs=runs, missing=missing)
             else:
                 callback = lambda amount=destination: self.change_page(amount, runs=runs, missing=missing)
-            button = ttk.Button(arrows, text=caption, command=callback, width=4 if name != "last" else 5, style="Compact.TButton")
+            button = ttk.Button(arrows, text=caption, command=callback, width=6, style="Compact.TButton")
             button.grid(row=0, column=column if column < 2 else column + 5, padx=2)
             buttons[name] = button
         page_buttons = []
@@ -855,6 +872,22 @@ class HistoryWindow(tk.Toplevel):
         self._layout_tiles()
         self._layout_preview()
         self._layout_stats()
+        search = self.search_controls
+        width = search.winfo_width()
+        if width > 1:
+            # Decide from fixed controls and usable query space, never the
+            # entry's current width, which changes when this row folds.
+            minimum = max(120, int(self.tk.call("font", "measure", self.search_entry.cget("font"),
+                                                "검색어를 입력하세요")))
+            needed = (self.search_filters.winfo_reqwidth() + minimum +
+                      self.search_button.winfo_reqwidth() + self.search_views.winfo_reqwidth() + 26)
+            stacked = needed > width
+            if stacked != self._search_stacked:
+                self._search_stacked = stacked
+                self.search_filters.grid_configure(columnspan=2 if stacked else 1)
+                self.search_query.grid_configure(row=1 if stacked else 0, column=0 if stacked else 1,
+                                                 columnspan=2 if stacked else 1,
+                                                 padx=(0 if stacked else 8, 0), pady=(8 if stacked else 0, 0))
         toolbar = self.library_toolbar
         width = toolbar.winfo_width()
         if width > 1:
@@ -872,6 +905,17 @@ class HistoryWindow(tk.Toplevel):
         selection_bar = self.file_selection_bar
         width = selection_bar.winfo_width()
         if width > 1:
+            # Caption changes must not push the action group out of a narrow window.
+            choices = (self.toggle_button, self.file_clear_button, self.file_all_button, self.delete_button)
+            stacked = 4 * max(button.winfo_reqwidth() for button in choices) + 24 > width
+            if bool(int(self.file_all_button.grid_info()["row"])) != stacked:
+                for index, button in enumerate(choices):
+                    button.grid_configure(row=index // 2 if stacked else 0,
+                                          column=(index % 2 if stacked else index) * 2,
+                                          pady=(8 if stacked and index >= 2 else 0, 0))
+                self.file_selection_actions.columnconfigure((4, 6), weight=0 if stacked else 1,
+                                                            uniform="" if stacked else "file-action")
+                self.file_selection_actions.columnconfigure((3, 5), minsize=0 if stacked else 8)
             actions_width = self.file_selection_actions.winfo_reqwidth()
             folded = actions_width + 230 > width
             self.file_selection_label.grid_configure(columnspan=2 if folded else 1)
@@ -2385,7 +2429,10 @@ class HistoryWindow(tk.Toplevel):
         downloading = bool(self.is_downloading()) if self.is_downloading else False
         self.file_all_button.configure(state="normal" if ready and self.rows else "disabled")
         self.file_clear_button.configure(state="normal" if self.tree.selection() else "disabled")
-        self.delete_button.configure(state="normal" if ready and files and not downloading and not self.media_offline else "disabled")
+        self.delete_button.configure(
+            text="휴지통으로 보내기" + (f" ({len(files):,}개)" if len(files) > 1 else ""),
+            state="normal" if ready and files and not downloading and not self.media_offline else "disabled")
+        self._queue_pager_layout()
 
     def toggle_select_several(self):
         """Mouse-only multiple selection: each click adds or removes a file."""
@@ -2799,7 +2846,7 @@ class HistoryWindow(tk.Toplevel):
             self._sample_list, self._sample_shown = [], 0
             self.sample_view.show([], lambda paths: set(), empty_text="")
             self.sample_text.set(SAMPLE_HINT)
-            self.sample_more_button.pack_forget()
+            self.sample_more_button.grid_remove()
             self._update_sample_actions()
             return
         self._sample_author = row["author"]
@@ -2809,7 +2856,7 @@ class HistoryWindow(tk.Toplevel):
             self._sample_list, self._sample_shown = [], 0
             self.sample_view.show([], lambda paths: set(), empty_text="불러오는 중…")
             self.sample_text.set(f"@{row['author']} · 파일을 불러오는 중…")
-            self.sample_more_button.pack_forget()
+            self.sample_more_button.grid_remove()
             self._update_sample_actions()
         threading.Thread(target=partial(HistoryWindow._samples_worker, self._sample_results),
                          args=(self._sample_token, self.current_storage, row["author"]), daemon=True).start()
@@ -2840,7 +2887,7 @@ class HistoryWindow(tk.Toplevel):
                 self.sample_rows = {}
                 self._sample_list, self._sample_shown = [], 0
                 self.sample_view.show([], lambda paths: set(), empty_text="")
-                self.sample_more_button.pack_forget()
+                self.sample_more_button.grid_remove()
                 self.sample_text.set(f"@{author} · 사진을 불러오지 못했습니다.")
                 self._update_sample_actions()
                 continue
@@ -2872,9 +2919,9 @@ class HistoryWindow(tk.Toplevel):
         rest = len(samples) - shown
         if rest > 0:
             self.sample_more_button.configure(text=f"더 보기 ({min(rest, SAMPLE_STEP):,}개)")
-            self.sample_more_button.pack(side="left", padx=(8, 0))
+            self.sample_more_button.grid()
         else:
-            self.sample_more_button.pack_forget()
+            self.sample_more_button.grid_remove()
         self._update_sample_actions()
 
     def more_samples(self):

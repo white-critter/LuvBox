@@ -367,6 +367,106 @@ class GalleryLayoutTests(unittest.TestCase):
             self.assertIsNot(self.grid.tiles["one"], tile)
             self.assertNotIn("one", self.grid.images)
 
+    def test_pending_missing_and_restored_previews_have_distinct_finished_states(self):
+        row = {"path": "offline-fixture.jpg", "author": "offline", "posted_at": "2026-10-01"}
+        with patch.object(self.grid._decoder, "request"):
+            self.grid.show([("one", row)], set)
+            self.grid.select("one")
+            tile = self.grid.tiles["one"]
+            self.assertEqual(tile.cget("text"), "✓ @offline\n불러오는 중…")
+            self.assertEqual(str(tile.cget("image")), str(self.grid.placeholder))
+            # An old page's completion must not make this request look finished.
+            self.grid._results.put((self.grid._token - 1, "one", None))
+            self.grid.poll()
+            self.assertNotIn("one", self.grid._source_images)
+            self.assertIn("불러오는 중", tile.cget("text"))
+
+            self.grid._results.put((self.grid._token, "one", None))
+            self.grid.poll()
+            self.assertEqual(tile.cget("text"), "✓ @offline\n미리보기 없음")
+            self.assertEqual(str(tile.cget("image")), str(self.grid.unavailable_placeholder))
+            self.assertNotEqual(str(self.grid.placeholder), str(self.grid.unavailable_placeholder))
+            # Retrying preserves a settled tile until there is a new result.
+            self.grid.show([("one", row)], set)
+            self.assertIn("미리보기 없음", tile.cget("text"))
+            with Image.new("RGB", (4, 4), "red") as source:
+                self.grid._results.put((self.grid._token, "one", source))
+                self.grid.poll()
+                self.assertEqual(tile.cget("text"), "✓ @offline\n2026-10-01")
+                self.assertEqual(str(tile.cget("image")), str(self.grid.images["one"]))
+                self.assertNotIn("one", self.grid._unavailable)
+                self.assertEqual(self.grid.selected_keys, ("one",))
+
+    def test_record_without_a_path_is_settled_without_waiting_for_a_decoder(self):
+        with patch.object(self.grid._decoder, "request") as request:
+            self.grid.show([("one", {"author": "offline"})], set)
+        self.assertEqual(request.call_args.args[1], [])
+        self.assertEqual(self.grid.tiles["one"].cget("text"), "@offline\n미리보기 없음")
+        self.assertEqual(str(self.grid.tiles["one"].cget("image")), str(self.grid.unavailable_placeholder))
+
+    def test_placeholder_panels_follow_theme_without_replacing_finished_images(self):
+        rows = [("pending", {"path": "offline-fixture.jpg", "author": "offline"}),
+                ("missing", {"author": "offline"}),
+                ("image", {"path": "other-fixture.jpg", "author": "offline"})]
+        with patch.object(self.grid._decoder, "request"), Image.new("RGB", (4, 4), "red") as source:
+            self.grid.show(rows, set)
+            self.grid._results.put((self.grid._token, "image", source))
+            self.grid.poll()
+            finished = self.grid.images["image"]
+            self.grid.select("missing")
+            for appearance in ("dark", "light"):
+                with self.subTest(appearance=appearance):
+                    theme.apply(self.root, appearance)
+                    expected = tuple(channel // 256 for channel in self.root.winfo_rgb(theme.HEADER))
+                    for key, placeholder in (("pending", self.grid.placeholder),
+                                             ("missing", self.grid.unavailable_placeholder)):
+                        self.assertEqual(str(self.grid.tiles[key].cget("image")), str(placeholder))
+                        pixel = self.grid.tk.call(str(placeholder), "get", 10, 10)
+                        self.assertEqual(tuple(pixel), expected)
+                    self.assertIs(self.grid.images["image"], finished)
+                    self.assertEqual(str(self.grid.tiles["image"].cget("image")), str(finished))
+                    self.assertEqual(self.grid.selected_keys, ("missing",))
+                    self.assertTrue(self.grid.tiles["missing"].cget("text").startswith("✓ "))
+
+    def test_placeholder_panels_use_their_own_interpreters_palette(self):
+        other = tk.Tk()
+        other.attributes("-alpha", 0)
+        another_grid = None
+        try:
+            theme.apply(other, "dark")
+            self.assertEqual(theme.mode(self.root), "light")
+            self.assertEqual(theme.mode(other), "dark")
+            self.grid._refresh_placeholders()
+            another_grid = ThumbnailGrid(self.root, on_select=lambda _: None, on_open=lambda _: None)
+            expected = tuple(channel // 256 for channel in self.root.winfo_rgb(theme.LIGHT["HEADER"]))
+            for grid in (self.grid, another_grid):
+                for placeholder in (grid.placeholder, grid.unavailable_placeholder):
+                    self.assertEqual(tuple(grid.tk.call(str(placeholder), "get", 10, 10)), expected)
+        finally:
+            if another_grid is not None:
+                another_grid.destroy()
+            other.destroy()
+            theme.apply(self.root, "light")
+
+    def test_wide_image_and_placeholder_keep_the_same_tile_height(self):
+        row = {"path": "offline-fixture.jpg", "author": "offline", "posted_at": "2026-10-01"}
+        with patch.object(self.grid._decoder, "request"):
+            self.grid.show([("one", row)], set)
+            self.root.update_idletasks()
+            tile = self.grid.tiles["one"]
+            height = tile.winfo_reqheight()
+            with Image.new("RGB", (150, 30), "red") as source:
+                self.grid._results.put((self.grid._token, "one", source))
+                self.grid.poll()
+                self.root.update_idletasks()
+                self.assertEqual((self.grid.images["one"].width(), self.grid.images["one"].height()), TILE)
+                self.assertEqual(tile.winfo_reqheight(), height)
+                self.assertEqual(source.size, (150, 30))
+            self.grid._results.put((self.grid._token, "one", None))
+            self.grid.poll()
+            self.root.update_idletasks()
+            self.assertEqual(tile.winfo_reqheight(), height)
+
     def test_refreshed_permission_revokes_an_already_displayed_thumbnail(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "one.jpg"
@@ -468,7 +568,7 @@ class GalleryLayoutTests(unittest.TestCase):
                     self.assertIsNot(replacement, original)
                     self.assertEqual((self.grid.selected_keys, self.grid.selected), (("one",), "one"))
                     self.assertEqual(tuple(replacement.cget(key) for key in ("background", "foreground")), colors)
-                    self.assertEqual(replacement.cget("text"), "✓ @updated\n2026-10-01")
+                    self.assertEqual(replacement.cget("text"), "✓ @updated\n불러오는 중…")
                     self.assertNotEqual(replacement.cget("background"), self.grid.tiles["two"].cget("background"))
 
     def test_external_selection_sets_range_anchor_but_callback_sync_preserves_it(self):

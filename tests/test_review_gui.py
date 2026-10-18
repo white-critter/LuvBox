@@ -55,6 +55,20 @@ class ReviewGuiTests(unittest.TestCase):
         self.assertIn("파일을 먼저 받습니다", window.explanation.cget("text"))
         self.factory.assert_called_once_with(self.path, "photo")
 
+    def test_peer_actions_have_equal_widths_and_all_actions_have_equal_heights(self):
+        window = self.window_for()
+        window.update()
+        for mode in ("light", "dark"):
+            with self.subTest(mode=mode):
+                theme.apply(self.root, mode)
+                window.update()
+                heights = {button.winfo_height() for button in window.buttons.values()}
+                self.assertEqual(len(heights), 1)
+                self.assertNotIn(1, heights)
+                for actions in (("save", "skip", "never"), ("auto", "stop")):
+                    widths = [window.buttons[action].winfo_width() for action in actions]
+                    self.assertLessEqual(max(widths) - min(widths), 1)
+
     def test_each_decision_is_delivered_once_after_destroy(self):
         for action in ("save", "skip", "never", "stop", "auto"):
             with self.subTest(action=action):

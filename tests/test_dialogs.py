@@ -22,6 +22,38 @@ class DialogTests(unittest.TestCase):
     def open_dialogs(self):
         return [widget for widget in self.root.winfo_children() if isinstance(widget, dialogs.Dialog)]
 
+    def test_short_and_long_confirmation_buttons_have_equal_visible_bounds(self):
+        dialog = dialogs.DeleteDialog(self.root, 1, 1024, ["fixture.jpg"])
+        self.addCleanup(lambda: dialog.winfo_exists() and dialog.destroy())
+        dialog.deiconify()
+        dialog.update()
+        for mode in ("light", "dark"):
+            with self.subTest(mode=mode):
+                theme.apply(self.root, mode)
+                dialog.update()
+                sizes = [(button.winfo_width(), button.winfo_height()) for button in dialog.buttons]
+                self.assertGreater(sizes[0][0], 1)
+                self.assertEqual(sizes[0], sizes[1])
+
+    def test_long_dialog_keeps_buttons_above_the_taskbar_on_a_short_screen(self):
+        with patch.object(tk.Misc, "winfo_screenwidth", return_value=1280), \
+                patch.object(tk.Misc, "winfo_screenheight", return_value=720):
+            for mode in ("light", "dark"):
+                theme.apply(self.root, mode)
+                dialog = dialogs.Dialog(self.root, "긴 안내", "기록을 확인했습니다.\n" * 80)
+                dialog.attributes("-alpha", 0)
+                try:
+                    dialog._place()
+                    dialog.deiconify()
+                    dialog.update()
+                    bottom = dialog.winfo_rooty() + dialog.winfo_height()
+                    self.assertLessEqual(bottom, 680)
+                    for button in dialog.buttons:
+                        self.assertLessEqual(button.winfo_rooty() + button.winfo_height(), bottom)
+                        self.assertGreater(button.winfo_height(), 1)
+                finally:
+                    dialog.destroy()
+
     def test_delete_confirmation_distinguishes_cancel_and_redownload_choice(self):
         dialog = dialogs.DeleteDialog(self.root, 2, 4096, ["first.jpg", "second.mp4"])
         self.assertTrue(dialog.keep_deleted.get())

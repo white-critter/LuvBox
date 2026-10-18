@@ -273,11 +273,13 @@ class App:
         self._wrapping_label(header, text="좋아요한 사진과 영상을 내 폴더에 차곡차곡.",
                              style="Subtitle.TLabel", wraplength=700).pack(fill="x", pady=(5, 0))
         self.compact_navigation = ttk.Frame(header)
-        for caption, command in (("기록 · 통계", self.show_history), ("자동 저장", self.show_schedule), ("사용 방법", self.help)):
+        self.compact_navigation.columnconfigure((0, 2, 4, 6), weight=1, uniform="compact-navigation")
+        self.compact_navigation.columnconfigure((1, 3, 5), minsize=6)
+        for column, (caption, command) in enumerate((("기록 · 통계", self.show_history), ("자동 저장", self.show_schedule), ("사용 방법", self.help))):
             ttk.Button(self.compact_navigation, text=caption, command=command,
-                       style="Ghost.TButton").pack(side="left", padx=(0, 6))
+                       style="Ghost.TButton").grid(row=0, column=column * 2, sticky="nsew")
         ttk.Button(self.compact_navigation, textvariable=self.theme_button_text,
-                   command=self.toggle_theme, style="Ghost.TButton").pack(side="right")
+                    command=self.toggle_theme, style="Ghost.TButton").grid(row=0, column=6, sticky="nsew")
 
         form = self.setup_card = theme.card(shell, fill="x", pady=(0, 16))
         form.columnconfigure(0, weight=1, uniform="account")
@@ -304,8 +306,8 @@ class App:
         folder.grid(row=0, column=0, sticky="ew")
         folder.bind("<Return>", lambda _: self._ensure_storage())
         browse = ttk.Button(folder_row, text="찾아보기", command=self.choose_folder, style="Ghost.TButton", width=8)
-        browse.grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(folder_row, text="열기", command=self.open_folder, style="Ghost.TButton", width=5).grid(row=0, column=2, padx=(6, 0))
+        browse.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ttk.Button(folder_row, text="열기", command=self.open_folder, style="Ghost.TButton", width=8).grid(row=0, column=2, sticky="nsew", padx=(8, 0))
         self.inputs.extend((folder, browse))
         self.preview_label = self._wrapping_label(form, textvariable=self.destination_text,
                                                   style="CardMuted.TLabel", wraplength=700)
@@ -326,9 +328,10 @@ class App:
         ttk.Label(head, text="이번 저장", style="CardEyebrow.TLabel").pack(side="left")
         self.work_actions = ttk.Frame(head, style="Plain.TFrame")
         self.work_actions.pack(side="right")
-        self.start_button = ttk.Button(self.work_actions, text="저장 시작", style="Primary.TButton", command=self.start)
-        self.start_button.pack(side="left")
-        self.stop_button = ttk.Button(self.work_actions, text="중단", style="Ghost.TButton", command=self.stop, state="disabled")
+        self.work_actions.columnconfigure(0, weight=1, uniform="work-action")
+        self.start_button = ttk.Button(self.work_actions, text="저장 시작", style="DialogPrimary.TButton", command=self.start)
+        self.start_button.grid(row=0, column=0, sticky="nsew")
+        self.stop_button = ttk.Button(self.work_actions, text="중단", command=self.stop, state="disabled")
         self.review_toggle = ttk.Checkbutton(hero, text="저장 전에 하나씩 확인", variable=self.confirm_each,
                                             style="Plain.TCheckbutton")
         self.review_toggle.pack(anchor="w", pady=(0, 6))
@@ -762,8 +765,11 @@ class App:
 
         footer = window.footer = ttk.Frame(window, style="Plain.TFrame", padding=(28, 14, 28, 20))
         footer.pack(side="bottom", fill="x", before=window.content_view)
-        ttk.Button(footer, text="쿠키 확인 방법", command=lambda: webbrowser.open("https://developer.chrome.com/docs/devtools/application/cookies/")).pack(side="left")
-        ttk.Button(footer, text="닫기", width=9, command=self._close_connect).pack(side="right")
+        footer.columnconfigure((0, 2), weight=1, uniform="connect-action")
+        footer.columnconfigure(1, minsize=8)
+        ttk.Button(footer, text="쿠키 확인 방법", command=lambda: webbrowser.open("https://developer.chrome.com/docs/devtools/application/cookies/")).grid(
+            row=0, column=0, sticky="nsew")
+        ttk.Button(footer, text="닫기", command=self._close_connect).grid(row=0, column=2, sticky="nsew")
         window.protocol("WM_DELETE_WINDOW", self._close_connect)
         window.bind("<Escape>", lambda _: self._close_connect())
         self._auth_changed()
@@ -911,10 +917,13 @@ class App:
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
         footer = window.footer = ttk.Frame(window, style="Plain.TFrame", padding=(28, 14, 28, 20))
         footer.pack(side="bottom", fill="x")
+        footer.columnconfigure(0, weight=1)
+        footer.columnconfigure((1, 3), uniform="settings-action")
+        footer.columnconfigure(2, minsize=8)
         ttk.Button(footer, text="설정 저장", command=self._close_options,
-                   style="DialogPrimary.TButton").pack(side="right")
-        ttk.Button(footer, text="취소", command=lambda: self._close_options(save=False, restore=True),
-                   style="Ghost.TButton").pack(side="right", padx=(0, 8))
+                   style="DialogPrimary.TButton").grid(row=0, column=3, sticky="nsew")
+        ttk.Button(footer, text="취소", command=lambda: self._close_options(save=False, restore=True)).grid(
+            row=0, column=1, sticky="nsew")
         body = self._popup_content(window, padding=(28, 8, 28, 8))
         self.option_tabs = ttk.Notebook(body, style="Card.TNotebook")
         self.option_tabs.pack(fill="both", expand=True)
@@ -1308,12 +1317,12 @@ class App:
         ttk.Label(heading, text="처음 연결부터 저장 기록 확인까지", style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
         links = ttk.Frame(popup, padding=(24, 12, 24, 20))
         links.pack(side="bottom", fill="x")
-        links.columnconfigure(0, weight=1)
-        links.columnconfigure(1, weight=1)
-        ttk.Button(links, text="자동 저장 예약", command=self.show_schedule).grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 8))
-        ttk.Button(links, text="자동 저장 실행 기록", command=self.open_schedule_logs).grid(row=0, column=1, sticky="ew", pady=(0, 8))
-        ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).grid(row=1, column=0, sticky="w")
-        ttk.Button(links, text="닫기", width=9, command=close).grid(row=1, column=1, sticky="e")
+        links.columnconfigure((0, 2), weight=1, uniform="help-action")
+        links.columnconfigure(1, minsize=8)
+        ttk.Button(links, text="자동 저장 예약", command=self.show_schedule).grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        ttk.Button(links, text="자동 저장 실행 기록", command=self.open_schedule_logs).grid(row=0, column=2, sticky="nsew", pady=(0, 8))
+        ttk.Button(links, text="X 자동화 정책", command=lambda: webbrowser.open("https://help.x.com/en/rules-and-policies/x-automation")).grid(row=1, column=0, sticky="nsew")
+        ttk.Button(links, text="닫기", width=9, command=close).grid(row=1, column=2, sticky="nsew")
         body = theme.card(popup, fill="both", expand=True, padx=24, pady=(16, 0))
         content = tk.Text(body, wrap="word", background=theme.CARD, foreground=theme.INK, relief="flat", borderwidth=0,
                           highlightthickness=0, padx=4, pady=2, font=theme.BODY, spacing1=2, spacing3=4, cursor="arrow")
@@ -1369,12 +1378,14 @@ class App:
         ttk.Combobox(row, textvariable=self.schedule_time, values=times, width=7, font=theme.BODY).pack(side="left", padx=8)
         ttk.Label(row, text="(24시간 형식)", style="CardMuted.TLabel").pack(side="left")
         buttons = ttk.Frame(body, style="Plain.TFrame")
-        buttons.pack(fill="x", pady=(16, 0))
+        buttons.pack(anchor="w", pady=(16, 0))
+        buttons.columnconfigure((0, 2, 4), weight=1, uniform="schedule-action")
+        buttons.columnconfigure((1, 3), minsize=8)
         self.schedule_on_button = ttk.Button(buttons, text="예약 켜기", style="DialogPrimary.TButton", command=self.register_schedule)
-        self.schedule_on_button.pack(side="left")
+        self.schedule_on_button.grid(row=0, column=0, sticky="nsew")
         self.schedule_off_button = ttk.Button(buttons, text="예약 끄기", command=self.unregister_schedule)
-        self.schedule_off_button.pack(side="left", padx=8)
-        ttk.Button(buttons, text="실행 기록", command=self.open_schedule_logs).pack(side="left")
+        self.schedule_off_button.grid(row=0, column=2, sticky="nsew")
+        ttk.Button(buttons, text="실행 기록", command=self.open_schedule_logs).grid(row=0, column=4, sticky="nsew")
         self._wrapping_label(body, text="PC가 꺼져 있던 날은 다음에 켤 때, 배터리일 때도 실행합니다. "
                                         "Windows에 로그인해 있어야 하며, 실패하면 알림이 뜹니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(16, 0))
@@ -1721,9 +1732,13 @@ class App:
         self.start_button.configure(state="disabled" if value else "normal")
         self.stop_button.configure(state="normal" if value else "disabled")
         if value and self.running:
-            self.stop_button.pack(side="left", padx=(8, 0))
+            self.work_actions.columnconfigure(1, minsize=8)
+            self.work_actions.columnconfigure(2, weight=1, uniform="work-action")
+            self.stop_button.grid(row=0, column=2, sticky="nsew")
         else:
-            self.stop_button.pack_forget()
+            self.stop_button.grid_remove()
+            self.work_actions.columnconfigure(1, minsize=0)
+            self.work_actions.columnconfigure(2, weight=0, uniform="")
         for widget in self.inputs:
             widget.configure(state="disabled" if value else "normal")
         if not value:
