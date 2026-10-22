@@ -6,19 +6,19 @@
 
 ## 소스 전달
 
-GitHub의 `codex/ui-ux-windows-handoff` 브랜치로 이어받습니다. `main`에 병합한 상태는 아닙니다. 새 작업 폴더를 만들 상위 폴더에서 다음을 실행합니다. 기존 폴더를 덮어쓰지 않으며, 같은 이름의 폴더가 있으면 다른 새 이름을 사용합니다.
+Windows에서 이어받을 브랜치는 `main`입니다. 이번 수정의 소스 커밋은 `5f26b14`이며, 최초 인수 브랜치는 `codex/ui-ux-windows-handoff`였습니다. 새 작업 폴더를 만들 상위 폴더에서 다음을 실행합니다. 기존 폴더를 덮어쓰지 않으며, 같은 이름의 폴더가 있으면 다른 새 이름을 사용합니다.
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-git clone --branch codex/ui-ux-windows-handoff https://github.com/chobby-f/LuvBox.git LuvBox-windows-handoff
-if ($LASTEXITCODE -ne 0) { throw '인수 브랜치 복제 실패' }
+git clone --branch main https://github.com/chobby-f/LuvBox.git LuvBox-windows-handoff
+if ($LASTEXITCODE -ne 0) { throw 'main 브랜치 복제 실패' }
 Set-Location -LiteralPath 'LuvBox-windows-handoff'
 git lfs pull
 if ($LASTEXITCODE -ne 0) { throw '고정 글꼴·FFmpeg Git LFS 복원 실패' }
 git log -1 --oneline
 ```
 
-기존 저장소를 사용한다면 먼저 `git status`로 로컬 변경을 확인하고 보존한 뒤 브랜치를 받습니다. 새 폴더에서 복제하면 기존 수정과 섞이지 않습니다. 위 폴더를 Windows 로컬 세션의 작업 폴더로 열고 `WINDOWS_CONTINUE.md`부터 읽습니다.
+기존 저장소를 사용한다면 먼저 `git status`로 로컬 변경을 확인하고 보존한 뒤 `main`을 갱신합니다. 새 폴더에서 복제하면 기존 수정과 섞이지 않습니다. 위 폴더를 Windows 로컬 세션의 작업 폴더로 열고 `WINDOWS_CONTINUE.md`부터 읽습니다.
 
 전달받은 소스 ZIP은 새 빈 폴더에 풉니다. `entry.py`와 `build.ps1`이 있는 최상위 폴더를 로컬 세션의 작업 폴더로 엽니다. 동봉된 SHA256과 ZIP의 `Get-FileHash -Algorithm SHA256` 값을 대조합니다. 기존 로컬 저장소의 미커밋 수정 위에 덮어쓰거나 강제 checkout하지 않습니다.
 

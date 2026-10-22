@@ -6,7 +6,7 @@
 
 사용자는 창 크기 조절·열기·닫기·진행바·갤러리·미리보기가 부드럽게 동작하고, 버튼 간격과 배치가 안정적이기를 원합니다. 기본 브라우저의 기존 X 로그인을 연결하고 본인 아이디는 자동 입력하거나 연결 계정 목록에서 선택하도록 요청했습니다. 개선을 차례로 계속 진행하라는 지시를 받았으며, Windows 로컬에서 검증과 빌드를 이어갈 단계입니다.
 
-Windows에서 이어받을 Git 브랜치는 `origin/codex/ui-ux-windows-handoff`입니다. 아래 수정과 이 인수 문서를 함께 커밋한 브랜치이며, 기준 커밋은 `e36c5d48c73d5fe6bead44cc292425c508bc7349`입니다. [Windows 실행 순서](docs/windows-handoff.md)의 Git 절차로 받습니다. `main`만 갱신해서는 이번 수정이 있다고 가정하지 않습니다. 기존 로컬 수정과 앱 데이터는 보존합니다.
+Windows에서 이어받을 Git 브랜치는 `main`입니다. 이번 수정의 소스 커밋 `5f26b14`를 포함한 `main`을 [Windows 실행 순서](docs/windows-handoff.md)의 Git 절차로 받습니다. 최초 인수 브랜치는 `codex/ui-ux-windows-handoff`였으며, 작업 기준 커밋은 `e36c5d48c73d5fe6bead44cc292425c508bc7349`입니다. 기존 로컬 수정과 앱 데이터는 보존합니다.
 
 소스 전달 ZIP을 사용해도 됩니다. ZIP에는 동일한 수정이 이미 반영돼 있으므로 새 빈 폴더에 풀고 패치를 다시 적용하지 않습니다. ZIP 전용 `HANDOFF_MANIFEST.json`에 전달 파일별 크기와 SHA256이 있고, `validation`에 클라우드 결과 JSON 세 개가 있습니다. Git 체크아웃에는 이 전달용 산출물을 넣지 않았으며 검증 기록은 `docs/verification.md`와 `docs/performance.md`에서 확인합니다.
 
