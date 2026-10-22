@@ -1,2 +1,7 @@
 assets/fonts/**/*.ttf filter=lfs diff=lfs merge=lfs -text
+# Its pinned upstream checksum uses LF, including in Windows checkouts.
+assets/fonts/Pretendard/OFL.txt text eol=lf
 tools/ffmpeg/runtime/*.exe filter=lfs diff=lfs merge=lfs -text
+# The pinned recipe hashes record the Windows CRLF bytes used for its build.
+tools/ffmpeg/build.py text eol=crlf
+tools/ffmpeg/configure-flags.json text eol=crlf

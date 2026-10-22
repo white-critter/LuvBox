@@ -2,6 +2,7 @@
 
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import cache
 from io import BytesIO
 from pathlib import Path
 import queue
@@ -17,6 +18,21 @@ from .thumbcache import cloud_only
 PREVIEW_SIZE = (220, 168)
 MAX_PIXELS = 60_000_000
 PHOTO_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
+
+
+@cache
+def _prepare_decoders(video: bool) -> None:
+    """Register our raster readers on the decoder thread, once per kind.
+
+    Pillow otherwise initializes every plugin when an earlier format in the
+    allowlist is not registered, even if the filename's reader is available.
+    Keep the full allowlist so a supported image with a renamed extension can
+    still be identified from its contents.
+    """
+    if video:
+        from PIL import BmpImagePlugin
+    else:
+        from PIL import GifImagePlugin, JpegImagePlugin, PngImagePlugin, WebPImagePlugin
 
 
 @dataclass(frozen=True)
@@ -77,6 +93,7 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
             note = "GIF · 첫 프레임" if kind == ".gif" else "사진 미리보기"
         else:
             return Thumbnail(None, "미리보기를 지원하지 않는 파일입니다.")
+        _prepare_decoders(kind == ".mp4")
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             # Inspect only our supported raster formats. A renamed EPS file

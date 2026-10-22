@@ -1,6 +1,8 @@
 """Native control behavior and image lifetime for the rounded ttk theme."""
 
 import gc
+import json
+import math
 import os
 import sys
 import tempfile
@@ -180,6 +182,7 @@ class ThemeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.object(sys, "frozen", True, create=True), \
                 patch("luvbox.settings.app_directory", return_value=Path(folder)), \
+                patch.object(theme, "_read_bundled_assets", return_value=None), \
                 patch.dict(theme._ASSET_CACHE, clear=True):
             cache = Path(folder) / "cache"
             cache.mkdir()
@@ -206,29 +209,23 @@ class ThemeTests(unittest.TestCase):
             self.assertIsNotNone(theme._read_asset_cache(theme._asset_key()))
             self.assertFalse(list(cache.glob("*.partial")))
 
-    def test_installed_rebuild_with_the_same_version_draws_images_again(self):
+    def test_renderer_revision_invalidates_installed_cache_without_a_version_change(self):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.object(sys, "frozen", True, create=True), \
-                patch.object(theme, "__file__", str(Path(folder) / "theme.pyc")), \
                 patch("luvbox.settings.app_directory", return_value=Path(folder)), \
+                patch.object(theme, "_read_bundled_assets", return_value=None), \
                 patch.dict(theme._ASSET_CACHE, clear=True):
             cache = Path(folder) / "cache"
-            executable = Path(folder) / "LuvBox-1.0.0.exe"
-            executable.write_bytes(b"first build")
-            os.utime(executable, ns=(1_700_000_000_000_000_000,) * 2)
-            with patch.object(sys, "executable", str(executable)):
+            theme.apply_style(self.root, mode="dark")
+            theme.apply_style(self.root, mode="light")
+            first = set(cache.glob("theme-*.zip"))
+            self.assertEqual(len(first), 2)
+            theme._ASSET_CACHE.clear()
+            with patch.object(theme, "_draw_assets", side_effect=AssertionError("drawn again")):
                 theme.apply_style(self.root, mode="dark")
                 theme.apply_style(self.root, mode="light")
-                first = set(cache.glob("theme-*.zip"))
-                self.assertEqual(len(first), 2)
-                theme._ASSET_CACHE.clear()
-                with patch.object(theme, "_draw_assets", side_effect=AssertionError("drawn again")):
-                    theme.apply_style(self.root, mode="dark")
-                    theme.apply_style(self.root, mode="light")
-                # A fixed build keeps its version number but not its executable.
-                executable.write_bytes(b"second, fixed build")
-                os.utime(executable, ns=(1_700_000_100_000_000_000,) * 2)
-                theme._ASSET_CACHE.clear()
+            theme._ASSET_CACHE.clear()
+            with patch.object(theme, "_RENDERER_REVISION", theme._RENDERER_REVISION + 1):
                 with patch.object(theme, "_draw_assets", wraps=theme._draw_assets) as draw:
                     theme.apply_style(self.root, mode="dark")
                     theme.apply_style(self.root, mode="light")
@@ -247,6 +244,7 @@ class ThemeTests(unittest.TestCase):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as folder, \
                     patch.object(sys, "frozen", True, create=True), \
                     patch("luvbox.settings.app_directory", return_value=Path(folder)), \
+                    patch.object(theme, "_read_bundled_assets", return_value=None), \
                     patch.dict(theme._ASSET_CACHE, clear=True):
                 location = theme._asset_cache_path(theme._asset_key())
                 location.parent.mkdir()
@@ -274,6 +272,7 @@ class ThemeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.object(sys, "frozen", True, create=True), \
                 patch("luvbox.settings.app_directory", return_value=Path(folder)), \
+                patch.object(theme, "_read_bundled_assets", return_value=None), \
                 patch.dict(theme._ASSET_CACHE, clear=True):
             theme.apply_style(self.root, mode="dark")
             location = theme._asset_cache_path(theme._asset_key())
@@ -298,6 +297,102 @@ class ThemeTests(unittest.TestCase):
             with patch.object(theme, "_draw_assets", side_effect=AssertionError("drawn again")):
                 theme.apply_style(self.root, mode="light")
                 theme.apply_style(self.root, mode="dark")
+
+    def test_first_use_of_each_appearance_uses_shipped_images_in_source_and_frozen_builds(self):
+        for frozen in (False, True):
+            with self.subTest(frozen=frozen), \
+                    patch.object(sys, "frozen", frozen, create=True), \
+                    patch.object(theme, "_asset_cache_path", return_value=None), \
+                    patch.dict(theme._ASSET_CACHE, clear=True), \
+                    patch.object(theme, "_draw_assets", side_effect=AssertionError("synchronous draw")):
+                for appearance in ("light", "dark"):
+                    window = tk.Tk()
+                    window.withdraw()
+                    try:
+                        theme.apply_style(window, mode=appearance)
+                        self.assertEqual(set(window._luvbox_theme_images), theme._ASSET_NAMES)
+                        self.assertEqual(theme._read_bundled_assets(theme._asset_key()),
+                                         theme._ASSET_CACHE[theme._asset_key()])
+                    finally:
+                        window.destroy()
+
+    def test_frozen_self_test_checks_shipped_images_without_requiring_a_disk_cache(self):
+        from entry import _check_theme_images
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(sys, "frozen", True, create=True), \
+                patch.object(theme, "_asset_cache_path", side_effect=lambda key: Path(folder) / (key + ".zip")), \
+                patch.dict(theme._ASSET_CACHE, clear=True), \
+                patch.object(theme, "_draw_assets", side_effect=AssertionError("unexpected theme generation")):
+            for appearance in ("dark", "light"):
+                theme.apply_style(self.root, mode=appearance)
+                self.assertEqual(_check_theme_images(self.root), "bundled")
+            self.assertEqual(list(Path(folder).iterdir()), [])
+
+    def test_frozen_self_test_rejects_missing_bundles_or_incomplete_tk_images(self):
+        from entry import _check_theme_images
+        with patch.object(sys, "frozen", True, create=True):
+            with patch.object(theme, "_read_bundled_assets", return_value=None):
+                with self.assertRaisesRegex(AssertionError, "bundled theme"):
+                    _check_theme_images(self.root)
+            images = dict(self.root._luvbox_theme_images)
+            images.pop("card")
+            with patch.object(self.root, "_luvbox_theme_images", images):
+                with self.assertRaisesRegex(AssertionError, "incomplete theme"):
+                    _check_theme_images(self.root)
+
+    def test_shipped_archives_match_current_renderer_and_are_reproducible(self):
+        from tools import build_theme
+        previous = theme._active_mode
+        with tempfile.TemporaryDirectory() as folder:
+            build_theme.build(folder)
+            self.assertEqual(theme._active_mode, previous)
+            for appearance in ("light", "dark"):
+                name = f"{appearance}.zip"
+                self.assertEqual((Path(folder) / name).read_bytes(),
+                                 (build_theme.ROOT / "assets" / "theme" / name).read_bytes())
+            build_theme.build(folder, check=True)
+
+    def test_bundle_key_is_stable_when_frozen_and_invalidates_palette_specs_or_renderer_changes(self):
+        original = theme._asset_key()
+        with patch.object(sys, "frozen", True, create=True), \
+                patch.object(theme, "__file__", "/unavailable/frozen/theme.pyc"):
+            self.assertEqual(theme._asset_key(), original)
+        with patch.dict(theme.LIGHT, {"BLUE": "#010203"}):
+            self.assertNotEqual(theme._asset_key(), original)
+        specs = list(theme._asset_specs())
+        name, generator, options = specs[0]
+        specs[0] = name, generator, {**options, "radius": options["radius"] + 1}
+        with patch.object(theme, "_asset_specs", return_value=iter(specs)):
+            self.assertNotEqual(theme._asset_key(), original)
+        with patch.object(theme, "_RENDERER_REVISION", theme._RENDERER_REVISION + 1):
+            self.assertNotEqual(theme._asset_key(), original)
+            self.assertIsNone(theme._read_bundled_assets(theme._asset_key()))
+
+    def test_missing_stale_incomplete_and_undecodable_bundles_fall_back_to_drawing(self):
+        original = theme._read_bundled_assets(theme._asset_key())
+        manifest = theme._asset_manifest(theme._asset_key())
+        for case in ("missing", "stale", "incomplete", "broken-png", "broken-json"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as folder, \
+                    patch.object(theme, "_asset_cache_path", return_value=None), \
+                    patch.object(theme, "_bundled_asset_path", return_value=Path(folder) / "light.zip"), \
+                    patch.dict(theme._ASSET_CACHE, clear=True):
+                if case != "missing":
+                    with zipfile.ZipFile(Path(folder) / "light.zip", "w") as archive:
+                        archive.writestr("manifest.json", b"invalid json" if case == "broken-json" else
+                                         json.dumps({**manifest, "key": "old"} if case == "stale" else manifest))
+                        for name, data in original.items():
+                            if case == "incomplete" and name == "button":
+                                continue
+                            archive.writestr(name, data[:16] if case == "broken-png" and name == "card" else data)
+                window = tk.Tk()
+                window.withdraw()
+                try:
+                    with patch.object(theme, "_draw_assets", wraps=theme._draw_assets) as draw:
+                        theme.apply_style(window, mode="light")
+                    self.assertEqual(draw.call_count, 1)
+                    self.assertEqual(theme._ASSET_CACHE[theme._asset_key()], original)
+                finally:
+                    window.destroy()
 
     def test_rounded_controls_match_their_parent_background_in_every_state(self):
         # These state backgrounds caused the visible square outside the PNG's
@@ -529,9 +624,89 @@ class ThemeTests(unittest.TestCase):
         self.assertEqual(bar.itemcget(bar._fill, "fill"), theme.DARK["BLUE"])
         bar.stop()
         self.assertIsNone(bar._timer)
+        self.assertIsNone(bar._next_frame)
         self.assertEqual(bar.itemcget(bar._fill, "state"), "hidden")
         bar.destroy()
         theme.apply(self.root, "light")
+
+    def test_progress_start_honors_interval_without_restarting_the_same_animation(self):
+        bar = theme.Progressbar(self.root, mode="indeterminate")
+        clock = [10.]
+        with patch("luvbox.theme.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(bar, "after", side_effect=("first", "second")) as after, \
+                patch.object(bar, "after_cancel") as cancel:
+            bar.start(12)
+            self.assertEqual(after.call_args.args[0], 12)
+            phase = bar._phase_start
+            clock[0] += .005
+            bar.start(12)
+            self.assertEqual(after.call_count, 1)
+            cancel.assert_not_called()
+            self.assertEqual(bar._phase_start, phase)
+            bar.start(40)
+            cancel.assert_called_once_with("first")
+            self.assertEqual(after.call_args.args[0], 40)
+            self.assertEqual(bar._phase_start, phase)
+            bar.stop()
+            self.assertIsNone(bar._timer)
+            self.assertIsNone(bar._next_frame)
+        bar.destroy()
+
+    def test_progress_frame_deadlines_exclude_render_time_and_skip_missed_frames(self):
+        bar = theme.Progressbar(self.root, mode="indeterminate")
+        clock = [0.]
+        def render(*_):
+            clock[0] += .004
+        with patch("luvbox.theme.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(bar, "after", return_value="frame") as after, \
+                patch.object(bar, "after_cancel"), patch.object(bar, "_draw", side_effect=render):
+            bar.start(12)
+            clock[0] = .013
+            bar._tick()
+            # The next deadline remains 24ms, rather than 12ms after rendering.
+            self.assertGreaterEqual(after.call_args.args[0], 6)
+            self.assertLessEqual(after.call_args.args[0], 8)
+            clock[0] = .2
+            bar._tick()
+            self.assertGreater(bar._next_frame, clock[0])
+            self.assertGreaterEqual(after.call_args.args[0], 1)
+            self.assertLessEqual(after.call_args.args[0], 12)
+            bar.stop()
+        bar.destroy()
+
+    def test_progress_target_updates_keep_the_frame_and_catch_up_after_a_pause(self):
+        bar = theme.Progressbar(self.root, value=0)
+        clock = [0.]
+        with patch("luvbox.theme.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(bar, "after", return_value="frame") as after, \
+                patch.object(bar, "after_cancel") as cancel, patch.object(bar, "_draw"):
+            bar.configure(value=50)
+            self.assertLessEqual(after.call_args.args[0], 16)
+            clock[0] = .004
+            bar.configure(value=75)
+            clock[0] = .008
+            bar.configure(value=100)
+            self.assertEqual(bar["value"], 100)
+            self.assertEqual(after.call_count, 1)
+            cancel.assert_not_called()
+            clock[0] = .016
+            bar._tick()
+            self.assertAlmostEqual(bar._display_value, 1 - math.exp(-.016 / .075))
+            clock[0] = 1.
+            bar._tick()
+            self.assertEqual(bar._display_value, 1)
+            self.assertIsNone(bar._timer)
+            self.assertIsNone(bar._next_frame)
+        bar.destroy()
+
+    def test_progress_rejects_invalid_animation_intervals_without_starting(self):
+        bar = theme.Progressbar(self.root, mode="indeterminate")
+        for interval in (0, -1, float("nan"), float("inf"), "invalid"):
+            with self.subTest(interval=interval), self.assertRaises(tk.TclError):
+                bar.start(interval)
+            self.assertFalse(bar._running)
+            self.assertIsNone(bar._timer)
+        bar.destroy()
 
     def test_legacy_rounded_progress_uses_parent_color_in_all_states(self):
         card = theme.card(self.root, fill="x")
@@ -569,6 +744,7 @@ class ThemeTests(unittest.TestCase):
         bar.destroy()
         self.assertEqual(value.trace_info(), [])
         self.assertIsNone(bar._timer)
+        self.assertIsNone(bar._next_frame)
         # A subsequent worker-side value update must not call a dead canvas.
         value.set(80)
         self.root.update()
@@ -730,6 +906,20 @@ class ThemeTests(unittest.TestCase):
         self.assertGreater(view.canvas.yview()[0], positions[0][0])
         self.assertEqual(other.canvas.yview(), positions[1])
 
+    def test_focus_reveal_uses_the_current_canvas_offset_before_native_windows_move(self):
+        (view, other), buttons, outside = self._nested_scroll_views()
+        target = buttons[0][0]
+        view.canvas.yview_moveto(0)
+        self.root.update()
+        # The logical offset changes immediately; native child positions are
+        # still from the old viewport until the next event-loop pass.
+        view.canvas.yview_moveto(1)
+        view._ensure_visible(target)
+        self.root.update()
+        self.assertGreaterEqual(target.winfo_rooty(), view.canvas.winfo_rooty())
+        self.assertLessEqual(target.winfo_rooty() + target.winfo_height(),
+                             view.canvas.winfo_rooty() + view.canvas.winfo_height())
+
     def test_scroll_view_destroy_releases_only_its_own_toplevel_callbacks(self):
         (view, survivor), buttons, outside = self._nested_scroll_views()
         received = []
@@ -737,6 +927,7 @@ class ThemeTests(unittest.TestCase):
         self.addCleanup(self.root.unbind, "<MouseWheel>", external)
         own_bindings = list(view._view_bindings)
         surviving_bindings = list(survivor._view_bindings)
+        buttons[0][-1].focus_force()
         buttons[0][-1].event_generate("<FocusIn>")
         view._schedule_layout()
         timers = set(view._focus_timers) | {view._layout_timer}

@@ -6,6 +6,26 @@ import sys
 from pathlib import Path
 
 
+def _check_theme_images(root) -> str:
+    """Check actual Tk images and required frozen assets, without a disk cache."""
+    import struct
+    from luvbox import theme
+
+    images = getattr(root._root(), "_luvbox_theme_images", {})
+    assert set(images) == theme._ASSET_NAMES, "incomplete theme images"
+    key = theme._asset_key()
+    assets = theme._ASSET_CACHE.get(key, {})
+    assert set(assets) == theme._ASSET_NAMES, "incomplete theme PNGs"
+    for name in theme._ASSET_NAMES:
+        size = struct.unpack(">II", assets[name][16:24])
+        assert (images[name].width(), images[name].height()) == size, name
+    bundled = theme._read_bundled_assets(key)
+    uses_bundle = bundled is not None and bundled == assets
+    if getattr(sys, "frozen", False):
+        assert uses_bundle, "missing, invalid or unused bundled theme images"
+    return "bundled" if uses_bundle else "generated-or-cached"
+
+
 def main() -> int:
     # PyInstaller's windowed interpreter has no standard streams. Libraries
     # may still expect these attributes while running GUI or diagnostic code.
@@ -78,17 +98,16 @@ def main() -> int:
             for name in fonts.FILES:
                 assert (fonts.asset_directory() / name).is_file()
             original_mode = theme.mode(root)
+            theme_sources = set()
             theme.apply(root, "dark")
             assert app.log.cget("background") == theme.DARK["CARD"]
+            theme_sources.add(_check_theme_images(root))
             theme.apply(root, "light")
             assert app.log.cget("background") == theme.LIGHT["CARD"]
+            theme_sources.add(_check_theme_images(root))
             theme.apply(root, original_mode)
-            theme_images = "drawn"
-            if getattr(sys, "frozen", False):
-                # Both appearances were drawn once and kept for the next start.
-                cached = list((Path(app_data.name) / "LuvBox" / "cache").glob(f"theme-{__version__}-*.zip"))
-                assert len(cached) == 2, cached
-                theme_images = "cached-light-and-dark"
+            theme_images = ("bundled-light-and-dark" if theme_sources == {"bundled"}
+                            else "generated-or-cached-light-and-dark")
             assert int(app.progress.cget("highlightthickness")) == 0
             assert app.auth.get()
             assert app.content_view.winfo_manager() == "grid"

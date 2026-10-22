@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "LuvBox 브라우저 연결",
+  "version": "1.0.0",
+  "description": "사용자가 승인한 X 계정만 이 컴퓨터의 LuvBox에 연결합니다.",
+  "permissions": ["cookies"],
+  "host_permissions": ["https://x.com/*", "http://127.0.0.1/*"],
+  "background": {"scripts": ["background.js"]},
+  "browser_specific_settings": {"gecko": {"id": "luvbox-bridge@local.luvbox", "strict_min_version": "128.0"}},
+  "content_scripts": [
+    {"matches": ["https://x.com/*"], "js": ["profile.js"], "run_at": "document_idle"},
+    {"matches": ["http://127.0.0.1/*"], "js": ["connect.js"], "run_at": "document_start"}
+  ]
+}

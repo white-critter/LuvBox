@@ -3,23 +3,25 @@
 The password is typed into Edge, never into this app. Edge runs with a new,
 temporary profile, so the user's own browser profiles are never opened. Through
 a pair of inherited anonymous pipes the app reads only the x.com
-auth_token cookie, stores it with DPAPI exactly like a pasted token, closes the
-window and deletes the temporary profile. No other site's data is kept.
+auth_token cookie and confirms the signed-in account from X's own navigation
+and twid cookie. It stores the token and identity with DPAPI, closes the window
+and deletes the temporary profile. No other site's data is kept.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
-from .login import _x_cookies, save_auth_token
+from .login import _x_cookies, normalize_identity, save_authenticated_session
 from .settings import app_directory
 
 
@@ -31,6 +33,7 @@ NO_DEBUGGING = "로그인 창에 연결하지 못했습니다(회사·학교 PC�
 CLOSED = "로그인 창이 닫혀 연결하지 않았습니다."
 TIMED_OUT = "로그인을 기다리는 시간이 지나 창을 닫았습니다. 다시 시도해 주세요."
 CANCELLED = "로그인 연결을 취소했습니다."
+NO_IDENTITY = "로그인한 X 계정을 확인하지 못했습니다. 로그인 창에서 본인 프로필이 보이는지 확인한 뒤 다시 연결해 주세요."
 
 
 class SignInError(RuntimeError):
@@ -210,6 +213,86 @@ def _x_token(cookies) -> str:
     return ""
 
 
+def _x_user_id(cookies) -> str:
+    ids = {match.group(1) for cookie in _x_cookies(cookies)
+           if cookie["name"] == "twid" and cookie["path"] == "/"
+           and (match := re.fullmatch(r"u=([1-9][0-9]{0,31})", unquote(cookie["value"])))}
+    return next(iter(ids)) if len(ids) == 1 else ""
+
+
+def _trusted_x_url(url) -> bool:
+    if not isinstance(url, str):
+        return False
+    try:
+        parsed = urlsplit(url)
+        return (parsed.scheme == "https" and parsed.hostname == "x.com" and
+                not parsed.username and not parsed.password and parsed.port in (None, 443))
+    except ValueError:
+        return False
+
+
+def _authenticated_identity(connection, pages, cookies, *, cancel=None) -> dict | None:
+    """Read X's own navigation identity, tied to the signed-in twid cookie.
+
+    A handle is never guessed from auth_token, the input field or a viewed
+    tweet/profile. Only X's dedicated *own profile* navigation link is read.
+    """
+    user_id = _x_user_id(cookies)
+    if not user_id:
+        return None
+    for page in pages:
+        if not isinstance(page, dict) or not _trusted_x_url(page.get("url")):
+            continue
+        target = page.get("targetId")
+        if not isinstance(target, str) or not target or len(target) > 256:
+            continue
+        attached = devtools_call(connection, "Target.attachToTarget", cancel=cancel,
+                                 params={"targetId": target, "flatten": True})
+        session = attached.get("sessionId")
+        if not isinstance(session, str) or not session or len(session) > 256:
+            raise ValueError("invalid devtools session")
+        try:
+            response = devtools_call(connection, "Runtime.evaluate", session_id=session, cancel=cancel, params={
+                "expression": "(() => { const a = document.querySelector('a[data-testid=\"AppTabBar_Profile_Link\"]'); "
+                              "const b = document.querySelector('[data-testid=\"SideNav_AccountSwitcher_Button\"]'); "
+                              "return {url: location.href, profile: a ? a.href : '', "
+                              "accountText: b ? b.innerText.slice(0, 1024) : ''}; })()",
+                "returnByValue": True})
+            state = response.get("result", {}).get("value")
+            if not isinstance(state, dict) or not _trusted_x_url(state.get("url")):
+                continue
+            profile = state.get("profile")
+            if not _trusted_x_url(profile):
+                continue
+            match = re.fullmatch(r"/([A-Za-z0-9_]{1,15})/?", urlsplit(profile).path)
+            parsed = urlsplit(profile)
+            if not match or parsed.query or parsed.fragment:
+                continue
+            handle = match.group(1)
+            account_text = state.get("accountText", "")
+            if not isinstance(account_text, str) or len(account_text) > 1024:
+                continue
+            lines = [line.strip() for line in account_text.splitlines() if line.strip()]
+            # The account switcher corroborates the profile handle whenever it
+            # is present. It may be omitted by X's compact sidebar layout.
+            handles = [line[1:].lower() for line in lines if re.fullmatch(r"@[A-Za-z0-9_]{1,15}", line)]
+            if handles and handles != [handle.lower()]:
+                continue
+            name = next((line for line in lines if not line.startswith("@") and len(line) <= 200), handle)
+            identity = normalize_identity({"user_id": user_id, "handle": handle, "display_name": name})
+            # Do not combine the old tab's identity with a session that changed
+            # while the navigation DOM was being inspected.
+            current = devtools_call(connection, "Storage.getCookies", cancel=cancel).get("cookies")
+            if _x_user_id(current) == user_id and _x_token(current) == _x_token(cookies):
+                return identity
+        finally:
+            try:
+                devtools_call(connection, "Target.detachFromTarget", params={"sessionId": session}, timeout=3)
+            except (OSError, ValueError):
+                pass
+    return None
+
+
 def _check_profile_policy() -> None:
     """A mandatory Edge directory policy overrides --user-data-dir."""
     if os.name != "nt":
@@ -290,7 +373,7 @@ Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | ForEach-Object {
 
 
 def sign_in(cancel: threading.Event, *, timeout: float = 600, edge: Path | None = None,
-            launch=subprocess.Popen, poll_interval: float = 1.0) -> None:
+            launch=subprocess.Popen, poll_interval: float = 1.0) -> dict:
     """Sign in through a dedicated Edge profile and inherited private pipes."""
     edge = edge or find_edge()
     if edge is None:
@@ -314,13 +397,15 @@ def sign_in(cancel: threading.Event, *, timeout: float = 600, edge: Path | None 
             raise SignInError(NO_DEBUGGING) from None
         deadline = time.monotonic() + timeout
         recovery_checked = False
+        token_seen = None
         while True:
             if cancel.is_set():
                 raise SignInError(CANCELLED)
             if time.monotonic() > deadline:
                 raise SignInError(TIMED_OUT)
             try:
-                token = _x_token(devtools_call(connection, "Storage.getCookies", cancel=cancel).get("cookies"))
+                cookies = devtools_call(connection, "Storage.getCookies", cancel=cancel).get("cookies")
+                token = _x_token(cookies)
                 pages = [target for target in devtools_call(connection, "Target.getTargets", cancel=cancel).get("targetInfos", ())
                          if isinstance(target, dict) and target.get("type") == "page"]
             except OSError:
@@ -330,11 +415,21 @@ def sign_in(cancel: threading.Event, *, timeout: float = 600, edge: Path | None 
             if token:
                 if cancel.is_set():
                     raise SignInError(CANCELLED)
+                token_seen = token_seen or time.monotonic()
                 try:
-                    save_auth_token(token)
+                    identity = _authenticated_identity(connection, pages, cookies, cancel=cancel)
+                    if identity is not None:
+                        if cancel.is_set():
+                            raise SignInError(CANCELLED)
+                        return save_authenticated_session(token, identity, cancel=cancel)
                 except ValueError as exc:
                     raise SignInError(str(exc)) from None
-                return
+                except OSError:
+                    raise SignInError(CLOSED) from None
+                if time.monotonic() - token_seen >= 30:
+                    raise SignInError(NO_IDENTITY)
+            else:
+                token_seen = None
             if not pages:
                 raise SignInError(CLOSED)
             if not recovery_checked and time.monotonic() - started >= 10:

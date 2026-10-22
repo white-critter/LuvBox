@@ -12,6 +12,7 @@ import math
 import os
 import re
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -26,6 +27,20 @@ _SESSION_HELP = "저장한 auth_token 연결을 사용할 수 없습니다. auth
 _TOKEN_HELP = "auth_token 값을 확인해 주세요. 쿠키의 값만 입력하고 공백이나 따옴표는 포함하지 마세요."
 _STORE_HELP = "auth_token 연결 정보를 암호화해 저장하지 못했습니다. Windows 사용자 폴더의 쓰기 권한을 확인해 주세요."
 _MAX_TOKEN_LENGTH = 4096
+_ACCOUNT_HELP = "연결된 계정을 확인하지 못했습니다. 계정을 다시 선택해 주세요."
+_USER_ID = re.compile(r"[1-9][0-9]{0,31}\Z")
+_HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
+_SESSION_LOCK = threading.RLock()
+_MAX_ACCOUNTS = 100
+
+
+class SessionCancelled(ValueError):
+    """A cancelled connection must not replace the last saved session."""
+
+
+def _check_cancelled(cancel) -> None:
+    if cancel is not None and cancel.is_set():
+        raise SessionCancelled("로그인 연결을 취소했습니다.")
 
 
 def session_path() -> Path:
@@ -119,12 +134,11 @@ def _has_auth(cookies: list[dict]) -> bool:
     return any(cookie["name"] == "auth_token" and cookie["path"] == "/" for cookie in cookies)
 
 
-def _store_session_cookies(cookies: list[dict]) -> None:
-    clean = _x_cookies(cookies)
-    if not _has_auth(clean):
-        raise ValueError(_SESSION_HELP)
-    raw = json.dumps({"version": 1, "cookies": clean}, ensure_ascii=True,
-                     separators=(",", ":")).encode("utf-8")
+def _write_payload(payload: dict, *, cancel=None) -> None:
+    _check_cancelled(cancel)
+    raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    if len(raw) > _MAX_SESSION_BYTES // 2:
+        raise ValueError(_STORE_HELP)
     encrypted = _HEADER + _dpapi(raw, protect=True)
     target = session_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -137,9 +151,213 @@ def _store_session_cookies(cookies: list[dict]) -> None:
             file.write(encrypted)
             file.flush()
             os.fsync(file.fileno())
+        _check_cancelled(cancel)
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _read_payload() -> dict:
+    with session_path().open("rb") as file:
+        encrypted = file.read(_MAX_SESSION_BYTES + 1)
+    if len(encrypted) > _MAX_SESSION_BYTES:
+        raise ValueError(_SESSION_HELP)
+    if encrypted.startswith(_HEADER):
+        decrypted = _dpapi(encrypted[len(_HEADER):], protect=False)
+    elif encrypted.startswith(_LEGACY_HEADER):
+        decrypted = _dpapi(encrypted[len(_LEGACY_HEADER):], protect=False, entropy=_LEGACY_ENTROPY)
+    else:
+        raise ValueError(_SESSION_HELP)
+    payload = json.loads(decrypted.decode("utf-8"))
+    if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
+        raise ValueError(_SESSION_HELP)
+    return payload
+
+
+def normalize_identity(identity: object) -> dict:
+    """Validate identity obtained from the authenticated browser, never a token.
+
+    The caller must establish that this is the signed-in user's profile. These
+    checks validate shape and bounded text; they do not authenticate a username.
+    """
+    if not isinstance(identity, dict):
+        raise ValueError(_ACCOUNT_HELP)
+    user_id, handle = identity.get("user_id"), identity.get("handle")
+    display_name = identity.get("display_name", handle)
+    if (not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id) or
+            not isinstance(handle, str) or not _HANDLE.fullmatch(handle) or
+            not isinstance(display_name, str) or len(display_name) > 200 or
+            any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in display_name)):
+        raise ValueError(_ACCOUNT_HELP)
+    return {"user_id": user_id, "handle": handle.lower(),
+            "display_name": display_name.strip() or handle}
+
+
+def _account_records(payload: dict) -> list[dict]:
+    rows = payload.get("accounts", [])
+    if not isinstance(rows, list) or len(rows) > _MAX_ACCOUNTS:
+        raise ValueError(_SESSION_HELP)
+    records = {}
+    # Include early identity-aware sessions which did not yet have an account
+    # collection, and prefer the active copy if a previous writer left it newer.
+    for row in [*rows, payload]:
+        if not isinstance(row, dict) or "identity" not in row:
+            continue
+        try:
+            identity = normalize_identity(row["identity"])
+        except ValueError:
+            continue
+        clean = _x_cookies(row.get("cookies"))
+        if _has_auth(clean):
+            records[identity["user_id"]] = {"identity": identity, "cookies": clean}
+    return list(records.values())
+
+
+def _existing_accounts() -> list[dict]:
+    try:
+        return _account_records(_read_payload())
+    except (OSError, ValueError, UnicodeError, TypeError):
+        return []
+
+
+def _store_session_cookies(cookies: list[dict]) -> None:
+    clean = _x_cookies(cookies)
+    if not _has_auth(clean):
+        raise ValueError(_SESSION_HELP)
+    with _SESSION_LOCK:
+        payload = {"version": 1, "cookies": clean}
+        accounts = _existing_accounts()
+        if accounts:
+            payload["accounts"] = accounts
+        _write_payload(payload)
+
+
+def save_authenticated_session(token: str, identity: dict, *, cookies: list[dict] | None = None,
+                               cancel=None) -> dict:
+    """Store a browser-verified identity and session together, then select it.
+
+    All account cookies and names stay inside the existing current-user DPAPI
+    file. Its v1 active-cookie fields remain readable by older app versions.
+    """
+    _check_cancelled(cancel)
+    normalized = normalize_identity(identity)
+    if not isinstance(token, str) or not 1 <= len(token) <= _MAX_TOKEN_LENGTH or any(
+            ord(char) < 33 or ord(char) > 126 or char in '\",;\\' for char in token):
+        raise ValueError(_TOKEN_HELP)
+    clean = _x_cookies(cookies) if cookies is not None else [{
+        "name": "auth_token", "value": token, "domain": ".x.com", "path": "/",
+        "expires": -1, "secure": True, "httpOnly": True}]
+    tokens = [item["value"] for item in clean if item["name"] == "auth_token" and item["path"] == "/"]
+    if not tokens or any(value != token for value in tokens):
+        raise ValueError(_TOKEN_HELP)
+    with _SESSION_LOCK:
+        try:
+            accounts = [row for row in _existing_accounts()
+                        if row["identity"]["user_id"] != normalized["user_id"]]
+            if len(accounts) >= _MAX_ACCOUNTS:
+                raise ValueError(_STORE_HELP)
+            accounts.append({"identity": normalized, "cookies": clean})
+            _write_payload({"version": 1, "cookies": clean, "identity": normalized,
+                            "accounts": accounts}, cancel=cancel)
+        except SessionCancelled:
+            raise
+        except (OSError, ValueError, TypeError):
+            raise ValueError(_STORE_HELP) from None
+    return dict(normalized)
+
+
+def _active_identity(payload: dict) -> dict | None:
+    if not _has_auth(_x_cookies(payload.get("cookies"))):
+        return None
+    try:
+        return normalize_identity(payload.get("identity"))
+    except ValueError:
+        return None
+
+
+def active_account() -> dict | None:
+    """Return verified active identity, or None for legacy/manual sessions."""
+    with _SESSION_LOCK:
+        try:
+            payload = _read_payload()
+            return _active_identity(payload)
+        except (OSError, ValueError, UnicodeError, TypeError):
+            return None
+
+
+def list_accounts() -> list[dict]:
+    """List connected identities without exposing cookies or token values."""
+    with _SESSION_LOCK:
+        try:
+            payload = _read_payload()
+            active = _active_identity(payload)
+            active_id = active["user_id"] if active else None
+            return [dict(row["identity"], active=row["identity"]["user_id"] == active_id)
+                    for row in _account_records(payload)]
+        except (OSError, ValueError, UnicodeError, TypeError):
+            return []
+
+
+def select_account(user_id: str) -> dict:
+    """Atomically make an already connected account the downloader session."""
+    if not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id):
+        raise ValueError(_ACCOUNT_HELP)
+    with _SESSION_LOCK:
+        try:
+            accounts = _account_records(_read_payload())
+            selected = next(row for row in accounts if row["identity"]["user_id"] == user_id)
+            _write_payload({"version": 1, **selected, "accounts": accounts})
+            return dict(selected["identity"])
+        except (OSError, ValueError, UnicodeError, TypeError, StopIteration):
+            raise ValueError(_ACCOUNT_HELP) from None
+
+
+def remove_account(user_id: str) -> None:
+    """Remove one account; select another if the removed account was active."""
+    if not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id):
+        raise ValueError(_ACCOUNT_HELP)
+    with _SESSION_LOCK:
+        try:
+            payload = _read_payload()
+            accounts = [row for row in _account_records(payload)
+                        if row["identity"]["user_id"] != user_id]
+            active = payload.get("identity")
+            if isinstance(active, dict) and active.get("user_id") == user_id:
+                if not accounts:
+                    session_path().unlink(missing_ok=True)
+                    return
+                payload = {"version": 1, **accounts[0]}
+            payload["accounts"] = accounts
+            _write_payload(payload)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, UnicodeError, TypeError):
+            raise ValueError(_ACCOUNT_HELP) from None
+
+
+def clear_active_session() -> None:
+    """Disconnect the current login while retaining other connected accounts.
+
+    A manual token has no verified identity and is not part of ``accounts``.
+    Clearing it must therefore leave the encrypted account collection intact,
+    without silently connecting one of those accounts in its place.
+    """
+    with _SESSION_LOCK:
+        try:
+            payload = _read_payload()
+            active = _active_identity(payload)
+            if active is not None:
+                remove_account(active["user_id"])
+                return
+            accounts = _account_records(payload)
+            if accounts:
+                _write_payload({"version": 1, "cookies": [], "accounts": accounts})
+            else:
+                clear_session()
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, UnicodeError, TypeError):
+            raise ValueError(_ACCOUNT_HELP) from None
 
 
 def save_auth_token(token: str) -> None:
@@ -164,26 +382,26 @@ def save_auth_token(token: str) -> None:
         raise ValueError(_STORE_HELP) from None
 
 
-def load_session_cookies() -> list[dict]:
+def load_session_cookies(*, account: str | None = None) -> list[dict]:
     """Decrypt a valid local session in memory or raise a secret-free error.
 
-    Local validation detects expiry and damage; X can revoke a still-unexpired
-    cookie, which is detected only when the downloader next connects to X.
+    A named account reads its own saved session without changing the global
+    selection, so scheduled runs cannot accidentally use another account's
+    login. Cookie-only sessions remain usable without claiming an identity.
+    X can revoke an unexpired cookie; the downloader detects that on connection.
     """
     try:
-        with session_path().open("rb") as file:
-            encrypted = file.read(_MAX_SESSION_BYTES + 1)
-        if len(encrypted) > _MAX_SESSION_BYTES:
-            raise ValueError
-        if encrypted.startswith(_HEADER):
-            decrypted = _dpapi(encrypted[len(_HEADER):], protect=False)
-        elif encrypted.startswith(_LEGACY_HEADER):
-            decrypted = _dpapi(encrypted[len(_LEGACY_HEADER):], protect=False, entropy=_LEGACY_ENTROPY)
-        else:
-            raise ValueError
-        payload = json.loads(decrypted.decode("utf-8"))
-        if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
-            raise ValueError
+        with _SESSION_LOCK:
+            payload = _read_payload()
+            if account is not None:
+                if not isinstance(account, str) or not _HANDLE.fullmatch(account):
+                    raise ValueError(_ACCOUNT_HELP)
+                if "identity" in payload:
+                    matches = [row for row in _account_records(payload)
+                               if row["identity"]["handle"] == account.lower()]
+                    if len(matches) == 1:
+                        return matches[0]["cookies"]
+                    raise ValueError(_ACCOUNT_HELP)
         clean = _x_cookies(payload.get("cookies"))
         if not _has_auth(clean):
             raise ValueError
@@ -203,6 +421,7 @@ def has_session() -> bool:
 
 def clear_session() -> None:
     """Remove only this app's saved session; leave Chrome profiles untouched."""
-    session_path().unlink(missing_ok=True)
+    with _SESSION_LOCK:
+        session_path().unlink(missing_ok=True)
 
 

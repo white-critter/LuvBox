@@ -481,6 +481,7 @@ class GuiTests(unittest.TestCase):
                 try:
                     with patch.object(window, "winfo_screenheight", return_value=screen_height):
                         other = App(window)
+                        window.deiconify()
                         self.root.update_idletasks()
                     width, height = map(int, window.geometry().split("+", 1)[0].split("x"))
                     self.assertEqual(height, expected_height)
@@ -547,12 +548,12 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(paths.media_dir, directory)
         self.assertEqual(paths.snapshot_dir, directory / ".luvbox" / "offline_test")
         self.assertTrue(paths.record_dir.is_relative_to(Path(self.temp.name) / "records"))
-        with patch("luvbox.gui.os.startfile") as opened:
+        with patch("luvbox.gui.os.startfile", create=True) as opened:
             self.app.open_folder()
         opened.assert_called_once_with(str(directory))
         self.app.separate_accounts.set(True)
         self.assertEqual(self.app.destination_preview.get(), str(directory / "offline_test"))
-        with patch("luvbox.gui.os.startfile") as opened:
+        with patch("luvbox.gui.os.startfile", create=True) as opened:
             self.app.open_folder()
         opened.assert_called_once_with(str(directory / "offline_test"))
         self.app.folder_mode.set("저장일별 폴더")
@@ -607,12 +608,63 @@ class GuiTests(unittest.TestCase):
         for widget in (self.app.start_button, self.app.options_button):
             bottom = widget.winfo_rooty() - self.root.winfo_rooty() + widget.winfo_height()
             self.assertLessEqual(bottom, self.root.winfo_height())
-        self.app.content_view.canvas.yview_moveto(1)
-        self.root.update()
+        canvas = self.app.content_view.canvas
         for widget in (self.app.progress_detail_label, self.app.log):
-            top = widget.winfo_rooty() - self.root.winfo_rooty()
-            self.assertGreaterEqual(top, 0)
-            self.assertLessEqual(top + widget.winfo_height(), self.root.winfo_height())
+            self.app.content_view._ensure_visible(widget)
+            self.root.update()
+            self.assertGreaterEqual(widget.winfo_rooty(), canvas.winfo_rooty())
+            self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(),
+                                 canvas.winfo_rooty() + canvas.winfo_height())
+
+    def test_large_dpi_minimum_keeps_work_controls_and_log_reachable_on_short_screens(self):
+        # A new Tcl interpreter is important: changing scaling after fonts
+        # have already been resolved does not resize existing font instances.
+        for scaling in (2.0, 2.6666666667):
+            for screen_width, screen_height in ((1920, 1080), (1280, 720)):
+                with self.subTest(scaling=scaling, screen=(screen_width, screen_height)):
+                    window = tk.Tk()
+                    window.withdraw()
+                    original_scaling = window.tk.call("tk", "scaling")
+                    window.tk.call("tk", "scaling", scaling)
+                    other = None
+                    try:
+                        with patch.object(window, "winfo_screenwidth", return_value=screen_width), \
+                                patch.object(window, "winfo_screenheight", return_value=screen_height):
+                            other = App(window)
+                        window.geometry("780x620")
+                        window.deiconify()
+                        window.update()
+                        self.assertLessEqual(window.winfo_width(), screen_width - 80)
+                        self.assertLessEqual(window.winfo_height(), screen_height - 100)
+                        for widget in (other.start_button, other.stop_button, other.progress):
+                            top = widget.winfo_rooty() - window.winfo_rooty()
+                            self.assertGreaterEqual(top, 0)
+                            self.assertLessEqual(top + widget.winfo_height(), window.winfo_height())
+                            self.assertLessEqual(widget.winfo_rootx() - window.winfo_rootx() + widget.winfo_width(),
+                                                 window.winfo_width())
+                        actions = [(button.winfo_rootx(), button.winfo_rooty())
+                                   for button in (other.start_button, other.stop_button)]
+                        other._toggle_setup()
+                        window.update()
+                        self.assertEqual(actions, [(button.winfo_rootx(), button.winfo_rooty())
+                                                   for button in (other.start_button, other.stop_button)])
+                        other.content_view.canvas.yview_moveto(1)
+                        window.update()
+                        canvas = other.content_view.canvas
+                        visible_top = max(canvas.winfo_rooty(), other.log.winfo_rooty())
+                        visible_bottom = min(canvas.winfo_rooty() + canvas.winfo_height(),
+                                             other.log.winfo_rooty() + other.log.winfo_height())
+                        linespace = int(window.tk.call("font", "metrics", other.log.cget("font"), "-linespace"))
+                        self.assertGreaterEqual(visible_bottom - visible_top, linespace * 3)
+                        other._focus_dashboard()
+                        window.update()
+                        self.assertFalse(other._setup_collapsed)
+                        self.assertGreaterEqual(other.account_entry.winfo_rooty(), canvas.winfo_rooty())
+                    finally:
+                        window.tk.call("tk", "scaling", original_scaling)
+                        destroy_tk(window)
+                        other = window = widget = canvas = None
+                        gc.collect()
 
     def test_narrow_window_wraps_option_summary_inside_its_column(self):
         self.root.attributes("-alpha", 0)
@@ -625,7 +677,7 @@ class GuiTests(unittest.TestCase):
         self.root.deiconify()
         self.root.update()
         label = self.app.option_summary_label
-        self.assertLessEqual(label.winfo_reqwidth(), label.winfo_width() + 2)
+        self.assertLessEqual(label.winfo_reqwidth(), label.winfo_width())
         self.assertGreater(label.winfo_height(), 25)
 
     def test_narrow_form_aligns_fields_and_preserves_folder_input_space(self):
@@ -663,6 +715,30 @@ class GuiTests(unittest.TestCase):
         self.assertGreater(self.app.token_entry.winfo_width(), 250)
         self.assertGreaterEqual(view.content.winfo_height(), view.content.winfo_reqheight())
 
+    def test_popups_first_map_uses_the_final_size(self):
+        self.root.deiconify()
+        self.root.update()
+        fit = self.app._fit_popup
+        mapped = []
+
+        def observed(window):
+            window.bind("<Map>", lambda event: mapped.append(
+                (window, window.winfo_width(), window.winfo_height()))
+                if event.widget is window else None, add="+")
+            fit(window)
+
+        with patch.object(self.app, "_fit_popup", side_effect=observed):
+            for show, name, close in ((self.app.show_connect, "connect_window", self.app._close_connect),
+                                      (self.app.show_options, "options_window",
+                                       lambda: self.app._close_options(save=False))):
+                with self.subTest(popup=name):
+                    show()
+                    self.root.update()
+                    window = getattr(self.app, name)
+                    first = next(size for owner, *size in mapped if owner is window)
+                    self.assertEqual(first, [window.winfo_width(), window.winfo_height()])
+                    close()
+
     def test_short_screen_keeps_full_log_reachable_and_wheel_scrolls(self):
         window = tk.Toplevel(self.root)
         window.withdraw()
@@ -677,7 +753,15 @@ class GuiTests(unittest.TestCase):
         self.assertGreaterEqual(app.log.winfo_height(), 60)
         canvas = app.content_view.canvas
         self.assertLess(canvas.yview()[1], 1)
+        # Account and work controls stay fixed; only the recent-work region
+        # scrolls, so a wheel over Start must not move the content underneath.
+        position = canvas.yview()
         app.start_button.event_generate("<MouseWheel>", delta=-120)
+        window.update()
+        self.assertEqual(canvas.yview(), position)
+        self.assertLessEqual(app.progress.winfo_rooty() - window.winfo_rooty() + app.progress.winfo_height(),
+                             window.winfo_height())
+        canvas.event_generate("<MouseWheel>", delta=-120)
         window.update()
         self.assertGreater(canvas.yview()[0], 0)
         canvas.yview_moveto(1)
@@ -693,7 +777,7 @@ class GuiTests(unittest.TestCase):
         # Keyboard navigation also brings an off-screen field into view.
         canvas.yview_moveto(0)
         window.update()
-        app.log.event_generate("<FocusIn>")
+        app.log.focus_force()
         window.update()
         self.assertGreater(canvas.yview()[0], 0)
         self.assertGreaterEqual(app.log.winfo_rooty() - window.winfo_rooty(), 0)
@@ -919,7 +1003,7 @@ class GuiTests(unittest.TestCase):
         self.app._poll()
         self.assertIn("오류", self.app.status.get())
         self.assertEqual(self.app.progress.cget("value"), 0)
-        self.assertFalse(self.app.stop_button.winfo_manager())
+        self.assertEqual(str(self.app.stop_button.cget("state")), "disabled")
 
     def test_reading_older_log_entries_does_not_jump_to_the_latest(self):
         self.root.attributes("-alpha", 0)
@@ -1236,6 +1320,18 @@ class GuiTests(unittest.TestCase):
                              "author": "alice", "posted_at": "2020-01-02T10:20:30+09:00",
                              "tweet_id": "123", "filename": "123_gif_1.mp4"})
         self.app._poll()
+        # A cold formatter import can consume one UI slice. Let the tracked
+        # poll deliver the following log event without requiring one long tick.
+        drained = tk.BooleanVar(self.root, value=False)
+        def check_queue():
+            if self.app.events.empty() and self.app._deferred_event is None:
+                drained.set(True)
+            else:
+                self.root.after(8, check_queue)
+        timeout = self.root.after(1000, lambda: drained.set(True))
+        self.root.after(0, check_queue)
+        self.root.wait_variable(drained)
+        self.root.after_cancel(timeout)
         self.assertIn("원본 MP4", self.app.progress_summary.get())
         self.assertIn("원본 MP4", self.app.status.get())
         self.assertIn("원본 MP4로 저장합니다 · 123_gif_1.mp4 · @alice", self.app.log.get("1.0", "end"))

@@ -22,7 +22,8 @@ import webbrowser
 
 from . import __version__, dialogs, theme
 from .core import JobOptions, _normal_account
-from .login import clear_session, has_session, save_auth_token
+from .login import (clear_active_session, clear_session, has_session, list_accounts, normalize_identity,
+                    remove_account, save_auth_token, save_authenticated_session, select_account)
 from .settings import load_settings, settings_path
 from .review import CONTROL_NAME, ReviewControl
 from .storage import StoragePaths, missing_media_help, resolve_storage, saved_media_missing
@@ -90,6 +91,17 @@ class App:
         root.configure(bg=theme.BG)
         root.protocol("WM_DELETE_WINDOW", self.close)
         self.events: queue.Queue = queue.Queue()
+        self._poll_timer = None
+        self._dashboard_layout_timer = None
+        self._setup_collapsed = False
+        self._dashboard_compact_height = None
+        self._dashboard_base_minimum = (min(780, width), min(620, height))
+        self._dashboard_screen_limit = (max(width, root.winfo_screenwidth() - 80), height)
+        self._polling = False
+        self._ui_closed = False
+        self._deferred_event = None
+        self._poll_logs = None
+        self._poll_counts_dirty = False
         self.running = False
         self.relocating = False
         self._storage_action = None
@@ -142,7 +154,14 @@ class App:
         except ValueError:
             pass
         self.account = tk.StringVar(value=str(settings.get("account", "")))
+        self._connected_accounts = list_accounts()
+        self._active_identity = next((row for row in self._connected_accounts if row.get("active")), None)
+        if self._active_identity is not None and settings.get("auth_mode", "managed") != "file":
+            self.account.set(self._active_identity["handle"])
         self.folder = tk.StringVar(value=str(settings.get("output_dir", Path.home() / "Pictures" / "LuvBox")))
+        if (settings.get("auth_mode", "managed") != "file" and self._active_identity
+                and self._active_identity["handle"] in self.record_locations):
+            self.folder.set(self.record_locations[self._active_identity["handle"]])
         mode = settings.get("auth_mode", "managed")
         self.auth = tk.StringVar(value=next((k for k, v in AUTH_MODES.items() if v == mode), next(iter(AUTH_MODES))))
         self.cookies = tk.StringVar()
@@ -202,9 +221,11 @@ class App:
         self._auth_changed()
         self._preview_location()
         self._update_option_summary()
-        # Short screens can scroll without shrinking the readable type.
-        root.minsize(min(780, width), min(620, height))
-        self.root.after(120, self._poll)
+        # Keep the work controls reachable even when larger system fonts need
+        # more room. The middle view remains scrollable on a short screen.
+        self.root.bind("<Configure>", self._schedule_dashboard_layout, add="+")
+        self._schedule_dashboard_layout()
+        self._poll_timer = self.root.after(120, self._poll)
         self.root.bind("<Destroy>", self._release_ui, add="+")
         # The installed app checks its daily task and the last scheduled run.
         # (Running from source, this happens when the schedule window opens.)
@@ -213,6 +234,15 @@ class App:
 
     def _release_ui(self, event):
         if event.widget is self.root:
+            self._ui_closed = True
+            if self._poll_timer is not None:
+                self.root.after_cancel(self._poll_timer)
+                self._poll_timer = None
+            if self._dashboard_layout_timer is not None:
+                self.root.after_cancel(self._dashboard_layout_timer)
+                self._dashboard_layout_timer = None
+            self._deferred_event = None
+            self._poll_logs = None
             self.login_cancel.set()
             self._destroy_review()
             theme.release_variables(self)
@@ -222,13 +252,15 @@ class App:
     def _build(self):
         self.workspace = ttk.Frame(self.root)
         self.workspace.pack(fill="both", expand=True)
-        self.workspace.columnconfigure(1, weight=1)
-        self.workspace.rowconfigure(0, weight=1)
+        self.workspace.columnconfigure(0, weight=1)
+        self.workspace.rowconfigure(1, weight=1)
 
-        self.sidebar = ttk.Frame(self.workspace, style="Sidebar.TFrame", padding=(22, 28))
-        self.sidebar.grid(row=0, column=0, sticky="nsew")
+        # Keep navigation in one fixed header at every supported width. Moving
+        # a sidebar into the page at a breakpoint made a 1px resize shift the
+        # entire form by hundreds of pixels.
+        self.sidebar = ttk.Frame(self.workspace, style="Sidebar.TFrame", padding=(24, 12))
+        self.sidebar.grid(row=0, column=0, sticky="ew")
         self.sidebar.columnconfigure(0, weight=1)
-        self.sidebar.rowconfigure(5, weight=1)
         brand = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
         brand.grid(row=0, column=0, sticky="w")
         try:
@@ -241,66 +273,48 @@ class App:
         except (OSError, tk.TclError):
             self._brand_icon = None
         ttk.Label(brand, text="러브박스", style="SidebarTitle.TLabel").pack(side="left")
-        ttk.Label(self.sidebar, text="LuvBox · 나만의 미디어 보관함", style="SidebarMuted.TLabel").grid(
-            row=1, column=0, sticky="w", pady=(6, 32))
-        ttk.Label(self.sidebar, text="작업 공간", style="SidebarEyebrow.TLabel").grid(row=2, column=0, sticky="w", pady=(0, 10))
+        self.setup_toggle_button = ttk.Button(self.sidebar, text="계정 · 폴더 접기", command=self._toggle_setup,
+                                              style="Ghost.TButton")
+        self.setup_toggle_button.grid(row=0, column=1, sticky="e", padx=(12, 8))
+        self.theme_button = ttk.Button(self.sidebar, textvariable=self.theme_button_text,
+                                       command=self.toggle_theme, style="Ghost.TButton")
+        self.theme_button.grid(row=0, column=2, sticky="e")
         navigation = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
-        navigation.grid(row=3, column=0, sticky="ew")
-        for caption, command, style in (
-                ("저장하기", self._focus_dashboard, "NavSelected.TButton"),
-                ("기록 · 통계", self.show_history, "Nav.TButton"),
-                ("저장 설정", self.show_options, "Nav.TButton"),
-                ("자동 저장", self.show_schedule, "Nav.TButton")):
-            ttk.Button(navigation, text=caption, command=command, style=style, width=16).pack(fill="x", pady=(0, 5))
-        self.schedule_sidebar = ttk.Label(self.sidebar, textvariable=self.schedule_text,
-                                           style="SidebarMuted.TLabel", wraplength=170, justify="left")
-        self.schedule_sidebar.grid(row=4, column=0, sticky="new", pady=(18, 0))
-        footer = ttk.Frame(self.sidebar, style="Sidebar.TFrame")
-        footer.grid(row=6, column=0, sticky="sew", pady=(22, 0))
-        self.theme_button = ttk.Button(footer, textvariable=self.theme_button_text, command=self.toggle_theme,
-                                       style="Nav.TButton")
-        self.theme_button.pack(fill="x")
-        ttk.Button(footer, text="사용 방법", command=self.help, style="Nav.TButton").pack(fill="x", pady=(4, 18))
-        ttk.Label(footer, text=f"버전 {__version__}", style="SidebarEyebrow.TLabel").pack(anchor="w")
-        ttk.Label(footer, text="Ctrl+Enter · 저장 시작", style="SidebarMuted.TLabel").pack(anchor="w", pady=(6, 0))
+        navigation.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(12, 0))
+        navigation.columnconfigure((0, 2, 4, 6), weight=1, uniform="navigation")
+        navigation.columnconfigure((1, 3, 5), minsize=8)
+        for column, (caption, command) in enumerate((
+                ("기록 · 통계", self.show_history), ("저장 설정", self.show_options),
+                ("자동 저장", self.show_schedule), ("사용 방법", self.help))):
+            button = ttk.Button(navigation, text=caption, command=command, style="Ghost.TButton")
+            button.grid(row=0, column=column * 2, sticky="nsew")
+            if caption == "저장 설정":
+                self.options_button = button
+        self.compact_navigation = navigation
 
-        self.content_view = theme.ScrollableContent(self.workspace, padding=(30, 24))
-        self.content_view.grid(row=0, column=1, sticky="nsew")
+        self.content_view = theme.ScrollableContent(self.workspace, padding=(24, 16, 24, 8))
+        self.content_view.grid(row=1, column=0, sticky="nsew")
         shell = self.content_view.content
-        header = ttk.Frame(shell)
-        header.pack(fill="x", pady=(0, 20))
-        ttk.Label(header, text="저장하기", style="PageTitle.TLabel").pack(anchor="w")
-        self._wrapping_label(header, text="좋아요한 사진과 영상을 내 폴더에 차곡차곡.",
-                             style="Subtitle.TLabel", wraplength=700).pack(fill="x", pady=(5, 0))
-        self.compact_navigation = ttk.Frame(header)
-        self.compact_navigation.columnconfigure((0, 2, 4, 6), weight=1, uniform="compact-navigation")
-        self.compact_navigation.columnconfigure((1, 3, 5), minsize=6)
-        for column, (caption, command) in enumerate((("기록 · 통계", self.show_history), ("자동 저장", self.show_schedule), ("사용 방법", self.help))):
-            ttk.Button(self.compact_navigation, text=caption, command=command,
-                       style="Ghost.TButton").grid(row=0, column=column * 2, sticky="nsew")
-        ttk.Button(self.compact_navigation, textvariable=self.theme_button_text,
-                    command=self.toggle_theme, style="Ghost.TButton").grid(row=0, column=6, sticky="nsew")
 
-        form = self.setup_card = theme.card(shell, fill="x", pady=(0, 16))
-        form.columnconfigure(0, weight=1, uniform="account")
-        form.columnconfigure(1, weight=1, uniform="account")
-        ttk.Label(form, text="저장 준비", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 16))
-        ttk.Label(form, text="내 X 아이디", style="CardMuted.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 7))
-        ttk.Label(form, text="로그인 연결", style="CardMuted.TLabel").grid(row=1, column=1, sticky="w", padx=(24, 0), pady=(0, 7))
-        account = self.account_entry = ttk.Entry(form, textvariable=self.account, width=1, font=theme.BODY)
-        account.grid(row=2, column=0, sticky="ew")
-        self._wrapping_label(form, text="@아이디 또는 x.com/아이디", style="CardMuted.TLabel",
-                             wraplength=470).grid(row=3, column=0, sticky="new", pady=(6, 0))
+        form = self.setup_card = theme.card(shell, fill="x", pady=(0, 8))
+        form.columnconfigure(1, weight=1)
+        ttk.Label(form, text="X 계정", style="CardMuted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
+        account = self.account_entry = ttk.Combobox(form, textvariable=self.account, width=1, font=theme.BODY,
+                                                   values=[row["handle"] for row in self._connected_accounts])
+        account.grid(row=0, column=1, sticky="ew")
+        account.bind("<<ComboboxSelected>>", self._choose_account)
         self.inputs.append(account)
-        self.login_label = self._wrapping_label(form, textvariable=self.login_text,
+        connection = ttk.Frame(form, style="Plain.TFrame")
+        connection.grid(row=0, column=2, sticky="ew", padx=(16, 0))
+        self.login_label = ttk.Label(connection, textvariable=self.login_text,
                                                 style="Disconnected.TLabel", wraplength=400, anchor="w")
-        self.login_label.grid(row=2, column=1, sticky="ew", padx=(24, 0))
-        self.login_button = ttk.Button(form, text="로그인 연결", command=self.show_connect, style="Ghost.TButton")
-        self.login_button.grid(row=3, column=1, sticky="w", padx=(24, 0), pady=(3, 0))
+        self.login_label.pack(side="left", padx=(0, 8))
+        self.login_button = ttk.Button(connection, text="로그인 연결", command=self.show_connect, style="Ghost.TButton")
+        self.login_button.pack(side="right")
         self.inputs.append(self.login_button)
-        ttk.Label(form, text="저장 폴더", style="CardMuted.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(16, 7))
+        ttk.Label(form, text="저장 폴더", style="CardMuted.TLabel").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=(12, 0))
         folder_row = ttk.Frame(form, style="Plain.TFrame")
-        folder_row.grid(row=5, column=0, columnspan=2, sticky="ew")
+        folder_row.grid(row=1, column=1, columnspan=2, sticky="ew", pady=(12, 0))
         folder_row.columnconfigure(0, weight=1)
         folder = self.folder_entry = ttk.Entry(folder_row, textvariable=self.folder, width=1, font=theme.BODY)
         folder.grid(row=0, column=0, sticky="ew")
@@ -311,60 +325,70 @@ class App:
         self.inputs.extend((folder, browse))
         self.preview_label = self._wrapping_label(form, textvariable=self.destination_text,
                                                   style="CardMuted.TLabel", wraplength=700)
-        self.preview_label.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(6, 14))
+        self.preview_label.grid(row=2, column=1, columnspan=2, sticky="ew", pady=(8, 0))
         summary = ttk.Frame(form, style="Plain.TFrame")
-        summary.grid(row=7, column=0, columnspan=2, sticky="ew")
+        summary.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         summary.columnconfigure(0, weight=1)
         self.option_summary_label = self._wrapping_label(summary, textvariable=self.option_summary,
                                                          style="CardMuted.TLabel", wraplength=600)
         self.option_summary_label.grid(row=0, column=0, sticky="ew")
-        self.options_button = ttk.Button(summary, text="저장 설정", command=self.show_options, style="Ghost.TButton")
-        self.options_button.grid(row=0, column=1, sticky="e", padx=(16, 0))
         self.inputs.append(self.options_button)
 
-        hero = self.work_card = theme.card(shell, fill="x", pady=(0, 16))
+        hero = self.work_card = theme.card(self.workspace)
+        hero.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 16))
         head = ttk.Frame(hero, style="Plain.TFrame")
         head.pack(fill="x", pady=(0, 12))
         ttk.Label(head, text="이번 저장", style="CardEyebrow.TLabel").pack(side="left")
         self.work_actions = ttk.Frame(head, style="Plain.TFrame")
         self.work_actions.pack(side="right")
         self.work_actions.columnconfigure(0, weight=1, uniform="work-action")
+        self.work_actions.columnconfigure(1, minsize=8)
+        self.work_actions.columnconfigure(2, weight=1, uniform="work-action")
         self.start_button = ttk.Button(self.work_actions, text="저장 시작", style="DialogPrimary.TButton", command=self.start)
         self.start_button.grid(row=0, column=0, sticky="nsew")
         self.stop_button = ttk.Button(self.work_actions, text="중단", command=self.stop, state="disabled")
+        self.stop_button.grid(row=0, column=2, sticky="nsew")
         self.review_toggle = ttk.Checkbutton(hero, text="저장 전에 하나씩 확인", variable=self.confirm_each,
                                             style="Plain.TCheckbutton")
         self.review_toggle.pack(anchor="w", pady=(0, 6))
-        self._wrapping_label(hero, textvariable=self.review_summary, style="CardMuted.TLabel",
-                             wraplength=800).pack(fill="x", pady=(0, 10))
         self._wrapping_label(hero, textvariable=self.status, style="CardStatus.TLabel", wraplength=800).pack(fill="x")
-        self._wrapping_label(hero, textvariable=self.status_detail, style="CardMuted.TLabel", wraplength=800).pack(fill="x", pady=(4, 16))
         tiles = ttk.Frame(hero, style="Plain.TFrame")
-        tiles.pack(fill="x", pady=(0, 16))
+        tiles.pack(fill="x", pady=(8, 12))
         for column, (variable, caption) in enumerate(((self.saved_text, "새로 저장"), (self.skipped_text, "이미 저장된 파일"),
                                                        (self.size_text, "용량 초과"))):
             metric = ttk.Frame(tiles, style="Plain.TFrame")
             metric.grid(row=0, column=column, sticky="ew", padx=(0 if column == 0 else 20, 0))
-            ttk.Label(metric, textvariable=variable, style="HeroNumber.TLabel").pack(anchor="w")
-            ttk.Label(metric, text=caption, style="CardMuted.TLabel").pack(anchor="w", pady=(4, 0))
+            ttk.Label(metric, text=caption, style="CardMuted.TLabel").pack(side="left", padx=(0, 8))
+            ttk.Label(metric, textvariable=variable, style="CardBold.TLabel").pack(side="left")
             tiles.columnconfigure(column, weight=1, uniform="metric")
         self.progress = theme.Progressbar(hero, mode="determinate", value=0)
         self.progress.pack(fill="x", pady=(0, 6))
         self.progress_heading = ttk.Frame(hero, style="Plain.TFrame")
         self.progress_heading.pack(fill="x")
-        self._wrapping_label(self.progress_heading, textvariable=self.progress_summary,
-                             style="CardMuted.TLabel", wraplength=700).pack(side="left", fill="x", expand=True)
+        self.progress_heading.columnconfigure(0, weight=1)
+        self.progress_line = tk.StringVar(self.root)
+        self.progress_detail_text = tk.StringVar(self.root)
+        def summarize_progress(*_):
+            text = " ".join(self.progress_summary.get().split())
+            self.progress_line.set(text if len(text) <= 76 else text[:73] + "…")
+            self.progress_detail_text.set("\n".join(filter(None, (self.progress_summary.get(), self.progress_details.get()))))
+        self.progress_summary.trace_add("write", summarize_progress)
+        self.progress_details.trace_add("write", summarize_progress)
+        ttk.Label(self.progress_heading, textvariable=self.progress_line, style="CardMuted.TLabel",
+                  width=1, anchor="w").grid(row=0, column=0, sticky="ew")
         ttk.Checkbutton(self.progress_heading, text="자세히", variable=self.detailed_progress, command=self._toggle_progress,
-                        style="Plain.TCheckbutton").pack(side="right", padx=(12, 0))
-        self.progress_detail_label = self._wrapping_label(hero, textvariable=self.progress_details,
-                                                         style="CardMuted.TLabel", wraplength=800)
+                        style="Plain.TCheckbutton").grid(row=0, column=1, sticky="e", padx=(12, 0))
         self.log_frame = theme.card(shell, fill="both", expand=True, pady=(0, 12))
-        log_heading = ttk.Frame(self.log_frame, style="Plain.TFrame")
+        log_heading = self.log_heading = ttk.Frame(self.log_frame, style="Plain.TFrame")
         log_heading.pack(fill="x", pady=(0, 8))
         self.log_title = ttk.Label(log_heading, text="최근 작업", style="CardBold.TLabel")
         self.log_title.pack(side="left")
         ttk.Button(log_heading, text="화면 비우기", command=self._clear_log,
                    style="Ghost.TButton").pack(side="right")
+        self._wrapping_label(self.log_frame, textvariable=self.status_detail, style="CardMuted.TLabel",
+                             wraplength=800).pack(fill="x", pady=(0, 8))
+        self.progress_detail_label = self._wrapping_label(self.log_frame, textvariable=self.progress_detail_text,
+                                                         style="CardMuted.TLabel", wraplength=800)
         log_body = ttk.Frame(self.log_frame, style="Plain.TFrame")
         log_body.pack(fill="both", expand=True)
         self.log = tk.Text(log_body, height=5, wrap="word", bg=theme.CARD, fg=theme.INK, relief="flat", borderwidth=0,
@@ -381,28 +405,64 @@ class App:
         self.log.tag_configure("warning", foreground=theme.ORANGE)
         if self.detailed_progress.get():
             self._toggle_progress()
-        self.root.bind("<Configure>", self._layout_dashboard, add="+")
         self.root.bind("<Control-Return>", lambda _: self.start())
         self.root.bind("<F6>", lambda _: self.show_history())
         self.root.bind("<Control-comma>", lambda _: self.show_options())
-        self._layout_dashboard()
-
-    def _layout_dashboard(self, event=None):
-        if event is not None and event.widget is not self.root:
-            return
-        compact = self.root.winfo_width() < 1020
-        if compact:
-            self.sidebar.grid_remove()
-            if not self.compact_navigation.winfo_manager():
-                self.compact_navigation.pack(fill="x", pady=(14, 0))
-        else:
-            self.sidebar.grid()
-            self.compact_navigation.pack_forget()
 
     def _focus_dashboard(self):
         self.root.lift()
+        if self._setup_collapsed:
+            self._toggle_setup()
         self.content_view.canvas.yview_moveto(0)
         self.account_entry.focus_set()
+
+    def _toggle_setup(self):
+        self._setup_collapsed = not self._setup_collapsed
+        if self._setup_collapsed:
+            self.setup_card.pack_forget()
+        else:
+            self.setup_card.pack(fill="x", before=self.log_frame, pady=(0, 8))
+        self.setup_toggle_button.configure(text="계정 · 폴더 보기" if self._setup_collapsed else "계정 · 폴더 접기")
+        self.content_view._schedule_layout()
+        self._schedule_dashboard_layout()
+
+    def _schedule_dashboard_layout(self, event=None):
+        if event is not None and event.widget not in (
+                self.root, self.sidebar, self.setup_card, self.work_card, self.log_heading):
+            return
+        if not self._ui_closed and self._dashboard_layout_timer is None:
+            self._dashboard_layout_timer = self.root.after_idle(self._fit_dashboard_minimum)
+
+    def _fit_dashboard_minimum(self):
+        self._dashboard_layout_timer = None
+        if self._ui_closed:
+            return
+        measure = lambda text: int(self.root.tk.call("font", "measure", self.account_entry.cget("font"), text))
+        # Reserve a useful account field instead of allowing buttons and the
+        # connection status to squeeze it to a few pixels at high DPI.
+        field_width = (measure("저장 폴더") + 12 + measure("abcdefghijklmnop") + 28 + 16 +
+                       self.login_button.master.winfo_reqwidth() + 84)
+        action_width = self.work_actions.winfo_reqwidth() + measure("이번 저장") + 100
+        minimum_width = min(self._dashboard_screen_limit[0], max(
+            self._dashboard_base_minimum[0], self.sidebar.winfo_reqwidth(), field_width, action_width))
+        linespace = int(self.root.tk.call("font", "metrics", self.log.cget("font"), "-linespace"))
+        # Three readable log lines and its heading are the central viewport's
+        # useful minimum. Account/folder controls can be scrolled or folded;
+        # the work card never needs to be clipped to make them fit.
+        middle_height = max(120, linespace * 3 + self.log_heading.winfo_reqheight() + 44)
+        needed_height = self.sidebar.winfo_reqheight() + self.work_card.winfo_reqheight() + middle_height + 40
+        compact_height = needed_height > self._dashboard_screen_limit[1]
+        if compact_height != self._dashboard_compact_height:
+            self._dashboard_compact_height = compact_height
+            self.content_view.content.configure(padding=(24, 4, 24, 0) if compact_height else (24, 16, 24, 8))
+            self.log_frame.configure(padding=(18, 8) if compact_height else (18, 14))
+            self.log_frame.pack_configure(pady=(0, 0) if compact_height else (0, 12))
+            self.log.configure(height=3 if compact_height else 5)
+        minimum_height = min(self._dashboard_screen_limit[1], max(
+            self._dashboard_base_minimum[1], needed_height))
+        minimum = (minimum_width, minimum_height)
+        if self.root.minsize() != minimum:
+            self.root.minsize(*minimum)
 
     def _clear_log(self):
         self.log.configure(state="normal")
@@ -413,7 +473,10 @@ class App:
     def _wrapping_label(self, parent, **kwargs):
         label = ttk.Label(parent, justify="left", **kwargs)
         def resize(event):
-            width = max(1, event.width)
+            # wraplength measures the text, while Configure includes ttk's
+            # border/padding elements. Reserve their horizontal inset so a
+            # line that just fits is not clipped at the label's right edge.
+            width = max(1, event.width - 4)
             if int(label.cget("wraplength")) != width:
                 label.configure(wraplength=width)
             view = getattr(label.winfo_toplevel(), "content_view", self.content_view)
@@ -423,7 +486,7 @@ class App:
 
     def _toggle_progress(self):
         if self.detailed_progress.get():
-            self.progress_detail_label.pack(after=self.progress_heading, fill="x", pady=(2, 0))
+            self.progress_detail_label.pack(after=self.log_heading, fill="x", pady=(0, 8))
         else:
             self.progress_detail_label.pack_forget()
         self.content_view._schedule_layout()
@@ -635,14 +698,15 @@ class App:
             self.status_detail.set("선택에 따라 다음 파일을 처리합니다.")
 
     def _update_progress(self, event):
-        from .history_gui import format_bytes, format_date, MEDIA_LABELS
+        from .presentation import format_bytes, format_date, MEDIA_LABELS
         downloaded = max(0, int(event.get("downloaded") or 0))
         total = max(0, int(event.get("total") or 0))
         filename = str(event.get("filename") or "현재 파일")
         kind = MEDIA_LABELS.get(event.get("media_type"), "파일")
         if total:
             percent = min(100, downloaded * 100 / total)
-            self.progress.stop()
+            if str(self.progress.cget("mode")) != "determinate":
+                self.progress.stop()
             self.progress.configure(mode="determinate", maximum=100, value=percent)
             amount = f"{format_bytes(downloaded)} / {format_bytes(total)} · {percent:.0f}%"
         else:
@@ -661,7 +725,7 @@ class App:
                          "fallback": ("GIF 대신 원본 MP4로 저장", "원본 MP4로 저장하고 있습니다…")}
 
     def _update_conversion(self, event):
-        from .history_gui import format_date
+        from .presentation import format_date
         stage = event.get("stage") if event.get("stage") in self.CONVERSION_STAGES else "started"
         summary, status = self.CONVERSION_STAGES[stage]
         self.progress_summary.set(summary + " · " + str(event.get("filename") or "현재 파일"))
@@ -675,17 +739,57 @@ class App:
             self.status.set(status)
 
     # ------------------------------------------------------------------- login
+    def _refresh_accounts(self):
+        self._connected_accounts = list_accounts()
+        self._active_identity = next((row for row in self._connected_accounts if row.get("active")), None)
+        self.account_entry.configure(values=[row["handle"] for row in self._connected_accounts])
+        if self._active_identity is not None and AUTH_MODES[self.auth.get()] == "managed":
+            self.account.set(self._active_identity["handle"])
+
+    def _choose_account(self, _event=None):
+        if AUTH_MODES[self.auth.get()] != "managed":
+            return
+        if self.running or self.relocating or self.login_busy:
+            if self._active_identity:
+                self.account.set(self._active_identity["handle"])
+            return
+        selected = next((row for row in self._connected_accounts
+                         if row["handle"] == self.account.get().strip().lstrip("@").lower()), None)
+        if selected is None:
+            return
+        previous = self._active_identity
+        try:
+            select_account(selected["user_id"])
+        except (OSError, ValueError):
+            if previous:
+                self.account.set(previous["handle"])
+            dialogs.showerror("계정 선택", "이 계정의 연결을 사용할 수 없습니다. 다시 연결해 주세요.", parent=self.root)
+            return
+        self._refresh_accounts()
+        directory = self.record_locations.get(selected["handle"])
+        if directory:
+            self.folder.set(directory)
+        self._auth_changed()
+        self.status.set(f"@{selected['handle']} 계정을 선택했습니다")
+
     def _auth_changed(self):
         mode = AUTH_MODES[self.auth.get()]
         if mode == "managed":
+            if self._active_identity:
+                self.account.set(self._active_identity["handle"])
             connected = has_session()
-            self.login_text.set("● 연결 정보 저장됨" if connected else "● 연결 필요")
+            identity = self._active_identity
+            self.login_text.set("● 연결됨" if connected and identity
+                                else "● 연결 정보 저장됨" if connected else "● 연결 필요")
         else:
             self.token.set("")
             connected = bool(self.cookies.get().strip())
             self.login_text.set("● cookies.txt 파일 사용" if connected else "● cookies.txt 파일을 골라 주세요")
         self.login_label.configure(style="Connected.TLabel" if connected else "Disconnected.TLabel")
-        self.login_button.configure(text="연결 변경" if connected else "로그인 연결")
+        self.login_button.configure(text="계정 추가" if connected and self._active_identity
+                                    else "연결 변경" if connected else "로그인 연결")
+        self.account_entry.configure(state="disabled" if self.running or self.relocating or self.login_busy
+                                     else "readonly" if mode == "managed" and self._active_identity else "normal")
         window = self.connect_window
         if window is not None and window.winfo_exists():
             if mode == "managed":
@@ -698,17 +802,19 @@ class App:
             if mode != "managed":
                 self.login_cancel.set()
             self.browser_button.configure(state="disabled" if self.login_busy else "normal")
+            self.default_browser_button.configure(state="disabled" if self.login_busy else "normal")
             self.token_button.configure(state="disabled" if self.login_busy else "normal")
             self.browser_button.configure(text="로그인 기다리는 중…" if self.login_busy else "Edge에서 X 로그인")
 
     def show_connect(self, notice=""):
-        """Connect in a dedicated Edge window, or use a manual token/file."""
+        """Connect an existing default-browser login or add a new browser login."""
         window = self.connect_window
         if window is not None and window.winfo_exists():
             window.lift()
             window.focus_set()
             return
         window = self.connect_window = tk.Toplevel(self.root)
+        window.withdraw()
         window.title("X 로그인 연결")
         window.configure(bg=theme.CARD)
         window.transient(self.root)
@@ -716,7 +822,7 @@ class App:
         heading = ttk.Frame(window, style="Plain.TFrame", padding=(28, 24, 28, 8))
         heading.pack(fill="x")
         ttk.Label(heading, text="X 로그인 연결", style="CardTitle.TLabel").pack(anchor="w")
-        self._wrapping_label(heading, text="Edge 창에서 로그인하면 자동으로 연결됩니다.",
+        self._wrapping_label(heading, text="로그인한 계정을 자동으로 확인하고 목록에 추가합니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(6, 0))
         body = self._popup_content(window, padding=(28, 12, 28, 8))
         if notice:
@@ -728,9 +834,16 @@ class App:
                             value=label, variable=self.auth).pack(anchor="w", pady=(0, 4))
 
         self.token_controls = ttk.Frame(body, style="Plain.TFrame")
-        self.browser_button = ttk.Button(self.token_controls, text="Edge에서 X 로그인", style="DialogPrimary.TButton", command=self.connect_browser)
+        self.default_browser_button = ttk.Button(self.token_controls, text="기본 브라우저 계정 연결",
+                                                 style="DialogPrimary.TButton", command=self.connect_default_browser)
+        self.default_browser_button.pack(fill="x", pady=(0, 8))
+        self._wrapping_label(self.token_controls, text="기본 브라우저에 로그인된 X 계정을 사용합니다. 처음 한 번 연결 확장을 설치해 주세요.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(0, 8))
+        ttk.Button(self.token_controls, text="연결 확장 설치 안내", style="Ghost.TButton",
+                   command=self.open_extension_folder).pack(anchor="w", pady=(0, 16))
+        self.browser_button = ttk.Button(self.token_controls, text="Edge에서 X 로그인", command=self.connect_browser)
         self.browser_button.pack(fill="x", pady=(0, 8))
-        self._wrapping_label(self.token_controls, text="열린 창에서 본인 계정에 로그인하세요. 연결되면 창이 자동으로 닫힙니다.",
+        self._wrapping_label(self.token_controls, text="다른 계정으로 새로 로그인하려면 Edge 창을 사용할 수 있습니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x")
         self.browser_status = tk.StringVar(self.root)
         self._wrapping_label(self.token_controls, textvariable=self.browser_status,
@@ -748,7 +861,7 @@ class App:
         self.token_button.pack(side="left", padx=(8, 0))
         self._wrapping_label(self.token_controls, text="연결 정보는 이 Windows 계정에 암호화해 저장합니다.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x")
-        self.clear_button = ttk.Button(self.token_controls, text="저장된 연결 지우기", command=self.disconnect)
+        self.clear_button = ttk.Button(self.token_controls, text="선택한 계정 연결 해제", command=self.disconnect)
         self.clear_button.pack(anchor="w", pady=(10, 0))
 
         self.cookie_controls = ttk.Frame(body, style="Plain.TFrame")
@@ -796,20 +909,79 @@ class App:
         # The worker owns no Tk widgets or variables, including on shutdown.
         threading.Thread(target=App._browser_worker, args=(self.events, self.login_cancel), daemon=True).start()
 
+    def open_extension_folder(self):
+        from .browser_bridge import extension_directory
+        directory = extension_directory()
+        try:
+            os.startfile(str(directory))
+        except (OSError, AttributeError):
+            dialogs.showinfo("연결 확장 설치", f"Chrome·Edge·Brave의 확장 관리에서 개발자 모드를 켜고 "
+                             f"‘압축해제된 확장 로드’로 chromium 폴더를 선택하세요. "
+                             f"Firefox는 firefox 폴더의 안내를 확인하세요.\n\n{directory}",
+                             parent=self.connect_window or self.root)
+            return
+        dialogs.showinfo("연결 확장 설치", "Chrome·Edge·Brave의 확장 관리에서 개발자 모드를 켜고 ‘압축해제된 확장 로드’로 "
+                         "방금 열린 폴더 안의 chromium을 선택하세요. Firefox는 firefox 폴더의 안내를 확인하세요. "
+                         "설치 후 ‘기본 브라우저 계정 연결’을 누릅니다.",
+                         parent=self.connect_window or self.root)
+
+    def connect_default_browser(self):
+        if self.login_busy or self.running or self.closing:
+            return
+        self.login_cancel = threading.Event()
+        self.login_busy = True
+        self.browser_status.set("기본 브라우저에서 연결할 X 계정을 확인해 주세요. 연결 확장이 처음 한 번 필요합니다.")
+        self._auth_changed()
+        threading.Thread(target=App._default_browser_worker,
+                         args=(self.events, self.login_cancel), daemon=True).start()
+
+    @staticmethod
+    def _default_browser_worker(events, cancel):
+        from .browser_bridge import BrowserBridge, BrowserBridgeError
+        from .login import SessionCancelled
+        message, identity = "", None
+        try:
+            with BrowserBridge(timeout=180) as bridge:
+                if cancel.is_set():
+                    return
+                events.put({"type": "browser-pairing", "code": bridge.pairing_code})
+                bridge.open_browser()
+                session = bridge.wait(cancel=cancel)
+                if cancel.is_set():
+                    return
+                identity = save_authenticated_session(session.auth_token, session.identity, cancel=cancel)
+        except BrowserBridgeError as exc:
+            message = str(exc)
+        except SessionCancelled:
+            message = "로그인 연결을 취소했습니다."
+        except Exception:
+            message = "기본 브라우저 연결을 마치지 못했습니다. 연결 확장을 확인하고 다시 시도해 주세요."
+        finally:
+            if cancel.is_set() and identity is None:
+                message = "로그인 연결을 취소했습니다."
+            events.put({"type": "browser-login", "message": message, "identity": identity})
+
+    def _browser_pairing(self, event):
+        code = event.get("code")
+        if (self.login_busy and isinstance(code, str) and re.fullmatch(r"[A-Z0-9_-]{8}", code)
+                and self.connect_window is not None and self.connect_window.winfo_exists()):
+            self.browser_status.set(f"연결 코드 {code} · 브라우저 확장에 같은 코드가 표시되는지 확인한 뒤 연결을 누르세요.")
+
     @staticmethod
     def _browser_worker(events, cancel):
         from .browser_login import sign_in, SignInError
-        message = ""
+        message, identity = "", None
         try:
-            sign_in(cancel)
+            identity = sign_in(cancel)
         except SignInError as exc:
             message = str(exc)
         except Exception:
             message = "로그인 연결을 마치지 못했습니다. 다시 시도하거나 ‘토큰 직접 입력’을 사용해 주세요."
-        events.put({"type": "browser-login", "message": message})
+        events.put({"type": "browser-login", "message": message, "identity": identity})
 
     def _browser_result(self, event):
         self.login_busy = False
+        self._refresh_accounts()
         self._auth_changed()
         message = event.get("message")
         if message:
@@ -817,6 +989,17 @@ class App:
             if self.connect_window is not None and self.connect_window.winfo_exists():
                 self.browser_status.set(message)
         else:
+            identity = event.get("identity")
+            if isinstance(identity, dict) and AUTH_MODES[self.auth.get()] == "managed":
+                try:
+                    identity = normalize_identity(identity)
+                    self.account.set(identity["handle"])
+                except ValueError:
+                    identity = None
+                if identity:
+                    directory = self.record_locations.get(identity["handle"])
+                    if directory:
+                        self.folder.set(directory)
             self.status.set("로그인을 연결했습니다")
             self.status_detail.set("연결 정보 저장됨 · 이제 저장을 시작할 수 있습니다.")
             self._close_connect()
@@ -833,9 +1016,12 @@ class App:
     def _fit_popup(self, window):
         # Set a readable width before measuring wrapped text. Natural widget
         # widths can otherwise push a single long instruction off the screen.
-        width = min(740, max(480, self.root.winfo_screenwidth() - 80))
+        hidden = window.state() == "withdrawn"
+        width = (min(740, max(480, self.root.winfo_screenwidth() - 80))
+                 if hidden else window.winfo_width())
         max_height = max(360, self.root.winfo_screenheight() - 120)
-        window.geometry(f"{width}x{max_height}")
+        if hidden:
+            window.geometry(f"{width}x{max_height}")
         window.update_idletasks()
         body = window.content_view.content
         extra = sum(child.winfo_reqheight() for child in window.winfo_children()
@@ -843,6 +1029,11 @@ class App:
         height = min(body.winfo_reqheight() + extra, max_height)
         window.minsize(min(600, width), min(360, height))
         window.geometry(f"{width}x{height}")
+        if hidden:
+            # Settle wrapping and geometry while withdrawn. The first mapped
+            # frame must already have the final size, including on Windows.
+            window.update_idletasks()
+            window.deiconify()
 
     def _close_connect(self):
         if self.login_busy:
@@ -869,6 +1060,7 @@ class App:
             return False
         finally:
             self.token.set("")
+        self._refresh_accounts()
         self._auth_changed()
         self.status.set("로그인을 연결했습니다")
         self.status_detail.set("연결 저장됨 · 실제 유효성은 저장을 시작할 때 확인합니다.")
@@ -879,14 +1071,21 @@ class App:
         if self.running or self.login_busy:
             return
         try:
-            clear_session()
-        except OSError:
+            if self._active_identity:
+                remove_account(self._active_identity["user_id"])
+            elif self._connected_accounts:
+                clear_active_session()
+            else:
+                clear_session()
+        except (OSError, ValueError):
             dialogs.showerror("연결 지우기 실패", "로그인 정보를 지우지 못했습니다. 잠시 후 다시 시도해 주세요.", parent=self.root)
             return
         self.token.set("")
+        self._refresh_accounts()
         self._auth_changed()
         self.status.set("저장된 로그인 연결을 지웠습니다")
-        self.status_detail.set("다시 저장하려면 ‘로그인 연결’을 눌러 연결하세요.")
+        self.status_detail.set(f"@{self._active_identity['handle']} 계정의 연결을 사용합니다."
+                               if self._active_identity else "다시 저장하려면 ‘로그인 연결’을 눌러 연결하세요.")
 
     def choose_cookies(self):
         value = filedialog.askopenfilename(title="X 로그인 쿠키 파일 선택", filetypes=[("Netscape 쿠키 파일", "*.txt"), ("모든 파일", "*.*")],
@@ -903,6 +1102,7 @@ class App:
             window.lift()
             return
         window = self.options_window = tk.Toplevel(self.root)
+        window.withdraw()
         window.title("저장 설정")
         window.configure(bg=theme.CARD)
         window.transient(self.root)
@@ -1247,12 +1447,13 @@ class App:
     # -------------------------------------------------------------------- help
     HELP_SECTIONS = (
         ("처음 시작하기", (
-            "1. ‘내 X 아이디’에 내 아이디를 입력합니다.",
-            "2. ‘로그인 연결 → Edge에서 X 로그인’을 누르고 열린 창에서 로그인합니다(처음 한 번).",
-            "3. 저장할 폴더를 고르고 ‘저장 시작’을 누릅니다.",
+            "1. ‘로그인 연결 → 기본 브라우저 계정 연결’을 누릅니다. 처음에는 연결 확장 설치 안내를 확인하세요.",
+            "2. 브라우저 확장에서 연결 코드와 X 계정을 확인합니다. 로그인한 계정이 자동으로 목록에 추가됩니다.",
+            "3. X 계정 목록에서 사용할 계정과 저장할 폴더를 고르고 ‘저장 시작’을 누릅니다.",
         ), "한 번 받은 파일은 건너뛰고, 다음부터는 새 Like만 받습니다."),
         ("로그인이 안 될 때", (
-            "Edge 창에서 연결되지 않으면 ‘로그인 연결’의 ‘토큰 직접 입력’을 펼쳐 안내대로 넣습니다.",
+            "확장 설치가 어려우면 ‘Edge에서 X 로그인’으로 별도 로그인할 수 있습니다.",
+            "기존 토큰·쿠키 연결은 계속 사용할 수 있습니다. 필요하면 ‘토큰 직접 입력’을 펼쳐 안내대로 넣습니다.",
             "연결이 끊기면 같은 방법으로 다시 연결합니다.",
         ), "로그인 정보는 이 PC에만 보관합니다."),
         ("저장 설정", (
@@ -1286,7 +1487,7 @@ class App:
         ("매일 자동 저장", (
             "‘자동 저장’에서 시각을 고르고 ‘예약 켜기’를 누르면 매일 새 Like를 저장합니다.",
             "PC가 꺼져 있던 날은 다음에 켤 때 저장하고, 실패하면 알려 줍니다.",
-        ), "‘Edge에서 X 로그인’으로 연결했을 때 쓸 수 있습니다."),
+        ), "기본 브라우저나 Edge로 연결한 계정을 사용할 수 있습니다."),
         ("알아 두세요", (
             "X 공식 기능이 아니어서, 천천히 받아도 계정이 제한될 수 있습니다.",
             "‘요청 한도’ 안내가 나오면 알려 준 시각 이후에 다시 시작합니다.",
@@ -1349,6 +1550,7 @@ class App:
             self.refresh_schedule()
             return
         window = self.schedule_window = tk.Toplevel(self.root)
+        window.withdraw()
         window.title("자동 저장")
         window.configure(bg=theme.CARD)
         window.transient(self.root)
@@ -1484,7 +1686,7 @@ class App:
         self.schedule_off_button.configure(state=busy if info.get("registered") else "disabled")
 
     def _show_schedule_info(self, error=""):
-        from .history_gui import format_short
+        from .presentation import format_short
         from .scheduled import last_run
         info = self.schedule_info
         if error:
@@ -1578,7 +1780,7 @@ class App:
         from .scheduled import last_run, mark_last_run_seen
         last = last_run()
         if last and last.get("failed") and not last.get("seen") and not self.running:
-            from .history_gui import format_short
+            from .presentation import format_short
             self.status.set("지난 자동 저장이 실패했습니다")
             self.status_detail.set(f"{format_short(last.get('finished_at'))} · {last.get('message') or '실행 기록을 확인해 주세요.'}")
             self._log("지난 자동 저장 실패 · " + str(last.get("message") or "실행 기록을 확인해 주세요."))
@@ -1599,6 +1801,9 @@ class App:
 
     # ------------------------------------------------------------------ saving
     def _validated_options(self, *, scheduled=False):
+        if AUTH_MODES[self.auth.get()] == "managed" and self._active_identity:
+            if _normal_account(self.account.get()) != self._active_identity["handle"]:
+                raise ValueError("연결된 계정을 목록에서 다시 선택해 주세요.")
         return JobOptions(account=self.account.get(), output_dir=self.folder.get(), auth_mode=AUTH_MODES[self.auth.get()],
                           cookies_file=self.cookies.get(), photo_limit=0 if scheduled else 20 if self.limited.get() else 0,
                           folder_mode=FOLDER_MODES[self.folder_mode.get()],
@@ -1648,7 +1853,7 @@ class App:
                 return False
         if AUTH_MODES[self.auth.get()] == "managed" and not has_session():
             self.status.set("먼저 X 로그인을 연결해 주세요")
-            self.status_detail.set("‘Edge에서 X 로그인’을 누르고 본인 계정에 로그인하세요.")
+            self.status_detail.set("‘기본 브라우저 계정 연결’로 로그인한 계정을 연결하세요.")
             self.show_connect("저장하려면 먼저 X 로그인을 연결해야 합니다.")
             return False
         try:
@@ -1731,14 +1936,6 @@ class App:
             self._close_options(save=False)
         self.start_button.configure(state="disabled" if value else "normal")
         self.stop_button.configure(state="normal" if value else "disabled")
-        if value and self.running:
-            self.work_actions.columnconfigure(1, minsize=8)
-            self.work_actions.columnconfigure(2, weight=1, uniform="work-action")
-            self.stop_button.grid(row=0, column=2, sticky="nsew")
-        else:
-            self.stop_button.grid_remove()
-            self.work_actions.columnconfigure(1, minsize=0)
-            self.work_actions.columnconfigure(2, weight=0, uniform="")
         for widget in self.inputs:
             widget.configure(state="disabled" if value else "normal")
         if not value:
@@ -1837,21 +2034,58 @@ class App:
     FINISH_HEADLINES = {"finished": "완료했습니다", "stopped": "중단했습니다", "error": "문제가 생겨 멈췄습니다"}
 
     def _poll(self):
-        # Bound each tick so a large backlog never monopolizes the GUI thread.
-        for _ in range(100):
+        if self._ui_closed or self._polling:
+            return
+        # A direct refresh (also used by tests) replaces the scheduled poll.
+        if self._poll_timer is not None:
+            self.root.after_cancel(self._poll_timer)
+            self._poll_timer = None
+        self._polling = True
+        self._poll_logs = []
+        self._poll_counts_dirty = False
+        try:
+            # Reserve roughly 1ms of the 6ms slice for its batched UI writes.
+            self._drain_events(time.perf_counter() + .005)
+        finally:
             try:
-                event = self.events.get_nowait()
+                if not self._ui_closed:
+                    if self._poll_counts_dirty:
+                        self._update_counts()
+                    self._write_logs(self._poll_logs)
+                    backlog = self._deferred_event is not None or not self.events.empty()
+                    self._poll_timer = self.root.after(8 if backlog else 120, self._poll)
+            finally:
+                self._poll_logs = None
+                self._polling = False
+
+    def _drain_events(self, deadline):
+        progress_event = None
+        while time.perf_counter() < deadline:
+            try:
+                if self._deferred_event is not None:
+                    event, self._deferred_event = self._deferred_event, None
+                else:
+                    event = self.events.get_nowait()
             except queue.Empty:
                 break
             kind = event.get("type")
+            if kind == "progress":
+                progress_event = event
+                continue
+            if progress_event is not None:
+                self._update_progress(progress_event)
+                progress_event = None
+                if time.perf_counter() >= deadline:
+                    self._deferred_event = event
+                    break
             if kind == "browser-login":
                 self._browser_result(event)
+            elif kind == "browser-pairing":
+                self._browser_pairing(event)
             elif kind == "storage-finished":
                 self._finish_relocation(event)
                 if self.closing:
                     return
-            elif kind == "progress":
-                self._update_progress(event)
             elif kind == "converting":
                 self._update_conversion(event)
             elif kind == "review-request":
@@ -1863,11 +2097,11 @@ class App:
             elif kind == "review-skipped":
                 self.review_skipped += 1
                 self._log("이번엔 건너뜀 · " + _file_label(event), event)
-                self._update_counts()
+                self._poll_counts_dirty = True
             elif kind == "review-never":
                 self.review_never += 1
                 self._log("저장 안 함 · " + _file_label(event), event)
-                self._update_counts()
+                self._poll_counts_dirty = True
             elif kind in ("saved", "skipped", "size-skipped"):
                 if kind == "saved":
                     self.saved += 1
@@ -1878,7 +2112,7 @@ class App:
                 else:
                     self.size_skipped += 1
                     self._log("용량 초과로 건너뜀 · " + _file_label(event), event)
-                self._update_counts()
+                self._poll_counts_dirty = True
                 self._schedule_history_refresh()
                 if not self.stopping:
                     self.status.set("파일을 저장하고 있습니다…")
@@ -1900,6 +2134,7 @@ class App:
                 self.review_skipped = int(event.get("review_skipped", self.review_skipped))
                 self.review_never = int(event.get("review_never", self.review_never))
                 self._update_counts()
+                self._poll_counts_dirty = False
                 message = str(event.get("message", "작업이 종료되었습니다."))
                 headline = self.FINISH_HEADLINES.get(self.final_status, message)
                 if self.final_status == "finished":
@@ -1933,23 +2168,43 @@ class App:
                 if self.closing:
                     self.root.destroy()
                     return
-        self.root.after(120, self._poll)
+            if self._ui_closed:
+                return
+            if len(self._poll_logs) >= 64:
+                self._write_logs(self._poll_logs)
+                self._poll_logs.clear()
+        if progress_event is not None:
+            self._update_progress(progress_event)
 
     def _log(self, text, event=None):
         if event and any(event.get(key) for key in ("tweet_id", "author", "posted_at")):
-            from .history_gui import format_short
+            from .presentation import format_short
             author = str(event.get("author") or "").lstrip("@")
             author = "@" + author if re.fullmatch(r"[A-Za-z0-9_]{1,15}", author) else "작성자 미확인"
             posted = format_short(event.get("posted_at"))
             text = f"{text} · {author} · 게시 {posted if posted != '–' else '미확인'}"
+        level = event.get("level", "") if event else ""
+        entry = (time.strftime("%H:%M:%S") + "  ", text + "\n",
+                 level if level in {"error", "warning"} else ())
+        if self._poll_logs is not None:
+            self._poll_logs.append(entry)
+        else:
+            self._write_logs([entry])
+
+    def _write_logs(self, entries):
+        if not entries:
+            return
         following = self.log.yview()[1] >= .995
         self.log_placeholder.place_forget()
         self.log.configure(state="normal")
-        self.log.insert("end", time.strftime("%H:%M:%S") + "  ", "time")
-        level = event.get("level", "") if event else ""
-        self.log.insert("end", text + "\n", level if level in {"error", "warning"} else ())
-        if int(self.log.index("end-1c").split(".")[0]) > 1000:
-            self.log.delete("1.0", "201.0")
+        chunks = []
+        for stamp, message, level in entries:
+            chunks.extend((stamp, "time", message, level))
+        self.log.insert("end", *chunks)
+        lines = int(self.log.index("end-1c").split(".")[0])
+        if lines > 1000:
+            removed = ((lines - 1000 + 199) // 200) * 200
+            self.log.delete("1.0", f"{removed + 1}.0")
         if following:
             self.log.see("end")
         self.log.configure(state="disabled")
@@ -1989,6 +2244,7 @@ def launch():
     from .settings import AppDataConflict, AppDataError, set_aside_previous
 
     root = tk.Tk()
+    root.withdraw()
     app = None
 
     def close():
@@ -2017,6 +2273,8 @@ def launch():
             dialogs.showerror("기존 데이터 이전 확인", str(exc), parent=root)
             close()
             return
+        root.update_idletasks()
+        root.deiconify()
         root.mainloop()
     finally:
         app = None

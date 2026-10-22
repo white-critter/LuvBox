@@ -12,10 +12,11 @@ from collections import OrderedDict
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 import weakref
 from pathlib import Path
-from tkinter import ttk
+from tkinter import font as tkfont, ttk
 
 from PIL import Image, ImageDraw, ImageTk
 
@@ -27,6 +28,7 @@ from .thumbcache import cloud_only
 TILE = (150, 112)
 _GAP = 10
 _CACHE_SIZE = 240
+_OVERSCAN_ROWS = 1
 _SELECTED = "#e3eaff"           # theme maps this to the dark selection color
 _SELECTED_INK = "#314fbb"
 _DRAG_START = 6        # pixels the pointer moves before a press becomes a drag
@@ -336,8 +338,13 @@ class ThumbnailGrid(ttk.Frame):
         self.on_selection = on_selection
         self.on_context = on_context
         self.canvas = tk.Canvas(self, background=theme.CARD, highlightthickness=0, borderwidth=0, width=1, height=1)
+        # Tk initializes a Label's default font before its explicit font. Keep
+        # that native resource alive across tile creation instead of resolving
+        # it again for every label. This hidden item adds no widget or geometry.
+        self._default_font_anchor = self.canvas.create_text(
+            0, 0, text="", font="TkDefaultFont", state="hidden")
         self.scrollbar = ttk.Scrollbar(self, command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.configure(yscrollcommand=self._view_changed)
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self.scrollbar.grid(row=0, column=1, sticky="ns")
         self.columnconfigure(0, weight=1)
@@ -349,15 +356,40 @@ class ThumbnailGrid(ttk.Frame):
         self.images: dict[str, ImageTk.PhotoImage] = {}
         self._paths = {}
         self._captions = {}
-        self._source_images = {}
+        self._source_images = OrderedDict()
+        self._valid_sources = set()
+        self._jobs = {}
+        self._permitted = self._remember = self._recall = None
+        self._requested_view = None
+        self._pending_keys = set()
+        self._poll_timer = None
+        self._positions = {}
+        self._indices = {}
+        self._tile_pool = []
+        self._font = tkfont.Font(root=self, font=theme.SMALL)
+        self._font_scaling = float(self.tk.call("tk", "scaling"))
+        self._fitted_text = OrderedDict()
+        self._cell_width = TILE[0] + 8 + _GAP
+        self._tile_height = TILE[1] + 8 + 4 + 2 * self._font.metrics("linespace")
+        self._cell_height = self._tile_height + _GAP
+        self._content_height = 1
         self.order: list[str] = []
         self.selected = None
         self.selected_keys: tuple[str, ...] = ()
         self._selected_set: set[str] = set()
         self._anchor = None
         self.columns = 0
-        self._weighted_columns = 0
+        self._layout_timer = None
+        self._region_timer = None
+        self._selection_timer = None
+        self._viewport_timer = None
+        self._window_width = None
+        self._window_x = None
+        self._window_y = 0
+        self._window_height = None
+        self._scrollregion = None
         self.placeholder = self.unavailable_placeholder = None
+        self._placeholder_appearance = None
         self._results = queue.Queue(maxsize=_CACHE_SIZE)
         self._decoder = _GridDecoder(self._results)
         self._token = 0
@@ -371,7 +403,7 @@ class ThumbnailGrid(ttk.Frame):
         # Classic canvases already redraw through the theme's normal walk.
         self.canvas.theme_redraw = self._refresh_placeholders
         self._refresh_placeholders()
-        self.canvas.bind("<Configure>", lambda _: self._layout())
+        self.canvas.bind("<Configure>", self._schedule_layout)
         for widget in (self.canvas, self.inner, self.empty):
             widget.bind("<MouseWheel>", self._wheel)
             self._bind_pointer(widget, None)
@@ -380,11 +412,20 @@ class ThumbnailGrid(ttk.Frame):
     def _refresh_placeholders(self):
         if self._released:
             return
+        appearance = theme.mode(self)
+        # Canvas Map events also request a theme redraw. Reopening a tab in
+        # the same appearance must retain its photos instead of blending every
+        # mounted image again just as the window becomes visible.
+        if appearance == self._placeholder_appearance:
+            return
         self.placeholder = _tile_placeholder(self, loading=True)
         self.unavailable_placeholder = _tile_placeholder(self, loading=False)
         for key, tile in self.tiles.items():
             if key not in self.images:
                 tile.configure(image=self.unavailable_placeholder if key in self._unavailable else self.placeholder)
+            else:
+                self._attach_image(key, tile)
+        self._placeholder_appearance = appearance
 
     def show(self, rows, permitted, *, empty_text="표시할 파일이 없습니다.", remember=None, recall=None):
         """rows: [(key, record)] in display order. permitted(paths) runs on
@@ -396,86 +437,259 @@ class ThumbnailGrid(ttk.Frame):
             self._drag = None
             self._release_drag(None)
         self._token += 1
+        self._valid_sources.clear()
+        self._pending_keys.clear()
+        self._requested_view = None
+        self._permitted, self._remember, self._recall = permitted, remember, recall
         order = [key for key, _ in rows]
         paths = {key: row.get("path") for key, row in rows}
-        for key in list(self.tiles):
-            if key not in paths or self._paths[key] != paths[key]:
-                self.tiles.pop(key).destroy()
-                self.images.pop(key, None)
-                self._source_images.pop(key, None)
-                self._captions.pop(key, None)
-                self._unavailable.discard(key)
-        relayout = order != self.order or len(self.tiles) != len(rows)
+        # Logical records outlive viewport widgets. Invalidate hidden previews
+        # too: a recycled key must never reveal the previous record's image.
+        for key in self._paths.keys() - paths.keys() | {
+            key for key in paths.keys() & self._paths.keys() if paths[key] != self._paths[key]
+        }:
+            self._unmount(key, recycle=False)
+            self._source_images.pop(key, None)
+            self._captions.pop(key, None)
+            self._unavailable.discard(key)
+        relayout = order != self.order
         appended = bool(self.order) and order[:len(self.order)] == self.order
         self.order = order
+        self._indices = {key: index for index, key in enumerate(order)}
         self._paths = paths
-        if relayout:
-            self.columns = 0
-        jobs = []
+        self._jobs = {}
         for key, row in rows:
             author = "@" + row["author"] if row.get("author") else "작성자 미확인"
             day = str(row.get("posted_at") or "")[:10] or "게시일 미확인"
             caption = f"{author}\n{day}"
-            if key not in self.tiles:
-                self._captions[key] = caption
-                if not row.get("path"):
-                    # No decoder job will arrive for a record without a path.
-                    self._source_images[key] = None
-                    self._unavailable.add(key)
-                chosen = key in self._selected_set
-                tile = tk.Label(self.inner,
-                                image=self.unavailable_placeholder if key in self._unavailable else self.placeholder,
-                                text=self._tile_text(key), compound="top",
-                                background=theme._tone(_SELECTED) if chosen else theme.CARD,
-                                foreground=theme._tone(_SELECTED_INK) if chosen else theme.INK, font=theme.SMALL, justify="center",
-                                wraplength=TILE[0], padx=4, pady=4, cursor="hand2", takefocus=True)
-                self._bind_pointer(tile, key)
-                tile.bind("<Double-1>", lambda _, key=key: self.on_open(key))
-                tile.bind("<MouseWheel>", self._wheel)
-                self.tiles[key] = tile
-            elif caption != self._captions[key]:
-                self._captions[key] = caption
+            changed = caption != self._captions.get(key)
+            self._captions[key] = caption
+            if not row.get("path"):
+                self._unavailable.add(key)
+            if changed and key in self.tiles:
                 self.tiles[key].configure(text=self._tile_text(key))
             if row.get("path"):
                 identity = ((row["tweet_id"], row["num"], row["media_type"])
                             if all(row.get(name) for name in ("tweet_id", "num", "media_type")) else None)
-                jobs.append((key, row["path"], identity))
+                self._jobs[key] = (key, row["path"], identity)
         self.empty.configure(text="" if rows else empty_text)
         # Keep surviving selections on refresh without transferring a selected
         # position to an unrelated record on the next page.
         self.select_many(self.selected_keys, focus=self.selected, scroll=False, _preserve_anchor=True)
-        self._layout()
+        self._schedule_layout()
         if relayout and not appended:
             self.canvas.yview_moveto(0)
-        self._decoder.request(self._token, jobs, permitted, remember=remember, recall=recall)
+        # Small initial contents are available immediately, without forcing a
+        # recursive geometry flush. Once mapped, mount only visible rows.
+        self._render_viewport()
 
-    def poll(self, limit=24):
-        """Attach decoded thumbnails; called from the window's UI loop."""
+    def _request_viewport(self, keys):
+        """Decode visible rows first, then their bounded overscan neighbors."""
+        if self._permitted is None:
+            return
+        view = tuple(keys)
+        if view == self._requested_view:
+            return
+        self._requested_view = view
+        missing = [key for key in keys if key in self._jobs and key not in self._valid_sources]
+        self._token += 1
+        self._pending_keys = set(missing)
+        self._decoder.request(self._token, [self._jobs[key] for key in missing], self._permitted,
+                              remember=self._remember, recall=self._recall)
+        if missing and self._poll_timer is None:
+            self._poll_timer = self.after(8, self._poll_ready)
+
+    def _poll_ready(self):
+        self._poll_timer = None
         if self._released:
             return
+        self.poll(limit=8)
+        if self._pending_keys:
+            self._poll_timer = self.after(8, self._poll_ready)
+
+    def _trim_sources(self):
+        # A very large display may itself show more than one cache's worth.
+        # Keep mounted previews, while bounding history independently of N.
+        limit = max(_CACHE_SIZE, len(self.tiles))
+        if len(self._source_images) <= limit:
+            return
+        for key in tuple(self._source_images):
+            if key not in self.tiles:
+                self._source_images.pop(key)
+                self._valid_sources.discard(key)
+                if len(self._source_images) <= limit:
+                    break
+
+    def poll(self, limit=24):
+        """Attach results cooperatively; normal delivery has its own UI timer."""
+        if self._released:
+            return
+        deadline = time.perf_counter() + .003
         for _ in range(limit):
             try:
                 token, key, image = self._results.get_nowait()
             except queue.Empty:
-                return
-            tile = self.tiles.get(key)
-            if token != self._token or tile is None:
+                break
+            if token != self._token or key not in self._paths:
                 continue
-            if key in self._source_images and self._source_images[key] is image:
-                continue
+            self._pending_keys.discard(key)
+            unchanged = key in self._source_images and self._source_images[key] is image
             self._source_images[key] = image
+            self._source_images.move_to_end(key)
+            self._valid_sources.add(key)
             if image is None:
                 self._unavailable.add(key)
-                tile.configure(image=self.unavailable_placeholder, text=self._tile_text(key))
-                self.images.pop(key, None)
-                continue
-            self._unavailable.discard(key)
-            # Keep the same preview area for a wide photo and an empty panel;
-            # transparent margins also preserve the tile's selection color.
-            with Image.new("RGBA", TILE) as surface:
-                surface.paste(image, ((TILE[0] - image.width) // 2, (TILE[1] - image.height) // 2))
-                self.images[key] = ImageTk.PhotoImage(surface, master=self)
-            tile.configure(image=self.images[key], text=self._tile_text(key))
+            else:
+                self._unavailable.discard(key)
+            if key in self.tiles:
+                if unchanged and key in self.images:
+                    self.tiles[key].configure(text=self._tile_text(key))
+                else:
+                    self._attach_image(key, self.tiles[key])
+            self._trim_sources()
+            if time.perf_counter() >= deadline:
+                break
+
+    def _attach_image(self, key, tile, **colors):
+        """Only visible previews need a Tcl image and a native label."""
+        image = self._source_images.get(key) if key in self._valid_sources or key in self.images else None
+        if image is None:
+            tile.configure(image=self.unavailable_placeholder if key in self._unavailable else self.placeholder,
+                           text=self._tile_text(key), **colors)
+            self.images.pop(key, None)
+            return
+        self._source_images.move_to_end(key)
+        # Blend transparent margins/content once in Pillow. Tk otherwise
+        # recomposites every translucent pixel whenever a row is exposed.
+        background = self._tile_colors(key)["background"]
+        with Image.new("RGB", TILE, background) as surface:
+            surface.paste(image, ((TILE[0] - image.width) // 2, (TILE[1] - image.height) // 2),
+                          image if "A" in image.getbands() else None)
+            photo = getattr(tile, "_preview_image", None)
+            if photo is None:
+                photo = tile._preview_image = ImageTk.PhotoImage(surface, master=self)
+            else:
+                # Recycled labels keep one Tcl image buffer. Repeated native
+                # image creation/deletion made incoming scroll rows expensive.
+                photo.paste(surface)
+            self.images[key] = photo
+        tile.configure(image=self.images[key], text=self._tile_text(key), **colors)
+
+    def _tile_colors(self, key):
+        appearance = theme.mode(self)
+        palette = theme.DARK if appearance == "dark" else theme.LIGHT
+        chosen = key in self._selected_set
+        return {"background": theme._tone(_SELECTED, appearance) if chosen else palette["CARD"],
+                "foreground": theme._tone(_SELECTED_INK, appearance) if chosen else palette["INK"]}
+
+    def _mount(self, key):
+        if self._tile_pool:
+            tile = self._tile_pool.pop()
+        else:
+            # The same named font must have a widget consumer. A separate
+            # tuple font let Tk repeatedly realize/free native font resources
+            # for each measurement of a newly encountered caption.
+            tile = tk.Label(self.inner, compound="top", font=self._font, justify="center",
+                            padx=4, pady=4, borderwidth=0, highlightthickness=0,
+                            cursor="hand2", takefocus=True)
+            # A recycled widget always resolves its current record at dispatch.
+            tile.bind("<ButtonPress-1>", lambda event: self._press(event, tile._gallery_key))
+            tile.bind("<B1-Motion>", self._drag_motion)
+            tile.bind("<ButtonRelease-1>", self._release_drag)
+            tile.bind("<Double-1>", lambda _: self.on_open(tile._gallery_key))
+            tile.bind("<MouseWheel>", self._wheel)
+            if self.on_context is not None:
+                tile.bind("<Button-3>", lambda event: self.on_context(event, tile._gallery_key))
+        tile._gallery_key = key
+        tile.configure(**self._tile_colors(key))
+        self.tiles[key] = tile
+        self._attach_image(key, tile)
+        return tile
+
+    def _unmount(self, key, *, recycle=True):
+        tile = self.tiles.pop(key, None)
+        self._positions.pop(key, None)
+        self.images.pop(key, None)
+        if tile is None:
+            return
+        if self.focus_get() == tile:
+            self.canvas.focus_set()
+        if recycle:
+            tile.place_forget()
+            tile.configure(image=self.placeholder, text="", takefocus=False)
+            tile._gallery_key = None
+            self._tile_pool.append(tile)
+        else:
+            tile.destroy()
+            tile._preview_image = None
+
+    def _view_changed(self, first, last):
+        self.scrollbar.set(first, last)
+        if self._viewport_timer is None and not self._released:
+            self._viewport_timer = self.after_idle(self._render_viewport)
+
+    def _render_viewport(self):
+        if self._viewport_timer is not None:
+            self.after_cancel(self._viewport_timer)
+        self._viewport_timer = None
+        if self._released:
+            return
+        columns = self.columns or 1
+        height = self.canvas.winfo_height()
+        if height <= 1:
+            # Geometry has not been delivered yet. Bound first-paint work.
+            keys = self.order[:24]
+            first = 0
+            last = (len(keys) + columns - 1) // columns
+        else:
+            top = max(0, self.canvas.canvasy(0))
+            first = max(0, int(top // self._cell_height) - _OVERSCAN_ROWS)
+            last = int((top + height) // self._cell_height) + _OVERSCAN_ROWS + 1
+            keys = self.order[first * columns:last * columns]
+        # The native frame covers a small slice, while the canvas tracks the
+        # full logical height. Huge libraries must not create huge OS windows.
+        window_y = first * self._cell_height
+        if window_y != self._window_y:
+            self._window_y = window_y
+            self.canvas.coords(self.window, self._window_x or 0, window_y)
+        window_height = max(height, (last - first) * self._cell_height)
+        if window_height != self._window_height:
+            self._window_height = window_height
+            self.canvas.itemconfigure(self.window, height=window_height)
+        # Keep the implicit mouse grab alive through drag autoscroll.
+        drag_key = self._drag.get("key") if self._drag is not None else None
+        if drag_key in self._indices and drag_key not in keys:
+            keys.append(drag_key)
+        visible = set(keys)
+        for key in self.tiles.keys() - visible:
+            self._unmount(key)
+        for key in keys:
+            tile = self.tiles.get(key)
+            if tile is None:
+                tile = self._mount(key)
+            row, column = divmod(self._indices[key], columns)
+            position = (column * self._cell_width + _GAP // 2,
+                        min(window_height + 1, max(-self._tile_height - 1,
+                            row * self._cell_height + _GAP // 2 - window_y)),
+                        TILE[0] + 8, self._tile_height)
+            if self._positions.get(key) != position:
+                self._positions[key] = position
+                tile.place(x=position[0], y=position[1], width=position[2], height=position[3])
+                tile.configure(takefocus=True)
+        # A temporary large viewport should not leave hundreds of idle widgets.
+        keep = max(columns, len(keys))
+        while len(self._tile_pool) > keep:
+            tile = self._tile_pool.pop()
+            tile.destroy()
+            tile._preview_image = None
+        top = max(0, self.canvas.canvasy(0))
+        bottom = top + height
+        in_view, neighbors = [], []
+        for key in keys:
+            row_top = (self._indices[key] // columns) * self._cell_height
+            (in_view if row_top < bottom and row_top + self._cell_height > top else neighbors).append(key)
+        self._trim_sources()
+        self._request_viewport(in_view + neighbors)
 
     # ------------------------------------------------------------- selection
     def select(self, key):
@@ -498,7 +712,7 @@ class ThumbnailGrid(ttk.Frame):
         self.selected = focus if focus in selected else (
             self.selected if self.selected in selected else next(iter(self.selected_keys), None)
         )
-        if self._anchor not in self.tiles or (
+        if self._anchor not in self._indices or (
             not _preserve_anchor and (previous != selected or previous_focus != self.selected)
         ):
             self._anchor = self.selected
@@ -506,12 +720,11 @@ class ThumbnailGrid(ttk.Frame):
         # change tile appearance. Repaint only tiles whose selection changed.
         for key in previous ^ selected:
             if key in self.tiles:
-                chosen = key in selected
-                self.tiles[key].configure(
-                    background=theme._tone(_SELECTED) if chosen else theme.CARD,
-                    foreground=theme._tone(_SELECTED_INK) if chosen else theme.INK,
-                    text=self._tile_text(key),
-                )
+                colors = self._tile_colors(key)
+                if key in self.images:
+                    self._attach_image(key, self.tiles[key], **colors)
+                else:
+                    self.tiles[key].configure(text=self._tile_text(key), **colors)
         if scroll:
             self._scroll_selected()
 
@@ -519,8 +732,30 @@ class ThumbnailGrid(ttk.Frame):
         """The caption; a check mark makes each chosen tile obvious."""
         author, _, day = self._captions.get(key, "").partition("\n")
         second = ("미리보기 없음" if key in self._unavailable else
-                  "불러오는 중…" if key not in self._source_images else day)
-        return ("✓ " if key in self._selected_set else "") + author + "\n" + second
+                  "불러오는 중…" if key not in self._valid_sources and key not in self.images else day)
+        prefix = "✓ " if key in self._selected_set else ""
+        # Fixed rows stay two lines even with large Windows text scaling.
+        return self._fit_caption(prefix + author) + "\n" + self._fit_caption(second)
+
+    def _fit_caption(self, text):
+        fitted = self._fitted_text.get(text)
+        if fitted is not None:
+            self._fitted_text.move_to_end(text)
+            return fitted
+        fitted = text
+        if self._font.measure(text) > TILE[0]:
+            low, high = 0, len(text)
+            while low < high:
+                middle = (low + high + 1) // 2
+                if self._font.measure(text[:middle] + "…") <= TILE[0]:
+                    low = middle
+                else:
+                    high = middle - 1
+            fitted = text[:low] + "…"
+        self._fitted_text[text] = fitted
+        if len(self._fitted_text) > _CACHE_SIZE:
+            self._fitted_text.popitem(last=False)
+        return fitted
 
     def _notify(self, key=None):
         if self.on_selection is not None:
@@ -537,8 +772,8 @@ class ThumbnailGrid(ttk.Frame):
         control = bool(event.state & _CONTROL) or self.toggle_mode
         chosen = set(self.selected_keys)
         if shift:
-            anchor = self._anchor if self._anchor in self.tiles else self.selected or key
-            first, last = sorted((self.order.index(anchor), self.order.index(key)))
+            anchor = self._anchor if self._anchor in self._indices else self.selected or key
+            first, last = sorted((self._indices[anchor], self._indices[key]))
             span = set(self.order[first:last + 1])
             chosen = chosen | span if control else span
             self._anchor = anchor
@@ -565,7 +800,8 @@ class ThumbnailGrid(ttk.Frame):
 
     def _inner_point(self, x_root, y_root):
         # Content coordinates: they stay put while the view scrolls.
-        return x_root - self.inner.winfo_rootx(), y_root - self.inner.winfo_rooty()
+        return (self.canvas.canvasx(x_root - self.canvas.winfo_rootx()) - (self._window_x or 0),
+                self.canvas.canvasy(y_root - self.canvas.winfo_rooty()))
 
     def _press(self, event, key):
         if self._released:
@@ -602,20 +838,20 @@ class ThumbnailGrid(ttk.Frame):
         if drag is None or not drag.get("scroll") or self._released:
             return
         self.canvas.yview_scroll(drag["scroll"], "units")
-        self.canvas.update_idletasks()
         self._update_band()
         self._drag_scroll = self.after(60, self._scroll_drag)
 
     def _update_band(self):
         drag = self._drag
-        width, height = self.inner.winfo_width(), self.inner.winfo_height()
+        width, height = self._window_width or self._cell_width, self._content_height
         x, y = self._inner_point(*drag["root"])
         (x0, x1), (y0, y1) = sorted((drag["origin"][0], x)), sorted((drag["origin"][1], y))
         x0, x1 = max(0, x0), min(width, x1)
         y0, y1 = max(0, y0), min(height, y1)
         # Show only the part inside the visible gallery, on the screen.
-        left, top = self.inner.winfo_rootx(), self.inner.winfo_rooty()
         view_left, view_top = self.canvas.winfo_rootx(), self.canvas.winfo_rooty()
+        left = view_left - self.canvas.canvasx(0) + (self._window_x or 0)
+        top = view_top - self.canvas.canvasy(0)
         view_right, view_bottom = view_left + self.canvas.winfo_width(), view_top + self.canvas.winfo_height()
         # A straight drag still shows a thin box.
         box = (left + x0, top + y0, max(left + x1, left + x0 + 2), max(top + y1, top + y0 + 2))
@@ -627,11 +863,14 @@ class ThumbnailGrid(ttk.Frame):
         else:
             self._band.hide()
         hits = set()
-        for key in self.order:
-            tile = self.tiles.get(key)
-            if (tile is not None and tile.winfo_x() < x1 and x0 < tile.winfo_x() + tile.winfo_width()
-                    and tile.winfo_y() < y1 and y0 < tile.winfo_y() + tile.winfo_height()):
-                hits.add(key)
+        first_row = max(0, int(y0 // self._cell_height))
+        last_row = min((len(self.order) + self.columns - 1) // self.columns, int(y1 // self._cell_height) + 1)
+        for index in range(first_row * self.columns, min(len(self.order), last_row * self.columns)):
+            row, column = divmod(index, self.columns)
+            left = column * self._cell_width + _GAP // 2
+            top = row * self._cell_height + _GAP // 2
+            if left < x1 and x0 < left + TILE[0] + 8 and top < y1 and y0 < top + self._tile_height:
+                hits.add(self.order[index])
         chosen = drag["base"] | hits
         if chosen != set(self.selected_keys):
             focus = self.selected if self.selected in chosen else next((key for key in self.order if key in hits), None)
@@ -644,6 +883,8 @@ class ThumbnailGrid(ttk.Frame):
             self.after_cancel(self._drag_scroll)
             self._drag_scroll = None
         self._band.hide()
+        if not self._released:
+            self._view_changed(*self.canvas.yview())
         if drag is None or self._released:
             return "break"
         if (not drag["moved"] and drag["key"] is None and not event.state & _CONTROL
@@ -654,41 +895,99 @@ class ThumbnailGrid(ttk.Frame):
         return "break"
 
     def _scroll_selected(self):
-        if self.selected is None:
+        if self.selected is not None and self._selection_timer is None and not self._released:
+            self._selection_timer = self.after_idle(self._reveal_selected)
+
+    def _reveal_selected(self):
+        self._selection_timer = None
+        if self.selected is None or self._released:
             return
-        tile = self.tiles[self.selected]
-        self.update_idletasks()
-        height = self.inner.winfo_height()
+        if self._layout_timer is not None or self._region_timer is not None:
+            self._selection_timer = self.after_idle(self._reveal_selected)
+            return
+        index = self._indices.get(self.selected)
+        if index is None:
+            return
+        if not self.columns:
+            # A hidden notebook page has not received its first geometry yet.
+            # Its Configure handler will reveal the selection when mapped.
+            return
+        top = (index // self.columns) * self._cell_height
+        height = max(self._content_height, self.canvas.winfo_height())
         if height > 1:
-            top, bottom = tile.winfo_y(), tile.winfo_y() + tile.winfo_height()
+            bottom = top + self._cell_height
             view_top, view_bottom = (fraction * height for fraction in self.canvas.yview())
             if top < view_top:
                 self.canvas.yview_moveto(top / height)
             elif bottom > view_bottom:
                 self.canvas.yview_moveto((bottom - (view_bottom - view_top)) / height)
+        self._render_viewport()
 
     # ---------------------------------------------------------------- layout
+    def _schedule_layout(self, _event=None):
+        if self._layout_timer is None and not self._released:
+            self._layout_timer = self.after_idle(self._layout)
+
     def _layout(self):
+        self._layout_timer = None
+        if self._released:
+            return
         width = self.canvas.winfo_width()
         if width <= 1:
             return
-        columns = max(1, (width + _GAP) // (TILE[0] + 8 + _GAP))
-        self.canvas.itemconfigure(self.window, width=width)
-        if columns != self.columns:
-            self.columns = columns
-            for column in range(columns, self._weighted_columns):
-                self.inner.columnconfigure(column, weight=0, uniform="", minsize=0)
-            for column in range(columns):
-                self.inner.columnconfigure(column, weight=1, uniform="tile")
-            self._weighted_columns = columns
-            for index, key in enumerate(self.order):
-                self.tiles[key].grid(row=index // columns, column=index % columns, padx=_GAP // 2, pady=_GAP // 2, sticky="n")
-            if not self.order:
-                self.empty.grid(row=0, column=0, columnspan=columns, pady=40)
-            else:
-                self.empty.grid_remove()
-        self.update_idletasks()
-        self.canvas.configure(scrollregion=(0, 0, width, max(self.inner.winfo_reqheight(), self.canvas.winfo_height())))
+        # Fixed cells and a logical scrollregion let resize cost depend on
+        # the viewport, even when an author has thousands of saved files.
+        old_columns = self.columns
+        old_cell_height = self._cell_height
+        top = max(0, self.canvas.canvasy(0))
+        anchor = int(top // old_cell_height) * old_columns
+        offset = top % old_cell_height
+        scaling = float(self.tk.call("tk", "scaling"))
+        if scaling != self._font_scaling:
+            self._font_scaling = scaling
+            # A displayed named font retains native metrics. Reapply its point
+            # size so fitting and labels both resolve the new Tk text scale.
+            self._font.configure(size=self._font.cget("size"))
+            self._tile_height = TILE[1] + 12 + 2 * self._font.metrics("linespace")
+            self._cell_height = self._tile_height + _GAP
+            self._fitted_text.clear()
+            for key, tile in self.tiles.items():
+                tile.configure(text=self._tile_text(key))
+        self.columns = max(1, width // self._cell_width)
+        content_width = self.columns * self._cell_width
+        self._content_height = max(1, ((len(self.order) + self.columns - 1) // self.columns) * self._cell_height)
+        if content_width != self._window_width:
+            self.canvas.itemconfigure(self.window, width=content_width)
+        self._window_width = content_width
+        x = max(0, (width - content_width) // 2)
+        if x != self._window_x:
+            self._window_x = x
+            self.canvas.coords(self.window, x, self._window_y)
+        if not self.order:
+            self.empty.place(x=0, y=40, width=content_width)
+        else:
+            self.empty.place_forget()
+        self._sync_region()
+        if old_columns and (old_columns != self.columns or old_cell_height != self._cell_height) and top:
+            new_top = ((anchor // self.columns) * self._cell_height
+                       + offset * self._cell_height / old_cell_height)
+            self.canvas.yview_moveto(new_top / max(self._content_height, self.canvas.winfo_height()))
+        self._render_viewport()
+        if self.selected is not None and not old_columns:
+            self._scroll_selected()
+
+    def _schedule_region(self, _event=None):
+        if self._region_timer is None and not self._released:
+            self._region_timer = self.after_idle(self._sync_region)
+
+    def _sync_region(self):
+        self._region_timer = None
+        if self._released:
+            return
+        region = (0, 0, self.canvas.winfo_width(), max(self._content_height, self.canvas.winfo_height()))
+        if region != self._scrollregion:
+            self._scrollregion = region
+            self.canvas.configure(scrollregion=region)
 
     def _wheel(self, event):
         if event.delta:
@@ -700,6 +999,11 @@ class ThumbnailGrid(ttk.Frame):
         if self._released:
             return
         self._released = True
+        for name in ("_layout_timer", "_region_timer", "_selection_timer", "_viewport_timer", "_poll_timer"):
+            timer = getattr(self, name)
+            if timer is not None:
+                self.after_cancel(timer)
+                setattr(self, name, None)
         self._token += 1
         self._drag = None
         self._band.destroy()
@@ -711,16 +1015,33 @@ class ThumbnailGrid(ttk.Frame):
         self._decoder.close()
         self.images.clear()
         self._source_images.clear()
+        self._valid_sources.clear()
+        self._jobs.clear()
+        self._pending_keys.clear()
+        self._requested_view = None
+        self._permitted = self._remember = self._recall = None
+        self._fitted_text.clear()
         self._captions.clear()
+        self._positions.clear()
+        self._indices.clear()
         self._paths.clear()
-        for tile in self.tiles.values():
+        for tile in (*self.tiles.values(), *self._tile_pool):
             tile.destroy()
+            tile._preview_image = None
+        self._tile_pool.clear()
         self.tiles.clear()
+        if self._default_font_anchor is not None:
+            self.canvas.delete(self._default_font_anchor)
+            self._default_font_anchor = None
+        # Font finalization also calls Tcl; release it on the UI thread even
+        # if another owner retains this already destroyed gallery object.
+        self._font = None
         self.order.clear()
         self.selected = self._anchor = None
         self.selected_keys = ()
         self._selected_set.clear()
         self.placeholder = self.unavailable_placeholder = None
+        self._placeholder_appearance = None
         self.on_select = self.on_open = self.on_selection = None
 
     def destroy(self):

@@ -323,8 +323,60 @@ class GalleryLayoutTests(unittest.TestCase):
         self.root.geometry("1050x400")
         self.root.update()
         self.assertEqual(self.grid.columns, wide_columns)
-        for index in range(wide_columns):
-            self.assertEqual(self.grid.inner.grid_columnconfigure(index)["weight"], 1)
+        for key in self.grid.order[:wide_columns]:
+            tile = self.grid.tiles[key]
+            self.assertGreaterEqual(tile.winfo_rootx(), self.grid.canvas.winfo_rootx())
+            self.assertLessEqual(tile.winfo_rootx() + tile.winfo_width(),
+                                 self.grid.canvas.winfo_rootx() + self.grid.canvas.winfo_width())
+
+    def test_resize_within_same_column_count_keeps_tile_coordinates_and_skips_reflow(self):
+        self.grid.show([(str(index), {"author": "offline"}) for index in range(200)], set)
+        self.root.update()
+        columns = self.grid.columns
+        before = {key: (tile.winfo_x(), tile.winfo_y()) for key, tile in self.grid.tiles.items()}
+        with ExitStack() as stack:
+            moves = [stack.enter_context(patch.object(tile, "grid", wraps=tile.grid))
+                     for tile in self.grid.tiles.values()]
+            flush = stack.enter_context(patch.object(self.grid, "update_idletasks"))
+            self.root.geometry("1040x400")
+            self.root.update()
+            self.assertEqual(self.grid.columns, columns)
+            self.assertEqual({key: (tile.winfo_x(), tile.winfo_y()) for key, tile in self.grid.tiles.items()}, before)
+            for move in moves:
+                move.assert_not_called()
+            flush.assert_not_called()
+
+    def test_resize_burst_is_coalesced_and_pending_layout_is_cancelled_on_release(self):
+        self.root.update()
+        with patch.object(self.grid, "_layout", wraps=self.grid._layout) as layout:
+            for _ in range(30):
+                self.grid._schedule_layout()
+            timer = self.grid._layout_timer
+            self.root.update()
+            self.assertEqual(layout.call_count, 1)
+            self.assertNotIn(timer, self.root.tk.call("after", "info"))
+        self.grid._schedule_layout()
+        self.grid._schedule_region()
+        timers = {self.grid._layout_timer, self.grid._region_timer}
+        self.grid.release()
+        self.assertTrue(timers.isdisjoint(self.root.tk.call("after", "info")))
+        self.root.update()
+
+    def test_appending_tiles_preserves_existing_positions_and_scrolls_to_new_selection(self):
+        rows = [(str(index), {"author": "offline"}) for index in range(100)]
+        self.grid.show(rows[:60], set)
+        self.root.update()
+        first = self.grid.tiles["0"]
+        with patch.object(first, "place", wraps=first.place) as move:
+            self.grid.show(rows, set)
+            self.root.update()
+            move.assert_not_called()
+            self.grid.select("99")
+            self.root.update()
+        tile = self.grid.tiles["99"]
+        self.assertGreaterEqual(tile.winfo_rooty(), self.grid.canvas.winfo_rooty())
+        self.assertLessEqual(tile.winfo_rooty() + tile.winfo_height(),
+                             self.grid.canvas.winfo_rooty() + self.grid.canvas.winfo_height())
 
     def test_destroyed_grid_dies_while_decode_remains_inflight(self):
         started, resume = threading.Event(), threading.Event()
@@ -689,7 +741,6 @@ class GalleryLayoutTests(unittest.TestCase):
         self.grid.show([(str(index), {"author": "offline"}) for index in range(12)], set)
         self.root.update()
         children = set(self.grid.inner.winfo_children())
-        focus = self.root.focus_get()
         self.grid._press(self.pointer("0"), "0")
         for key in ("1", "7", "2", "8", "3", "9", "0"):
             self.grid._drag_motion(self.pointer(key))
@@ -697,7 +748,7 @@ class GalleryLayoutTests(unittest.TestCase):
         # Nothing is placed among the tiles, so moving the box repaints none.
         self.assertEqual(set(self.grid.inner.winfo_children()), children)
         self.assertEqual(self.grid._band.window.wm_overrideredirect(), True)
-        self.assertEqual(self.root.focus_get(), focus)
+        self.assertEqual(self.root.focus_get(), self.grid.tiles["0"])
         # One window the size of the visible gallery: moving the box never
         # resizes it (a new size first shows up blank, which looked like a
         # blinking white box).
@@ -711,7 +762,9 @@ class GalleryLayoutTests(unittest.TestCase):
         self.assertTrue(band.revealed or band._reveal_job is not None)
         self.grid._release_drag(self.pointer("0"))
         self.assertFalse(band.visible or band.revealed)
-        self.assertEqual(float(band.window.attributes("-alpha")), 0.0)
+        self.assertEqual(band.window.state(), "withdrawn")
+        if os.name == "nt":  # transparentcolor and the conceal alpha are Windows features.
+            self.assertEqual(float(band.window.attributes("-alpha")), 0.0)
         self.grid.release()
         self.assertIsNone(self.grid._band.window)
 

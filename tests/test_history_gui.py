@@ -393,7 +393,8 @@ class HistoryGuiTests(unittest.TestCase):
             self.assertEqual(tree.selection(), tuple(rows[1:5]))
             self.window._tree_release()
             self.window.toggle_select_several()
-            self.assertEqual(self.window.toggle_button.cget("text"), "여러 개 선택 끝내기")
+            self.assertEqual(self.window.toggle_button.cget("text"), "여러 개 선택")
+            self.assertEqual(self.window.toggle_button.cget("style"), "CompactPrimary.TButton")
             self.assertTrue(self.window.grid_view.toggle_mode)
             self.assertEqual(self.window._tree_press(event(0)), "break")
             self.assertEqual(set(tree.selection()), {rows[0], *rows[1:5]})
@@ -457,9 +458,180 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertEqual(newest, [str(309 - index) for index in range(10)])
         self.assertIn("@alice · 파일 10개", self.window.sample_text.get())
         self.assertFalse(self.window.sample_more_button.winfo_manager())
-        with patch("luvbox.history_gui.os.startfile") as start:
+        with patch("luvbox.history_gui.os.startfile", create=True) as start:
             self.window._open_sample(next(iter(self.window.sample_rows)))
         start.assert_called_once_with(str(self.account / "309_1.jpg"))
+
+    @staticmethod
+    def author_ranking_rows(count):
+        return [{"author": f"artist{index:05}", "files": count - index,
+                 "posts": count - index, "latest": "2026-10-01"}
+                for index in range(count)]
+
+    def finish_author_ranking(self):
+        deadline = time.monotonic() + 4
+        while self.window._author_fill_state is not None and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(.001)
+        self.assertIsNone(self.window._author_fill_state, "author ranking did not finish")
+        self.assertIsNone(self.window._author_fill_timer)
+
+    def test_large_author_search_yields_to_input_and_only_the_latest_query_finishes(self):
+        self.window.tabs.select(2)
+        self.root.update()
+        self.window.stats = {"authors": self.author_ranking_rows(1000)}
+        self.window._fill_authors()
+        self.assertGreater(len(self.window.author_tree.get_children()), 0)
+        self.assertLess(len(self.window.author_tree.get_children()), 1000)
+        old_state, old_timer = self.window._author_fill_state, self.window._author_fill_timer
+        self.window.author_query.set("artist009")
+        self.window.author_query.set("ARTIST0099")
+        current_state, current_timer = self.window._author_fill_state, self.window._author_fill_timer
+        self.assertNotIn(old_timer, self.root.tk.call("after", "info"))
+        self.window._fill_authors_step(old_state)
+        self.assertIs(self.window._author_fill_state, current_state)
+        self.assertEqual(self.window._author_fill_timer, current_timer)
+        input_seen = []
+        self.root.after(0, lambda: input_seen.append(self.window._author_fill_state is not None))
+        self.finish_author_ranking()
+        self.assertEqual(input_seen, [True])
+        expected = tuple(str(index) for index in range(990, 1000))
+        self.assertEqual(self.window.author_tree.get_children(), expected)
+        self.assertEqual(tuple(self.window.stats_authors), expected)
+        self.assertEqual(self.window.author_tree.item("990", "values")[:2], ("991", "@artist00990"))
+
+    def test_same_author_refresh_preserves_visible_order_during_each_chunk(self):
+        self.window.tabs.select(2)
+        self.root.update()
+        self.window.stats = {"authors": self.author_ranking_rows(1000)}
+        self.window._fill_authors()
+        self.finish_author_ranking()
+        original = self.window.author_tree.get_children()
+        self.window._fill_authors()
+        self.assertIsNotNone(self.window._author_fill_state)
+        self.assertEqual(self.window.author_tree.get_children(), original)
+        self.finish_author_ranking()
+        self.assertEqual(self.window.author_tree.get_children(), original)
+
+    def test_author_rank_changes_restore_identity_without_clearing_retained_samples(self):
+        self.window.tabs.select(2)
+        self.root.update()
+        rows = self.author_ranking_rows(1000)
+        self.window.stats = {"authors": rows}
+        self.window._fill_authors()
+        self.finish_author_ranking()
+        self.window.author_tree.selection_set("0")
+        self.window._sample_author = rows[0]["author"]
+        kept = self.window.sample_rows = {"retained": {"author": rows[0]["author"]}}
+        self.window._sample_shown = 1
+        with patch("luvbox.history_gui.threading.Thread") as worker:
+            self.window._show_stats({"authors": rows[::-1]})
+            self.assertIsNotNone(self.window._author_fill_state)
+            self.assertEqual(self.window.author_tree.selection(), ())
+            self.window._show_author_samples()
+            self.assertIs(self.window.sample_rows, kept)
+            worker.assert_not_called()
+            self.finish_author_ranking()
+        self.assertEqual(self.window.author_tree.selection(), ("999",))
+        self.assertEqual(self.window.stats_authors["999"]["author"], "artist00000")
+        self.assertIs(self.window.sample_rows, kept)
+        self.assertEqual(self.window._sample_author, "artist00000")
+        self.assertEqual(worker.call_count, 1)
+
+    def test_author_filter_clears_excluded_samples_only_after_the_query_finishes(self):
+        self.window.tabs.select(2)
+        self.root.update()
+        rows = self.author_ranking_rows(1000)
+        self.window.stats = {"authors": rows}
+        self.window._fill_authors()
+        self.finish_author_ranking()
+        self.window.author_tree.selection_set("0")
+        self.window._sample_author = rows[0]["author"]
+        kept = self.window.sample_rows = {"retained": {"author": rows[0]["author"]}}
+        self.window.author_query.set("artist0099")
+        self.assertIsNotNone(self.window._author_fill_state)
+        self.window._show_author_samples()
+        self.assertIs(self.window.sample_rows, kept)
+        self.finish_author_ranking()
+        self.assertEqual(self.window.author_tree.selection(), ())
+        self.assertEqual(self.window.sample_rows, {})
+        self.assertEqual(self.window.sample_view.order, [])
+
+    def test_picking_an_old_rank_during_reorder_restores_its_already_processed_author(self):
+        self.window.tabs.select(2)
+        self.root.update()
+        rows = self.author_ranking_rows(1000)
+        self.window.stats = {"authors": rows}
+        self.window._fill_authors()
+        self.finish_author_ranking()
+        with patch("luvbox.history_gui.threading.Thread"):
+            self.window._show_stats({"authors": rows[::-1]})
+            self.assertIsNotNone(self.window._author_fill_state)
+            self.assertEqual(self.window.stats_authors["0"]["author"], "artist00999")
+            self.assertEqual(self.window.stats_authors["999"]["author"], "artist00999")
+            self.window.author_tree.selection_set("999")
+            self.window._show_author_samples()
+            self.finish_author_ranking()
+        self.assertEqual(self.window.author_tree.selection(), ("0",))
+        self.assertEqual(self.window.stats_authors["0"]["author"], "artist00999")
+        self.assertEqual(self.window._sample_author, "artist00999")
+
+    def test_changed_author_query_starts_at_top_and_unchanged_refresh_keeps_scroll(self):
+        self.window.tabs.select(2)
+        self.root.update()
+        self.window.stats = {"authors": self.author_ranking_rows(1000)}
+        self.window._fill_authors()
+        self.finish_author_ranking()
+        self.window.author_tree.yview_moveto(.7)
+        self.root.update()
+        before = self.window.author_tree.yview()[0]
+        self.assertGreater(before, 0)
+        self.window._fill_authors()
+        self.finish_author_ranking()
+        self.assertAlmostEqual(self.window.author_tree.yview()[0], before)
+        self.window.author_query.set("artist009")
+        self.finish_author_ranking()
+        self.assertEqual(self.window.author_tree.yview()[0], 0)
+
+    def test_hidden_author_refresh_cancels_old_work_and_removes_obsolete_ranks(self):
+        self.window.tabs.select(2)
+        self.root.update()
+        self.window.stats = {"authors": self.author_ranking_rows(1000)}
+        self.window._fill_authors()
+        self.finish_author_ranking()
+        self.window._show_stats({"authors": self.author_ranking_rows(2)})
+        state, timer = self.window._author_fill_state, self.window._author_fill_timer
+        self.assertIsNotNone(state)
+        self.window.tabs.select(0)
+        self.root.update()
+        self.assertIsNone(self.window._author_fill_state)
+        self.assertIsNone(self.window._author_fill_timer)
+        self.assertNotIn(timer, self.root.tk.call("after", "info"))
+        self.assertTrue(self.window._authors_stale)
+        self.window._show_stats({"authors": self.author_ranking_rows(3)})
+        self.window._fill_authors_step(state)
+        self.assertIsNone(self.window._author_fill_state)
+        self.window.tabs.select(2)
+        self.root.update()
+        self.finish_author_ranking()
+        self.assertEqual(self.window.author_tree.get_children(), ("0", "1", "2"))
+        self.assertEqual(set(self.window.stats_authors), {"0", "1", "2"})
+
+    def test_author_search_close_cancels_timer_and_removes_query_trace(self):
+        self.window.tabs.select(2)
+        self.root.update()
+        self.window.stats = {"authors": self.author_ranking_rows(1000)}
+        self.window._fill_authors()
+        state, timer = self.window._author_fill_state, self.window._author_fill_timer
+        query = self.window.author_query
+        self.window.destroy()
+        self.assertNotIn(timer, self.root.tk.call("after", "info"))
+        self.assertIsNone(self.window._author_fill_state)
+        self.assertIsNone(self.window._author_fill_timer)
+        self.assertFalse(query.trace_info())
+        query.set("artist0099")
+        self.window._fill_authors_step(state)
+        self.root.update()
 
     def author_gallery(self, count=10):
         store = HistoryStore(self.account)
@@ -964,7 +1136,7 @@ class HistoryGuiTests(unittest.TestCase):
         unknown.write_bytes(b"unrelated")
         self.assertFalse(permitted(unknown))
 
-    def test_preview_reflows_below_table_and_paging_buttons_fit_large_fonts(self):
+    def test_compact_preview_keeps_paging_and_file_actions_fixed(self):
         self.root.attributes("-alpha", 0)
         self.root.deiconify()
         self.window.attributes("-alpha", 0)
@@ -974,12 +1146,19 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.geometry("860x720")
         self.root.update()
         self.assertFalse(self.window._preview_side)
-        self.assertEqual(int(self.window.preview_card.grid_info()["row"]), 2)
-        self.assertEqual(str(self.window._pagers[0][0].grid_info()["in"]), str(self.window.file_browser))
-        self.assertLess(self.window._pagers[0][0].winfo_rooty(), self.window.preview_card.winfo_rooty())
+        self.assertFalse(self.window.preview_card.winfo_ismapped())
+        self.assertEqual(str(self.window._pagers[0][0].grid_info()["in"]), str(self.window._file_page_parent))
         self.assertGreaterEqual(self.window.tree.winfo_height(), self.window.tree.winfo_reqheight())
-        self.assertLessEqual(self.window.preview_box.winfo_rootx() + self.window.preview_box.winfo_width(),
-                             self.window.file_browser.winfo_rootx() + self.window.file_browser.winfo_width())
+        anchors = tuple(widget.winfo_rooty() for widget in
+                        (self.window.next_button, self.window.open_file_button, self.window.tree))
+        self.window.toggle_preview()
+        self.root.update()
+        self.assertTrue(self.window._preview_window.winfo_ismapped())
+        self.assertEqual(anchors, tuple(widget.winfo_rooty() for widget in
+                                       (self.window.next_button, self.window.open_file_button, self.window.tree)))
+        self.assertEqual(self.window._compact_selection_detail.get("1.0", "end-1c"), self.window.selection_text.get())
+        self.window.toggle_preview()
+        self.assertFalse(self.window._preview_window.winfo_ismapped())
         self.window.geometry("1400x900")
         self.root.update()
         self.assertTrue(self.window._preview_side)
@@ -1020,7 +1199,7 @@ class HistoryGuiTests(unittest.TestCase):
         self.window.select_record()
         self.assertIn("저장한 때 " + store.records()[0]["saved_at"][:10], self.window.selection_text.get())
 
-    def test_large_font_columns_fit_dates_handles_and_move_preview_below_the_table(self):
+    def test_large_font_columns_fit_dates_handles_and_compact_preview_is_optional(self):
         root = tk.Tk()
         root.attributes("-alpha", 0)
         previous_scaling = root.tk.call("tk", "scaling")
@@ -1037,7 +1216,7 @@ class HistoryGuiTests(unittest.TestCase):
             window._display({"files": 1}, [row], [])
             root.update()
             self.assertFalse(window._preview_side)
-            self.assertEqual(int(window.preview_card.grid_info()["row"]), 2)
+            self.assertFalse(window.preview_card.winfo_ismapped())
             style = ttk.Style(root)
             font = style.lookup("Treeview", "font")
             heading_font = style.lookup("Treeview.Heading", "font")
@@ -1124,27 +1303,30 @@ class HistoryGuiTests(unittest.TestCase):
             self.window.geometry(size)
             self.root.update()
             stable = (self.window.preview_card.winfo_width(), self.window.preview_info.winfo_width(),
-                      label.cget("wraplength"), self.window._preview_side, self.window.content_view.canvas.yview())
+                      label.cget("wraplength"), self.window._preview_side, self.window.next_button.winfo_rooty())
             self.root.update()
             self.assertEqual(stable, (self.window.preview_card.winfo_width(), self.window.preview_info.winfo_width(),
                                      label.cget("wraplength"), self.window._preview_side,
-                                     self.window.content_view.canvas.yview()))
+                                     self.window.next_button.winfo_rooty()))
         with patch.object(label, "configure") as configured:
             self.window._wrap_preview_note(SimpleNamespace(width=self.window.preview_info.winfo_width()))
         configured.assert_not_called()
 
-    def test_changing_tabs_returns_outer_scroll_to_the_header(self):
+    def test_changing_tabs_resets_only_the_internal_statistics_scroll(self):
         self.root.attributes("-alpha", 0)
         self.root.deiconify()
         self.window.attributes("-alpha", 0)
         self.window.deiconify()
         self.window.geometry("760x640")
         self.root.update()
-        self.window.content_view.canvas.yview_moveto(1)
+        self.window.tabs.select(2)
+        self.root.update()
+        self.window.stats_scroll_view.canvas.yview_moveto(1)
         self.root.update()
         self.window.tabs.select(1)
         self.root.update()
-        self.assertEqual(self.window.content_view.canvas.yview()[0], 0)
+        self.assertEqual(self.window.stats_scroll_view.canvas.yview()[0], 0)
+        self.assertFalse(hasattr(self.window, "content_view"))
 
     def test_search_view_buttons_keep_text_space_when_the_search_row_folds(self):
         self.root.attributes("-alpha", 0)
@@ -1259,30 +1441,23 @@ class HistoryGuiTests(unittest.TestCase):
                                                          bar.winfo_rootx() + bar.winfo_width())
                             tree = window.run_tree if tab else window.tree
                             self.assertGreaterEqual(tree.winfo_height(), 90)
-                            canvas = window.content_view.canvas
                             expected_row = int(info.winfo_reqwidth() + navigation._arrows.winfo_reqwidth() +
                                                navigation._jump_box.winfo_reqwidth() + 24 > bar.winfo_width())
                             self.assertEqual(int(navigation.grid_info()["row"]), expected_row)
-                            if scaling == 2.0:
-                                self.assertTrue(window.content_view.scrollbar.winfo_manager())
-                                canvas.yview_moveto(0)
-                                button = window.run_next_button if tab else window.next_button
-                                button.event_generate("<MouseWheel>", delta=-120)
-                                root.update()
-                                self.assertGreater(canvas.yview()[0], 0)
-                                canvas.yview_moveto(0)
-                                tree.event_generate("<MouseWheel>", delta=-120)
-                                root.update()
-                                self.assertEqual(canvas.yview()[0], 0)
-                                canvas.yview_moveto(1)
-                                root.update()
-                                bottom = bar.winfo_rooty() - canvas.winfo_rooty() + bar.winfo_height()
-                                self.assertLessEqual(bottom, canvas.winfo_height())
+                            bottom = bar.winfo_rooty() - window.winfo_rooty() + bar.winfo_height()
+                            self.assertLessEqual(bottom, window.winfo_height())
+                            # Scrolling a navigation control must never move
+                            # the header or hide the fixed browsing actions.
+                            button = window.run_next_button if tab else window.next_button
+                            anchor = bar.winfo_rooty()
+                            button.event_generate("<MouseWheel>", delta=-120)
+                            root.update()
+                            self.assertEqual(anchor, bar.winfo_rooty())
                             # A second geometry pass must not undo folding or
                             # continually resize the content and reset scrolling.
-                            before = (int(navigation.grid_info()["row"]), bar.winfo_width(), canvas.yview())
+                            before = (int(navigation.grid_info()["row"]), bar.winfo_width(), bar.winfo_rooty())
                             root.update()
-                            after = (int(navigation.grid_info()["row"]), bar.winfo_width(), canvas.yview())
+                            after = (int(navigation.grid_info()["row"]), bar.winfo_width(), bar.winfo_rooty())
                             self.assertEqual(before, after)
                 finally:
                     root.tk.call("tk", "scaling", previous_scaling)
@@ -1303,6 +1478,8 @@ class HistoryGuiTests(unittest.TestCase):
                         window = HistoryWindow(root, lambda: ("offline", self.account))
                     window.attributes("-alpha", 0)
                     window.geometry("860x720")
+                    self.assertFalse(window._tile_frame.winfo_ismapped())
+                    window.toggle_overview()
                     paging = {"page": 0, "total": 100000, "pages": 1000, "page_size": 100}
                     window._display({"files": 100000, "posts": 90317, "photo": 97000,
                                      "video": 2400, "animated_gif": 600, "bytes": 1_000_000_000_000,
@@ -1324,13 +1501,10 @@ class HistoryGuiTests(unittest.TestCase):
                         window.tabs.select(tab)
                         root.update()
                         tree = window.run_tree if tab else window.tree
-                        self.assertGreaterEqual(tree.winfo_height(), tree.winfo_reqheight())
-                        canvas = window.content_view.canvas
-                        canvas.yview_moveto(1)
-                        root.update()
+                        self.assertGreaterEqual(tree.winfo_height(), 90)
                         pager = window._pagers[tab][0]
-                        bottom = pager.winfo_rooty() - canvas.winfo_rooty() + pager.winfo_height()
-                        self.assertLessEqual(bottom, canvas.winfo_height())
+                        bottom = pager.winfo_rooty() - window.winfo_rooty() + pager.winfo_height()
+                        self.assertLessEqual(bottom, window.winfo_height())
                     # Wide windows keep the original single statistics row,
                     # including a large font and all of the large numbers.
                     window.geometry("1400x900")
@@ -1759,16 +1933,64 @@ class HistoryGuiTests(unittest.TestCase):
         self.assertTrue(self.window.tree.winfo_ismapped())
         status_label = next(widget for widget in self.window.wrapping_labels
                             if str(widget.cget("textvariable")) == str(self.window.status_text))
-        for widget in (self.window.selection_detail, status_label):
+        # The compact inspector is optional. Opening it must leave the
+        # always-visible paging and selected-file actions in place.
+        controls = (self.window.next_button, self.window.open_file_button, self.window.open_tweet_button,
+                    self.window.delete_button, status_label)
+        anchors = tuple(widget.winfo_rooty() for widget in controls)
+        for widget in controls:
             self.assertTrue(widget.winfo_ismapped())
-            # Readable statistics may occupy two rows in a narrow window.
-            # The outer scrollbar then keeps both the selected file and
-            # status reachable while preserving the table's useful height.
-            self.window.content_view._ensure_visible(widget)
-            self.root.update()
             self.assertGreaterEqual(widget.winfo_rooty(), self.window.winfo_rooty())
             bottom = widget.winfo_rooty() - self.window.winfo_rooty() + widget.winfo_height()
             self.assertLessEqual(bottom, self.window.winfo_height())
+        self.window.toggle_preview()
+        self.root.update()
+        self.assertEqual(anchors, tuple(widget.winfo_rooty() for widget in controls))
+        self.assertEqual(self.window._compact_selection_detail.get("1.0", "end-1c"), self.window.selection_text.get())
+
+    def test_minimum_library_with_large_fonts_keeps_the_list_and_actions_visible(self):
+        root = tk.Tk()
+        root.attributes("-alpha", 0)
+        previous_scaling = root.tk.call("tk", "scaling")
+        window = None
+        try:
+            root.tk.call("tk", "scaling", 2.0)
+            with patch("luvbox.history_gui.threading.Thread"):
+                window = HistoryWindow(root, lambda: ("offline", self.account))
+            window.attributes("-alpha", 0)
+            window.geometry("760x640")
+            rows = self.records(3).records()
+            paging = {"page": 0, "total": 100000, "pages": 1000, "page_size": 100}
+            window._display({"files": 100000}, rows, [], 0, paging, paging)
+            root.update()
+            controls = (window.next_button, window.open_file_button, window.open_tweet_button,
+                        window.delete_button, window.toggle_button)
+            self.assertTrue(window.tree.winfo_ismapped())
+            self.assertGreaterEqual(window.tree.winfo_height(), 90)
+            anchors = tuple((widget.winfo_rootx(), widget.winfo_rooty(), widget.winfo_width()) for widget in controls)
+            for widget in controls:
+                self.assertTrue(widget.winfo_ismapped())
+                self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(),
+                                     window.winfo_rooty() + window.winfo_height())
+                self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(),
+                                     window.winfo_rootx() + window.winfo_width())
+            window.tree.selection_set(window.tree.get_children())
+            window.select_record()
+            window.toggle_select_several()
+            root.update()
+            self.assertEqual(anchors, tuple((widget.winfo_rootx(), widget.winfo_rooty(), widget.winfo_width())
+                                             for widget in controls))
+            self.assertEqual(window.delete_button.cget("text"), "휴지통 (3)")
+            window.toggle_overview()
+            root.update()
+            self.assertTrue(window._overview_window.winfo_ismapped())
+            self.assertEqual(anchors, tuple((widget.winfo_rootx(), widget.winfo_rooty(), widget.winfo_width())
+                                             for widget in controls))
+        finally:
+            root.tk.call("tk", "scaling", previous_scaling)
+            if window is not None:
+                window.destroy()
+            destroy_tk(root)
 
     def test_long_selected_path_is_scrollable_and_does_not_hide_table(self):
         store = self.records()

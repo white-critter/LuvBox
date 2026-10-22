@@ -4,7 +4,7 @@
 
 ## 준비와 실행
 
-Windows 64비트와 Tkinter가 포함된 Python 3.12 이상을 사용합니다. 로그인 전용 파이프의 취소·시간 제한을 위해 Windows 비동기 파이프를 사용하며, 정확한 의존성 버전은 `requirements-lock.txt`의 제약으로 고정합니다. 별도 서버나 Node.js, X 개발자 API 키는 필요하지 않습니다.
+Windows 64비트와 Tkinter가 포함된 Python 3.12 이상을 사용합니다. 보조 Edge 로그인은 취소·시간 제한을 위해 Windows 비동기 파이프를 사용하며, 정확한 의존성 버전은 `requirements-lock.txt`의 제약으로 고정합니다. 별도 서버나 Node.js, X 개발자 API 키는 필요하지 않습니다.
 
 ```powershell
 .\setup.ps1
@@ -27,13 +27,17 @@ Pretendard 글꼴과 FFmpeg 실행 파일은 Git LFS 대상입니다. 새 체크
 | `luvbox/deletion.py`, `recycling.py` | 선택한 파일의 확인된 휴지통 이동과 삭제 기록 |
 | `luvbox/metadata.py`, `process_limits.py` | ExifTool 출처·작성자 기록과 검증, 도구의 출력·메모리 제한 |
 | `luvbox/media.py`, `preview.py`, `thumbcache.py` | GIF 변환, 로컬 미리보기와 섬네일 캐시 |
+| `luvbox/gallery.py`, `tools/benchmark_gallery.py` | 가시 범위 배치·디코딩, 상한이 있는 이미지 캐시와 스크롤 계측 |
 | `luvbox/review.py`, `review_gui.py`, `review_preview.py` | 파일별 저장 선택, 작업 제어, 움직이는 미리보기 |
-| `luvbox/browser_login.py`, `login.py` | 전용 Edge 로그인과 Windows DPAPI 보관 |
+| `luvbox/browser_bridge.py`, `assets/browser-extension/` | 기본 브라우저의 확장 기반 계정 연결과 일회성 로컬 전달 |
+| `luvbox/browser_login.py`, `login.py` | 보조 Edge 로그인, 연결 계정 선택과 Windows DPAPI 보관 |
 | `luvbox/settings.py`, `scheduled.py` | 사용자 설정, Windows 작업 스케줄러 연동 |
 | `luvbox/theme.py`, `app_icon.py`, `fonts.py` | 테마, 창·작업표시줄 아이콘, 프로세스 전용 글꼴 |
-| `build.ps1`, `tools/package_release.py` | 실행 폴더, 소스·라이선스를 포함한 배포 ZIP |
+| `build.ps1`, `tools/build_theme.py`, `tools/package_release.py` | 테마 이미지 사전 생성, 실행 폴더, 소스·라이선스를 포함한 배포 ZIP |
 
 Tk 위젯과 `PhotoImage`는 UI 스레드에서만 만듭니다. 작업 스레드·프로세스는 queue 또는 JSON 메시지로 결과를 전달하고, 창을 닫으면 디코더·콜백·이미지 참조를 정리합니다. UI 검증이나 테스트에서 실제 계정·저장 폴더를 사용하지 않습니다.
+
+메인 화면의 탐색 메뉴는 창 위에 고정합니다. 라이브러리도 탐색·검색·페이지 이동을 고정하고 결과 영역을 스크롤합니다. 갤러리는 고정 폭 셀로 배치해 같은 열수 안에서 리사이즈할 때 모든 타일을 다시 움직이지 않으며, Configure 요청과 scrollregion 갱신을 idle 단계로 병합합니다. 화면 크기 검사와 이벤트 루프 지연 측정을 구분하고, Linux의 Tk 측정값을 Windows의 실제 표시 프레임으로 해석하지 않습니다.
 
 ## 이름과 기존 데이터 호환성
 
@@ -46,13 +50,17 @@ Tk 위젯과 `PhotoImage`는 UI 스레드에서만 만듭니다. 작업 스레�
 
 이전 이름은 호환 입력으로만 인식합니다. 이전 앱 데이터 폴더는 전체를 새 이름으로 원자적으로 옮겨 설정·암호화 세션·DB·WAL을 함께 유지합니다. 이동할 수 없거나 두 데이터 폴더에 각각 설정·로그인·기록이 있으면 안내하고 중단하며 빈 설정으로 시작하지 않습니다. 이동 뒤 예전 실행 파일이나 예약이 다시 실행되어 `XlikeSaver`에 로그·실행 결과·캐시만 생겼다면 지우지 않고 `LuvBox\legacy\XlikeSaver-<시각>`으로 옮긴 뒤 계속합니다(실행 결과 확인 표식과 중단된 임시 파일 포함). 설정·로그인·기록까지 생겼다면 앱을 열 때 사용자가 고르면 같은 위치로 옮기고, 예약 실행은 오류로 끝나지 않고 알림으로 알립니다. 이전 이름으로만 남은 손상된 기록 DB도 ‘기록 복구’가 그 파일을 읽어 살리며 원본은 그대로 둡니다. SQLite가 전혀 읽지 못하면 이전처럼 백업으로 다시 만듭니다. 기록 복구로 고칠 수 없는 이전 이름의 다른 DB 손상에는 복구를 권하지 않습니다. 이전 DB와 저장 폴더 사본은 읽기 전용 SQLite 백업으로 새 이름에 가져오고 원본은 보존합니다. 이전 암호화 형식·완료 표식·사진 안 작성자 표식·예약 이름도 인식합니다. Git 커밋 이력의 옛 이름은 다시 쓰지 않습니다.
 
-버전은 `luvbox/__init__.py`에서 읽습니다. 현재 정식 버전 번호를 올리지 않는 수정판도 지원하며, 테마 이미지 보관본은 실행 파일 식별값을 반영해 새 빌드에서 갱신합니다. 기존 사용자 데이터를 초기화하거나 버전 문자열의 크기 비교로 마이그레이션하지 않습니다.
+버전은 `luvbox/__init__.py`에서 읽습니다. 현재 정식 버전 번호를 올리지 않는 수정판도 지원합니다. 테마 이미지 식별값은 버전·팔레트·이미지 명세·렌더러 revision을 반영하며 소스와 EXE에서 같습니다. 픽셀 렌더링·합성·PNG 인코딩을 바꿀 때는 `theme._RENDERER_REVISION`을 올리고 `tools/build_theme.py`를 실행합니다. 팔레트·명세 옵션은 식별값에 자동 반영됩니다. `--check`로 두 번들 이미지가 현재 렌더러와 일치하는지 확인할 수 있고, `build.ps1`도 PyInstaller 이전에 다시 생성합니다. [테마 자산 안내](../assets/theme/README.md)를 참고하세요. 기존 사용자 데이터를 초기화하거나 버전 문자열의 크기 비교로 마이그레이션하지 않습니다.
 
 ## 로그인과 예약
 
-기본 연결은 별도 Edge 창입니다. 새 임시 프로필과 상속된 전용 익명 파이프로 연결하고, 로그인된 X의 정상 `auth_token`을 Windows DPAPI로 저장합니다. TCP 디버깅 포트는 열지 않으며 사용 중인 Chrome·Edge 프로필을 직접 읽지 않습니다. 완료·취소·시간 초과 때 이번 연결 시도의 창과 임시 프로필만 정리합니다. 창을 닫을 때도 작업 정리를 기다립니다.
+기본 연결은 사용자가 설치한 브라우저 확장을 통해 현재 기본 브라우저의 X 로그인을 사용합니다. 앱이 일회성 `127.0.0.1` 리스너를 먼저 열고 기본 브라우저에 연결 페이지를 띄웁니다. 사용자는 앱과 확장의 8자리 연결 코드를 비교하고, 확장 자체 화면에서 현재 X 계정의 `@아이디`를 확인한 뒤 전달을 승인합니다. 토큰은 로컬 안내 페이지에 노출하지 않으며, 만료 시간·일회성 비밀 값·확장 origin 검사를 거쳐 이 PC의 앱에 전달합니다. 설치 절차와 지원 범위는 [브라우저 연결 안내](browser-login.md)에 있습니다.
 
-토큰 직접 입력과 Netscape `cookies.txt`도 지원합니다. 원문 토큰·쿠키·브라우저 프로필은 로그·설정·Git·배포 파일에 넣지 않습니다. 세션은 현재 Windows 사용자 범위로 암호화해 `%LOCALAPPDATA%\LuvBox\session.bin`에 보관합니다. `cookies.txt`는 암호화되지 않은 사용자 파일이며 경로를 설정에 저장하지 않습니다.
+Chromium 계열은 개발자 모드에서 `assets/browser-extension/chromium`을 압축해제된 확장으로 로드합니다. Firefox 128 이상은 `firefox/manifest.json`을 임시 부가 기능으로 로드하며 브라우저 재시작 뒤 다시 설치해야 합니다. Firefox 영구 배포에는 서명이 필요합니다. Safari·비공개 창·Firefox 컨테이너와 확장 설치를 막는 관리 정책은 지원하지 않습니다. 확장 설치나 정책 변경을 앱이 자동 수행하지 않습니다.
+
+다른 계정으로 새로 로그인하는 보조 수단은 **Edge에서 X 로그인**입니다. 새 임시 프로필과 상속된 전용 익명 파이프를 사용합니다. 완료·취소·시간 초과 때 이번 연결 시도의 창과 임시 프로필만 정리하고, 창을 닫을 때도 작업 정리를 기다립니다. 두 연결 방식 모두 사용 중인 브라우저 프로필 디렉터리를 직접 읽지 않습니다.
+
+정상 연결은 확인한 계정 정보를 X 계정란에 자동 반영하며, 연결한 여러 계정을 목록에서 선택할 수 있습니다. 계정 정보와 로그인 쿠키는 현재 Windows 사용자 범위의 DPAPI로 암호화해 `%LOCALAPPDATA%\LuvBox\session.bin`에 함께 보관합니다. 기존 암호화 세션과 토큰 직접 입력·Netscape `cookies.txt`도 지원하며, 확인된 계정 정보가 없는 연결은 사용자가 아이디를 직접 확인합니다. 원문 토큰·쿠키·브라우저 프로필은 로그·설정·Git·배포 파일에 넣지 않습니다. `cookies.txt`는 암호화되지 않은 사용자 파일이며 경로를 설정에 저장하지 않습니다.
 
 예약 작업 이름은 **LuvBox 자동 저장**입니다. 예약은 마지막으로 저장한 설정과 DPAPI 로그인 연결을 사용하고, `confirm_each=False`로 무인 실행합니다. cookies.txt 방식은 예약을 지원하지 않습니다. 등록된 실행 파일 경로가 달라지면 앱에서 예약을 갱신합니다. 예약 실패는 알림과 실행 기록에 남기며, 같은 계정·폴더의 작업이 이미 진행 중이면 겹쳐 저장하지 않습니다.
 
@@ -113,6 +121,7 @@ Windows 파일 점유는 전체 제한 시간 안에서 최대 약 1초 재시�
 프로젝트 루트에서 실행합니다. 테스트는 자체 임시 파일·앱 데이터를 사용하며 실제 X 다운로드는 별도 검증입니다. `tests/app_data_isolation.py`가 테스트 프로세스의 `LOCALAPPDATA`를 임시 폴더로 바꾸므로 이 PC의 실제 데이터 폴더를 옮기거나 읽지 않습니다. 기록 저장소를 만드는 새 테스트 모듈은 이 모듈을 import합니다.
 기록 조회·갤러리·미리보기의 성능 개선과 재현 명령은 [성능 검증](performance.md)에 있습니다. 공유 기록·로그인 연결·미디어 처리의 보안 경계와 자동 미리보기 보완은 [보안 검토](security-review.md)에 있습니다.
 후속 구조 정리·오류 재현·화면 검수는 [리팩토링 검수](refactoring-review.md)에 있습니다.
+클라우드 소스를 Windows 로컬 세션에서 이어받는 순서와 실제 화면·로그인·실행 파일 검사 범위는 [Windows 이어받기](windows-handoff.md)에 있습니다.
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
@@ -125,6 +134,8 @@ Windows 파일 점유는 전체 제한 시간 안에서 최대 약 1초 재시�
 
 `tools/ui_qa.py`는 예시 미디어·기록을 만들고 X 요청·실제 로그인 저장·예약 등록을 막은 상태로 라이트·다크·작은 화면을 캡처합니다. 산출물은 `.test-output/`에만 둡니다. 최신 전체 검사와 배포 검증의 범위·결과는 [검증 기록](verification.md)에 작성합니다.
 
-`build.ps1`은 `release/LuvBox-1.0.0/`의 폴더형 실행 파일을 만들고 `LuvBox-1.0.0.zip`, `SHA256-1.0.0.txt`를 만듭니다. 실행 파일은 같은 폴더의 `_internal`이 필요하므로 폴더 전체 또는 ZIP을 제공합니다. ZIP에는 해당 빌드의 앱 소스·고정 의존성 정보·FFmpeg/ExifTool 소스와 런타임·라이선스가 포함됩니다. [제3자 라이선스](../THIRD_PARTY_NOTICES.md)와 소스 재현 자료를 제거하지 않습니다.
+`tools/check_build_inputs.py --assets-only`는 준비 도구 실행 전에 Git LFS 글꼴·FFmpeg 런타임과 고정 레시피를 검사합니다. 옵션 없이 실행하면 FFmpeg 원본 아카이브와 ExifTool의 Windows 실행 파일·Perl 런타임도 확인합니다. 다운로드나 실행 파일 호출은 하지 않습니다. `build.ps1`은 준비 전후에 각각 이 검사를 실행하고, 배포 ZIP 생성도 전체 입력 검사를 먼저 통과해야 합니다. `.gitattributes`는 고정 체크섬에 맞춰 FFmpeg 레시피의 CRLF와 글꼴 라이선스의 LF를 유지합니다.
+
+`build.ps1`은 `release/LuvBox-1.0.0/`의 폴더형 실행 파일을 만들고 `LuvBox-1.0.0.zip`, `SHA256-1.0.0.txt`를 만듭니다. 실행 파일은 같은 폴더의 `_internal`이 필요하므로 폴더 전체 또는 ZIP을 제공합니다. Chromium·Firefox 연결 확장의 15개 파일과 브라우저 연결 안내는 PyInstaller 데이터와 배포 소스의 명시적 목록에 포함합니다. 확장 폴더 전체를 재귀 수집하지 않으며 새 확장 파일을 추가하면 `build.ps1`과 `tools/package_release.py`의 목록을 함께 갱신하고 `tests/test_package_release.py`를 실행합니다. ZIP에는 해당 빌드의 앱 소스·고정 의존성 정보·FFmpeg/ExifTool 소스와 런타임·라이선스가 포함됩니다. [제3자 라이선스](../THIRD_PARTY_NOTICES.md)와 소스 재현 자료를 제거하지 않습니다.
 
 빌드 뒤에는 배포 ZIP의 CRC·SHA256, 소스와 실행 파일의 일치, 한글 경로에 풀어 실행한 자체 점검, 개인 설정·로그인·DB·임시 파일의 미포함을 확인합니다. `build/`, `dist/`, `.test-output/`은 개발 산출물이며 Git에 넣지 않습니다. `release/`는 배포 산출물이므로 실행 중인 앱·등록된 예약 경로를 확인한 뒤 정리합니다. 소스 수정 후 실제 변경·검증 여부에 따라 커밋·배포하며, 같은 1.0.0 수정판은 대응 소스를 배포 ZIP에 함께 제공합니다.

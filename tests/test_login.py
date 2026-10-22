@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -215,6 +216,183 @@ class LoginTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in clean], ["auth_token"])
         self.assertEqual(clean[0]["value"], SECRET)
 
+
+
+class AccountSessionTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.session = Path(temporary.name) / "session.bin"
+        self.addCleanup(patch.stopall)
+        patch("luvbox.login.session_path", return_value=self.session).start()
+        # Reversible fixture ciphertext permits all store/load/selection paths
+        # on Linux while ensuring that no plaintext fixture is written to disk.
+        patch("luvbox.login._dpapi", side_effect=lambda data, **_: bytes(value ^ 0xA5 for value in data)).start()
+        self.first = {"user_id": "123", "handle": "First_User", "display_name": "첫 번째 계정"}
+        self.second = {"user_id": "456", "handle": "second_user", "display_name": "두 번째 계정"}
+
+    def test_connected_accounts_switch_cookies_and_keep_identity_inside_ciphertext(self):
+        self.assertEqual(login.save_authenticated_session(SECRET, self.first)["handle"], "first_user")
+        login.save_authenticated_session("second-token", self.second)
+        self.assertEqual(login.active_account()["user_id"], "456")
+        rows = login.list_accounts()
+        self.assertEqual([(row["user_id"], row["active"]) for row in rows], [("123", False), ("456", True)])
+        self.assertEqual(set(rows[0]), {"user_id", "handle", "display_name", "active"})
+        login.select_account("123")
+        self.assertEqual(login.active_account()["handle"], "first_user")
+        self.assertEqual(login.load_session_cookies()[0]["value"], SECRET)
+        binary = self.session.read_bytes()
+        for value in (SECRET, "first_user", "second_user", "첫 번째 계정"):
+            self.assertNotIn(value.encode(), binary)
+        self.assertEqual(list(self.session.parent.iterdir()), [self.session])
+
+    def test_reconnecting_same_stable_user_id_updates_handle_without_duplicate_account(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_authenticated_session("updated-token", dict(self.first, handle="renamed_user"))
+        self.assertEqual(len(login.list_accounts()), 1)
+        self.assertEqual(login.active_account()["handle"], "renamed_user")
+        self.assertEqual(login.load_session_cookies()[0]["value"], "updated-token")
+
+    def test_removing_one_account_preserves_other_and_last_removal_disconnects(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_authenticated_session("second-token", self.second)
+        login.remove_account("123")
+        self.assertEqual(login.active_account()["user_id"], "456")
+        self.assertEqual([row["user_id"] for row in login.list_accounts()], ["456"])
+        login.remove_account("456")
+        self.assertFalse(login.has_session())
+        self.assertFalse(self.session.exists())
+
+    def test_removing_active_account_selects_remaining_session_atomically(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_authenticated_session("second-token", self.second)
+        login.remove_account("456")
+        self.assertEqual(login.active_account()["user_id"], "123")
+        self.assertEqual(login.load_session_cookies()[0]["value"], SECRET)
+
+    def test_legacy_cookie_only_session_stays_usable_without_identity(self):
+        login._store_session_cookies([cookie(), cookie("ct0")])
+        self.assertTrue(login.has_session())
+        self.assertIsNone(login.active_account())
+        self.assertEqual(login.list_accounts(), [])
+        self.assertEqual([item["name"] for item in login.load_session_cookies()], ["auth_token", "ct0"])
+        self.assertEqual(login.load_session_cookies(account="previous_user")[0]["value"], SECRET)
+
+    def test_named_account_reads_its_saved_cookies_without_changing_active_selection(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_authenticated_session("second-token", self.second)
+        previous = self.session.read_bytes()
+        self.assertEqual(login.load_session_cookies(account="FIRST_USER")[0]["value"], SECRET)
+        self.assertEqual(login.active_account()["user_id"], "456")
+        self.assertEqual(self.session.read_bytes(), previous)
+        with self.assertRaises(ValueError) as error:
+            login.load_session_cookies(account="unknown_user")
+        self.assertNotIn(SECRET, str(error.exception))
+        self.assertEqual(self.session.read_bytes(), previous)
+
+    def test_named_account_rejects_ambiguous_reused_handle(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_authenticated_session("second-token", dict(self.second, handle=self.first["handle"]))
+        with self.assertRaises(ValueError):
+            login.load_session_cookies(account="first_user")
+
+    def test_manual_token_does_not_claim_previous_identity_and_keeps_known_accounts(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_auth_token("manual-token")
+        self.assertIsNone(login.active_account())
+        self.assertEqual(login.load_session_cookies()[0]["value"], "manual-token")
+        self.assertEqual(login.load_session_cookies(account="first_user")[0]["value"], "manual-token")
+        self.assertEqual(login.list_accounts()[0]["user_id"], "123")
+        self.assertFalse(login.list_accounts()[0]["active"])
+        login.select_account("123")
+        self.assertEqual(login.load_session_cookies()[0]["value"], SECRET)
+
+    def test_clearing_manual_session_retains_accounts_until_explicitly_selected(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_authenticated_session("second-token", self.second)
+        login.save_auth_token("manual-token")
+        login.clear_active_session()
+        self.assertFalse(login.has_session())
+        self.assertIsNone(login.active_account())
+        self.assertEqual([(row["user_id"], row["active"]) for row in login.list_accounts()],
+                         [("123", False), ("456", False)])
+        with self.assertRaises(ValueError):
+            login.load_session_cookies()
+        login.select_account("123")
+        self.assertEqual(login.load_session_cookies()[0]["value"], SECRET)
+        login.clear_active_session()
+        self.assertEqual(login.active_account()["user_id"], "456")
+        login.clear_active_session()
+        self.assertFalse(self.session.exists())
+        login.clear_active_session()
+
+    def test_failed_active_disconnect_preserves_ciphertext_and_hides_upstream_error(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_auth_token("manual-token")
+        previous = self.session.read_bytes()
+        with patch("luvbox.login.os.replace", side_effect=PermissionError(SECRET)):
+            with self.assertRaises(ValueError) as error:
+                login.clear_active_session()
+        self.assertNotIn(SECRET, str(error.exception))
+        self.assertEqual(self.session.read_bytes(), previous)
+        self.assertEqual(login.load_session_cookies()[0]["value"], "manual-token")
+        self.assertEqual(login.list_accounts()[0]["user_id"], "123")
+        self.assertEqual(list(self.session.parent.iterdir()), [self.session])
+
+    def test_selection_and_removal_failure_preserve_previous_active_account(self):
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_authenticated_session("second-token", self.second)
+        previous = self.session.read_bytes()
+        for operation in (lambda: login.select_account("123"), lambda: login.remove_account("456"),
+                          lambda: login.save_authenticated_session("new-token", self.first)):
+            with self.subTest(operation=operation), patch("luvbox.login.os.replace", side_effect=PermissionError(SECRET)):
+                with self.assertRaises(ValueError) as error:
+                    operation()
+                self.assertNotIn(SECRET, str(error.exception))
+            self.assertEqual(self.session.read_bytes(), previous)
+            self.assertEqual(list(self.session.parent.iterdir()), [self.session])
+
+    def test_cancellation_during_encryption_never_replaces_previous_session(self):
+        login.save_authenticated_session(SECRET, self.first)
+        previous = self.session.read_bytes()
+        cancel = threading.Event()
+
+        def encrypt_and_cancel(data, *, protect, **_):
+            if protect:
+                cancel.set()
+            return bytes(value ^ 0xA5 for value in data)
+
+        with patch("luvbox.login._dpapi", side_effect=encrypt_and_cancel):
+            with self.assertRaises(login.SessionCancelled):
+                login.save_authenticated_session("second-token", self.second, cancel=cancel)
+        self.assertEqual(self.session.read_bytes(), previous)
+        self.assertEqual(list(self.session.parent.iterdir()), [self.session])
+
+    def test_invalid_identity_and_paths_never_overwrite_or_leak_secrets(self):
+        login.save_authenticated_session(SECRET, self.first)
+        previous = self.session.read_bytes()
+        invalid = (None, {}, dict(self.first, user_id="../session"), dict(self.first, user_id="0"),
+                   dict(self.first, user_id=True), dict(self.first, handle="https://x.com/user"),
+                   dict(self.first, handle="a" * 16), dict(self.first, display_name=SECRET + "\n"))
+        for identity in invalid:
+            with self.subTest(identity_type=type(identity).__name__), self.assertRaises(ValueError) as error:
+                login.save_authenticated_session(SECRET, identity)
+            self.assertNotIn(SECRET, str(error.exception))
+            self.assertEqual(self.session.read_bytes(), previous)
+        for account_id in ("../session", "unknown", "777", None):
+            with self.subTest(account_id=account_id), self.assertRaises(ValueError):
+                login.select_account(account_id)
+        self.assertEqual(self.session.read_bytes(), previous)
+
+    def test_extra_cookies_are_filtered_and_cannot_replace_the_verified_token(self):
+        login.save_authenticated_session(SECRET, self.first, cookies=[cookie(), cookie("ct0"),
+                                                                      cookie(domain="example.org")])
+        self.assertEqual([item["name"] for item in login.load_session_cookies()], ["auth_token", "ct0"])
+        previous = self.session.read_bytes()
+        for cookies in ([cookie(value="different-token")], [cookie(domain="x.com.evil")], [cookie("ct0")]):
+            with self.subTest(count=len(cookies)), self.assertRaises(ValueError):
+                login.save_authenticated_session(SECRET, self.first, cookies=cookies)
+            self.assertEqual(self.session.read_bytes(), previous)
 
 
 if __name__ == "__main__":

@@ -15,20 +15,32 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from luvbox import __version__  # noqa: E402
+from tools.check_build_inputs import require_inputs  # noqa: E402
 
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
     "tools/draw_icon.py",
-    "entry.py", "setup.ps1", "build.ps1", "run.bat", "requirements.txt",
-    "requirements-dev.txt", "requirements-lock.txt", "README.md", "LICENSE",
+    "tools/build_theme.py", "assets/theme/README.md", "assets/theme/light.zip", "assets/theme/dark.zip",
+    "entry.py", "setup.ps1", "build.ps1", "run.bat", ".gitattributes", "requirements.txt",
+    "requirements-dev.txt", "requirements-lock.txt", "README.md", "WINDOWS_CONTINUE.md", "LICENSE",
     "THIRD_PARTY_NOTICES.md", "LuvBox.code-workspace",
-    "tools/exiftool/download.py", "tools/package_release.py", "tools/ui_qa.py",
-    "tools/benchmark_history.py", "tools/benchmark_preview.py",
+    "tools/exiftool/download.py", "tools/package_release.py", "tools/check_build_inputs.py", "tools/ui_qa.py",
+    "tools/benchmark_history.py", "tools/benchmark_preview.py", "tools/benchmark_gallery.py",
+    "tests/browser_bridge_extension_harness.js",
     "tools/ffmpeg/build.py", "tools/ffmpeg/README.md", "tools/ffmpeg/manifest.json",
     "tools/ffmpeg/configure-flags.json", "tools/ffmpeg/build-info.txt", "tools/ffmpeg/LICENSE.LGPLv2.1.txt",
     "tools/ffmpeg/COPYING.MinGW-w64-runtime.txt", "tools/ffmpeg/COPYING.GCC-runtime-exception.txt",
     "assets/fonts/Pretendard/Pretendard-Regular.ttf", "assets/fonts/Pretendard/Pretendard-Bold.ttf",
     "assets/fonts/Pretendard/OFL.txt", "assets/fonts/Pretendard/manifest.json",
+    "assets/browser-extension/README.md",
+    "assets/browser-extension/chromium/manifest.json", "assets/browser-extension/chromium/background.js",
+    "assets/browser-extension/chromium/profile.js", "assets/browser-extension/chromium/connect.js",
+    "assets/browser-extension/chromium/connect.html", "assets/browser-extension/chromium/connect.css",
+    "assets/browser-extension/chromium/extension-page.js",
+    "assets/browser-extension/firefox/manifest.json", "assets/browser-extension/firefox/background.js",
+    "assets/browser-extension/firefox/profile.js", "assets/browser-extension/firefox/connect.js",
+    "assets/browser-extension/firefox/connect.html", "assets/browser-extension/firefox/connect.css",
+    "assets/browser-extension/firefox/extension-page.js", "docs/browser-login.md", "docs/windows-handoff.md",
 )
 DEPENDENCIES = (
     "gallery_dl", "pillow", "requests", "urllib3", "certifi", "charset-normalizer", "idna",
@@ -135,6 +147,7 @@ def _runtime_files(manifest: dict[Path, Path], component: str) -> list[Path]:
 
 
 def package() -> None:
+    require_inputs(ROOT)
     subprocess.run([sys.executable, str(ROOT / "tools/ffmpeg/build.py"), "--check"], check=True)
     output = ROOT / "release"
     if output.is_symlink() or getattr(output, "is_junction", lambda: False)():

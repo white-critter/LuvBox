@@ -877,7 +877,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     from .login import load_session_cookies
 
                     try:
-                        session_cookies = load_session_cookies()
+                        session_cookies = load_session_cookies(account=normalized.account)
                     except (ValueError, OSError):
                         raise exception.AuthRequired("managed authenticated session") from None
                     for item in session_cookies:

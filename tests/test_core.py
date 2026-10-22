@@ -831,7 +831,7 @@ class CoreTests(unittest.TestCase):
                                        before_row=before_row)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
-        load.assert_called_once_with()
+        load.assert_called_once_with(account="myaccount")
         library_load.assert_not_called()
         self.assertEqual({cookie.domain for cookie in observed}, {".x.com"})
         auth = next(cookie for cookie in observed if cookie.name == "auth_token")
@@ -845,6 +845,36 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertEqual(events[-1]["status"], "error")
         self.assertIn("Edge에서 X 로그인", events[-1]["message"])
+
+    def test_managed_job_uses_target_account_session_without_switching_active_account(self):
+        from luvbox import login
+
+        def inspect(extractor, _row):
+            self.assertEqual(extractor.cookies.get("auth_token", domain=".x.com"), SECRET)
+
+        with patch("luvbox.login.session_path", return_value=self.base / "session.bin"), \
+                patch("luvbox.login._dpapi", side_effect=lambda data, **_: bytes(value ^ 0xA5 for value in data)):
+            login.save_authenticated_session(SECRET, {"user_id": "123", "handle": "myaccount"})
+            login.save_authenticated_session("other-account-token", {"user_id": "456", "handle": "other_account"})
+            previous = login.session_path().read_bytes()
+            code, events = self.worker([("100", 1, "photo", "alice")],
+                                       options=replace(self.options, auth_mode="managed"), before_row=inspect)
+            self.assertEqual(code, 0)
+            self.assertEqual(events[-1]["saved"], 1)
+            self.assertEqual(login.active_account()["user_id"], "456")
+            self.assertEqual(login.session_path().read_bytes(), previous)
+
+    def test_managed_job_rejects_another_accounts_login_before_downloading(self):
+        from luvbox import login
+
+        with patch("luvbox.login.session_path", return_value=self.base / "session.bin"), \
+                patch("luvbox.login._dpapi", side_effect=lambda data, **_: bytes(value ^ 0xA5 for value in data)):
+            login.save_authenticated_session(SECRET, {"user_id": "456", "handle": "other_account"})
+            code, events = self.worker([("100", 1, "photo", "alice")], options=replace(self.options, auth_mode="managed"))
+            self.assertNotEqual(code, 0)
+            self.assertEqual(events[-1]["status"], "error")
+            self.assertEqual(FakeHttpDownloader.downloaded, [])
+            self.assertNotIn(SECRET, str(events))
 
     def test_stop_before_managed_start_does_not_load_session(self):
         flag = self.base / "stop.flag"

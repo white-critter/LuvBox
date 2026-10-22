@@ -15,6 +15,11 @@ from luvbox import browser_login as login
 
 
 TOKEN = "offline-browser-token"
+IDENTITY = {"user_id": "123456789", "handle": "offline_user", "display_name": "Offline User"}
+
+
+def signed_in_cookies():
+    return [cookie(), dict(cookie(), name="twid", value="u%3D123456789")]
 
 
 def cookie(**changes):
@@ -32,7 +37,7 @@ class BrowserLoginTests(unittest.TestCase):
         self.connection = Mock(spec=login._PipeDevTools)
         self.connection.launch.side_effect = self.pipe_launch
         patch("luvbox.browser_login._PipeDevTools", return_value=self.connection).start()
-        self.save = patch("luvbox.browser_login.save_auth_token").start()
+        self.save = patch("luvbox.browser_login.save_authenticated_session", return_value=dict(IDENTITY)).start()
         self.cancel = threading.Event()
         self.process = Mock()
         self.process.poll.return_value = None
@@ -49,9 +54,14 @@ class BrowserLoginTests(unittest.TestCase):
     def call(self, connection, method, **kwargs):
         self.assertIs(connection, self.connection)
         if method == "Storage.getCookies":
-            return {"cookies": [cookie()]}
+            return {"cookies": signed_in_cookies()}
         if method == "Target.getTargets":
-            return {"targetInfos": [{"type": "page"}]}
+            return {"targetInfos": [{"type": "page", "url": "https://x.com/home", "targetId": "offline-page"}]}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "synthetic-session"}
+        if method == "Runtime.evaluate":
+            return {"result": {"value": {"url": "https://x.com/home", "profile": "https://x.com/Offline_User",
+                                           "accountText": "Offline User\n@Offline_User"}}}
         return {}
 
     def sign_in(self, **kwargs):
@@ -62,8 +72,9 @@ class BrowserLoginTests(unittest.TestCase):
         other.mkdir()
         (other / "marker").write_text("another running app")
         with patch("luvbox.browser_login.devtools_call", side_effect=self.call) as wire:
-            self.sign_in()
-        self.save.assert_called_once_with(TOKEN)
+            identity = self.sign_in()
+        self.assertEqual(identity, IDENTITY)
+        self.save.assert_called_once_with(TOKEN, IDENTITY, cancel=self.cancel)
         self.assertFalse(self.profile.exists())
         self.assertTrue((other / "marker").exists())
         self.assertIn("--remote-debugging-pipe", self.args)
@@ -85,7 +96,7 @@ class BrowserLoginTests(unittest.TestCase):
                 patch("urllib.request.build_opener", side_effect=AssertionError("login used HTTP discovery")), \
                 patch("luvbox.browser_login.devtools_call", side_effect=self.call):
             self.sign_in()
-        self.save.assert_called_once_with(TOKEN)
+        self.save.assert_called_once_with(TOKEN, IDENTITY, cancel=self.cancel)
 
     def test_unavailable_pipe_fails_closed_without_tcp_fallback_or_session_write(self):
         def call(connection, method, **kwargs):
@@ -105,7 +116,7 @@ class BrowserLoginTests(unittest.TestCase):
         self.process.poll.return_value = 0
         with patch("luvbox.browser_login.devtools_call", side_effect=self.call) as wire:
             self.sign_in()
-        self.save.assert_called_once_with(TOKEN)
+        self.save.assert_called_once_with(TOKEN, IDENTITY, cancel=self.cancel)
         self.assertEqual(wire.call_args.args[-1], "Browser.close")
         self.assertFalse(self.profile.exists())
 
@@ -234,6 +245,52 @@ class BrowserLoginTests(unittest.TestCase):
             self.sign_in()
         self.assertFalse(self.profile.exists())
         self.process.wait.assert_called_once()
+
+    def test_identity_is_not_inferred_from_token_or_viewed_profile(self):
+        pages = [{"url": "https://x.com/somebody_else", "targetId": "offline-page"}]
+        with patch("luvbox.browser_login.devtools_call", side_effect=self.call):
+            self.assertIsNone(login._authenticated_identity(self.connection, pages, [cookie()]))
+            self.assertEqual(login._authenticated_identity(self.connection, pages, signed_in_cookies()), IDENTITY)
+
+    def test_identity_rejects_untrusted_page_before_reading_its_dom(self):
+        for url in ("http://x.com/home", "https://x.com.evil/home", "https://other@x.com/home",
+                    "https://x.com:444/home", "https://x.com:invalid/home"):
+            with self.subTest(url=url), patch("luvbox.browser_login.devtools_call") as wire:
+                self.assertIsNone(login._authenticated_identity(
+                    self.connection, [{"url": url, "targetId": "offline-page"}], signed_in_cookies()))
+                wire.assert_not_called()
+
+    def test_identity_rejects_wrong_profile_and_account_switch_during_read(self):
+        pages = [{"url": "https://x.com/home", "targetId": "offline-page"}]
+        for profile, text in (("https://x.com.evil/Offline_User", "Offline User\n@Offline_User"),
+                              ("https://x.com/Offline_User?redirect=1", "Offline User\n@Offline_User"),
+                              ("https://x.com/Offline_User", "Other\n@other_user")):
+            def call(connection, method, **kwargs):
+                if method == "Runtime.evaluate":
+                    return {"result": {"value": {"url": "https://x.com/home", "profile": profile,
+                                                   "accountText": text}}}
+                return self.call(connection, method, **kwargs)
+            with self.subTest(profile=profile, text=text), patch("luvbox.browser_login.devtools_call", side_effect=call):
+                self.assertIsNone(login._authenticated_identity(self.connection, pages, signed_in_cookies()))
+        def switched(connection, method, **kwargs):
+            if method == "Storage.getCookies":
+                return {"cookies": [dict(cookie(), value="another-session"),
+                                     dict(cookie(), name="twid", value="u%3D777")]}
+            return self.call(connection, method, **kwargs)
+        with patch("luvbox.browser_login.devtools_call", side_effect=switched):
+            self.assertIsNone(login._authenticated_identity(self.connection, pages, signed_in_cookies()))
+        self.save.assert_not_called()
+
+    def test_user_id_requires_unexpired_unambiguous_x_cookie(self):
+        self.assertEqual(login._x_user_id(signed_in_cookies()), "123456789")
+        for invalid in (dict(cookie(), name="twid", value="u%3D123", domain="x.com.evil"),
+                        dict(cookie(), name="twid", value="u%3D123", path="/other"),
+                        dict(cookie(), name="twid", value="u%3D0"),
+                        dict(cookie(), name="twid", value="u%3D123\n"),
+                        dict(cookie(), name="twid", value="u%3D123", expires=time.time() - 5)):
+            with self.subTest(value=invalid["value"]):
+                self.assertEqual(login._x_user_id([invalid]), "")
+        self.assertEqual(login._x_user_id(signed_in_cookies() + [dict(cookie(), name="twid", value="u%3D777")]), "")
 
 
 

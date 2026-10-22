@@ -132,8 +132,12 @@ def encode(image) -> bytes:
 
 def decode(data: bytes):
     from PIL import Image
+    # preview imports cloud_only from this module; keep this import at call
+    # time so either public preview path can be the first one used.
+    from .preview import _prepare_decoders
 
     try:
+        _prepare_decoders(False)
         with Image.open(io.BytesIO(data), formats=("JPEG", "WEBP")) as picture:
             if picture.width > SIZE[0] * 2 or picture.height > SIZE[1] * 2:
                 return None

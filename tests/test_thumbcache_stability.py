@@ -35,6 +35,33 @@ class ThumbCacheStabilityTests(unittest.TestCase):
         with closing(thumbcache.Cache("offline", create=False)) as cache:
             return cache.total_bytes(), cache.stored([(str(index), 1, "photo") for index in range(100, 108)])
 
+    def test_first_cached_preview_decode_avoids_global_plugin_initialization(self):
+        from PIL import features
+        for file_format in ("JPEG", "WEBP"):
+            if file_format == "WEBP" and not features.check("webp"):
+                continue
+            with self.subTest(file_format=file_format):
+                path = self.root / ("cached." + file_format.lower())
+                self.image.save(path, file_format)
+                completed = subprocess.run([sys.executable, "-c", """
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from PIL import Image
+from luvbox import thumbcache
+assert not Image.OPEN, tuple(Image.OPEN)
+with patch.object(Image, 'init', side_effect=AssertionError('global plugin initialization')):
+    image = thumbcache.decode(Path(sys.argv[1]).read_bytes())
+assert image is not None
+assert image.size == thumbcache.SIZE
+assert image.mode == 'RGBA'
+assert 'PIL.EpsImagePlugin' not in sys.modules
+assert 'PIL.PdfImagePlugin' not in sys.modules
+image.close()
+""", str(path)], cwd=Path(__file__).resolve().parents[1], capture_output=True,
+                    text=True, timeout=10)
+                self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
     def test_gallery_callbacks_share_pruning_across_reopened_connections(self):
         size = len(thumbcache.encode(self.image))
         with patch.object(thumbcache, "LIMIT_BYTES", size * 2), patch.object(thumbcache, "_PRUNE_EVERY", 2):

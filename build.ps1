@@ -2,10 +2,16 @@
 Set-Location -LiteralPath $PSScriptRoot
 $taskPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 if (-not (Test-Path -LiteralPath $taskPython)) { throw '먼저 .\setup.ps1을 실행하세요.' }
+& $taskPython 'tools\check_build_inputs.py' '--assets-only'
+if ($LASTEXITCODE -ne 0) { throw '빌드 입력이 준비되지 않았습니다. 위의 Git LFS·체크섬 안내를 확인하세요.' }
 & $taskPython 'tools\exiftool\download.py'
 if ($LASTEXITCODE -ne 0) { throw 'ExifTool 준비에 실패했습니다.' }
 & $taskPython 'tools\ffmpeg\build.py' '--check'
 if ($LASTEXITCODE -ne 0) { throw '번들 GIF 변환 도구 확인에 실패했습니다. tools\ffmpeg\README.md를 확인하세요.' }
+& $taskPython 'tools\build_theme.py'
+if ($LASTEXITCODE -ne 0) { throw '테마 이미지 준비에 실패했습니다.' }
+& $taskPython 'tools\check_build_inputs.py'
+if ($LASTEXITCODE -ne 0) { throw '필수 빌드 파일 확인에 실패했습니다. setup.ps1의 준비 과정을 완료하세요.' }
 
 $version = (& $taskPython -c "from luvbox import __version__; print(__version__)" | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') { throw '버전을 읽지 못했습니다. luvbox\__init__.py를 확인하세요.' }
@@ -31,6 +37,24 @@ if (Test-Path -LiteralPath $target) {
     --add-data 'tools\exiftool\runtime;tools/exiftool/runtime' `
     --add-data 'tools\ffmpeg\runtime;tools/ffmpeg/runtime' `
     --add-data 'assets\fonts\Pretendard;assets/fonts/Pretendard' `
+    --add-data 'assets\theme\light.zip;assets/theme' `
+    --add-data 'assets\theme\dark.zip;assets/theme' `
+    --add-data 'assets\browser-extension\README.md;assets/browser-extension' `
+    --add-data 'assets\browser-extension\chromium\manifest.json;assets/browser-extension/chromium' `
+    --add-data 'assets\browser-extension\chromium\background.js;assets/browser-extension/chromium' `
+    --add-data 'assets\browser-extension\chromium\profile.js;assets/browser-extension/chromium' `
+    --add-data 'assets\browser-extension\chromium\connect.js;assets/browser-extension/chromium' `
+    --add-data 'assets\browser-extension\chromium\connect.html;assets/browser-extension/chromium' `
+    --add-data 'assets\browser-extension\chromium\connect.css;assets/browser-extension/chromium' `
+    --add-data 'assets\browser-extension\chromium\extension-page.js;assets/browser-extension/chromium' `
+    --add-data 'assets\browser-extension\firefox\manifest.json;assets/browser-extension/firefox' `
+    --add-data 'assets\browser-extension\firefox\background.js;assets/browser-extension/firefox' `
+    --add-data 'assets\browser-extension\firefox\profile.js;assets/browser-extension/firefox' `
+    --add-data 'assets\browser-extension\firefox\connect.js;assets/browser-extension/firefox' `
+    --add-data 'assets\browser-extension\firefox\connect.html;assets/browser-extension/firefox' `
+    --add-data 'assets\browser-extension\firefox\connect.css;assets/browser-extension/firefox' `
+    --add-data 'assets\browser-extension\firefox\extension-page.js;assets/browser-extension/firefox' `
+    --add-data 'docs\browser-login.md;docs' `
     --add-data 'README.md;.' --add-data 'LICENSE;.' --add-data 'THIRD_PARTY_NOTICES.md;.' entry.py
 if ($LASTEXITCODE -ne 0) { throw '실행 파일 빌드에 실패했습니다.' }
 & $taskPython 'tools\package_release.py'

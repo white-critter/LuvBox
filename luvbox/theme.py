@@ -266,23 +266,19 @@ def _image_element(style, name, images, *, border=0, minimum=(0, 0), padding=0):
 
 
 _ASSET_CACHE: dict[str, dict[str, bytes]] = {}
+# Bump when pixel drawing/PNG encoding changes. Palette and image-spec edits
+# are included automatically in the key; renderer implementation edits are not.
+# Regenerate the two bundled archives with tools/build_theme.py afterwards.
+_RENDERER_REVISION = 1
 
 
 def _asset_key() -> str:
-    """Identify the generated images: palette, mode and the drawing code."""
+    """Stable in source and frozen builds, so shipped PNGs work on first use."""
     from . import __version__
-    try:
-        code = Path(__file__).read_bytes()
-    except OSError:
-        # A frozen build has no source file. Fixes were re-released under the
-        # same version, so the executable (size and build time) names the code.
-        try:
-            status = os.stat(sys.executable)
-            code = f"{status.st_size}:{status.st_mtime_ns}".encode("ascii")
-        except OSError:
-            code = b""
     palette = DARK if _active_mode == "dark" else LIGHT
-    material = json.dumps([__version__, _active_mode, palette], sort_keys=True).encode("utf-8") + code
+    specs = [(name, generator.__name__, options) for name, generator, options in _asset_specs()]
+    material = json.dumps([__version__, _RENDERER_REVISION, _active_mode, palette, _DARK_SHADES, specs],
+                          sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(material).hexdigest()[:20]
 
 
@@ -297,15 +293,35 @@ def _asset_cache_path(key: str) -> Path | None:
 
 def _read_asset_cache(key: str) -> dict[str, bytes] | None:
     location = _asset_cache_path(key)
-    if location is None or not location.is_file():
+    return _read_asset_archive(location) if location is not None else None
+
+
+def _bundled_asset_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "assets" / "theme" / f"{_active_mode}.zip"
+
+
+def _asset_manifest(key: str) -> dict:
+    return {"key": key, "mode": _active_mode, "renderer_revision": _RENDERER_REVISION}
+
+
+def _read_bundled_assets(key: str) -> dict[str, bytes] | None:
+    return _read_asset_archive(_bundled_asset_path(), manifest=_asset_manifest(key))
+
+
+def _read_asset_archive(location: Path, *, manifest=None) -> dict[str, bytes] | None:
+    if not location.is_file():
         return None
     try:
         with zipfile.ZipFile(location) as archive:
             names = archive.namelist()
-            if len(names) != len(_ASSET_NAMES) or set(names) != _ASSET_NAMES:
+            expected = _ASSET_NAMES | {"manifest.json"} if manifest is not None else _ASSET_NAMES
+            if len(names) != len(expected) or set(names) != expected:
                 return None
-            assets = {name: archive.read(name) for name in names}
-    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, EOFError, zlib.error):
+            if manifest is not None and json.loads(archive.read("manifest.json")) != manifest:
+                return None
+            assets = {name: archive.read(name) for name in _ASSET_NAMES}
+    except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, EOFError, zlib.error,
+            ValueError, UnicodeError):
         return None
     return assets if all(data.startswith(b"\x89PNG\r\n\x1a\n") for data in assets.values()) else None
 
@@ -424,10 +440,10 @@ def _control_images(root, style):
         return images[name]
 
     surfaces = [(suffix, globals()[color]) for suffix, color in _SURFACES]
-    # Drawing ~110 antialiased images in Python took about a second on every
-    # start and theme switch; the result only depends on version and palette.
+    # Ship both appearances so first launch and the first theme switch need
+    # only decode PNGs. A missing/stale bundle still has the cache/draw fallback.
     key = _asset_key()
-    assets = _ASSET_CACHE.get(key) or _read_asset_cache(key)
+    assets = _ASSET_CACHE.get(key) or _read_asset_cache(key) or _read_bundled_assets(key)
     if assets is not None:
         try:
             for name, data in assets.items():
@@ -808,6 +824,8 @@ class Progressbar(tk.Canvas):
                           "maximum": self._check_maximum(maximum), "length": length}
         self._display_value = self._target()
         self._timer = None
+        self._frame_interval = .016
+        self._next_frame = None
         self._running = False
         self._phase_start = time.monotonic()
         self._last_frame = self._phase_start
@@ -889,8 +907,8 @@ class Progressbar(tk.Canvas):
             values["width"] = changes["length"]
         result = super().configure(**values) if values or not changes else None
         if changes:
-            self._last_frame = time.monotonic()
-            self._draw()
+            if "mode" in changes or "length" in changes:
+                self._draw()
             self._schedule()
         return result
 
@@ -908,8 +926,26 @@ class Progressbar(tk.Canvas):
         self.configure(**{key: value})
 
     def start(self, interval=None):
+        try:
+            milliseconds = 16. if interval is None else float(interval)
+        except (TypeError, ValueError) as error:
+            raise tk.TclError("interval must be a positive finite number") from error
+        if not math.isfinite(milliseconds) or milliseconds <= 0:
+            raise tk.TclError("interval must be a positive finite number")
+        # Tk timers have millisecond resolution; never spin on sub-ms input.
+        frame_interval = max(.001, milliseconds / 1000)
+        if self._running and frame_interval == self._frame_interval:
+            return
+        now = time.monotonic()
+        if not self._running:
+            self._phase_start = now
         self._running = True
-        self._phase_start = self._last_frame = time.monotonic()
+        self._frame_interval = frame_interval
+        self._last_frame = now
+        self._next_frame = now + frame_interval
+        if self._timer is not None:
+            self.after_cancel(self._timer)
+            self._timer = None
         self._schedule()
 
     def stop(self):
@@ -917,6 +953,7 @@ class Progressbar(tk.Canvas):
         if self._timer is not None:
             self.after_cancel(self._timer)
             self._timer = None
+        self._next_frame = None
         self._draw()
 
     def step(self, amount=1):
@@ -929,15 +966,32 @@ class Progressbar(tk.Canvas):
             pass
 
     def _schedule(self):
-        if self._timer is None and (self._running or
-                self._progress["mode"] == "determinate" and abs(self._display_value - self._target()) > .0005):
-            self._timer = self.after(20, self._tick)
+        if self._timer is not None:
+            return
+        if not (self._running or self._progress["mode"] == "determinate" and
+                abs(self._display_value - self._target()) > .0005):
+            self._next_frame = None
+            return
+        now = time.monotonic()
+        if self._next_frame is None:
+            self._last_frame = now
+            self._next_frame = now + self._frame_interval
+        elif self._next_frame <= now:
+            missed = math.floor((now - self._next_frame) / self._frame_interval) + 1
+            self._next_frame += missed * self._frame_interval
+        delay = max(1, math.ceil(round((self._next_frame - now) * 1000, 6)))
+        self._timer = self.after(delay, self._tick)
 
     def _tick(self):
         self._timer = None
         now = time.monotonic()
-        elapsed = min(.1, max(.001, now - self._last_frame))
+        elapsed = max(0., now - self._last_frame)
         self._last_frame = now
+        # Keep deadlines on the original cadence rather than adding drawing
+        # time to every interval. A busy UI skips missed frames without a burst.
+        deadline = self._next_frame if self._next_frame is not None else now
+        missed = max(1, math.floor((now - deadline) / self._frame_interval) + 1)
+        self._next_frame = deadline + missed * self._frame_interval
         if self._progress["mode"] == "determinate":
             target = self._target()
             self._display_value += (target - self._display_value) * (1 - math.exp(-elapsed / .075))
@@ -996,6 +1050,7 @@ class Progressbar(tk.Canvas):
         if self._timer is not None:
             self.after_cancel(self._timer)
             self._timer = None
+        self._next_frame = None
         if self._variable is not None and self._variable_trace is not None:
             self._variable.trace_remove("write", self._variable_trace)
             self._variable_trace = None
@@ -1091,24 +1146,38 @@ class ScrollableContent(ttk.Frame):
 
     def _focus_visible(self, event):
         widget = event.widget
-        if self._owns_content(widget) and widget not in (self.canvas, self.content):
+        if (self.focus_get() is widget and self._owns_content(widget)
+                and widget not in (self.canvas, self.content)):
             # Focus can follow a scroll before screen coordinates are updated.
             def reveal():
                 self._focus_timers.discard(timer)
-                self._ensure_visible(widget)
+                if self.focus_get() is widget:
+                    self._ensure_visible(widget)
             timer = self.after_idle(reveal)
             self._focus_timers.add(timer)
 
     def _ensure_visible(self, widget):
         if not widget.winfo_exists() or not self.scrollbar.winfo_manager():
             return
-        top = widget.winfo_rooty() - self.canvas.winfo_rooty()
+        # A Canvas updates its scroll offset before child HWND/X window root
+        # coordinates catch up. Sum stable coordinates inside the content
+        # instead, then compare with the Canvas's current logical viewport.
+        top, current = 0, widget
+        while current is not self.content:
+            if current is None:
+                return
+            top += current.winfo_y()
+            current = getattr(current, "master", None)
+        top += self.canvas.coords(self.window)[1]
         bottom = top + widget.winfo_height()
         height = self.canvas.winfo_height()
-        delta = top - 24 if top < 0 else bottom - height + 24 if bottom > height else 0
+        view_top = self.canvas.canvasy(0)
+        delta = top - view_top - 24 if top < view_top else bottom - view_top - height + 24 if bottom > view_top + height else 0
         if delta:
-            offset = self.canvas.canvasy(0) + delta
-            self.canvas.yview_moveto(max(0, offset) / self.content.winfo_height())
+            offset = view_top + delta
+            bounds = tuple(float(value) for value in self.tk.splitlist(self.canvas.cget("scrollregion")))
+            content_height = max(1, bounds[3] - bounds[1])
+            self.canvas.yview_moveto(max(0, offset) / content_height)
 
     def destroy(self):
         # Child .master links and our convenience attributes form Python

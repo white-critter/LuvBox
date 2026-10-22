@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 import queue
 import subprocess
+import sys
 import tempfile
 from threading import Event
 import unittest
@@ -32,6 +33,86 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(result.image.size, (220, 147))
         self.assertEqual(result.image.mode, "RGBA")
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+
+    def fresh_decoder(self, script, *paths):
+        # Saving a fixture imports Pillow plugins. A new interpreter is needed
+        # to exercise the application's first decode rather than a warm one.
+        completed = subprocess.run(
+            [sys.executable, "-c", script, *(str(path) for path in paths)],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True,
+            text=True, timeout=10)
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_first_raster_decode_avoids_global_plugin_initialization_even_when_renamed(self):
+        from PIL import features
+        for file_format, suffix in (("JPEG", ".jpg"), ("PNG", ".png"),
+                                    ("WEBP", ".webp"), ("GIF", ".gif"),
+                                    ("PNG", ".jpg")):
+            if file_format == "WEBP" and not features.check("webp"):
+                continue
+            with self.subTest(file_format=file_format, suffix=suffix):
+                path = self.root / (file_format + suffix)
+                with Image.new("RGB", (320, 160), "red") as image:
+                    image.save(path, format=file_format)
+                self.fresh_decoder("""
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from PIL import Image
+from luvbox.preview import thumbnail
+assert not Image.OPEN, tuple(Image.OPEN)
+with patch.object(Image, 'init', side_effect=AssertionError('global plugin initialization')):
+    result = thumbnail(Path(sys.argv[1]))
+assert result.image is not None, result.note
+assert result.image.size == (220, 110), result.image.size
+assert result.image.mode == 'RGBA'
+assert 'PIL.EpsImagePlugin' not in sys.modules
+assert 'PIL.PdfImagePlugin' not in sys.modules
+result.image.close()
+""", path)
+
+    def test_first_disguised_eps_decode_rejects_without_loading_external_renderer(self):
+        path = self.root / "disguised.png"
+        path.write_bytes(b"%!PS-Adobe-3.0 EPSF-3.0\n%%BoundingBox: 0 0 16 16\nshowpage\n")
+        self.fresh_decoder("""
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from PIL import Image
+from luvbox.preview import thumbnail
+assert not Image.OPEN, tuple(Image.OPEN)
+with patch.object(Image, 'init', side_effect=AssertionError('global plugin initialization')):
+    result = thumbnail(Path(sys.argv[1]))
+assert result.image is None
+assert 'PIL.EpsImagePlugin' not in sys.modules
+assert 'PIL.PdfImagePlugin' not in sys.modules
+""", path)
+
+    def test_first_video_frame_decode_avoids_global_plugin_initialization(self):
+        path = self.root / "video.mp4"
+        path.write_bytes(b"offline-video")
+        frame = self.root / "frame.bmp"
+        with Image.new("RGB", (220, 100), "green") as image:
+            image.save(frame)
+        self.fresh_decoder("""
+import subprocess
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from PIL import Image
+from luvbox.preview import thumbnail
+assert not Image.OPEN, tuple(Image.OPEN)
+completed = subprocess.CompletedProcess([], 0, stdout=Path(sys.argv[2]).read_bytes(), stderr=b'')
+with patch.object(Image, 'init', side_effect=AssertionError('global plugin initialization')), \\
+        patch('luvbox.media.ffmpeg_path', return_value=Path('bundled-ffmpeg.exe')), \\
+        patch('luvbox.preview.subprocess.run', return_value=completed):
+    result = thumbnail(Path(sys.argv[1]))
+assert result.image is not None, result.note
+assert result.image.size == (220, 100), result.image.size
+assert 'PIL.EpsImagePlugin' not in sys.modules
+assert 'PIL.PdfImagePlugin' not in sys.modules
+result.image.close()
+""", path, frame)
 
     def test_disguised_eps_never_dispatches_an_external_renderer(self):
         path = self.root / "photo.jpg"

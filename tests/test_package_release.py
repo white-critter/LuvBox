@@ -1,13 +1,119 @@
-"""Release input validation uses only disposable build-manifest fixtures."""
+"""Check shipped browser assets and disposable release-manifest fixtures."""
 
+from html.parser import HTMLParser
+import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
 from tools import package_release
+
+
+class _PageResources(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.files = set()
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        resource = attrs.get("src") if tag == "script" else attrs.get("href") if tag == "link" else None
+        if resource:
+            self.files.add(resource)
+
+
+class BrowserExtensionPackagingTests(unittest.TestCase):
+    def test_manifests_and_connection_pages_have_all_resources_in_source_archive(self):
+        root = Path(__file__).resolve().parents[1]
+        shipped = set(package_release.SOURCE_FILES)
+        self.assertEqual(len(shipped), len(package_release.SOURCE_FILES))
+        for name in ("assets/browser-extension/README.md", "docs/browser-login.md",
+                     "tests/browser_bridge_extension_harness.js"):
+            self.assertIn(name, shipped)
+            self.assertTrue((root / name).is_file(), name)
+        for browser in ("chromium", "firefox"):
+            with self.subTest(browser=browser):
+                folder = f"assets/browser-extension/{browser}"
+                manifest = json.loads((root / folder / "manifest.json").read_text(encoding="utf-8"))
+                background = manifest["background"]
+                resources = {"manifest.json", "connect.html", *background.get("scripts", [])}
+                if "service_worker" in background:
+                    resources.add(background["service_worker"])
+                for script in manifest["content_scripts"]:
+                    resources.update(script["js"])
+                    resources.update(script.get("css", []))
+                page = _PageResources()
+                page.feed((root / folder / "connect.html").read_text(encoding="utf-8"))
+                resources.update(page.files)
+                for resource in resources:
+                    name = f"{folder}/{resource}"
+                    self.assertIn(name, shipped, name)
+                    self.assertTrue((root / name).is_file(), name)
+
+    def test_windows_build_bundles_each_extension_resource_and_login_guide_explicitly(self):
+        root = Path(__file__).resolve().parents[1]
+        build = (root / "build.ps1").read_text(encoding="utf-8-sig")
+        data = {}
+        for argument in re.findall(r"--add-data\s+'([^']+)'", build):
+            source, destination = argument.split(";", 1)
+            data[source.replace("\\", "/")] = destination.replace("\\", "/")
+        required = [name for name in package_release.SOURCE_FILES
+                    if name.startswith("assets/browser-extension/") or name == "docs/browser-login.md"]
+        self.assertGreater(len(required), 2)
+        for name in required:
+            self.assertEqual(data.get(name), Path(name).parent.as_posix(), name)
+        self.assertNotIn("assets/browser-extension", data)  # Never bundle unknown files recursively.
+
+
+class ThemePackagingTests(unittest.TestCase):
+    def test_build_generates_then_collects_only_the_two_theme_archives(self):
+        root = Path(__file__).resolve().parents[1]
+        build = (root / "build.ps1").read_text(encoding="utf-8-sig")
+        self.assertLess(build.index("'tools\\build_theme.py'"), build.index("-m PyInstaller"))
+        data = {}
+        for argument in re.findall(r"--add-data\s+'([^']+)'", build):
+            source, destination = argument.split(";", 1)
+            data[source.replace("\\", "/")] = destination.replace("\\", "/")
+        for name in ("assets/theme/light.zip", "assets/theme/dark.zip"):
+            self.assertEqual(data.get(name), "assets/theme")
+            self.assertIn(name, package_release.SOURCE_FILES)
+            self.assertTrue((root / name).is_file())
+        for name in ("tools/build_theme.py", "assets/theme/README.md"):
+            self.assertIn(name, package_release.SOURCE_FILES)
+            self.assertTrue((root / name).is_file())
+        self.assertNotIn("assets/theme", data)
+
+
+class BuildInputPackagingTests(unittest.TestCase):
+    def test_build_checks_lfs_before_prepare_then_complete_inputs_before_pyinstaller(self):
+        root = Path(__file__).resolve().parents[1]
+        build = (root / "build.ps1").read_text(encoding="utf-8-sig")
+        early = build.index("'tools\\check_build_inputs.py' '--assets-only'")
+        prepare = build.index("'tools\\exiftool\\download.py'")
+        complete = build.index("'tools\\check_build_inputs.py'\n")
+        self.assertLess(early, prepare)
+        self.assertLess(prepare, complete)
+        self.assertLess(complete, build.index("-m PyInstaller"))
+        self.assertIn("tools/check_build_inputs.py", package_release.SOURCE_FILES)
+        self.assertIn(".gitattributes", package_release.SOURCE_FILES)
+        self.assertTrue((root / "tools/check_build_inputs.py").is_file())
+        # Python test files are shipped by the existing tests/*.py allowlist.
+        self.assertTrue((root / "tests/test_build_inputs.py").is_file())
+
+    def test_package_refuses_missing_pinned_inputs_before_prepare_or_output(self):
+        with tempfile.TemporaryDirectory(prefix="luvbox-package-preflight-") as folder:
+            root = Path(folder)
+            with patch.object(package_release, "ROOT", root), \
+                    patch.object(package_release, "require_inputs", side_effect=ValueError("missing pinned inputs")) as check, \
+                    patch.object(package_release.subprocess, "run") as prepare:
+                with self.assertRaisesRegex(ValueError, "missing pinned inputs"):
+                    package_release.package()
+            check.assert_called_once_with(root)
+            prepare.assert_not_called()
+            self.assertFalse((root / "release").exists())
 
 
 class ReleaseManifestTests(unittest.TestCase):

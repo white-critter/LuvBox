@@ -8,6 +8,7 @@ thread. Closing never waits on Tk's thread; ``finished`` signals closed handles.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from io import BytesIO
 import os
 from pathlib import Path
@@ -21,12 +22,12 @@ import warnings
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from .preview import MAX_PIXELS, PHOTO_FORMATS, oriented_thumbnail
+from .preview import MAX_PIXELS, PHOTO_FORMATS, _prepare_decoders, oriented_thumbnail
 from .thumbcache import cloud_only
 
 
 REVIEW_SIZE = (640, 400)
-PLAYBACK_FPS = 12
+PLAYBACK_FPS = 30
 LOOP_SECONDS = 30
 FRAME_QUEUE_SIZE = 3
 DECODER_TIMEOUT = 8
@@ -35,8 +36,19 @@ DECODER_TIMEOUT = 8
 @dataclass(frozen=True)
 class ReviewFrame:
     image: Image.Image | None
-    duration_ms: int = 0
+    duration_ms: float = 0.0
     note: str = ""
+
+
+class _FrameQueue(queue.Queue):
+    """Wake a bounded producer as soon as the viewer consumes a frame."""
+
+    def wait_for_space(self, stop):
+        # Queue.get() notifies this condition. Keep its mutex separate from
+        # the preview's lifecycle lock; close() takes that lock before draining.
+        with self.not_full:
+            self.not_full.wait_for(lambda: stop.is_set() or self._qsize() < self.maxsize,
+                                   timeout=.05)
 
 
 class _GifSampler:
@@ -53,7 +65,13 @@ class _GifSampler:
     def add(self, original, duration):
         while duration:
             if self.image is None:
-                self.image = ImageOps.contain(original, self.size, Image.Resampling.LANCZOS).convert("RGBA")
+                # Keep small sources at their original resolution. Enlarging
+                # here only makes the viewer shrink or enlarge those pixels a
+                # second time for its actual canvas on every frame.
+                if original.width <= self.size[0] and original.height <= self.size[1]:
+                    self.image = original.convert("RGBA")
+                else:
+                    self.image = ImageOps.contain(original, self.size, Image.Resampling.LANCZOS).convert("RGBA")
             # A long source frame needs one held image, rather than a copy
             # for every sampling interval in which its pixels stay the same.
             consumed = (duration // self.interval * self.interval
@@ -64,7 +82,7 @@ class _GifSampler:
             if self.duration >= self.interval:
                 image, self.image = self.image, None
                 elapsed, self.duration = self.duration, 0
-                if not self.send(ReviewFrame(image, elapsed, self.note)):
+                if not self.send(ReviewFrame(image, float(elapsed), self.note)):
                     return False
         return True
 
@@ -100,7 +118,7 @@ class ReviewPreview:
         self.path = Path(path).absolute()
         self.media_type = str(media_type)
         self.size = (width, height)
-        self.frames = queue.Queue(maxsize=FRAME_QUEUE_SIZE)
+        self.frames = _FrameQueue(maxsize=FRAME_QUEUE_SIZE)
         self.stop = Event()
         self.finished = Event()
         self._lock = Lock()
@@ -127,7 +145,9 @@ class ReviewPreview:
                     return True
                 except queue.Full:
                     pass
-            self.stop.wait(.05)
+            # A timeout still refreshes the watchdog heartbeat while a paused
+            # viewer leaves the queue full, but normal delivery needs no poll.
+            self.frames.wait_for_space(self.stop)
         if frame.image is not None:
             frame.image.close()
         return False
@@ -217,6 +237,7 @@ class ReviewPreview:
             time.sleep(.01)
 
     def _photo(self, signature):
+        _prepare_decoders(False)
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(self.path, formats=PHOTO_FORMATS) as original:
@@ -241,8 +262,11 @@ class ReviewPreview:
     def _gif(self, signature):
         """Read one GIF frame at a time; sample fast GIFs without slowing them."""
         note = f"GIF · 소리 없이 재생 · 처음 {LOOP_SECONDS}초 반복"
-        interval = max(1, round(1000 / PLAYBACK_FPS))
+        # Exact sampling boundaries preserve GIF timing across short loops and
+        # long holds. Repeating 33ms would play a 30fps timeline too quickly.
+        interval = Fraction(1000, PLAYBACK_FPS)
         sampler = _GifSampler(self.size, interval, self._send, note)
+        _prepare_decoders(False)
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(self.path, formats=("GIF",)) as original:
@@ -286,6 +310,7 @@ class ReviewPreview:
         if executable is None:
             self._send(ReviewFrame(None, note="재생 도구를 찾지 못했습니다. 건너뛰거나 저장을 선택할 수 있습니다."))
             return
+        _prepare_decoders(True)
         width, height = self.size
         max_frame_bytes = width * height * 4 + 4096
         caption = "GIF" if self.media_type in {"animated_gif", "gif"} else "동영상"
@@ -332,7 +357,7 @@ class ReviewPreview:
                         if source.width > width or source.height > height:
                             raise OSError("unbounded preview dimensions")
                         image = source.convert("RGB")
-                    if not self._send(ReviewFrame(image, max(1, round(1000 / PLAYBACK_FPS)), note)):
+                    if not self._send(ReviewFrame(image, 1000 / PLAYBACK_FPS, note)):
                         return
                     emitted += 1
             finally:
