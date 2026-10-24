@@ -31,7 +31,8 @@ Dialog {
     width: Math.min(520, parent ? Math.max(240, parent.width - 32) : 520)
     readonly property int windowLimit: parent ? Math.max(180, parent.height - 32) : 760
     readonly property int chromeHeight: topPadding + bottomPadding
-        + (header ? header.implicitHeight : 0) + (footer ? footer.implicitHeight : 0)
+        + (header && header.implicitHeight > 0 ? header.implicitHeight + spacing : 0)
+        + (footer && footer.implicitHeight > 0 ? footer.implicitHeight + spacing : 0)
     implicitHeight: contentColumn.implicitHeight + chromeHeight
     height: Math.min(implicitHeight, windowLimit)
     x: parent ? Math.round((parent.width - width) / 2) : 0

@@ -360,25 +360,56 @@ ApplicationWindow {
                             width: parent.width
                             spacing: 14
                             Label {
+                                id: saveStatus
                                 text: window.app ? window.app.status : ""
                                 textFormat: Text.PlainText
                                 font.pixelSize: 18
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
+                                color: window.app && window.app.error.length > 0 && text === window.app.error
+                                    ? window.errorColor : window.textColor
                             }
                             Label {
                                 text: window.app ? window.app.error : ""
                                 textFormat: Text.PlainText
-                                visible: text.length > 0
+                                visible: text.length > 0 && text !== saveStatus.text
                                 color: window.errorColor
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
                             }
-                            ProgressBar {
+                            Item {
+                                id: saveProgress
                                 Layout.fillWidth: true
-                                visible: window.app && (window.app.busy || window.app.download.savedCount > 0)
-                                indeterminate: window.app && window.app.busy && (!window.app.download.running || window.app.download.progress < 0)
-                                value: window.app ? Math.max(0, window.app.download.progress) : 0
+                                implicitHeight: 4
+                                clip: true
+                                visible: window.app && window.app.busy && (sliding || amount > 0)
+                                readonly property bool sliding: !!(window.app && window.app.busy &&
+                                    (!window.app.download.running || window.app.download.progress < 0))
+                                readonly property real amount: window.app
+                                    ? Math.max(0, Math.min(1, window.app.download.progress)) : 0
+                                property real slide: 0
+                                Accessible.role: Accessible.ProgressBar
+                                Accessible.name: "저장 진행"
+                                Rectangle {
+                                    anchors.fill: parent
+                                    radius: height / 2
+                                    color: "#2a2a2a"
+                                }
+                                Rectangle {
+                                    height: parent.height
+                                    radius: height / 2
+                                    color: window.accentColor
+                                    width: saveProgress.sliding ? parent.width * 0.34 : parent.width * saveProgress.amount
+                                    x: saveProgress.sliding ? parent.width * saveProgress.slide : 0
+                                }
+                                NumberAnimation on slide {
+                                    running: saveProgress.visible && saveProgress.sliding
+                                    loops: Animation.Infinite
+                                    from: -0.34
+                                    to: 1
+                                    duration: 1100
+                                    easing.type: Easing.InOutQuad
+                                }
                             }
                             Label {
                                 Layout.fillWidth: true
@@ -451,6 +482,7 @@ ApplicationWindow {
                         objectName: "thumbSizeChoice"
                         model: ["작게", "보통", "크게"]
                         currentIndex: window.densityChoice
+                        implicitWidth: 108
                         implicitHeight: 40
                         Accessible.name: "미리보기 크기"
                         onActivated: window.setDensity(currentIndex)

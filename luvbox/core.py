@@ -454,7 +454,7 @@ def _safe_diagnostic(message: str, mode: str) -> str:
         return "중복 저장 기록을 열지 못했습니다. 저장 폴더의 권한과 다른 실행 중인 프로그램을 확인해 주세요."
     if "download" in text:
         return "일부 파일을 저장하지 못했습니다. 연결과 저장 폴더를 확인한 뒤 다시 실행해 주세요."
-    return "X 목록을 읽는 중 문제가 발생했습니다. 로그인 상태를 확인하고 다시 시도해 주세요."
+    return "X 목록을 읽지 못했습니다. 잠시 뒤 다시 시도해 주세요."
 
 
 # Worker aborts that end a run regardless of which post was being handled.

@@ -43,20 +43,26 @@ ComboBox {
 
     delegate: ItemDelegate {
         id: row
-        width: ListView.view ? ListView.view.width : control.width
+        required property var model
+        required property int index
+        width: Math.max(control.popup.availableWidth, implicitWidth)
         height: 36
-        text: !control.textRole ? modelData
-              : (modelData && modelData[control.textRole] !== undefined ? modelData[control.textRole] : modelData)
+        text: {
+            const value = model.modelData !== undefined ? model.modelData : model
+            if (!control.textRole)
+                return value
+            return value && value[control.textRole] !== undefined ? value[control.textRole] : value
+        }
         highlighted: control.highlightedIndex === index
         font.pixelSize: 14
+        leftPadding: 12
+        rightPadding: 12
         contentItem: Text {
             text: row.text
             font: row.font
             color: "#f4f1f1"
             verticalAlignment: Text.AlignVCenter
-            leftPadding: 10
-            rightPadding: 10
-            elide: Text.ElideRight
+            elide: Text.ElideNone
         }
         background: Rectangle {
             radius: 8
@@ -66,7 +72,7 @@ ComboBox {
 
     popup: Popup {
         y: control.height + 6
-        width: control.width
+        width: Math.max(control.width, 168)
         padding: 4
         implicitHeight: Math.min(280, contentItem.implicitHeight + 8)
         background: Rectangle {
@@ -76,6 +82,7 @@ ComboBox {
             border.color: "#2e2e2e"
         }
         contentItem: ListView {
+            width: control.popup.availableWidth
             clip: true
             implicitHeight: contentHeight
             model: control.popup.visible ? control.delegateModel : null
