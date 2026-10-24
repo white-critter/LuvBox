@@ -143,3 +143,28 @@ class ReviewFailureTests(unittest.TestCase):
             finally:
                 controller.requestClose()
                 self.wait_for(lambda: controller.shutdownReady)
+
+    def test_review_request_with_an_ntfs_file_id_above_int64_reaches_the_window(self):
+        # NTFS file IDs carry a sequence number in their top bits and can exceed
+        # the signed 64-bit range; such a review must not vanish in transit.
+        with tempfile.TemporaryDirectory(prefix="luvbox-qt-review-") as folder, \
+                patch.dict(os.environ, {"LOCALAPPDATA": folder}), \
+                patch("luvbox.qt_schedule.task_status", return_value={"registered": False}):
+            from luvbox.qt_app import ApplicationController
+            controller = ApplicationController()
+            try:
+                large_id = 13300401179940104648
+                event = {"type": "review-request", "id": "preview-2", "job_id": 1, "media_type": "photo",
+                         "path": str(Path(folder) / "missing.jpg"),
+                         "signature": [8444249301665953, large_id, 676, 1792857244290150500]}
+                received = []
+                controller.download.eventReceived.connect(received.append)
+                controller.download.eventReceived.emit(event)
+                controller.download.reviewRequested.emit(event)
+                self.assertEqual(received[0]["signature"][1], large_id)
+                # The window checks the file; this one is gone, so it reports that.
+                self.wait_for(lambda: controller.error != "")
+                self.assertEqual(controller.error, "저장 확인 중 파일이 바뀌었습니다.")
+            finally:
+                controller.requestClose()
+                self.wait_for(lambda: controller.shutdownReady)

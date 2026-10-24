@@ -922,7 +922,14 @@ class HistoryTests(unittest.TestCase):
             link.symlink_to(outside, target_is_directory=True)
             (self.account / "loop").symlink_to(self.account, target_is_directory=True)
         except OSError:
-            self.skipTest("Windows symlink creation is unavailable")
+            # Symbolic links need a Windows privilege; junctions redirect the
+            # same way and need none.
+            try:
+                import _winapi
+                _winapi.CreateJunction(str(outside), str(link))
+                _winapi.CreateJunction(str(self.account), str(self.account / "loop"))
+            except (ImportError, OSError):
+                self.skipTest("Windows directory links are unavailable")
         self.store.import_legacy()
         self.assertEqual(self.store.summary()["files"], 0)
 

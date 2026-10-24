@@ -280,7 +280,7 @@ ApplicationWindow {
                 contentWidth: availableWidth
                 contentHeight: saveForm.implicitHeight + 32
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                 ColumnLayout {
                     id: saveForm
                     width: Math.max(1, Math.min(saveScroll.availableWidth - 24, 640))
@@ -764,11 +764,20 @@ ApplicationWindow {
             }
             Label {
                 Layout.fillWidth: true
-                visible: !!window.app
-                text: window.app ? window.app.library.selectedAuthor : ""
+                visible: text.length > 0
+                text: window.app && window.app.library.selectedAuthor ? "@" + window.app.library.selectedAuthor : ""
                 textFormat: Text.PlainText
                 font.bold: true
                 elide: Text.ElideRight
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: text.length > 0
+                text: window.app ? window.app.library.selectedPublicInfo : ""
+                textFormat: Text.PlainText
+                elide: Text.ElideMiddle
+                color: window.mutedColor
+                font.pixelSize: 12
             }
             ScrollView {
                 id: bodyScroll
@@ -776,7 +785,7 @@ ApplicationWindow {
                 Layout.preferredHeight: Math.min(140, Math.max(1, bodyText.implicitHeight))
                 visible: window.app && window.app.library.selectedBody.length > 0
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                ScrollBar.vertical.policy: bodyText.implicitHeight > height + 2 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                ScrollBar.vertical.policy: bodyText.implicitHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                 TextArea {
                     id: bodyText
                     width: bodyScroll.availableWidth

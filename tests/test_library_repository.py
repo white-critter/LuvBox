@@ -1,6 +1,7 @@
 """Gallery catalog reads check each folder once and decode without reopening the catalog."""
 
 from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 import tempfile
 import unittest
@@ -63,6 +64,33 @@ class LibraryRepositoryTests(unittest.TestCase):
         self.assertEqual((total, len(rows)), (6, 6))
         self.assertEqual(self.registered, {})
         self.assertTrue(all("파일 없음" in row["caption"] for row in rows))
+
+    def test_captions_show_the_post_date_and_fall_back_to_the_file_name(self):
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            path = self.paths.media_dir / "artist_200_1.jpg"
+            Image.new("RGB", (8, 8)).save(path, "JPEG")
+            store.record_media("flat", {"tweet_id": "200", "num": 1, "type": "photo", "author": {"name": "artist"},
+                                        "date": datetime(2026, 9, 30, 15, 30, tzinfo=timezone.utc)}, path)
+        _total, rows = self.repository.read("1", 0, 100)
+        captions = {row["key"].split("_")[2]: row["caption"] for row in rows}
+        # 15:30 UTC is the next day in Korea, where the stored times are kept.
+        self.assertEqual(captions["200"], "@artist · 2026-10-01")
+        self.assertEqual(captions["100"], "@alice · 100_1.jpg")
+        key = next(row["key"] for row in rows if row["key"].split("_")[2] == "200")
+        selected = self.repository.selected(key, 1)
+        self.assertEqual(selected["public_info"], "artist_200_1.jpg · 2026-10-01 00:30")
+
+    def test_a_missing_file_the_person_hid_stays_out_of_the_gallery(self):
+        self.files[0].unlink()
+        self.files[1].unlink()
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            store.import_legacy(refresh=True)
+            store.set_missing_ignored([("100", 1, "photo")], True)
+        total, rows = self.repository.read("1", 0, 100)
+        self.assertEqual(total, 5)
+        self.assertNotIn("100", {row["key"].split("_")[2] for row in rows})
+        # A file that is merely missing is still shown, marked as such.
+        self.assertTrue(any(row["key"].split("_")[2] == "101" and "파일 없음" in row["caption"] for row in rows))
 
     def test_decode_uses_the_registered_file_without_reopening_the_catalog(self):
         self.repository.read("1", 0, 100)

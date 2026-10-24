@@ -26,6 +26,15 @@ _KINDS = {"all", "photo", "video", "animated_gif"}
 _MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4"}
 _DRIVE_MISSING = "파일을 열 수 없습니다. 저장 드라이브를 연결해 주세요."
 _FILE_MISSING = "이 파일을 찾지 못했습니다. 저장 폴더 밖에서 지우거나 옮긴 파일일 수 있습니다."
+_POSTED = re.compile(r"(\d{4}-\d\d-\d\d)T(\d\d:\d\d)")
+
+
+def _posted(value, *, time=False):
+    """'2026-10-01' (or with its Korean-time hour) from a stored post time."""
+    match = _POSTED.match(value) if isinstance(value, str) else None
+    if match is None:
+        return ""
+    return f"{match[1]} {match[2]}" if time else match[1]
 
 
 class _ReadOnlyHistory(HistoryStore):
@@ -108,7 +117,10 @@ class LibraryRepository:
                         if path is not None:
                             self.provider.register(key, path)
                     author = row.get("author") or ""
-                    caption = ("@" + author + " · " if author else "") + (row.get("filename") or row["tweet_id"])
+                    # New file names already start with the author; the post
+                    # date tells tiles apart, the name stays searchable.
+                    detail = _posted(row.get("posted_at")) or row.get("filename") or row["tweet_id"]
+                    caption = ("@" + author + " · " if author else "") + detail
                     if path is None:
                         caption += " · 파일 없음"
                     rows.append({"key": key, "caption": caption})
@@ -148,7 +160,8 @@ class LibraryRepository:
             content = store._db.execute("SELECT content FROM tweets WHERE tweet_id=?", (row["tweet_id"],)).fetchone()
             path = self._path(store, row)
             source = f"https://x.com/i/web/status/{row['tweet_id']}"
-            info = " · ".join(value for value in (row.get("filename") or "", row.get("posted_at") or "") if value)
+            info = " · ".join(value for value in (row.get("filename") or "", _posted(row.get("posted_at"), time=True))
+                              if value)
             return {"key": key, "author": row.get("author") or "",
                     "body": content[0] if content and isinstance(content[0], str) else "",
                     "source": source, "path": str(path) if path is not None else "", "missing": path is None,

@@ -603,11 +603,6 @@ class ApplicationController(QObject):
             self._commands.put(("open", self._output))
 
     @Slot()
-    def openExtensionFolder(self):
-        if not self._closing:
-            self._commands.put(("open", _ROOT / "assets/browser-extension/chromium"))
-
-    @Slot()
     def openRecordsFolder(self):
         from .storage import records_root
         if not self._closing:

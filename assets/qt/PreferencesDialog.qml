@@ -75,7 +75,7 @@ Dialog {
         id: scrollView
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-        ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+        ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
 
         ColumnLayout {
             id: contentColumn

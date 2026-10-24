@@ -1,5 +1,6 @@
 import os
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from queue import Queue
@@ -8,6 +9,8 @@ from PySide6.QtCore import QObject, Property, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 
 from .browser_discovery import find_default_browser, find_edge
+from .file_mutex import replace_file
+from .settings import app_directory
 
 
 _WORKING = {
@@ -19,22 +22,31 @@ _WORKING = {
 }
 _ERRORS = {
     "manager": "확장 관리를 열지 못했습니다. 주소창에서 chrome://extensions 또는 edge://extensions를 여세요.",
-    "copy": "확장 폴더를 찾지 못했습니다. LuvBox의 assets 폴더를 확인해 주세요.",
-    "folder": "확장 폴더를 열지 못했습니다. LuvBox의 assets 폴더를 확인해 주세요.",
+    "copy": "확장 폴더를 준비하지 못했습니다. LuvBox 파일과 사용자 폴더 권한을 확인해 주세요.",
+    "folder": "확장 폴더를 열지 못했습니다. LuvBox 파일과 사용자 폴더 권한을 확인해 주세요.",
     "x": "X를 열지 못했습니다. 브라우저에서 https://x.com/home을 여세요.",
     "install": "확장을 불러오지 못했습니다. 아래 단계로 폴더를 직접 선택해 주세요.",
 }
+_COPY_ERRORS = {
+    "manager": "주소를 복사하지 못했습니다. 주소창에 chrome://extensions 또는 edge://extensions를 입력해 주세요.",
+    "copy": "폴더 경로를 복사하지 못했습니다. ‘폴더 열기’를 사용해 주세요.",
+}
+_MANAGERS = {"chrome.exe": "chrome://extensions", "msedge.exe": "edge://extensions"}
+_EXTENSION_FILES = ("manifest.json", "background.js", "profile.js", "connect.js", "connect.html",
+                    "connect.css", "extension-page.js")
 
 
 def plan_extension_launch(browser, running, folder):
     """Load the unpacked extension into the user's browser for this launch.
 
-    Chrome and Edge ignore ``--load-extension`` when that browser is already
-    open, and closing the window can drop the extension. The manual load stays
-    available for a copy that remains installed.
+    Edge ignores ``--load-extension`` when it is already open, and closing the
+    window can drop the extension. Chrome's stable builds ignore the switch
+    altogether. The manual load stays available for a copy that remains.
     """
     if browser is None:
         return {"status": "Chrome 또는 Edge를 찾지 못했습니다. 아래 단계로 폴더를 직접 불러 주세요."}
+    if browser.name.lower() == "chrome.exe":
+        return {"status": "Chrome은 확장을 자동으로 불러오지 않습니다. 아래 1~2단계로 한 번만 직접 불러와 주세요."}
     if running:
         return {"status": f"{browser.name}가 이미 켜져 있습니다. 그 브라우저를 모두 닫은 뒤 다시 누르면 확장을 함께 엽니다. 계속 쓰려면 아래 단계로 한 번만 불러 두세요."}
     return {"status": "브라우저를 확장과 함께 열었습니다. 이 창을 닫으면 확장이 다시 빠질 수 있어, 계속 쓰려면 아래 단계로 한 번만 불러 두세요.",
@@ -109,10 +121,39 @@ class BrowserSetupController(QObject):
 
     @staticmethod
     def _extension_folder():
-        folder = Path(__file__).resolve().parents[1] / "assets" / "browser-extension" / "chromium"
-        if not folder.is_dir() or not (folder / "manifest.json").is_file():
+        """The unpacked extension, copied outside the versioned app folder.
+
+        Chrome and Edge keep reading an unpacked extension from the folder it
+        was loaded from, while each LuvBox version has a folder of its own.
+        Loading this copy keeps the extension after an old version is deleted;
+        every version refreshes its files.
+        """
+        bundled = Path(__file__).resolve().parents[1] / "assets" / "browser-extension" / "chromium"
+        if not (bundled / "manifest.json").is_file():
             raise OSError("missing extension assets")
-        return folder
+        target = app_directory() / "browser-extension" / "chromium"
+        for folder in (target.parent, target):
+            if folder.is_symlink() or getattr(folder, "is_junction", lambda: False)():
+                raise OSError("linked extension folder")
+        target.mkdir(parents=True, exist_ok=True)
+        for name in _EXTENSION_FILES:
+            content = (bundled / name).read_bytes()
+            destination = target / name
+            if destination.is_symlink():
+                raise OSError("linked extension file")
+            try:
+                if destination.read_bytes() == content:
+                    continue
+            except FileNotFoundError:
+                pass
+            descriptor, staged = tempfile.mkstemp(prefix=".extension-", dir=target)
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(content)
+                replace_file(staged, destination)
+            finally:
+                Path(staged).unlink(missing_ok=True)
+        return target
 
     @staticmethod
     def _chromium():
@@ -164,12 +205,15 @@ class BrowserSetupController(QObject):
                 return {}
             if browser is None:
                 return {"status": "관리 화면을 직접 열어 주세요. Chrome: chrome://extensions · Edge: edge://extensions. Firefox 설치는 확장 폴더 상위의 README를 확인하세요."}
-            manager = {"chrome.exe": "chrome://extensions", "msedge.exe": "edge://extensions"}.get(browser.name.lower())
+            manager = _MANAGERS.get(browser.name.lower())
             if manager is None:
                 return {"status": "이 브라우저의 관리 화면은 직접 열어 주세요. Firefox 설치는 확장 폴더 상위의 README를 확인하세요."}
-            subprocess.Popen([str(browser), manager], stdin=subprocess.DEVNULL,
+            # Neither browser opens its own pages from a command line (it shows
+            # a new tab instead), so open a window and copy the address.
+            subprocess.Popen([str(browser)], stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True)
-            return {"status": "확장 관리 화면에서 개발자 모드를 켜 주세요."}
+            return {"status": f"브라우저를 열고 {manager} 주소를 복사했습니다. 주소창에 붙여 넣어 확장 관리 화면을 연 뒤 개발자 모드를 켜 주세요.",
+                    "clipboard": manager}
         if operation == "x":
             if self._stop.is_set():
                 return {}
@@ -179,7 +223,7 @@ class BrowserSetupController(QObject):
         if self._stop.is_set():
             return {}
         if operation == "copy":
-            return {"status": "확장 폴더 경로를 복사했습니다.", "path": str(folder)}
+            return {"status": "확장 폴더 경로를 복사했습니다.", "clipboard": str(folder)}
         return {"status": "열린 chromium 폴더를 확장 로드 창에서 선택해 주세요.",
                 "url": QUrl.fromLocalFile(str(folder))}
 
@@ -204,13 +248,13 @@ class BrowserSetupController(QObject):
         if "url" in result and not QDesktopServices.openUrl(result["url"]):
             self._status = ""
             self._error = _ERRORS[operation]
-        if operation == "copy" and "path" in result:
+        if "clipboard" in result:
             clipboard = QGuiApplication.clipboard()
             if clipboard is None:
                 self._status = ""
-                self._error = "폴더 경로를 복사하지 못했습니다. ‘폴더 열기’를 사용해 주세요."
+                self._error = _COPY_ERRORS[operation]
             else:
-                clipboard.setText(result["path"])
+                clipboard.setText(result["clipboard"])
         self.changed.emit()
 
     @Slot()

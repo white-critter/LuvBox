@@ -244,8 +244,13 @@ class ReleaseManifestTests(unittest.TestCase):
         try:
             os.symlink(self.root, alias, target_is_directory=True)
         except (OSError, NotImplementedError):
-            self.skipTest("directory links are not available")
-        self.addCleanup(alias.unlink)
+            # Symbolic links need a Windows privilege; a junction does not.
+            try:
+                import _winapi
+                _winapi.CreateJunction(str(self.root), str(alias))
+            except (ImportError, OSError):
+                self.skipTest("directory links are not available")
+        self.addCleanup(os.rmdir, alias)
         entries = [(name, source.replace(str(self.root), str(alias), 1), kind)
                    for name, source, kind in self.entries]
         self.write_toc(entries)

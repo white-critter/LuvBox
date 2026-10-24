@@ -1433,6 +1433,10 @@ class HistoryStore:
             # while paging. Present files then skip the other deletion checks
             # without looking up every skipped row's full path in the table.
             clauses.append("NOT ((media.path='')=1 AND media.record_source='declined')")
+            # Likewise a missing file the person hid ('다시 받지 않기').
+            clauses.append("NOT ((media.path='')=1 AND EXISTS (SELECT 1 FROM missing_choices WHERE "
+                           "missing_choices.tweet_id=media.tweet_id AND missing_choices.num=media.num AND "
+                           "missing_choices.media_type=media.media_type AND missing_choices.ignored=1))")
             clauses.append("NOT ((media.path='')=1 AND media.last_path!='' AND EXISTS ("
                            "SELECT 1 FROM deletion_items WHERE deletion_items.tweet_id=media.tweet_id "
                            "AND deletion_items.num=media.num AND deletion_items.media_type=media.media_type "

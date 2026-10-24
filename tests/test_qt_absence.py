@@ -15,14 +15,22 @@ class AbsenceNoteTests(unittest.TestCase):
 
 
 class ExtensionLaunchTests(unittest.TestCase):
-    def test_closed_browser_loads_the_unpacked_extension(self):
-        browser = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+    def test_closed_edge_loads_the_unpacked_extension(self):
+        browser = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
         folder = Path("C:/LuvBox/assets/browser-extension/chromium")
         plan = plan_extension_launch(browser, False, folder)
         self.assertEqual(plan["command"], [str(browser), "--load-extension=" + str(folder)])
 
-    def test_running_browser_is_left_open(self):
+    def test_chrome_is_not_told_it_loaded_an_extension_it_ignores(self):
+        # Chrome's stable builds ignore --load-extension; only the manual load works.
         browser = Path("C:/Program Files/Google/Chrome/Application/chrome.exe")
+        for running in (False, True):
+            plan = plan_extension_launch(browser, running, Path("C:/extension"))
+            self.assertNotIn("command", plan)
+            self.assertIn("직접 불러와", plan["status"])
+
+    def test_running_browser_is_left_open(self):
+        browser = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
         plan = plan_extension_launch(browser, True, Path("C:/extension"))
         self.assertNotIn("command", plan)
         self.assertIn("이미 켜져", plan["status"])

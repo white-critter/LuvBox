@@ -25,9 +25,11 @@ def _note(value, limit=1000):
 
 class DownloadController(QObject):
     changed = Signal()
-    reviewRequested = Signal(dict)
+    # Worker events stay Python objects: a review's file signature holds NTFS
+    # file IDs above the signed 64-bit range that a QVariantMap cannot carry.
+    reviewRequested = Signal(object)
     reviewDismissed = Signal()
-    eventReceived = Signal(dict)
+    eventReceived = Signal(object)
     shutdownFinished = Signal()
 
     def __init__(self, parent=None, *, service=None):
