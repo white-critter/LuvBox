@@ -8,6 +8,8 @@ ComboBox {
     rightPadding: 28
     font.pixelSize: 14
     hoverEnabled: true
+    // Measures the widest choice, so the list fits its labels and no more.
+    implicitContentWidthPolicy: ComboBox.WidestText
 
     background: Rectangle {
         radius: 10
@@ -72,7 +74,9 @@ ComboBox {
 
     popup: Popup {
         y: control.height + 6
-        width: Math.max(control.width, 168)
+        width: Math.max(control.width, control.implicitContentWidth + 32)
+        // Stay inside the window, e.g. for a combo at its right edge.
+        margins: 8
         padding: 4
         implicitHeight: Math.min(280, contentItem.implicitHeight + 8)
         background: Rectangle {
