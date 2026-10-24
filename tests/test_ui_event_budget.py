@@ -6,9 +6,11 @@ import unittest
 from unittest.mock import patch
 
 from tests import test_gui as fixtures
+from tests.legacy_ui import previous_window
 from luvbox.gui import App
 
 
+@previous_window
 class UIEventBudgetTests(unittest.TestCase):
     setUp = fixtures.GuiTests.setUp
 

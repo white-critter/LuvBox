@@ -6,10 +6,12 @@ import unittest
 import weakref
 from unittest.mock import patch
 
+from tests.legacy_ui import previous_window
 from tests.test_gui import destroy_tk, release_tk
 from luvbox import dialogs, theme
 
 
+@previous_window
 class DialogTests(unittest.TestCase):
     def setUp(self):
         self.root = tk.Tk()

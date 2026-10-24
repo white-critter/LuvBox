@@ -11,6 +11,8 @@ import time
 import threading
 import tkinter as tk
 import unittest
+
+from tests.legacy_ui import previous_window
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
@@ -271,6 +273,7 @@ class WorkerPreviewTests(unittest.TestCase):
         self.assertIsNotNone(thumbcache.recall("myaccount", ("123", 1, "photo")))
 
 
+@previous_window
 class MissingTabTests(StateTestCase):
     def setUp(self):
         super().setUp()

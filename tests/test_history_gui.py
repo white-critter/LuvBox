@@ -13,6 +13,8 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 import unittest
+
+from tests.legacy_ui import previous_window
 import weakref
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
@@ -30,6 +32,7 @@ from luvbox.storage import OutputGuard, StoragePaths, resolve_storage
 from tests.test_gui import destroy_tk, release_tk
 
 
+@previous_window
 class HistoryGuiTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -2297,6 +2300,7 @@ class LocalChangeWorkerTests(unittest.TestCase):
                 self.assertTrue(results.empty())
 
 
+@previous_window
 class HistoryLifecycleTests(unittest.TestCase):
     def test_root_history_preview_theme_resources_die_before_background_gc(self):
         # A decoder's allocations can trigger Python's cyclic GC. Tk resources

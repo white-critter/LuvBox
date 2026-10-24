@@ -7,12 +7,14 @@ from tkinter import ttk
 from unittest.mock import patch
 
 from tests import test_account_merge as merge_support
+from tests.legacy_ui import previous_window
 from luvbox.history import HistoryStore
 from luvbox.history_gui import HistoryWindow
 from luvbox.gallery import TILE
 from luvbox.storage import MigrationError
 
 
+@previous_window
 class AccountMergeGuiStabilityTests(unittest.TestCase):
     setUp = merge_support.AccountMergeWindowTests.setUp
     write_cookies = merge_support.AccountMergeWindowTests.write_cookies

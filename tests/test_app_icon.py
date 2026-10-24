@@ -6,6 +6,7 @@ import tkinter as tk
 import unittest
 from PIL import Image
 from luvbox import app_icon
+from tests.legacy_ui import previous_window
 
 
 def rendered_icon(handle, size):
@@ -48,6 +49,7 @@ def rendered_icon(handle, size):
         gdi.DeleteDC(dc)
 
 
+@previous_window
 class AppIconTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows GUI handle accounting")
     def test_repeated_window_mapping_does_not_accumulate_gui_handles(self):

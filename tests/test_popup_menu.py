@@ -5,11 +5,13 @@ from types import SimpleNamespace
 import unittest
 import unittest.mock
 
+from tests.legacy_ui import previous_window
 from tests.test_gui import destroy_tk
 from luvbox import theme
 from luvbox.popup_menu import PopupMenu
 
 
+@previous_window
 class PopupMenuTests(unittest.TestCase):
     def setUp(self):
         self.root = tk.Tk()

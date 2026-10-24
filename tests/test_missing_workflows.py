@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from tests import test_gui, test_history_gui
+from tests.legacy_ui import previous_window
 from luvbox.history import HistoryStore
 from luvbox.history_gui import HistoryWindow
 from luvbox.protection import AccountGuard, ProtectionError, _BUSY_HELP
@@ -21,6 +22,7 @@ def missing_item(index, ignored=False):
             "author": "alice", "filename": tweet + "_1.jpg", "ignored": ignored}
 
 
+@previous_window
 class MissingWorkflowTests(unittest.TestCase):
     setUp = test_history_gui.HistoryGuiTests.setUp
     load = test_history_gui.HistoryGuiTests.load
@@ -205,6 +207,7 @@ class MissingWorkflowTests(unittest.TestCase):
         self.assertFalse(self.window.winfo_exists())
 
 
+@previous_window
 class RetryContextTests(unittest.TestCase):
     setUp = test_gui.GuiTests.setUp
 

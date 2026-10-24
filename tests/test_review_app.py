@@ -7,11 +7,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 import test_gui as fixtures
+from tests.legacy_ui import previous_window
 from luvbox.recycling import file_signature
 from luvbox.review import ReviewControl
 from luvbox.storage import resolve_storage
 
 
+@previous_window
 class AppReviewTests(unittest.TestCase):
     setUp = fixtures.GuiTests.setUp
 
