@@ -681,6 +681,8 @@ def _bind_surfaces(root, style):
 
     def mapped(event):
         widget = event.widget
+        if not isinstance(widget, tk.Misc):
+            return
         if isinstance(widget, (tk.Tk, tk.Toplevel)):
             # Windows creates the title bar when a window is first shown.
             title_bar(widget, mode(owner))

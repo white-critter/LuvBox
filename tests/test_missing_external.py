@@ -31,7 +31,7 @@ class ExternalMissingRetryTests(unittest.TestCase):
             store.import_legacy(refresh=True)
             [before] = store.records()
             if remove_original:
-                (self.output / "100_1.jpg").unlink()  # Only this private test file.
+                (self.output / "alice_100_1.jpg").unlink()  # Only this private test file.
                 store.import_legacy(refresh=True)
                 [missing] = store.records()
                 self.assertEqual((missing["path"], missing["filesize"]), (before["path"], None))

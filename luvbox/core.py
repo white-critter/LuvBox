@@ -180,13 +180,19 @@ def _media_details(metadata: dict) -> dict:
         posted = ""
     author, author_id = _author_fields(metadata.get("author"))
     tweet_id = str(metadata.get("tweet_id", ""))
+    actual_path = metadata.get("_luvbox_path")
+    prefix = metadata.get("_luvbox_filename_prefix", author + "_" if author else "")
+    part = metadata.get("_luvbox_filename_part", metadata.get("num", 0))
+    filename = (_review_path(actual_path).name if actual_path else
+                f"{prefix}{tweet_id}_{part}.{metadata.get('extension', '')}")
     return {"tweet_id": tweet_id, "num": metadata.get("num", 0),
             "media_type": metadata.get("type", ""),
             "author": author, "author_id": author_id,
             "posted_at": posted,
-            "filename": f"{tweet_id}_{metadata.get('_luvbox_filename_part', metadata.get('num', 0))}.{metadata.get('extension', '')}",
+            "filename": filename,
             "source_url": f"https://x.com/i/web/status/{tweet_id}" if re.fullmatch(r"[0-9]{1,20}", tweet_id) else "",
             "metadata_status": metadata.get("_luvbox_metadata_status", "pending"),
+            "text_metadata_status": metadata.get("_luvbox_text_metadata_status", "unknown"),
             "author_metadata_status": metadata.get("_luvbox_author_metadata_status", "pending")}
 
 
@@ -585,7 +591,7 @@ def _configure_gallery(options: JobOptions, archive_path: Path, account_folder: 
     values = {
         "base-directory": options.output_dir,
         "directory": directory,
-        "filename": "{tweet_id}_{_luvbox_filename_part}.{extension}",
+        "filename": "{_luvbox_filename_prefix}{tweet_id}_{_luvbox_filename_part}.{extension}",
         "archive": str(archive_path),
         "archive-format": "{_luvbox_archive_key}",
         "archive-event": ["file", "skip"],
@@ -749,6 +755,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         author_done = not known_author or (previous_author_status == "embedded" and same_author)
         recording_required = False
         metadata_reason = "unknown"
+        text_status = "unknown"
         if previous_status == "unsupported" or (previous_status == "embedded" and author_done):
             metadata_status = previous_status
             author_status = previous_author_status if known_author else "unknown"
@@ -764,7 +771,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         elif metadata_available:
             recording_required = True
             try:
-                result = embed_source(media_path, str(kwdict["tweet_id"]), author=author, author_id=author_id)
+                content = kwdict.get("content")
+                result = embed_source(media_path, str(kwdict["tweet_id"]), author=author, author_id=author_id,
+                                      text=content if isinstance(content, str) else None)
+                text_status = result.get("text_status", "unknown")
+                if text_status not in {"embedded", "preserved", "not_requested", "error", "unknown"}:
+                    text_status = "error"
                 metadata_reason = result.get("reason", "unknown")
                 metadata_status = result.get("status")
                 if metadata_status not in {"embedded", "failed", "unsupported"}:
@@ -775,12 +787,15 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             except Exception:
                 metadata_status = "failed"
                 author_status = "error" if known_author else "unknown"
+                text_status = "error"
         else:
             recording_required = True
             metadata_reason = "unavailable"
             metadata_status = "failed"
             author_status = "error" if known_author else "unknown"
+            text_status = "error"
         kwdict["_luvbox_metadata_status"] = metadata_status
+        kwdict["_luvbox_text_metadata_status"] = text_status
         kwdict["_luvbox_author_metadata_status"] = author_status
         # Deferred work keeps any prior author error for retry; it is not a
         # recording failure from this run.
@@ -940,6 +955,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 return
             kwdict = dict(kwdict)
             tweet_id = str(kwdict["tweet_id"])
+            author, _ = _author_fields(kwdict.get("author"))
+            kwdict["_luvbox_filename_prefix"] = author + "_" if author else ""
             attachment_number = kwdict.get("_luvbox_attachment_number", kwdict["num"])
             if media_type == "photo":
                 position_key = (tweet_id, attachment_number)
@@ -986,6 +1003,20 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             super().handle_directory(kwdict)
             self.pathfmt.set_filename(kwdict)
             self.pathfmt.build_path()
+            destination = _review_path(self.pathfmt.path)
+            if kwdict["_luvbox_filename_prefix"]:
+                current_candidates = [destination, Path(str(destination) + ".part")]
+                if media_type == "animated_gif":
+                    current_candidates.append(destination.with_suffix(".gif"))
+                if not any(candidate.is_file() for candidate in current_candidates):
+                    legacy = destination.with_name(f"{tweet_id}_{kwdict['_luvbox_filename_part']}.{kwdict['extension']}")
+                    legacy_candidates = [legacy, Path(str(legacy) + ".part")]
+                    if media_type == "animated_gif":
+                        legacy_candidates.append(legacy.with_suffix(".gif"))
+                    if any(candidate.is_file() for candidate in legacy_candidates):
+                        kwdict["_luvbox_filename_prefix"] = ""
+                        self.pathfmt.set_filename(kwdict)
+                        self.pathfmt.build_path()
             # Keep existing MP4 GIFs untouched. New GIF downloads still use a
             # resumable MP4 .part file, but a completed .gif is also a file hit
             # when a ledger was missing or has just moved to another folder.

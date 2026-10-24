@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import test_core as core_support
+from tests.legacy_ui import previous_window
 from tests.test_gui import destroy_tk, release_tk
 from luvbox.core import JobOptions, run_worker
 from luvbox.history import HistoryStore
@@ -67,7 +68,7 @@ class AccountMergeTests(unittest.TestCase):
         rows = [("100", 1, "photo", "artistA"), ("102", 1, "photo", "artistC")]
         self.assertEqual(self.save(self.job("new_account"), rows, date(2026, 10, 12)), ["100_1", "102_1"])
         files, _, _ = self.library("new_account")
-        self.assertNotIn("101_1.jpg", files)   # the other account's file is not this account's
+        self.assertNotIn("artistB_101_1.jpg", files)   # the other account's file is not this account's
 
     def test_merged_account_files_are_managed_and_never_downloaded_again(self):
         self.old_account_saved()
@@ -81,9 +82,9 @@ class AccountMergeTests(unittest.TestCase):
         rows = [("100", 1, "photo", "artistA"), ("101", 1, "photo", "artistB"), ("102", 1, "photo", "artistC")]
         self.assertEqual(self.save(self.job("new_account"), rows, date(2026, 10, 12)), ["102_1"])
         files, missing, store = self.library("new_account")
-        self.assertEqual(files, ["100_1.jpg", "101_1.jpg", "102_1.jpg"])
+        self.assertEqual(files, ["artistA_100_1.jpg", "artistB_101_1.jpg", "artistC_102_1.jpg"])
         self.assertEqual(missing, [])
-        next(self.output.rglob("101_1.jpg")).unlink()
+        next(self.output.rglob("artistB_101_1.jpg")).unlink()
         files, missing, _ = self.library("new_account")
         self.assertEqual(missing, ["101"])
         self.assertEqual(self.library("old_account")[1], ["101"])   # the old account's records still work
@@ -107,7 +108,7 @@ class AccountMergeTests(unittest.TestCase):
         self.assertEqual(other_account_records(paths), [{"account": "old_account", "records": 2}])
         self.assertEqual(merge_account_records(paths, "old_account")["added"], 2)
         files, missing, _ = self.library("new_account", True)
-        self.assertEqual((files, missing), (["100_1.jpg", "101_1.jpg"], []))
+        self.assertEqual((files, missing), (["artistA_100_1.jpg", "artistB_101_1.jpg"], []))
 
     def test_unknown_or_own_account_is_refused(self):
         paths = resolve_storage(self.output, "new_account")
@@ -425,6 +426,7 @@ class AccountMergeStorageTests(unittest.TestCase):
         self.assertFalse(saved_media_missing(other))
 
 
+@previous_window
 class AccountMergeWindowTests(unittest.TestCase):
     write_cookies = core_support.CoreTests.write_cookies
 

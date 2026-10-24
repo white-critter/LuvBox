@@ -323,7 +323,7 @@ class GifWorkerTests(unittest.TestCase):
             self.assertEqual(summary["bytes"], len(content))
 
     def assert_saved_as_original_mp4(self, events, message):
-        mp4 = self.output / "myaccount" / "alice" / "100_gif_1.mp4"
+        mp4 = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4"
         self.assertTrue(mp4.is_file())
         self.assertFalse(list(self.output.rglob("*.part*")))
         self.assertFalse(list(self.output.rglob("*.gif")))
@@ -357,7 +357,7 @@ class GifWorkerTests(unittest.TestCase):
             kwargs["check_stop"]()
         with patch("luvbox.core.convert_mp4_to_gif", side_effect=stop):
             self.worker(rows, options=self.options_all(), stop_file=str(flag))
-        source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
+        source = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4.part"
         self.assertTrue(core._transfer_complete(source))
         flag.unlink()
         with patch("luvbox.core.convert_mp4_to_gif", side_effect=self.convert):
@@ -377,7 +377,7 @@ class GifWorkerTests(unittest.TestCase):
         self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "stopped", 0))
         self.assertEqual(self.keys(), set())
         self.assertEqual(self.records(), [])
-        source = self.output / "myaccount" / "alice" / "100_gif_1.mp4.part"
+        source = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4.part"
         self.assertTrue(core._transfer_complete(source))
 
     def test_gif_over_size_cap_saves_original_mp4_and_next_file(self):
@@ -402,7 +402,7 @@ class GifWorkerTests(unittest.TestCase):
         self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 1)
 
     def test_destination_created_during_conversion_is_not_overwritten_or_archived(self):
-        destination = self.output / "myaccount" / "alice" / "100_gif_1.gif"
+        destination = self.output / "myaccount" / "alice" / "alice_100_gif_1.gif"
         def collision(source, **kwargs):
             output = self.convert(source, **kwargs)
             destination.write_bytes(b"another process created this file")
@@ -451,7 +451,7 @@ class GifWorkerTests(unittest.TestCase):
                                       options=self.options_all(gif_format="mp4"))
         convert.assert_not_called()
         self.assertEqual((code, events[-1]["saved"]), (0, 2))
-        mp4 = self.output / "myaccount" / "alice" / "100_gif_1.mp4"
+        mp4 = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4"
         self.assertTrue(mp4.is_file())
         self.assertFalse(list(self.output.rglob("*.part*")))
         self.assertEqual(self.keys(), {"twitter100_animated_gif_1", "twitter101_1"})

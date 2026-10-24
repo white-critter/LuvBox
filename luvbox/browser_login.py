@@ -1,6 +1,6 @@
-"""Connect by signing in to X in a separate Microsoft Edge window.
+"""Connect by signing in to X in a separate Chrome or Microsoft Edge window.
 
-The password is typed into Edge, never into this app. Edge runs with a new,
+The password is typed into the browser, never into this app. It runs with a new,
 temporary profile, so the user's own browser profiles are never opened. Through
 a pair of inherited anonymous pipes the app reads only the x.com
 auth_token cookie and confirms the signed-in account from X's own navigation
@@ -29,7 +29,8 @@ LOGIN_URL = "https://x.com/i/flow/login"
 _PROFILE_PREFIX = "login-profile-"
 _START_TIMEOUT = 20
 NO_EDGE = "Microsoft Edge를 찾지 못했습니다. ‘토큰 직접 입력’으로 연결해 주세요."
-NO_DEBUGGING = "로그인 창에 연결하지 못했습니다(회사·학교 PC의 Edge 정책일 수 있음). ‘토큰 직접 입력’을 사용해 주세요."
+NO_DEFAULT_BROWSER = "확장 없는 새 로그인은 기본 브라우저가 Chrome 또는 Edge일 때 사용할 수 있습니다. 기본 브라우저를 확인하거나 다른 로그인 연결 방법을 선택해 주세요."
+NO_DEBUGGING = "로그인 창에 연결하지 못했습니다(회사·학교 PC의 브라우저 정책일 수 있음). ‘토큰 직접 입력’을 사용해 주세요."
 CLOSED = "로그인 창이 닫혀 연결하지 않았습니다."
 TIMED_OUT = "로그인을 기다리는 시간이 지나 창을 닫았습니다. 다시 시도해 주세요."
 CANCELLED = "로그인 연결을 취소했습니다."
@@ -57,6 +58,40 @@ def find_edge() -> Path | None:
             except OSError:
                 pass
     return next((path for path in candidates if path.is_file()), None)
+
+
+def _association_executable(command: object) -> Path | None:
+    if not isinstance(command, str) or len(command) > 32768 or any(char in command for char in "\r\n\0"):
+        return None
+    quoted = re.match(r'^\s*"([^\"]+)"(?:\s|$)', command)
+    unquoted = re.match(r'^\s*([^\s\"]+)(?:\s|$)', command) if quoted is None else None
+    match = quoted or unquoted
+    if match is None:
+        return None
+    executable = Path(os.path.expandvars(match.group(1)))
+    if (not executable.is_absolute() or executable.name.lower() not in {"chrome.exe", "msedge.exe"}
+            or not executable.is_file()):
+        return None
+    return executable
+
+
+def find_default_browser() -> Path | None:
+    """Resolve the default HTTPS browser executable without running its command."""
+    if os.name != "nt":
+        return None
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                           r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice") as key:
+            program_id, _ = winreg.QueryValueEx(key, "ProgId")
+        if not isinstance(program_id, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,200}", program_id):
+            return None
+        with winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, program_id + r"\shell\open\command") as key:
+            command, _ = winreg.QueryValueEx(key, None)
+        return _association_executable(command)
+    except (OSError, ValueError):
+        return None
 
 
 class _PipeDevTools:
@@ -293,15 +328,17 @@ def _authenticated_identity(connection, pages, cookies, *, cancel=None) -> dict 
     return None
 
 
-def _check_profile_policy() -> None:
-    """A mandatory Edge directory policy overrides --user-data-dir."""
+def _check_profile_policy(browser: Path | None = None) -> None:
+    """A mandatory browser directory policy overrides --user-data-dir."""
     if os.name != "nt":
         return
     import winreg
+    policy = (r"SOFTWARE\Policies\Google\Chrome" if browser is not None and browser.name.lower() == "chrome.exe"
+              else r"SOFTWARE\Policies\Microsoft\Edge")
     for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
         for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
             try:
-                with winreg.OpenKey(hive, r"SOFTWARE\Policies\Microsoft\Edge", 0, winreg.KEY_READ | view) as key:
+                with winreg.OpenKey(hive, policy, 0, winreg.KEY_READ | view) as key:
                     value, _ = winreg.QueryValueEx(key, "UserDataDir")
             except OSError:
                 continue
@@ -346,19 +383,19 @@ def _recover_blank_login(connection, pages, *, cancel=None) -> bool:
 
 
 def _stop_profile_processes(profile: Path) -> None:
-    """Edge may hand off to another PID; stop only this unique profile's browser."""
+    """A browser may hand off to another PID; stop only this attempt's profile."""
     if os.name != "nt":
+        return
+    if (profile.is_symlink() or profile.is_junction() or
+            profile.resolve().parent != app_directory().resolve() or not profile.name.startswith(_PROFILE_PREFIX)):
         return
     # Pass the path as environment data, never as interpolated PowerShell code.
     script = r'''
-$needle = '--user-data-dir=' + $env:LUVBOX_LOGIN_PROFILE
-$quoted = '--user-data-dir="' + $env:LUVBOX_LOGIN_PROFILE + '"'
-$whole = '"--user-data-dir=' + $env:LUVBOX_LOGIN_PROFILE + '"'
-Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | ForEach-Object {
+$escaped = [regex]::Escape($env:LUVBOX_LOGIN_PROFILE)
+$pattern = '(?:^|\s)(?:"--user-data-dir=' + $escaped + '"|--user-data-dir="' + $escaped + '"|--user-data-dir=' + $escaped + ')(?=\s|$)'
+Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe' OR Name = 'chrome.exe'" | ForEach-Object {
     $tokens = $_.CommandLine
-    if ($tokens -and ($tokens.Contains($quoted + ' ') -or $tokens.EndsWith($quoted) -or
-        $tokens.Contains($whole + ' ') -or $tokens.EndsWith($whole) -or
-        $tokens.Contains($needle + ' ') -or $tokens.EndsWith($needle))) {
+    if ($tokens -and $tokens -cmatch $pattern) {
         & taskkill.exe /PID $_.ProcessId /T /F 2>$null | Out-Null
     }
 }
@@ -374,13 +411,13 @@ Get-CimInstance Win32_Process -Filter "Name = 'msedge.exe'" | ForEach-Object {
 
 def sign_in(cancel: threading.Event, *, timeout: float = 600, edge: Path | None = None,
             launch=subprocess.Popen, poll_interval: float = 1.0) -> dict:
-    """Sign in through a dedicated Edge profile and inherited private pipes."""
+    """Sign in through a dedicated browser profile and inherited private pipes."""
     edge = edge or find_edge()
     if edge is None:
         raise SignInError(NO_EDGE)
     if cancel.is_set():
         raise SignInError(CANCELLED)
-    _check_profile_policy()
+    _check_profile_policy(edge)
     directory = app_directory().resolve()
     directory.mkdir(parents=True, exist_ok=True)
     profile = Path(tempfile.mkdtemp(prefix=_PROFILE_PREFIX, dir=directory))
@@ -467,3 +504,14 @@ def sign_in(cancel: threading.Event, *, timeout: float = 600, edge: Path | None 
             if not profile.exists():
                 break
             time.sleep(0.2)
+
+
+def sign_in_default(cancel: threading.Event, *, timeout: float = 600,
+                    launch=subprocess.Popen, poll_interval: float = 1.0) -> dict:
+    """Start a fresh login in the supported default browser, without extensions."""
+    if cancel.is_set():
+        raise SignInError(CANCELLED)
+    browser = find_default_browser()
+    if browser is None:
+        raise SignInError(NO_DEFAULT_BROWSER)
+    return sign_in(cancel, timeout=timeout, edge=browser, launch=launch, poll_interval=poll_interval)

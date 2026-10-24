@@ -33,6 +33,13 @@ def main() -> int:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    if len(sys.argv) > 1 and sys.argv[1] == "--qt-smoke":
+        if len(sys.argv) != 3:
+            return 2
+        from luvbox.qt_smoke import run
+
+        return run(Path(sys.argv[2]))
+    # Previous Tk window check. The current app is checked with --qt-smoke.
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
         if len(sys.argv) != 3:
             return 2
@@ -421,13 +428,18 @@ def main() -> int:
 
         return run_saved(full=len(sys.argv) == 3)
 
+    if len(sys.argv) == 2 and sys.argv[1] == "--legacy-ui":
+        from luvbox.gui import launch
+
+        launch()
+        return 0
+
     if len(sys.argv) > 1:
         return 2
 
-    from luvbox.gui import launch
+    from luvbox.qt_app import launch
 
-    launch()
-    return 0
+    return launch()
 
 
 if __name__ == "__main__":

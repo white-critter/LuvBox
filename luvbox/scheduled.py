@@ -113,6 +113,7 @@ function Stamp($value) { if ($value -and $value.Year -gt 2000) { $value.ToString
     arguments = [string]$action.Arguments
     start = [string]$trigger.StartBoundary
     enabled = [bool]$trigger.Enabled -and ($task.State -ne 'Disabled')
+    running = $task.State -eq 'Running'
     catch_up = [bool]$task.Settings.StartWhenAvailable
     on_battery = -not [bool]$task.Settings.DisallowStartIfOnBatteries
     last_run = Stamp $info.LastRunTime
@@ -165,7 +166,8 @@ def task_status() -> dict:
                        str(data.get("arguments") or "") == arguments and
                        str(data.get("name") or TASK_NAME) == TASK_NAME,
             "time": f"{found[1]}:{found[2]}" if found else "",
-            "enabled": bool(data.get("enabled")), "catch_up": bool(data.get("catch_up")),
+            "enabled": bool(data.get("enabled")), "running": bool(data.get("running")),
+            "catch_up": bool(data.get("catch_up")),
             "on_battery": bool(data.get("on_battery")),
             "last_run": str(data.get("last_run") or ""), "next_run": str(data.get("next_run") or "")}
 

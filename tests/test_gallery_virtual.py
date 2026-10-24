@@ -14,8 +14,10 @@ from PIL import Image
 
 from luvbox.gallery import TILE, ThumbnailGrid
 from tests import test_gallery as gallery_fixtures
+from tests.legacy_ui import previous_window
 
 
+@previous_window
 class GalleryVirtualizationTests(unittest.TestCase):
     release = gallery_fixtures.GalleryLayoutTests.release
 
@@ -302,6 +304,7 @@ class GalleryVirtualizationTests(unittest.TestCase):
                          if tile in originals and top <= tile.winfo_rooty()
                          and tile.winfo_rooty() + tile.winfo_height() <= bottom)
         self.assertNotEqual(key, "0")
+        self.assertTrue(self.root.tk.getboolean(tile.cget("takefocus")))
         # Dispatch through Tcl bindings, which must resolve the recycled key
         # rather than a closure carrying the widget's former record.
         tile.event_generate("<ButtonPress-1>", x=10, y=10, time=1000)

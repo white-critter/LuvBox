@@ -200,6 +200,26 @@ class BrowserBridge:
                 self.end_headers()
                 if content:
                     self.wfile.write(content)
+                if code >= 400:
+                    self._finish_rejection()
+
+            def _finish_rejection(self):
+                try:
+                    self.wfile.flush()
+                    self.connection.shutdown(socket.SHUT_WR)
+                    deadline = time.monotonic() + 0.2
+                    remaining_bytes = _MAX_PAYLOAD + 1
+                    while remaining_bytes:
+                        remaining_time = deadline - time.monotonic()
+                        if remaining_time <= 0:
+                            break
+                        self.connection.settimeout(remaining_time)
+                        chunk = self.rfile.read1(min(4096, remaining_bytes))
+                        if not chunk:
+                            break
+                        remaining_bytes -= len(chunk)
+                except OSError:
+                    pass
 
             def _valid_request(self, path):
                 if (self.client_address[0] != "127.0.0.1" or

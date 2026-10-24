@@ -13,8 +13,10 @@ from luvbox import theme
 from luvbox.history_gui import HistoryWindow
 from luvbox.recycling import file_signature
 from tests import test_history_gui as history_tests
+from tests.legacy_ui import previous_window
 
 
+@previous_window
 class FileSelectionGuiTests(unittest.TestCase):
     setUp = history_tests.HistoryGuiTests.setUp
     load = history_tests.HistoryGuiTests.load
@@ -111,7 +113,8 @@ class FileSelectionGuiTests(unittest.TestCase):
         records = store.records()
         self.assertTrue(self.window.bind("<Delete>"))
         labels = {button.cget("text") for button in self.window.file_selection_actions.winfo_children()}
-        self.assertIn("휴지통으로 보내기 (2개)", labels)
+        self.assertIn("휴지통 (2)", labels)
+        self.assertEqual(self.window.delete_button.cget("text"), "휴지통 (2)")
         commands = {label: callback for label, callback, _enabled in self.window._file_menu_commands()}
         self.assertEqual(set(commands), {"파일 열기", "트윗 열기", "이 작성자 파일 보기",
                                          "선택한 파일 경로 복사", "이 페이지 모두 선택", "선택 해제", "휴지통으로 보내기"})
@@ -358,7 +361,7 @@ class FileSelectionGuiTests(unittest.TestCase):
         self.assertEqual(self.window.tile_values["files"].get(), "2")
         items = {item["tweet_id"]: item for item in self.window.missing_items}
         self.assertEqual((items["300"]["removed"], items["300"]["ignored"]), ("declined", True))
-        self.assertEqual(self.window.tabs.tab(self.window.missing_view, "text"), "사라진 파일")
+        self.assertEqual(self.window.tabs.tab(self.window.missing_scroll_view, "text"), "사라진 파일")
         self.window.show_ignored.set(True)
         self.window._filter_missing()
         key = items["300"]["archive_key"]

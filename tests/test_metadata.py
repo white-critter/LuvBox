@@ -149,10 +149,12 @@ class MetadataTransactionTests(unittest.TestCase):
 
     def test_author_verification_failure_preserves_original_even_with_valid_source(self):
         valid = {"XMP-dc:Source": URL,
-                 "XMP-dc:Description": URL + "\nX author: @writer (https://x.com/writer)",
+                 "XMP-dc:Description": "",
                  "XMP-dc:Creator": ["Original creator", "@writer"],
                  "XMP-dc:Relation": ["https://original.example/", "https://x.com/writer"],
-                 "XMP-xmp:Identifier": ["original-id", "luvbox:x-author:writer"]}
+                 "XMP-xmp:Identifier": ["original-id", "luvbox:x-author:writer",
+                                        "luvbox:owned-author:v1:creator:writer",
+                                        "luvbox:owned-author:v1:profile:writer"]}
         for tag in ("XMP-dc:Creator", "XMP-dc:Relation", "XMP-xmp:Identifier"):
             incomplete = {**valid, tag: []}
             def fake(arguments, deadline):
@@ -167,7 +169,7 @@ class MetadataTransactionTests(unittest.TestCase):
 
     def test_missing_author_remains_unknown_with_source_only_metadata(self):
         with patch.object(metadata, "available", return_value=True), \
-                patch.object(metadata, "_read_tags", side_effect=[{}, {"XMP-dc:Source": URL, "XMP-dc:Description": URL}]), \
+                patch.object(metadata, "_read_tags", side_effect=[{}, {"XMP-dc:Source": URL, "XMP-dc:Description": ""}]), \
                 patch.object(metadata, "_run", return_value=subprocess.CompletedProcess([], 0, "", "")):
             result = metadata.embed_source(self.path, "100")
         self.assertEqual((result["status"], result["author_status"], result["author"], result["author_id"]),
@@ -208,7 +210,7 @@ class MetadataTransactionTests(unittest.TestCase):
                 self.path.write_bytes(b"concurrent-local-change")
                 return subprocess.CompletedProcess([], 0, "", "")
             reads += 1
-            return subprocess.CompletedProcess([], 0, json.dumps([{} if reads == 1 else {"XMP-dc:Source": URL, "XMP-dc:Description": URL}]), "")
+            return subprocess.CompletedProcess([], 0, json.dumps([{} if reads == 1 else {"XMP-dc:Source": URL, "XMP-dc:Description": ""}]), "")
         with patch.object(metadata, "available", return_value=True), patch.object(metadata, "_run", side_effect=fake):
             result = metadata.embed_source(self.path, "100")
         self.assertEqual(result["status"], "failed")
@@ -216,7 +218,7 @@ class MetadataTransactionTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [self.path])
 
     def test_replace_failure_removes_temporaries_and_preserves_original(self):
-        with patch.object(metadata, "available", return_value=True), patch.object(metadata, "_read_tags", side_effect=[{}, {"XMP-dc:Source": URL, "XMP-dc:Description": URL}]), patch.object(metadata, "_run", return_value=subprocess.CompletedProcess([], 0, "", "")), patch.object(metadata.os, "replace", side_effect=OSError(SECRET)):
+        with patch.object(metadata, "available", return_value=True), patch.object(metadata, "_read_tags", side_effect=[{}, {"XMP-dc:Source": URL, "XMP-dc:Description": ""}]), patch.object(metadata, "_run", return_value=subprocess.CompletedProcess([], 0, "", "")), patch.object(metadata.os, "replace", side_effect=OSError(SECRET)):
             result = metadata.embed_source(self.path, "100")
         self.assertEqual(result["status"], "failed")
         self.assertNotIn(SECRET, str(result))
@@ -266,10 +268,10 @@ class MetadataTransactionTests(unittest.TestCase):
         with patch.object(metadata.sys, "frozen", True, create=True), patch.object(metadata.sys, "executable", str(self.root / "LuvBox.exe")):
             self.assertEqual(metadata.exiftool_path(), self.root / "tools" / "exiftool" / "runtime" / "exiftool.exe")
 
-    def test_description_and_comment_do_not_confuse_longer_url_with_source(self):
+    def test_description_and_comment_preserve_unrelated_urls(self):
         for old_url in (URL + "0", URL + "?ref=other", URL + "/extra", URL + "#fragment", URL):
             old_text = "Existing source: " + old_url
-            expected = old_text if old_url == URL else old_text + "\nSource: " + URL
+            expected = old_text
             captured = {}
             def fake(arguments, deadline):
                 for argument in arguments:
@@ -475,9 +477,10 @@ class ActualExifToolTests(unittest.TestCase):
                                                              for frame in ImageSequence.Iterator(image)]
         before = animation()
         with metadata.persistent():
-            result = metadata.embed_source(path, "100", author="gif_writer", author_id="123456")
+            result = metadata.embed_source(path, "100", author="gif_writer", author_id="123456", text="움직이는 사진\n본문")
             self.assertEqual((result["status"], result["author_status"]), ("embedded", "embedded"))
             self.assertEqual(metadata.read_source(path), URL)
+            self.assertEqual(metadata._read_tags(path, time.monotonic() + 20)["XMP-dc:Description"], "움직이는 사진\n본문")
             self.assertEqual(metadata.read_author(path), {"author": "gif_writer", "author_id": "123456",
                                                          "profile_url": "https://x.com/gif_writer"})
         self.assertEqual(animation(), before)
@@ -513,16 +516,10 @@ class ActualExifToolTests(unittest.TestCase):
                                          {"https://original.example/source", "https://x.com/Example_User", "https://x.com/i/user/1234567890"})
                         ownership = {"luvbox:owned-author:v1:creator:Example_User",
                                      "luvbox:owned-author:v1:profile:Example_User",
-                                     "luvbox:owned-author:v1:user-url:1234567890",
-                                     "luvbox:owned-author:v1:description-handle:Example_User",
-                                     "luvbox:owned-author:v1:description-id:1234567890"}
-                        if suffix == ".mp4":
-                            ownership.update({"luvbox:owned-author:v1:comment-handle:Example_User",
-                                              "luvbox:owned-author:v1:comment-id:1234567890"})
+                                     "luvbox:owned-author:v1:user-url:1234567890"}
                         self.assertEqual(set(metadata._values(first["XMP-xmp:Identifier"])),
                                          {"original:123", "luvbox:x-author:Example_User", "luvbox:x-user-id:1234567890"} | ownership)
-                        self.assertIn("원본 설명\nSource: " + URL, first["XMP-dc:Description"])
-                        self.assertIn("X author: @Example_User (https://x.com/Example_User)", first["XMP-dc:Description"])
+                        self.assertEqual(first["XMP-dc:Description"], "원본 설명")
                         self.assertEqual(metadata.embed_source(path, "100", "Example_User", "1234567890")["author_status"], "embedded")
                         second = metadata._read_tags(path, time.monotonic() + 20)
                         self.assertEqual(first, second)
@@ -535,7 +532,7 @@ class ActualExifToolTests(unittest.TestCase):
                         self.assertEqual(current_payload, payload)
                         self.assertEqual(path.stat().st_mtime_ns, mtime)
                         if suffix == ".mp4":
-                            self.assertIn("X author: @Example_User", first["ItemList:Comment"])
+                            self.assertEqual(first["ItemList:Comment"], "Original comment")
                             self.assertEqual(first["UserData:Comment"], "Separate comment")
                         self.assertFalse(list(self.root.glob(".luvbox-source-*")))
 
@@ -565,11 +562,8 @@ class ActualExifToolTests(unittest.TestCase):
                          {"urn:other:1", "luvbox:x-author:current_name", "luvbox:x-user-id:67890",
                           "luvbox:owned-author:v1:creator:current_name",
                           "luvbox:owned-author:v1:profile:current_name",
-                          "luvbox:owned-author:v1:user-url:67890",
-                          "luvbox:owned-author:v1:description-handle:current_name",
-                          "luvbox:owned-author:v1:description-id:67890"})
-        self.assertEqual(tags["XMP-dc:Description"], URL + "\nX author: @current_name (https://x.com/current_name)\n"
-                                                      "X user ID: 67890 (https://x.com/i/user/67890)")
+                          "luvbox:owned-author:v1:user-url:67890"})
+        self.assertEqual(tags.get("XMP-dc:Description", ""), "")
 
     def test_handle_case_change_leaves_one_creator(self):
         path = self.root / "100_case.png"
@@ -616,11 +610,11 @@ class ActualExifToolTests(unittest.TestCase):
                                      {"https://x.com/previous_name", "https://x.com/i/user/12345",
                                       "https://x.com/current_name", "https://x.com/i/user/67890"})
                     self.assertTrue(set(unrelated).issubset(metadata._values(changed["XMP-xmp:Identifier"])))
-                    self.assertTrue(changed["XMP-dc:Description"].startswith(external_text + "\nSource: " + URL))
+                    self.assertEqual(changed["XMP-dc:Description"], external_text)
                     self.assertEqual(metadata.read_author(path), {"author": "current_name", "author_id": "67890",
                                                                  "profile_url": "https://x.com/current_name"})
                     if suffix == ".mp4":
-                        self.assertTrue(changed["ItemList:Comment"].startswith(external_text + "\nSource: " + URL))
+                        self.assertEqual(changed["ItemList:Comment"], external_text)
                         self.assertEqual(changed["UserData:Comment"], "Unrelated comment")
                     self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
                     self.assertEqual(metadata._read_tags(path, time.monotonic() + 20), changed)
@@ -647,7 +641,7 @@ class ActualExifToolTests(unittest.TestCase):
             self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
             tags = metadata._read_tags(path, time.monotonic() + 20)
             self.assertEqual(metadata._values(tags["XMP-dc:Creator"]), ["@previous_name", "@current_name"])
-            self.assertTrue(tags["XMP-dc:Description"].startswith(legacy_description + "\n"))
+            self.assertEqual(tags["XMP-dc:Description"], legacy_description)
             self.assertIn("https://x.com/previous_name", metadata._values(tags["XMP-dc:Relation"]))
             self.assertIn("https://x.com/i/user/12345", metadata._values(tags["XMP-dc:Relation"]))
             self.assertNotIn("luvbox:x-author:previous_name", metadata._values(tags["XMP-xmp:Identifier"]))
@@ -672,7 +666,7 @@ class ActualExifToolTests(unittest.TestCase):
                         self.assertEqual(metadata.embed_source(path, "100", "previous_name", "12345")["author_status"], "embedded")
                         self.assertEqual(metadata.embed_source(path, "100", "current_name", "67890")["author_status"], "embedded")
                         tags = metadata._read_tags(path, time.monotonic() + 20)
-                        expected = original + "\nX author: @current_name (https://x.com/current_name)\nX user ID: 67890 (https://x.com/i/user/67890)"
+                        expected = original
                         self.assertEqual(tags["XMP-dc:Description"], expected)
                         if suffix == ".mp4":
                             self.assertEqual(tags["ItemList:Comment"], expected)
@@ -717,7 +711,7 @@ class ActualExifToolTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(metadata.embed_source(path, "100")["status"], "embedded")
         first = metadata._read_tags(path, time.monotonic() + 20)
-        self.assertEqual(first["XMP-dc:Description"], original_description + "\nSource: " + URL)
+        self.assertEqual(first["XMP-dc:Description"], original_description)
         self.assertEqual(metadata.embed_source(path, "100")["status"], "embedded")
         self.assertEqual(metadata._read_tags(path, time.monotonic() + 20)["XMP-dc:Description"], first["XMP-dc:Description"])
         result = metadata._run(["-j", "-XMP-dc:Description-fr", str(path)], time.monotonic() + 20)
@@ -741,7 +735,7 @@ class ActualExifToolTests(unittest.TestCase):
         self.assertEqual(metadata.read_source(path), URL)
         self.assertEqual([data for kind, data in atoms(path.read_bytes()) if kind == b"mdat"], original_payload)
         tags = metadata._read_tags(path, time.monotonic() + 20)
-        self.assertEqual(tags["ItemList:Comment"], "Original comment\nSource: " + URL)
+        self.assertEqual(tags["ItemList:Comment"], "Original comment")
         self.assertEqual(tags["UserData:Comment"], "Separate comment")
         self.assertEqual(metadata.embed_source(path, "100")["status"], "embedded")
         self.assertEqual(metadata._read_tags(path, time.monotonic() + 20)["ItemList:Comment"], tags["ItemList:Comment"])

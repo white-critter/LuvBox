@@ -729,8 +729,8 @@ ApplicationWindow {
                 color: window.mutedColor
             }
             Label {
-                visible: window.app && window.app.library.selectedMissing && !window.app.library.busy
-                text: "파일을 열 수 없습니다. 저장 드라이브를 연결해 주세요."
+                visible: window.app && text.length > 0 && !window.app.library.busy
+                text: window.app ? window.app.library.selectedMissingNote : ""
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true

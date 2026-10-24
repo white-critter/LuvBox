@@ -4,6 +4,7 @@ The original file is replaced only after the temporary copy's source tag has
 been read back successfully. No account credentials or network calls are used.
 """
 
+import hashlib
 import json
 import os
 import queue
@@ -29,10 +30,11 @@ _OUTPUT_LIMIT_LINES = 4096
 _ID = re.compile(r"[0-9]{1,20}\Z", re.ASCII)
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z", re.ASCII)
 _URL = re.compile(r"https://x\.com/i/web/status/[0-9]{1,20}\Z", re.ASCII)
-_URL_CHARACTER = r"[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]"
 _AUTHOR_MARKER = "luvbox:x-author:"
 _AUTHOR_ID_MARKER = "luvbox:x-user-id:"
 _OWNED_AUTHOR_MARKER = "luvbox:owned-author:v1:"
+_OWNED_DESCRIPTION_MARKER = "luvbox:owned-description:v1:"
+_TEXT_LIMIT_BYTES = 1024 * 1024
 # These are persisted inside media from releases before the rename. Read and
 # retire them too, while writing only the current protocol markers.
 _AUTHOR_MARKERS = (_AUTHOR_MARKER, "xlikesaver:x-author:")
@@ -651,18 +653,6 @@ def _identity_marker(marker: str) -> bool:
                 _marker_value(marker, _AUTHOR_ID_MARKERS, _ID))
 
 
-def _remove_owned_line(text: str, line: str) -> str:
-    # An appended author line owns its preceding LF, not a newline belonging
-    # to the original description. Keep all other separators byte-for-byte.
-    # In particular, keep an original CR immediately before our appended LF.
-    pattern = re.compile(r"\n" + re.escape(line) + r"(?=\r|\n|\Z)")
-    matches = list(pattern.finditer(text))
-    if not matches:
-        return text
-    match = matches[-1]
-    return text[:match.start()] + text[match.end():]
-
-
 def _author_from_tags(tags: dict) -> dict[str, str]:
     identities = _values(tags.get("XMP-xmp:Identifier"))
     authors = {author for value in identities
@@ -707,13 +697,16 @@ def read_source(path: Path | str) -> str:
         return ""
 
 
-def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: str = "") -> dict[str, str]:
-    """Embed tweet source and optional author, preserving original on failure."""
+def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: str = "",
+                 *, text: str | None = None) -> dict[str, str]:
+    """Write separate post fields transactionally; None leaves descriptions intact."""
     url = f"https://x.com/i/web/status/{tweet_id}" if isinstance(tweet_id, str) and _ID.fullmatch(tweet_id) else ""
     status = "failed"
     reason = "invalid"
     temporary = None
     text_files = []
+    structured = text is not None
+    text_status = "error" if structured else "not_requested"
     # An invalid handle or ID is treated as unknown: the author part is
     # skipped and the source URL is still recorded.
     identity = author_identity(author, author_id)
@@ -722,12 +715,15 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
     try:
         if not url:
             raise ValueError("invalid tweet id")
+        if structured and (not isinstance(text, str) or len(text) > _TEXT_LIMIT_BYTES or "\0" in text or
+                           len(text.encode("utf-8")) > _TEXT_LIMIT_BYTES):
+            raise ValueError("invalid post text")
         target_input = Path(path)
         if target_input.suffix.lower() not in SUPPORTED_SUFFIXES:
             status = "unsupported"
             return {"status": status, "url": url, "message": _MESSAGES[status],
                     "reason": "unsupported", "reason_message": failure_message("unsupported"),
-                    "author_status": author_status, **identity}
+                    "author_status": author_status, "text_status": text_status, **identity}
         if target_input.is_symlink() or getattr(target_input, "is_junction", lambda: False)():
             raise _MediaChanged("linked media")
         reason = "missing"
@@ -750,8 +746,9 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         os.close(fd)
         temporary = Path(name)
         _copy_for_metadata(target, temporary)
-        source_token = re.compile(r"(?<!" + _URL_CHARACTER + r")" + re.escape(url) + r"(?!" + _URL_CHARACTER + r")")
         identifiers = _values(previous_tags.get("XMP-xmp:Identifier"))
+        description_markers = []
+        update_description = False
         previous_owned = {}
         wanted_entries = {}
         owned_markers = []
@@ -762,7 +759,9 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                     tag, content = entry
                     previous_owned.setdefault(tag, set()).add(content)
             for role, (tag, field, template) in _AUTHOR_ENTRY_ROLES.items():
-                if identity[field] and (tag != "ItemList:Comment" or target.suffix.lower() == ".mp4"):
+                if tag in {"XMP-dc:Description", "ItemList:Comment"}:
+                    continue
+                if identity[field]:
                     content = template.format(identity[field])
                     marker = _OWNED_AUTHOR_MARKER + role + ":" + identity[field]
                     wanted_entries.setdefault(tag, []).append((content, marker))
@@ -772,18 +771,19 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             return previous_owned.get(tag, set()) - wanted
 
         def text_argument(tag: str, old_value: str) -> tuple[str, str]:
+            nonlocal text_status, update_description
             if not isinstance(old_value, str):
                 old_value = ""
             ownership_tag = tag.removesuffix("-x-default")
-            for line in sorted(stale_values(ownership_tag)):
-                old_value = _remove_owned_line(old_value, line)
-            value = old_value if source_token.search(old_value) else (f"{old_value}\nSource: {url}" if old_value else url)
-            for line, marker in wanted_entries.get(ownership_tag, ()):
-                if line not in value.splitlines():
-                    value += "\n" + line
-                    owned_markers.append(marker)
-                elif line in previous_owned.get(ownership_tag, ()):
-                    owned_markers.append(marker)
+            value = old_value
+            if structured and ownership_tag == "XMP-dc:Description":
+                marker = _OWNED_DESCRIPTION_MARKER + hashlib.sha256(old_value.encode("utf-8")).hexdigest()
+                update_description = not old_value or marker in identifiers
+                if update_description:
+                    value = text
+                    if value:
+                        description_markers.append(_OWNED_DESCRIPTION_MARKER + hashlib.sha256(value.encode("utf-8")).hexdigest())
+                text_status = "embedded" if value == text else "preserved"
             fd, name = tempfile.mkstemp(prefix=".luvbox-source-", suffix=".txt", dir=target.parent)
             text_path = Path(name)
             text_files.append(text_path)
@@ -818,16 +818,20 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             # ItemList belongs to QuickTime. Other Comment locations remain intact.
             comment_arg, comment_value = text_argument("ItemList:Comment", previous_tags.get("ItemList:Comment", ""))
             arguments.append(comment_arg)
-        if has_author:
+        if has_author or update_description:
             wanted_identifiers = []
-            if identity["author"]:
+            if has_author and identity["author"]:
                 wanted_identifiers.append(_AUTHOR_MARKER + identity["author"])
             if identity["author_id"]:
                 wanted_identifiers.append(_AUTHOR_ID_MARKER + identity["author_id"])
             wanted_identifiers.extend(owned_markers)
+            wanted_identifiers.extend(description_markers)
             kept_identifiers = []
             for value in identifiers:
-                if (_identity_marker(value) or _owned_author_entry(value)) and value not in wanted_identifiers:
+                replace_identity = has_author and (_identity_marker(value) or _owned_author_entry(value))
+                replace_description = (update_description and value.startswith(_OWNED_DESCRIPTION_MARKER) and
+                                       re.fullmatch(r"[0-9a-f]{64}", value[len(_OWNED_DESCRIPTION_MARKER):]))
+                if (replace_identity or replace_description) and value not in wanted_identifiers:
                     arguments.append(f"-XMP-xmp:Identifier-={value}")
                 else:
                     kept_identifiers.append(value)
@@ -842,15 +846,15 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             raise ValueError("metadata write failed")
         reason = "verification"
         tags = _read_tags(temporary, deadline)
-        if tags.get("XMP-dc:Source") != url or tags.get("XMP-dc:Description") != description_value:
+        if tags.get("XMP-dc:Source") != url or tags.get("XMP-dc:Description", "") != description_value:
             raise ValueError("metadata verification failed")
-        if target.suffix.lower() == ".mp4" and tags.get("ItemList:Comment") != comment_value:
+        if target.suffix.lower() == ".mp4" and tags.get("ItemList:Comment", "") != comment_value:
             raise ValueError("metadata verification failed")
+        for tag, expected in required_tags.items():
+            actual = _values(tags.get(tag))
+            if any(actual.count(value) < expected.count(value) for value in expected):
+                raise ValueError("metadata verification failed")
         if has_author:
-            for tag, expected in required_tags.items():
-                actual = _values(tags.get(tag))
-                if any(actual.count(value) < expected.count(value) for value in expected):
-                    raise ValueError("author metadata verification failed")
             for tag, removed in removed_tags.items():
                 if any(value in _values(tags.get(tag)) for value in removed):
                     raise ValueError("author metadata verification failed")
@@ -869,6 +873,8 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         author_status = "embedded" if has_author else "unknown"
     except Exception as exc:
         status = "failed"
+        if structured:
+            text_status = "error"
         if isinstance(exc, _MediaChanged):
             reason = "changed"
         elif isinstance(exc, _MediaBusy):
@@ -898,4 +904,4 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                 pass
     return {"status": status, "url": url, "message": _MESSAGES[status],
             "reason": reason, "reason_message": failure_message(reason) if reason else "",
-            "author_status": author_status, **identity}
+            "author_status": author_status, "text_status": text_status, **identity}

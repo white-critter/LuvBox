@@ -64,14 +64,22 @@ class _GifSampler:
 
     def add(self, original, duration):
         while duration:
-            if self.image is None:
+            prepared_current = self.image is None
+            if prepared_current:
                 # Keep small sources at their original resolution. Enlarging
                 # here only makes the viewer shrink or enlarge those pixels a
                 # second time for its actual canvas on every frame.
                 if original.width <= self.size[0] and original.height <= self.size[1]:
                     self.image = original.convert("RGBA")
                 else:
-                    self.image = ImageOps.contain(original, self.size, Image.Resampling.LANCZOS).convert("RGBA")
+                    image = ImageOps.contain(original, self.size, Image.Resampling.LANCZOS)
+                    if image.mode == "RGBA":
+                        self.image = image
+                    else:
+                        try:
+                            self.image = image.convert("RGBA")
+                        finally:
+                            image.close()
             # A long source frame needs one held image, rather than a copy
             # for every sampling interval in which its pixels stay the same.
             consumed = (duration // self.interval * self.interval
@@ -81,6 +89,8 @@ class _GifSampler:
             self.duration += consumed
             if self.duration >= self.interval:
                 image, self.image = self.image, None
+                if duration and prepared_current:
+                    self.image = image.copy()
                 elapsed, self.duration = self.duration, 0
                 if not self.send(ReviewFrame(image, float(elapsed), self.note)):
                     return False

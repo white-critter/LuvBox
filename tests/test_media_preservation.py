@@ -95,10 +95,9 @@ class LegacyAuthorIdentityTests(unittest.TestCase):
             self.assertEqual(set(metadata._values(tags["XMP-dc:Creator"])), {"Studio Photographer", "@new_author"})
             self.assertEqual(set(metadata._values(tags["XMP-dc:Relation"])),
                              {"https://x.com/new_author", "https://x.com/i/user/456"})
-            self.assertIn("Original caption", tags["XMP-dc:Description"])
-            self.assertNotIn("old_author", tags["XMP-dc:Description"])
-            self.assertNotIn("X user ID: 123", tags["XMP-dc:Description"])
-            self.assertIn("X author: @new_author", tags["XMP-dc:Description"])
+            self.assertEqual(tags["XMP-dc:Description"], description.read_bytes().decode("utf-8"))
+            self.assertNotIn("new_author", tags["XMP-dc:Description"])
+            self.assertNotIn("X user ID: 456", tags["XMP-dc:Description"])
             identifiers = metadata._values(tags["XMP-xmp:Identifier"])
             self.assertIn("unrelated-private-identifier", identifiers)
             self.assertIn("luvbox:x-author:new_author", identifiers)

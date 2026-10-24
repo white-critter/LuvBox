@@ -135,7 +135,7 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 3)
         folder = self.output / "myaccount" / "alice"
         self.assertEqual({path.name for path in folder.iterdir()},
-                         {"100_1.jpg", "100_video_2.mp4", "100_gif_3.gif"})
+                         {"alice_100_1.jpg", "alice_100_video_2.mp4", "alice_100_gif_3.gif"})
         self.assertEqual({event["media_type"] for event in events if event["type"] == "saved"},
                          {"photo", "video", "animated_gif"})
         self.assertEqual(len(self.history_rows()), 3)
@@ -198,7 +198,7 @@ class MediaTests(unittest.TestCase):
         code, events = self.variant_worker(media, include_gifs=False)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
-        self.assertTrue((self.output / "myaccount" / "alice" / "100_video_2.mp4").is_file())
+        self.assertTrue((self.output / "myaccount" / "alice" / "alice_100_video_2.mp4").is_file())
         code, events = self.variant_worker(media)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
@@ -211,7 +211,7 @@ class MediaTests(unittest.TestCase):
         code, events = self.variant_worker([self.variant_media("video", hls), self.variant_media("video", mp4)])
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
-        self.assertTrue((self.output / "myaccount" / "alice" / "100_video_2.mp4").is_file())
+        self.assertTrue((self.output / "myaccount" / "alice" / "alice_100_video_2.mp4").is_file())
         code, events = self.variant_worker([self.variant_media("video", mp4), self.variant_media("video", mp4)])
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
@@ -252,7 +252,7 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
         self.assertEqual(events[-1]["size_skipped"], 0)
-        gif = self.output / "myaccount" / "alice" / "100_gif_1.gif"
+        gif = self.output / "myaccount" / "alice" / "alice_100_gif_1.gif"
         self.assertTrue(gif.read_bytes().startswith(b"GIF89a"))
         self.assertFalse(list(self.output.rglob("*.part*")))
 
@@ -414,8 +414,8 @@ class MediaTests(unittest.TestCase):
     def test_transfer_kept_by_a_stop_at_the_review_is_saved_later_without_a_resume_request(self):
         # X answers a request to resume a complete file with 416, which stops
         # the run. A choice the user left open must not cause that next time.
-        kinds = {"photo": ("100_1.jpg", [b"\xff\xd8\xff", b"photo-bytes"], "image/jpeg"),
-                 "video": ("100_video_1.mp4", [MP4_HEADER, b"video-bytes"], "video/mp4")}
+        kinds = {"photo": ("alice_100_1.jpg", [b"\xff\xd8\xff", b"photo-bytes"], "image/jpeg"),
+                 "video": ("alice_100_video_1.mp4", [MP4_HEADER, b"video-bytes"], "video/mp4")}
 
         class Review:
             def __init__(self, choice, flag=None):
@@ -522,7 +522,7 @@ class MediaTests(unittest.TestCase):
         code, events, _ = self.http_worker([("100", 1, "photo", "alice")], [response],
                                            review=Review(), stop_file=flag)
         self.assertEqual((code, events[-1]["status"]), (0, "stopped"))
-        partial = self.output / "myaccount" / "alice" / "100_1.jpg.part"
+        partial = self.output / "myaccount" / "alice" / "alice_100_1.jpg.part"
         self.assertTrue(Path(str(partial) + ".luvbox-complete").is_file())
         flag.unlink()
         refused = self.response(status=416, content_range="bytes */14")
@@ -548,7 +548,7 @@ class MediaTests(unittest.TestCase):
                                                [self.response(photo, size=14, content_type="image/jpeg")],
                                                review=Review(), stop_file=flag)
         self.assertEqual((code, events[-1]["status"]), (0, "stopped"))
-        partial = self.output / "myaccount" / "alice" / "100_1.jpg.part"
+        partial = self.output / "myaccount" / "alice" / "alice_100_1.jpg.part"
         self.assertTrue(partial.is_file())
         self.assertFalse(Path(str(partial) + ".luvbox-complete").exists())
         # A record that cannot be removed after the save does not undo it.
@@ -625,7 +625,7 @@ class MediaTests(unittest.TestCase):
     def test_416_never_finalizes_partial_or_requests_fallback_and_preserves_completed_archive(self):
         self.worker([("90", 1, "photo", "alice")])
         folder = self.output / "myaccount" / "alice"
-        completed = folder / "90_1.jpg"
+        completed = folder / "alice_90_1.jpg"
         completed_bytes = completed.read_bytes()
         previous_archive = self.archive_keys()
         kinds = {"photo": ("1.jpg", b"\xff\xd8\xffphoto-part"),
@@ -675,7 +675,7 @@ class MediaTests(unittest.TestCase):
 
         self.worker([("90", 1, "photo", "alice")])
         folder = self.output / "myaccount" / "alice"
-        completed = folder / "90_1.jpg"
+        completed = folder / "alice_90_1.jpg"
         completed_bytes = completed.read_bytes()
         previous_archive = self.archive_keys()
         original_open = PathFormat.open
@@ -751,7 +751,7 @@ class MediaTests(unittest.TestCase):
         for event in progress:
             self.assertEqual(event["tweet_id"], "100")
             self.assertEqual(event["media_type"], "video")
-            self.assertEqual(event["filename"], "100_video_1.mp4")
+            self.assertEqual(event["filename"], "alice_100_video_1.mp4")
             self.assertEqual(event["author"], "alice")
             self.assertEqual(event["posted_at"], "2020-01-02T00:30:00+09:00")
             self.assertGreaterEqual(event["speed"], 0)
@@ -812,7 +812,7 @@ class MediaTests(unittest.TestCase):
         rows = [("100", 1, "photo", "alice", None, 123456789)]
         code, events = self.worker(rows)
         self.assertEqual(code, 0)
-        self.assertEqual(self.embed_source.call_args.kwargs, {"author": "alice", "author_id": "123456789"})
+        self.assertEqual(self.embed_source.call_args.kwargs, {"author": "alice", "author_id": "123456789", "text": None})
         saved = next(event for event in events if event["type"] == "saved")
         self.assertEqual((saved["author"], saved["author_id"], saved["author_metadata_status"]), ("alice", "123456789", "embedded"))
         row = self.history_rows()[0]
@@ -917,7 +917,7 @@ class MediaTests(unittest.TestCase):
         options = replace(self.options, folder_mode="flat")
         rows = [("100", 1, "photo", "")]
         self.worker(rows, options=options)
-        self.assertEqual(self.embed_source.call_args.kwargs, {"author": "", "author_id": ""})
+        self.assertEqual(self.embed_source.call_args.kwargs, {"author": "", "author_id": "", "text": None})
         row = self.history_rows()[0]
         self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]), ("", "", "unknown"))
         self.embed_source.reset_mock()

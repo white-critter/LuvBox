@@ -24,6 +24,7 @@ def _archive(assets, manifest):
                                                         separators=(",", ":")).encode("utf-8")}
         for name, data in sorted(entries.items()):
             info = zipfile.ZipInfo(name, date_time=(2020, 1, 1, 0, 0, 0))
+            info.create_system = 3
             info.external_attr = 0o644 << 16
             archive.writestr(info, data)
     return output.getvalue()

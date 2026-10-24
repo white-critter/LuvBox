@@ -10,6 +10,8 @@ import threading
 import tkinter as tk
 from types import SimpleNamespace
 import unittest
+
+from tests.legacy_ui import previous_window
 import weakref
 from unittest.mock import patch
 
@@ -290,6 +292,7 @@ class GalleryDecoderTests(unittest.TestCase):
             self.assertEqual(len(decoder.cache), 240)
 
 
+@previous_window
 class GalleryLayoutTests(unittest.TestCase):
     def setUp(self):
         self.root = tk.Tk()
@@ -740,6 +743,9 @@ class GalleryLayoutTests(unittest.TestCase):
     def test_fast_drag_box_is_one_window_that_never_takes_focus_or_leaves_lines(self):
         self.grid.show([(str(index), {"author": "offline"}) for index in range(12)], set)
         self.root.update()
+        self.grid.tiles["0"].focus_force()
+        self.root.update()
+        self.assertEqual(self.root.focus_get(), self.grid.tiles["0"])
         children = set(self.grid.inner.winfo_children())
         self.grid._press(self.pointer("0"), "0")
         for key in ("1", "7", "2", "8", "3", "9", "0"):

@@ -33,7 +33,7 @@ class MetadataResilienceTests(unittest.TestCase):
         self.mtime = self.path.stat().st_mtime_ns
 
     def valid_tags(self):
-        return [{}, {"XMP-dc:Source": URL, "XMP-dc:Description": URL}]
+        return [{}, {"XMP-dc:Source": URL, "XMP-dc:Description": ""}]
 
     def assert_original(self):
         self.assertEqual(self.path.read_bytes(), self.original)

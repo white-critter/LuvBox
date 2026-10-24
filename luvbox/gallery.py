@@ -601,7 +601,7 @@ class ThumbnailGrid(ttk.Frame):
             if self.on_context is not None:
                 tile.bind("<Button-3>", lambda event: self.on_context(event, tile._gallery_key))
         tile._gallery_key = key
-        tile.configure(**self._tile_colors(key))
+        tile.configure(takefocus=True, **self._tile_colors(key))
         self.tiles[key] = tile
         self._attach_image(key, tile)
         return tile
@@ -675,7 +675,6 @@ class ThumbnailGrid(ttk.Frame):
             if self._positions.get(key) != position:
                 self._positions[key] = position
                 tile.place(x=position[0], y=position[1], width=position[2], height=position[3])
-                tile.configure(takefocus=True)
         # A temporary large viewport should not leave hundreds of idle widgets.
         keep = max(columns, len(keys))
         while len(self._tile_pool) > keep:

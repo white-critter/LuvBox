@@ -191,27 +191,29 @@ class ReviewWindow(tk.Toplevel):
             return
         width, height = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         bounds = (min(width, REVIEW_SIZE[0]), min(height, REVIEW_SIZE[1]))
-        image = (self._frame_image if self._frame_image.size == bounds else
-                 ImageOps.contain(self._frame_image, bounds, Image.Resampling.LANCZOS))
-        surface = image
+        surface = self._frame_image
+        image = None
         try:
-            if image.mode != "RGB":
+            if surface.mode != "RGB":
                 # Compose alpha once instead of asking Tk to blend every
                 # exposed pixel. Keep the source for later theme changes.
-                surface = Image.new("RGB", image.size, self.canvas.cget("background"))
-                surface.paste(image, mask=image if "A" in image.getbands() else None)
+                surface = Image.new("RGB", self._frame_image.size, self.canvas.cget("background"))
+                surface.paste(self._frame_image,
+                              mask=self._frame_image if "A" in self._frame_image.getbands() else None)
+            image = (surface if surface.size == bounds else
+                     ImageOps.contain(surface, bounds, Image.Resampling.LANCZOS))
             if (self._photo is not None and
-                    (self._photo.width(), self._photo.height()) == surface.size):
-                self._photo.paste(surface)
+                    (self._photo.width(), self._photo.height()) == image.size):
+                self._photo.paste(image)
             else:
-                self._photo = ImageTk.PhotoImage(surface, master=self)
+                self._photo = ImageTk.PhotoImage(image, master=self)
                 self.canvas.itemconfigure(self._image_item, image=self._photo)
             self.canvas.coords(self._image_item, width // 2, height // 2)
         finally:
-            if surface is not image:
-                surface.close()
-            if image is not self._frame_image:
+            if image is not None and image is not surface:
                 image.close()
+            if surface is not self._frame_image:
+                surface.close()
 
     def _poll(self):
         if self._poll_timer is not None:

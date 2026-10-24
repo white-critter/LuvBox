@@ -60,6 +60,29 @@ class HistoryTests(unittest.TestCase):
         path.write_bytes(content)
         return path
 
+    def test_file_scan_rejects_non_ascii_handle_prefixes(self):
+        names = ("İd_900_1.jpg", "ıd_901_1.jpg", "ſam_902_1.jpg", "Kate_903_1.jpg", "valid_904_1.JPG")
+        paths = [self.file(name) for name in names]
+        self.store.import_legacy(refresh=True)
+        self.assertEqual([row["tweet_id"] for row in self.store.records()], ["904"])
+        self.assertTrue(all(path.is_file() for path in paths))
+
+    def test_file_scan_recovers_author_prefixed_media_in_all_layouts(self):
+        names = ("artist_801_1.jpg", "2026-10-23/under_score_802_video_2.mp4",
+                 "old_folder/new_handle_803_gif_3.gif", "123_804_1.jpg", "805_1.jpg")
+        for name in names:
+            self.file(name)
+        self.store.import_legacy(refresh=True)
+        records = {row["tweet_id"]: row for row in self.store.records()}
+        expected = {"801": ("artist", "photo", "flat"), "802": ("under_score", "video", "date"),
+                    "803": ("new_handle", "animated_gif", "author"), "804": ("123", "photo", "flat"),
+                    "805": ("", "photo", "flat")}
+        self.assertEqual(set(records), set(expected))
+        for tweet, values in expected.items():
+            row = records[tweet]
+            self.assertEqual((row["author"], row["media_type"], row["folder_mode"]), values)
+            self.assertEqual(row["filename"], Path(row["path"]).name)
+
     def test_opening_never_waits_for_another_writer_but_still_migrates_old_rows(self):
         path = self.file("100_1.jpg")
         self.store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo"}, path)

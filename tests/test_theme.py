@@ -1,6 +1,7 @@
 """Native control behavior and image lifetime for the rounded ttk theme."""
 
 import gc
+import io
 import json
 import math
 import os
@@ -10,6 +11,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import font, ttk
 import unittest
+
+from tests.legacy_ui import previous_window
 from unittest.mock import patch
 import zipfile
 
@@ -17,6 +20,19 @@ from luvbox import theme
 from luvbox import fonts
 
 
+class ThemeArchiveTests(unittest.TestCase):
+    def test_archive_bytes_do_not_depend_on_the_build_platform(self):
+        from tools import build_theme
+        archives = []
+        for platform in ("win32", "linux"):
+            with patch.object(zipfile.sys, "platform", platform):
+                archives.append(build_theme._archive({"control": b"image"}, {"key": "test"}))
+        self.assertEqual(archives[0], archives[1])
+        with zipfile.ZipFile(io.BytesIO(archives[0])) as archive:
+            self.assertTrue(all(entry.create_system == 3 for entry in archive.infolist()))
+
+
+@previous_window
 class ThemeTests(unittest.TestCase):
     def setUp(self):
         self.root = tk.Tk()
@@ -575,6 +591,20 @@ class ThemeTests(unittest.TestCase):
         self.assertEqual(text.cget("foreground"), theme.DARK["INK"])
         self.assertEqual(ttk.Style(self.root).lookup(button.cget("style"), "background", ("pressed",)), theme.DARK["CARD"])
         theme.apply(self.root, "light")
+
+    def test_tcl_only_popup_maps_without_python_widget_callback_errors(self):
+        popup = ".tcl_theme_popup"
+        self.root.tk.call("toplevel", popup)
+        self.addCleanup(self.root.tk.call, "destroy", popup)
+        self.root.tk.call("wm", "withdraw", popup)
+        self.root.tk.call("wm", "attributes", popup, "-alpha", 0)
+        with self.assertRaises(KeyError):
+            self.root.nametowidget(popup)
+        with patch.object(self.root, "report_callback_exception") as report:
+            self.root.tk.call("wm", "deiconify", popup)
+            self.root.update()
+            self.assertTrue(self.root.tk.getboolean(self.root.tk.call("winfo", "ismapped", popup)))
+        report.assert_not_called()
 
     def test_smooth_progress_reports_real_value_and_eases_only_the_display(self):
         bar = theme.Progressbar(self.root, maximum=100, value=0, length=300)

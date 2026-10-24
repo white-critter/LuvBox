@@ -49,6 +49,8 @@ class FakeLikesExtractor(Extractor):
                 metadata["date"] = row[4]
             if len(row) > 5:
                 metadata["author"]["id"] = row[5]
+            if len(row) > 6:
+                metadata["content"] = row[6]
             yield Message.Directory, "", metadata
             url = (f"https://video.twimg.com/{row[0]}_{row[1]}.mp4" if row[2] in {"video", "animated_gif"}
                    else f"https://pbs.twimg.com/media/{row[0]}_{row[1]}?format=jpg&name=orig")
@@ -132,6 +134,98 @@ class CoreTests(unittest.TestCase):
             catalog.commit()
         return target
 
+    def test_new_filenames_use_valid_author_handle_not_display_name_or_account_id(self):
+        options = replace(self.options, folder_mode="flat", separate_accounts=False)
+        rows = [("801", 1, "photo", "@Artist_Name", None, "12345"),
+                ("802", 1, "photo", "Display Name", None, "54321"),
+                ("803", 1, "photo", "../../unsafe", None, "54321"),
+                ("804", 1, "photo", "", None, "54321")]
+        code, events = self.worker(rows, options=options)
+        self.assertEqual(code, 0)
+        expected = {"Artist_Name_801_1.jpg", "802_1.jpg", "803_1.jpg", "804_1.jpg"}
+        self.assertEqual({path.name for path in self.output.glob("*.jpg")}, expected)
+        self.assertEqual({event["filename"] for event in events if event["type"] == "saved"}, expected)
+        with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.flat.sqlite3")) as archive:
+            self.assertEqual({row[0] for row in archive.execute("SELECT entry FROM archive")},
+                             {f"twitter{tweet}_1" for tweet in ("801", "802", "803", "804")})
+
+    def test_existing_legacy_filename_without_archive_is_preserved_without_download(self):
+        options = replace(self.options, folder_mode="flat", separate_accounts=False)
+        self.output.mkdir(parents=True)
+        legacy = self.output / "801_1.jpg"
+        legacy.write_bytes(b"original user photo")
+        code, events = self.worker([("801", 1, "photo", "artist")], options=options)
+        self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 0, 1))
+        self.assertEqual(FakeHttpDownloader.downloaded, [])
+        self.assertEqual(legacy.read_bytes(), b"original user photo")
+        self.assertFalse((self.output / "artist_801_1.jpg").exists())
+        skipped = next(event for event in events if event["type"] == "skipped")
+        self.assertEqual((skipped["path"], skipped["filename"]), (str(legacy), legacy.name))
+
+    def test_completed_legacy_partial_is_reused_without_rename_or_network(self):
+        from luvbox.core import _mark_transfer_complete
+
+        options = replace(self.options, folder_mode="flat", separate_accounts=False)
+        self.output.mkdir(parents=True)
+        partial = self.output / "801_1.jpg.part"
+        partial.write_bytes(b"completed legacy transfer")
+        _mark_transfer_complete(partial)
+        code, events = self.worker([("801", 1, "photo", "artist")], options=options)
+        self.assertEqual((code, events[-1]["saved"]), (0, 1))
+        self.assertEqual(FakeHttpDownloader.downloaded, [])
+        self.assertEqual((self.output / "801_1.jpg").read_bytes(), b"completed legacy transfer")
+        self.assertFalse((self.output / "artist_801_1.jpg").exists())
+        self.assertFalse(partial.exists())
+
+    def test_other_author_prefix_is_left_alone_when_records_and_author_id_are_gone(self):
+        options = replace(self.options, folder_mode="flat", separate_accounts=False)
+        self.output.mkdir(parents=True)
+        foreign = self.output / "former_801_1.jpg"
+        foreign.write_bytes(b"photo from the previous handle")
+        self.assertFalse((self.record_dir / ".luvbox-archive.flat.sqlite3").exists())
+        self.assertFalse((self.record_dir / ".luvbox-history.sqlite3").exists())
+        code, events = self.worker([("801", 1, "photo", "renamed", None, "222")], options=options)
+        self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 1, 0))
+        self.assertEqual(foreign.read_bytes(), b"photo from the previous handle")
+        created = self.output / "renamed_801_1.jpg"
+        self.assertTrue(created.is_file())
+        self.assertNotEqual(created.read_bytes(), foreign.read_bytes())
+        self.assertEqual(FakeHttpDownloader.downloaded, ["https://pbs.twimg.com/media/801_1?format=jpg&name=orig"])
+        self.assertEqual(sorted(path.name for path in self.output.glob("*.jpg")),
+                         ["former_801_1.jpg", "renamed_801_1.jpg"])
+
+    def test_changed_author_keeps_original_filename_and_archive_identity(self):
+        options = replace(self.options, folder_mode="flat", separate_accounts=False)
+        self.worker([("801", 1, "photo", "first")], options=options)
+        original = self.output / "first_801_1.jpg"
+        original_bytes = original.read_bytes()
+        code, events = self.worker([("801", 1, "photo", "renamed")], options=options)
+        self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 0, 1))
+        self.assertEqual(len(FakeHttpDownloader.downloaded), 1)
+        self.assertEqual(original.read_bytes(), original_bytes)
+        self.assertFalse((self.output / "renamed_801_1.jpg").exists())
+        skipped = next(event for event in events if event["type"] == "skipped")
+        self.assertEqual((skipped["path"], skipped["filename"]), (str(original), original.name))
+
+    def test_new_download_passes_post_text_separately_to_metadata(self):
+        code, events = self.worker([("801", 1, "photo", "artist", None, "123", "본문\n두 번째 줄")])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.embed_source.call_args.kwargs,
+                         {"author": "artist", "author_id": "123", "text": "본문\n두 번째 줄"})
+
+    def test_download_events_keep_text_metadata_outcome_separate_from_source_status(self):
+        self.embed_source.side_effect = None
+        for index, status in enumerate(("embedded", "preserved", "not_requested", "error", "unknown", "bad")):
+            with self.subTest(status=status):
+                self.embed_source.return_value = {"status": "embedded", "author_status": "embedded",
+                                                 "text_status": status}
+                code, events = self.worker([(str(810 + index), 1, "photo", "artist")])
+                self.assertEqual(code, 0)
+                saved = next(event for event in events if event["type"] == "saved")
+                self.assertEqual(saved["metadata_status"], "embedded")
+                self.assertEqual(saved["text_metadata_status"], "error" if status == "bad" else status)
+
+
     def test_output_change_skips_existing_old_media_and_saves_new_media_at_new_root(self):
         from luvbox.history import HistoryStore
         from luvbox.storage import migrate_records, resolve_storage
@@ -139,7 +233,7 @@ class CoreTests(unittest.TestCase):
         options = replace(self.options, folder_mode="flat", separate_accounts=False)
         first, events = self.worker([("100", 1, "photo", "alice")], options=options)
         self.assertEqual(first, 0)
-        old_path = self.output / "100_1.jpg"
+        old_path = self.output / "alice_100_1.jpg"
         original = HistoryStore.for_storage(resolve_storage(self.output, "myaccount"))
         try:
             before = original.records()[0]
@@ -158,7 +252,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(old_path.is_file())
         self.assertFalse((new_output / old_path.name).exists())
         self.assertEqual(next(event for event in events if event["type"] == "skipped")["path"], str(old_path))
-        self.assertEqual(next(event for event in events if event["type"] == "saved")["path"], str(new_output / "101_1.jpg"))
+        self.assertEqual(next(event for event in events if event["type"] == "saved")["path"], str(new_output / "alice_101_1.jpg"))
         with closing(sqlite3.connect(target / ".luvbox-history.sqlite3")) as catalog:
             catalog.row_factory = sqlite3.Row
             after = dict(catalog.execute("SELECT * FROM media WHERE tweet_id='100'").fetchone())
@@ -197,8 +291,8 @@ class CoreTests(unittest.TestCase):
                                    options=replace(self.options, output_dir=str(self.base)))
         self.assertEqual(code, 0)
         self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (1, 1))
-        self.assertTrue((self.output / "myaccount" / "alice" / "100_1.jpg").is_file())
-        self.assertTrue((self.base / "myaccount" / "alice" / "101_1.jpg").is_file())
+        self.assertTrue((self.output / "myaccount" / "alice" / "alice_100_1.jpg").is_file())
+        self.assertTrue((self.base / "myaccount" / "alice" / "alice_101_1.jpg").is_file())
 
     def test_accepts_handles_and_profile_urls(self):
         for account in ("@MyAccount", "MyAccount", "https://x.com/MyAccount", "https://twitter.com/MyAccount/?s=20", "x.com/MyAccount/likes"):
@@ -256,7 +350,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual((events[-1]["status"], events[-1]["saved"]), ("error", 0))
         self.assertIn("저장 폴더를 찾을 수 없습니다", events[-1]["message"])
         self.assertFalse(self.output.exists())
-        self.assertTrue((moved / "100_1.jpg").is_file())
+        self.assertTrue((moved / "alice_100_1.jpg").is_file())
         self.assertEqual(self.runs(), before_runs)
         login.assert_not_called()
         find.assert_not_called()
@@ -270,9 +364,9 @@ class CoreTests(unittest.TestCase):
                                   options=replace(options, allow_recreate_media=True))
         self.assertEqual(code, 0)
         self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (1, 1))
-        self.assertTrue((moved / "100_1.jpg").is_file())
-        self.assertTrue((self.output / "101_1.jpg").is_file())
-        self.assertFalse((self.output / "100_1.jpg").exists())
+        self.assertTrue((moved / "alice_100_1.jpg").is_file())
+        self.assertTrue((self.output / "alice_101_1.jpg").is_file())
+        self.assertFalse((self.output / "alice_100_1.jpg").exists())
         self.assertEqual(len(FakeHttpDownloader.downloaded), 2)
 
     def test_validates_layout_and_scan_mode(self):
@@ -298,8 +392,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 3)
         self.assertEqual(events[-1]["skipped"], 0)
         self.assertEqual(len(FakeHttpDownloader.downloaded), 3)
-        self.assertTrue((self.output / "myaccount" / "alice" / "100_2.jpg").is_file())
-        self.assertTrue((self.output / "myaccount" / "bob" / "104_1.jpg").is_file())
+        self.assertTrue((self.output / "myaccount" / "alice" / "alice_100_2.jpg").is_file())
+        self.assertTrue((self.output / "myaccount" / "bob" / "bob_104_1.jpg").is_file())
 
     def test_preserves_likes_list_order_and_partial_run_archive_without_sorting_posts(self):
         # A very old post can be the most recently liked item. Only the server
@@ -335,8 +429,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 3)
         self.assertEqual(events[-1]["scan_mode"], "full")
-        for tweet in ("100", "101", "102"):
-            self.assertTrue((self.output / "myaccount" / "2026-10-04" / f"{tweet}_1.jpg").is_file())
+        for tweet, author in (("100", "alice"), ("101", "bob"), ("102", "alice")):
+            self.assertTrue((self.output / "myaccount" / "2026-10-04" / f"{author}_{tweet}_1.jpg").is_file())
         self.assertFalse((self.output / "myaccount" / "alice").exists())
         self.assertFalse((self.output / "myaccount" / "bob").exists())
 
@@ -346,8 +440,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 2)
         account = self.output / "myaccount"
-        self.assertTrue((account / "100_1.jpg").is_file())
-        self.assertTrue((account / "101_1.jpg").is_file())
+        self.assertTrue((account / "alice_100_1.jpg").is_file())
+        self.assertTrue((account / "bob_101_1.jpg").is_file())
         self.assertFalse(any(path.is_dir() for path in account.iterdir()))
 
     def test_date_layout_checks_each_photo_saving_day_and_deduplicates_across_days(self):
@@ -359,8 +453,8 @@ class CoreTests(unittest.TestCase):
                                                              date(2026, 10, 5), date(2026, 10, 5)]):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
-        self.assertTrue((self.output / "myaccount" / "2026-10-04" / "100_1.jpg").is_file())
-        self.assertTrue((self.output / "myaccount" / "2026-10-05" / "101_1.jpg").is_file())
+        self.assertTrue((self.output / "myaccount" / "2026-10-04" / "alice_100_1.jpg").is_file())
+        self.assertTrue((self.output / "myaccount" / "2026-10-05" / "alice_101_1.jpg").is_file())
         with patch("luvbox.core._save_day", return_value=date(2026, 10, 6)):
             code, events = self.worker(rows, options=options)
         self.assertEqual(code, 0)
@@ -374,7 +468,7 @@ class CoreTests(unittest.TestCase):
 
         options = replace(self.options, folder_mode="date", include_videos=True)
         account = self.output / "myaccount"
-        old_path = account / "2026-10-04" / "100_video_1.mp4"
+        old_path = account / "2026-10-04" / "alice_100_video_1.mp4"
         completed_path = account / "2026-10-05" / old_path.name
         observed = []
         def move(source, destination):
@@ -419,7 +513,7 @@ class CoreTests(unittest.TestCase):
         from datetime import date
 
         account = self.output / "myaccount"
-        old_path = account / "2026-10-04" / "100_1.jpg"
+        old_path = account / "2026-10-04" / "alice_100_1.jpg"
         collision = account / "2026-10-05" / old_path.name
         collision.parent.mkdir(parents=True)
         collision.write_bytes(b"existing-user-file")
@@ -445,7 +539,7 @@ class CoreTests(unittest.TestCase):
         options = replace(self.options, folder_mode="date")
         rows = [("100", 1, "photo", "alice")]
         account = self.output / "myaccount"
-        old_path = account / "2026-10-04" / "100_1.jpg"
+        old_path = account / "2026-10-04" / "alice_100_1.jpg"
         def move(source, destination):
             if source.name.endswith(".part"):
                 return _move_without_overwrite(source, destination)
@@ -472,7 +566,7 @@ class CoreTests(unittest.TestCase):
         from luvbox.core import _move_without_overwrite
 
         account = self.output / "myaccount"
-        old_path = account / "2026-10-04" / "100_1.jpg"
+        old_path = account / "2026-10-04" / "alice_100_1.jpg"
         completed_path = account / "2026-10-05" / old_path.name
         outside = self.base / "outside" / old_path.name
         resolve = Path.resolve
@@ -505,9 +599,9 @@ class CoreTests(unittest.TestCase):
     def test_changing_layout_downloads_into_new_destination_then_skips_within_layout(self):
         rows = [("100", 1, "photo", "alice", datetime(2026, 10, 4))]
         for mode, relative, archive_name in (
-            ("author", "alice/100_1.jpg", ".luvbox-archive.sqlite3"),
-            ("date", "2026-10-04/100_1.jpg", ".luvbox-archive.date.sqlite3"),
-            ("flat", "100_1.jpg", ".luvbox-archive.flat.sqlite3"),
+            ("author", "alice/alice_100_1.jpg", ".luvbox-archive.sqlite3"),
+            ("date", "2026-10-04/alice_100_1.jpg", ".luvbox-archive.date.sqlite3"),
+            ("flat", "alice_100_1.jpg", ".luvbox-archive.flat.sqlite3"),
         ):
             options = replace(self.options, folder_mode=mode)
             with self.subTest(mode=mode):
@@ -526,7 +620,7 @@ class CoreTests(unittest.TestCase):
     def test_archive_prevents_repeat_downloads_even_when_file_moved(self):
         rows = [("100", 1, "photo", "alice"), ("100", 2, "photo", "alice")]
         self.worker(rows)
-        (self.output / "myaccount" / "alice" / "100_1.jpg").unlink()
+        (self.output / "myaccount" / "alice" / "alice_100_1.jpg").unlink()
         code, events = self.worker(rows)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 0)
@@ -642,7 +736,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["visited"]),
                              ("full", 1, 4))
-            self.assertTrue((self.output / "myaccount" / "charlie" / "300_1.jpg").is_file())
+            self.assertTrue((self.output / "myaccount" / "charlie" / "charlie_300_1.jpg").is_file())
             self.assertTrue(any("기록을 합쳐" in event.get("message", "") for event in events))
             # Repeating an unchanged merge must not invalidate the full scan.
             again = merge_account_records(paths, "otheraccount")
@@ -1044,7 +1138,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(result, 0)
         self.assertIn("요청 한도", events[-1]["message"])
         self.assertEqual(self.runs()[-1]["status"], "error")
-        self.assertTrue((self.output / "myaccount" / "alice" / "100_1.jpg").is_file())
+        self.assertTrue((self.output / "myaccount" / "alice" / "alice_100_1.jpg").is_file())
 
     def test_media_server_error_stops_before_fallback_and_preserves_saved_photo_history(self):
         import requests

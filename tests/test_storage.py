@@ -186,7 +186,7 @@ class StorageWorkerTests(unittest.TestCase):
         code, events = self.worker([("100", 1, "photo", "alice")], options=options)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
-        self.assertTrue((self.output / "100_1.jpg").is_file())
+        self.assertTrue((self.output / "alice_100_1.jpg").is_file())
         self.assertFalse((self.output / "myaccount").exists())
         self.assertTrue((self.record_dir / ".luvbox-history.sqlite3").is_file())
         self.assertFalse((self.output / ".luvbox-history.sqlite3").exists())
@@ -195,12 +195,12 @@ class StorageWorkerTests(unittest.TestCase):
         rows = [("100", 1, "photo", "alice")]
         code, _ = self.worker(rows, options=self.direct(folder_mode="author"))
         self.assertEqual(code, 0)
-        self.assertTrue((self.output / "alice" / "100_1.jpg").is_file())
+        self.assertTrue((self.output / "alice" / "alice_100_1.jpg").is_file())
         from datetime import date
         with patch("luvbox.core._save_day", return_value=date(2026, 10, 4)):
             code, _ = self.worker(rows, options=self.direct(folder_mode="date"))
         self.assertEqual(code, 0)
-        self.assertTrue((self.output / "2026-10-04" / "100_1.jpg").is_file())
+        self.assertTrue((self.output / "2026-10-04" / "alice_100_1.jpg").is_file())
         self.assertFalse((self.output / "myaccount").exists())
 
     def test_toggling_account_folder_keeps_old_files_and_skip_paths_for_every_layout(self):
@@ -245,7 +245,7 @@ class StorageWorkerTests(unittest.TestCase):
         self.assertEqual((events[-1]["saved"], events[-1]["skipped"]), (1, 1))
         self.assertEqual(next(row for row in events if row["type"] == "skipped")["path"], str(old_file))
         self.assertEqual(old_file.read_bytes(), b"previous-user-photo")
-        self.assertTrue((self.output / "101_1.jpg").is_file())
+        self.assertTrue((self.output / "alice_101_1.jpg").is_file())
         records, _ = self.catalog()
         migrated = next(row for row in records if row["tweet_id"] == "100")
         self.assertEqual(migrated["saved_at"], old_row["saved_at"])
@@ -292,7 +292,7 @@ class StorageWorkerTests(unittest.TestCase):
             guard.close()
 
     def test_redirected_author_folder_cannot_download_or_write_outside_output(self):
-        target = self.output / "alice" / "100_1.jpg"
+        target = self.output / "alice" / "alice_100_1.jpg"
         outside = self.base / "outside" / target.name
         original = Path.resolve
         with patch.object(Path, "resolve", autospec=True,

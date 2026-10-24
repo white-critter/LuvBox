@@ -1,6 +1,7 @@
 """Check shipped browser assets and disposable release-manifest fixtures."""
 
 from html.parser import HTMLParser
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -116,6 +117,61 @@ class BuildInputPackagingTests(unittest.TestCase):
             self.assertFalse((root / "release").exists())
 
 
+class StartupReportPackagingTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="luvbox-startup-package-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        root = patch.object(package_release, "ROOT", self.root)
+        root.start()
+        self.addCleanup(root.stop)
+        self.executable = self.root / "LuvBox-test.exe"
+        self.executable.write_bytes(b"synthetic frozen executable")
+        self.report_path = self.root / "build" / f"qt-startup-{package_release.__version__}.json"
+        self.report_path.parent.mkdir()
+
+    def write_report(self, **changes):
+        report = {
+            "ok": True,
+            "frozen": True,
+            "version": package_release.__version__,
+            "executable_sha256": hashlib.sha256(self.executable.read_bytes()).hexdigest(),
+        }
+        report.update(changes)
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+
+    def test_missing_startup_report_blocks_packaging(self):
+        with self.assertRaisesRegex(ValueError, "startup check before packaging"):
+            package_release._require_startup_report(self.executable)
+
+    def test_malformed_startup_report_blocks_packaging(self):
+        self.report_path.write_text("not JSON", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "startup check before packaging"):
+            package_release._require_startup_report(self.executable)
+
+    def test_failed_or_unfrozen_startup_report_blocks_packaging(self):
+        for changes in ({"ok": False}, {"frozen": False}):
+            with self.subTest(changes=changes):
+                self.write_report(**changes)
+                with self.assertRaisesRegex(ValueError, "did not pass"):
+                    package_release._require_startup_report(self.executable)
+
+    def test_another_version_startup_report_blocks_packaging(self):
+        self.write_report(version="0.0.0")
+        with self.assertRaisesRegex(ValueError, "this version"):
+            package_release._require_startup_report(self.executable)
+
+    def test_executable_changed_since_startup_report_blocks_packaging(self):
+        self.write_report()
+        self.executable.write_bytes(b"rebuilt executable after startup check")
+        with self.assertRaisesRegex(ValueError, "executable changed"):
+            package_release._require_startup_report(self.executable)
+
+    def test_successful_startup_report_for_exact_executable_allows_packaging(self):
+        self.write_report()
+        package_release._require_startup_report(self.executable)
+
+
 class ReleaseManifestTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="luvbox-package-manifest-")
@@ -215,6 +271,13 @@ class ReleaseManifestTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.toc.write_text(repr(value), encoding="utf-8")
                 with self.assertRaises(ValueError):
+                    self.manifest()
+
+    def test_foreign_icu_runtime_cannot_shadow_windows_qt_dependency(self):
+        for name in ("icuuc.dll", "ICUDT78.DLL", "PySide6\\ICUUC.dll"):
+            with self.subTest(name=name):
+                self.write_toc([*self.entries, (name, str(self.root / "foreign-icu.dll"), "BINARY")])
+                with self.assertRaisesRegex(ValueError, "unexpected ICU runtime"):
                     self.manifest()
 
     def test_destination_escape_and_windows_aliases_are_rejected(self):

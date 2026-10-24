@@ -11,14 +11,16 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, ImageOps
 
+from tests.legacy_ui import previous_window
 from tests.test_gui import destroy_tk, release_tk
 from luvbox import theme
 from luvbox.review_gui import ReviewWindow
 from luvbox.review_preview import ReviewFrame
 
 
+@previous_window
 class ReviewGuiTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -250,6 +252,34 @@ class ReviewGuiTests(unittest.TestCase):
         self.assertEqual(pixel(), background())
         window.destroy()
         self.assertIsNone(window.canvas.theme_redraw)
+
+    def test_transparent_frame_resizes_as_rgb_and_recomposes_without_altering_source(self):
+        window = self.window_for()
+        image = Image.new("RGBA", (640, 400), (200, 50, 80, 0))
+        image.paste((20, 80, 200, 128), (160, 100, 480, 300))
+        original_pixels = image.tobytes()
+        window._frame_image = image
+        for mode, geometry in (("light", "480x500"), ("dark", "720x650"), ("light", "480x500")):
+            with self.subTest(mode=mode, geometry=geometry):
+                window.geometry(geometry)
+                theme.apply(self.root, mode)
+                window.update()
+                with patch("luvbox.review_gui.ImageOps.contain", wraps=ImageOps.contain) as contain:
+                    window._render()
+                self.assertEqual(contain.call_count, 1)
+                self.assertEqual(contain.call_args.args[0].mode, "RGB")
+                self.assertEqual(contain.call_args.args[2], Image.Resampling.LANCZOS)
+                background = tuple(channel // 257 for channel in window.winfo_rgb(window.canvas.cget("background")))
+                photo = window._photo
+                self.assertEqual(tuple(window.tk.call(str(photo), "get", 0, 0)), background)
+                center = tuple(window.tk.call(str(photo), "get", photo.width() // 2, photo.height() // 2))
+                self.assertEqual(center, tuple((128 * foreground + 127 * behind + 127) // 255
+                                               for foreground, behind in zip((20, 80, 200), background)))
+                self.assertEqual(image.tobytes(), original_pixels)
+                self.assertLessEqual(photo.width(), min(640, window.canvas.winfo_width()))
+                self.assertLessEqual(photo.height(), min(400, window.canvas.winfo_height()))
+                window._render()
+                self.assertIs(window._photo, photo)
 
     def test_dark_and_short_screen_keep_all_actions_visible(self):
         for mode in ("light", "dark"):

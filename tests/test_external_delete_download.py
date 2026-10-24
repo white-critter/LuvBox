@@ -100,24 +100,24 @@ class ExternalDeleteDownloadTests(unittest.TestCase):
         self.assertEqual((restored["saved"], restored["recovered"]), (1, 1))
         self.assertEqual(core_support.FakeHttpDownloader.downloaded,
                          ["https://pbs.twimg.com/media/100_1?format=jpg&name=orig"])
-        self.assertTrue((self.output / "100_1.jpg").exists())
+        self.assertTrue((self.output / "alice_100_1.jpg").exists())
 
     def test_external_deletion_of_one_attachment_preserves_other_photos_and_retries_only_chosen_attachment(self):
         rows = [("100", 1, "photo", "alice"), ("100", 2, "photo", "alice"),
                 ("100", 3, "photo", "alice")]
         self.worker(rows)
-        untouched = {number: (self.output / f"100_{number}.jpg").read_bytes() for number in (1, 3)}
+        untouched = {number: (self.output / f"alice_100_{number}.jpg").read_bytes() for number in (1, 3)}
         self.delete([self.record(number=2)], keep=False)
         for number, content in untouched.items():
-            self.assertEqual((self.output / f"100_{number}.jpg").read_bytes(), content)
-        self.assertFalse((self.output / "100_2.jpg").exists())
+            self.assertEqual((self.output / f"alice_100_{number}.jpg").read_bytes(), content)
+        self.assertFalse((self.output / "alice_100_2.jpg").exists())
         restored = self.retry("100_2", {"100": [(1, "photo"), (2, "photo"), (3, "photo")]})
         self.assertEqual(restored["saved"], 1)
         self.assertEqual(core_support.FakeHttpDownloader.downloaded,
                          ["https://pbs.twimg.com/media/100_2?format=jpg&name=orig"])
-        self.assertEqual(len(list(self.output.glob("100_*.jpg"))), 3)
+        self.assertEqual(len(list(self.output.glob("alice_100_*.jpg"))), 3)
         for number, content in untouched.items():
-            self.assertEqual((self.output / f"100_{number}.jpg").read_bytes(), content)
+            self.assertEqual((self.output / f"alice_100_{number}.jpg").read_bytes(), content)
 
     def test_core_reconciles_crashed_deletion_after_gui_refresh_before_reading_ignore_policy(self):
         self.worker([("100", 1, "photo", "alice")])

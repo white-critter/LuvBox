@@ -3,6 +3,7 @@
 import ast
 import hashlib
 import importlib.metadata
+import json
 import os
 from pathlib import Path, PureWindowsPath
 import stat
@@ -16,13 +17,20 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from luvbox import __version__  # noqa: E402
 from tools.check_build_inputs import require_inputs  # noqa: E402
+from tools.qt.prepare_sources import release_files as qt_source_files
 
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
     "tools/draw_icon.py",
     "tools/build_theme.py", "assets/theme/README.md", "assets/theme/light.zip", "assets/theme/dark.zip",
-    "entry.py", "setup.ps1", "build.ps1", "run.bat", ".gitattributes", "requirements.txt",
-    "requirements-dev.txt", "requirements-lock.txt", "README.md", "WINDOWS_CONTINUE.md", "LICENSE",
+    "entry.py", "setup.ps1", "build.ps1", "run.bat", "tools/windows_version.py", "tools/check_qt_startup.py", "tools/package_browser_extension.py", ".gitattributes", "requirements.txt",
+    "requirements-dev.txt", "requirements-lock.txt", "requirements-qt.txt", "README.md", "WINDOWS_CONTINUE.md", "LICENSE",
+    "CHANGELOG.md", "docs/ui-redesign-plan.md", "docs/legacy-1.0-guide.md", "docs/legacy-1.0-usage.txt", "tools/qt_gallery_preview.py",
+    "tools/pyinstaller/hook-PySide6.py", "tools/pyinstaller/hook-PySide6.QtQml.py",
+    "tools/pyinstaller/hook-PySide6.QtGui.py",
+    "tools/qt/prepare_sources.py", "tools/qt/sources.json", "tools/qt/README.md",
+    "assets/qt/licenses/GPL-2.0-only.txt", "assets/qt/licenses/GPL-3.0-only.txt",
+    "assets/qt/licenses/LGPL-3.0-only.txt",
     "THIRD_PARTY_NOTICES.md", "LuvBox.code-workspace",
     "tools/exiftool/download.py", "tools/package_release.py", "tools/check_build_inputs.py", "tools/ui_qa.py",
     "tools/benchmark_history.py", "tools/benchmark_preview.py", "tools/benchmark_gallery.py",
@@ -32,7 +40,7 @@ SOURCE_FILES = (
     "tools/ffmpeg/COPYING.MinGW-w64-runtime.txt", "tools/ffmpeg/COPYING.GCC-runtime-exception.txt",
     "assets/fonts/Pretendard/Pretendard-Regular.ttf", "assets/fonts/Pretendard/Pretendard-Bold.ttf",
     "assets/fonts/Pretendard/OFL.txt", "assets/fonts/Pretendard/manifest.json",
-    "assets/browser-extension/README.md",
+    "assets/browser-extension/README.md", "assets/browser-extension/PRIVACY.md", "docs/browser-extension-store.md",
     "assets/browser-extension/chromium/manifest.json", "assets/browser-extension/chromium/background.js",
     "assets/browser-extension/chromium/profile.js", "assets/browser-extension/chromium/connect.js",
     "assets/browser-extension/chromium/connect.html", "assets/browser-extension/chromium/connect.css",
@@ -41,12 +49,19 @@ SOURCE_FILES = (
     "assets/browser-extension/firefox/profile.js", "assets/browser-extension/firefox/connect.js",
     "assets/browser-extension/firefox/connect.html", "assets/browser-extension/firefox/connect.css",
     "assets/browser-extension/firefox/extension-page.js", "docs/browser-login.md", "docs/windows-handoff.md",
+    "docs/windows-validation-20261022.md",
 )
 DEPENDENCIES = (
     "gallery_dl", "pillow", "requests", "urllib3", "certifi", "charset-normalizer", "idna",
     "pyinstaller", "pyinstaller-hooks-contrib", "altgraph", "packaging", "pefile",
     "pywin32-ctypes", "setuptools",
+    "PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6",
 )
+EXCLUDED_QT_COMPONENTS = {
+    "qt6quick3dutils.dll", "qt6virtualkeyboard.dll", "qt6pdf.dll", "qt6pdfwidgets.dll",
+    "qpdf.dll", "qtvirtualkeyboardplugin.dll", "qtquick3d.pyd", "qtvirtualkeyboard.pyd",
+    "qtpdf.pyd", "qtpdfwidgets.pyd", "opengl32sw.dll",
+}
 
 
 def _plain_entry(path: Path):
@@ -84,6 +99,15 @@ def _collect_manifest(toc: Path, application_name: str) -> dict[Path, Path]:
             raise ValueError("Build manifest contains an unsafe destination")
         if kind not in {"EXECUTABLE", "BINARY", "EXTENSION", "DATA"} or "\0" in source or not Path(source).is_absolute():
             raise ValueError("Unsupported PyInstaller COLLECT entry")
+        normalized = "/".join(parts).casefold()
+        # Qt links to Windows' unversioned ICU API. A PATH tool's ICU build
+        # can share its filename while exporting only version-suffixed names.
+        if parts[-1].casefold() in {"icuuc.dll", "icudt78.dll"}:
+            raise ValueError(f"Build manifest contains an unexpected ICU runtime: {name}")
+        if normalized.startswith("pyside6/") and (
+                parts[-1].casefold() in EXCLUDED_QT_COMPONENTS or
+                normalized.startswith("pyside6/plugins/qmltooling/")):
+            raise ValueError(f"Build manifest contains an excluded Qt component: {name}")
         if kind == "EXECUTABLE":
             if name != application_name + ".exe":
                 raise ValueError("Build manifest contains an unexpected executable")
@@ -146,6 +170,21 @@ def _runtime_files(manifest: dict[Path, Path], component: str) -> list[Path]:
     return _verified_files(runtime, expected)
 
 
+def _require_startup_report(executable: Path) -> None:
+    report_path = ROOT / "build" / f"qt-startup-{__version__}.json"
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ValueError("Run the frozen Qt startup check before packaging") from None
+    if (not isinstance(report, dict) or report.get("ok") is not True
+            or report.get("frozen") is not True or report.get("version") != __version__):
+        raise ValueError("The frozen Qt startup report did not pass for this version")
+    with executable.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    if report.get("executable_sha256") != digest:
+        raise ValueError("The executable changed after its Qt startup check")
+
+
 def package() -> None:
     require_inputs(ROOT)
     subprocess.run([sys.executable, str(ROOT / "tools/ffmpeg/build.py"), "--check"], check=True)
@@ -159,9 +198,11 @@ def package() -> None:
     executable = application / f"LuvBox-{__version__}.exe"
     if not executable.is_file():
         raise FileNotFoundError("Build the application first")
+    _require_startup_report(executable)
     manifest = _collect_manifest(ROOT / "build/onedir" / application.name / "COLLECT-00.toc", application.name)
     application_files = _verified_files(application, manifest)
     runtimes = {component: _runtime_files(manifest, component) for component in ("ffmpeg", "exiftool")}
+    qt_materials = qt_source_files()
     destination = output / f"LuvBox-{__version__}.zip"
     descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".zip", dir=output)
     os.close(descriptor)
@@ -173,6 +214,11 @@ def package() -> None:
             archive.write(ROOT / "docs" / "사용안내.txt", "사용안내.txt")
             archive.write(ROOT / "LICENSE", "LICENSE")
             archive.write(ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")
+            archive.write(ROOT / "CHANGELOG.md", "CHANGELOG.md")
+            for name in ("GPL-2.0-only.txt", "GPL-3.0-only.txt", "LGPL-3.0-only.txt"):
+                archive.write(ROOT / "assets/qt/licenses" / name, "licenses/Qt/" + name)
+            for path, name in qt_materials:
+                archive.write(path, name)
             archive.write(ROOT / "assets/fonts/Pretendard/OFL.txt", "licenses/Pretendard-OFL.txt")
             archive.write(ROOT / "tools/ffmpeg/LICENSE.LGPLv2.1.txt", "licenses/FFmpeg-LGPLv2.1.txt")
             for name in ("COPYING.MinGW-w64-runtime.txt", "COPYING.GCC-runtime-exception.txt"):
@@ -182,6 +228,10 @@ def package() -> None:
                 archive.write(path, "source/tools/ffmpeg/runtime/" + path.relative_to(ROOT / "tools/ffmpeg/runtime").as_posix())
             for name in SOURCE_FILES:
                 archive.write(ROOT / name, "source/" + name)
+            for path in sorted((ROOT / "assets/qt").rglob("*.qml")):
+                if path.is_file():
+                    _plain_entry(path)
+                    archive.write(path, "source/" + path.relative_to(ROOT).as_posix())
             # Ship the current guide and verification, without obsolete reports.
             for name in (
                 "docs/사용안내.txt", "docs/development.md", "docs/verification.md",

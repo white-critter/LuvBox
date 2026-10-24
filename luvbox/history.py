@@ -31,7 +31,7 @@ _TYPES = {"photo", "video", "animated_gif"}
 _HISTORY_HELP = "저장 내역을 읽거나 기록하지 못했습니다. 저장 폴더의 권한과 다른 실행 중인 작업을 확인해 주세요."
 _INTERRUPTED_MESSAGE = "이전 작업이 비정상 종료되어 중단으로 정리했습니다. 받은 파일과 진행 수치는 그대로입니다."
 _ENTRY = re.compile(r"(?:twitter)?([0-9]{1,20})_(?:(video|animated_gif|gif)_)?([0-9]{1,5})\Z")
-_FILENAME = re.compile(r"([0-9]{1,20})_(?:(video|gif|animated_gif)_)?([0-9]{1,5})\.(jpg|jpeg|png|webp|gif|mp4)\Z", re.I)
+_FILENAME = re.compile(r"(?:[A-Za-z0-9_]{1,15}_)?([0-9]{1,20})_(?:(video|gif|animated_gif)_)?([0-9]{1,5})\.(jpg|jpeg|png|webp|gif|mp4)\Z", re.I | re.ASCII)
 _ARCHIVES = {"author": ".luvbox-archive.sqlite3",
              "date": ".luvbox-archive.date.sqlite3",
              "flat": ".luvbox-archive.flat.sqlite3"}
@@ -1006,6 +1006,7 @@ class HistoryStore:
         for path, scan_root, restricted in self._files():
             match = _FILENAME.fullmatch(path.name)
             number = int(match[3])
+            filename_author = path.name[:match.start(1) - 1] if match.start(1) else ""
             if not 1 <= number <= 10000:
                 continue
             # The walk joined these names onto scan_root (relative_to would
@@ -1042,7 +1043,8 @@ class HistoryStore:
                 continue
             row = self._legacy_row(mode, match[1], number, path=actual, filesize=size,
                                    filename=filename, media_type=media_type,
-                                   author=parent if mode == "author" else "", source="file_scan")
+                                   author=filename_author or (parent if mode == "author" else ""),
+                                   source="file_scan")
             previous_identity = self.media_record(mode, {"tweet_id": match[1], "num": number, "type": media_type})
             old_path = previous_identity.get("path", "") if previous_identity else ""
             keep_old = (old_path and not self.is_download_path(old_path) and

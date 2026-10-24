@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tests import test_gui as gui_fixtures
+from tests.legacy_ui import previous_window
 from luvbox.gui import App, AUTH_MODES
 
 
@@ -14,6 +15,7 @@ ALICE = {"user_id": "101", "handle": "alice", "display_name": "앨리스"}
 BOB = {"user_id": "202", "handle": "bob", "display_name": "밥"}
 
 
+@previous_window
 class ConnectedAccountsGuiTests(unittest.TestCase):
     def setUp(self):
         self.rows = []
@@ -114,6 +116,35 @@ class ConnectedAccountsGuiTests(unittest.TestCase):
         with patch("luvbox.browser_login.sign_in", return_value=ALICE):
             App._browser_worker(self.app.events, cancel)
         self.assertEqual(self.app.events.get_nowait()["identity"], ALICE)
+
+    def test_extension_free_default_login_runs_off_ui_thread_and_prevents_other_attempts(self):
+        self.app.show_connect()
+        self.assertEqual(self.app.fresh_browser_button.cget("text"), "기본 브라우저에서 새 로그인")
+        self.assertIn("확장 필요", self.app.default_browser_button.cget("text"))
+        with patch("luvbox.gui.threading.Thread") as thread:
+            self.app.connect_fresh_browser()
+            self.app.connect_fresh_browser()
+            self.app.connect_browser()
+            self.app.connect_default_browser()
+        thread.assert_called_once()
+        self.assertTrue(self.app.login_busy)
+        for button in (self.app.fresh_browser_button, self.app.browser_button, self.app.default_browser_button):
+            self.assertEqual(str(button.cget("state")), "disabled")
+        self.assertIs(thread.call_args.kwargs["target"], App._fresh_browser_worker)
+        with patch("luvbox.browser_login.sign_in_default", return_value=ALICE) as sign_in:
+            thread.call_args.kwargs["target"](*thread.call_args.kwargs["args"])
+        sign_in.assert_called_once_with(self.app.login_cancel)
+        self.assertEqual(self.app.events.get_nowait()["identity"], ALICE)
+        self.app.login_busy = False
+
+    def test_extension_free_login_failure_has_a_fixed_secret_free_message(self):
+        cancel = threading.Event()
+        with patch("luvbox.browser_login.sign_in_default", side_effect=RuntimeError("synthetic-secret")):
+            App._fresh_browser_worker(self.app.events, cancel)
+        event = self.app.events.get_nowait()
+        self.assertIsNone(event["identity"])
+        self.assertIn("다시 시도", event["message"])
+        self.assertNotIn("synthetic-secret", event["message"])
 
     def test_default_browser_worker_saves_verified_session(self):
         cancel = threading.Event()

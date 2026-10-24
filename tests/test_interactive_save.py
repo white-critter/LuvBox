@@ -302,7 +302,7 @@ class InteractiveSaveTests(unittest.TestCase):
         # A small preview is kept from the temporary file before it is removed.
         self.assertIn((("100", 1, "photo"), True, ".jpg"), recorder)
         self.assertFalse(list(self.output.rglob("*.part*")))
-        self.assertFalse(list(self.output.rglob("100_1.jpg")))
+        self.assertFalse(list(self.output.rglob("alice_100_1.jpg")))
         self.assertEqual(self.keys(), {"twitter100_1", "twitter101_1"})
         declined = next(row for row in self.records() if row["tweet_id"] == "100")
         self.assertEqual((declined["path"], declined["record_source"], declined["author"]), ("", "declined", "alice"))
@@ -324,7 +324,7 @@ class InteractiveSaveTests(unittest.TestCase):
         self.assertEqual((result, events[-1]["saved"], later.requests), (0, 0, []))
         result, events = self.worker(rows)
         self.assertEqual((result, events[-1]["saved"]), (0, 0))
-        self.assertFalse(list(self.output.rglob("100_1.jpg")))
+        self.assertFalse(list(self.output.rglob("alice_100_1.jpg")))
 
     def test_declined_file_can_still_be_downloaded_from_the_missing_list(self):
         rows = [("100", 1, "photo", "alice")]
@@ -338,7 +338,7 @@ class InteractiveSaveTests(unittest.TestCase):
             store.close()
         result, events = self.retry(["100_1"], rows)
         self.assertEqual((result, events[-1]["saved"]), (0, 1))
-        self.assertTrue(list(self.output.rglob("100_1.jpg")))
+        self.assertTrue(list(self.output.rglob("alice_100_1.jpg")))
         store = self.store()
         try:
             self.assertNotIn(("100", 1, "photo"), store.ignored_media())
@@ -400,7 +400,7 @@ class InteractiveSaveTests(unittest.TestCase):
     def test_never_in_a_chosen_redownload_hides_it_without_new_records(self):
         rows = [("100", 1, "photo", "alice")]
         self.worker(rows)
-        saved = next(self.output.rglob("100_1.jpg"))
+        saved = next(self.output.rglob("alice_100_1.jpg"))
         saved.unlink()  # Only this test's temporary fixture.
         result, events = self.retry(["100_1"], rows, review=Review(("never",)))
         self.assertEqual((result, events[-1]["saved"], events[-1]["review_never"]), (0, 0, 1))
@@ -577,7 +577,7 @@ class InteractiveSaveTests(unittest.TestCase):
         self.assertEqual((result, events[-1]["saved"], events[-1]["review_skipped"]), (0, 1, 1))
         self.assertEqual(self.keys(), {"twitter100_video_2"})
         self.assertEqual([media["type"] for path, media in review.requests], ["video", "video"])
-        self.assertEqual(Path(self.records()[0]["path"]).name, "100_video_2.mp4")
+        self.assertEqual(Path(self.records()[0]["path"]).name, "alice_100_video_2.mp4")
 
     def test_gif_skip_does_not_convert_and_saved_gif_keeps_success_metadata(self):
         review = Review(("skip", "save"))

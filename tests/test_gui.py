@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import tkinter as tk
 from types import SimpleNamespace
 import unittest
@@ -13,6 +14,7 @@ import weakref
 from unittest.mock import Mock, patch
 
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
+from tests.legacy_ui import previous_window
 from luvbox.gui import App, AUTH_MODES, worker_command
 
 
@@ -35,6 +37,7 @@ def release_tk(test, *names):
     gc.collect()
 
 
+@previous_window
 class GuiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -1253,7 +1256,14 @@ class GuiTests(unittest.TestCase):
     def test_abnormal_exit_does_not_look_successful(self):
         self.app.events.put({"type": "finished", "status": "finished", "saved": 7, "skipped": 3, "message": "완료"})
         self.app.events.put({"type": "process_exit", "code": 1})
-        self.app._poll()
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            self.app._poll()
+            if self.app.events.empty() and self.app._deferred_event is None:
+                break
+            self.root.update()
+        else:
+            self.fail("UI event queue did not settle within the test deadline")
         self.assertIn("오류로 종료", self.app.status.get())
         self.assertEqual((self.app.saved, self.app.skipped), (7, 3))
 
@@ -1384,6 +1394,7 @@ class GuiTests(unittest.TestCase):
         theme.apply(self.root, "light")
 
 
+@previous_window
 class ScheduleWorkerLifetimeTests(unittest.TestCase):
     def test_delayed_schedule_result_does_not_retain_closed_app_or_tk(self):
         root = app = None

@@ -15,6 +15,7 @@ from gallery_dl.extractor.common import Extractor
 from gallery_dl.extractor.message import Message
 
 from tests import test_core, test_gui, test_history_gui
+from tests.legacy_ui import previous_window
 from tests.test_core import SECRET, FakeHttpDownloader
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import JobOptions, run_worker
@@ -190,7 +191,7 @@ class RetryWorkerTests(unittest.TestCase):
                 ("300", 1, "photo", "carol")]
         code, _ = self.worker(rows, options=self.flat())
         self.assertEqual(code, 0)
-        for name in ("100_1.jpg", "200_1.jpg", "300_1.jpg"):
+        for name in ("alice_100_1.jpg", "bob_200_1.jpg", "carol_300_1.jpg"):
             (self.output / name).unlink()
         FakeHttpDownloader.downloaded = []
 
@@ -204,7 +205,7 @@ class RetryWorkerTests(unittest.TestCase):
         self.assertEqual(sorted(FakeHttpDownloader.downloaded),
                          ["https://pbs.twimg.com/media/100_1?format=jpg&name=orig",
                           "https://pbs.twimg.com/media/300_1?format=jpg&name=orig"])
-        self.assertTrue((self.output / "100_1.jpg").is_file() and (self.output / "300_1.jpg").is_file())
+        self.assertTrue((self.output / "alice_100_1.jpg").is_file() and (self.output / "alice_300_1.jpg").is_file())
         final = events[-1]
         self.assertEqual((final["status"], final["saved"], final["recovered"], final["unavailable_tweets"]),
                          ("finished", 2, 2, 1))
@@ -272,6 +273,7 @@ class RetryWorkerTests(unittest.TestCase):
         self.assertEqual(JobOptions("me", str(self.output)).targets, ())
 
 
+@previous_window
 class MissingTabTests(unittest.TestCase):
     setUp = test_history_gui.HistoryGuiTests.setUp
     load = test_history_gui.HistoryGuiTests.load
@@ -293,7 +295,7 @@ class MissingTabTests(unittest.TestCase):
         self.load()
 
     def tab_text(self):
-        return self.window.tabs.tab(self.window.missing_view, "text")
+        return self.window.tabs.tab(self.window.missing_scroll_view, "text")
 
     def test_missing_files_are_listed_and_can_be_kept_deleted_or_shown_again(self):
         self.load()

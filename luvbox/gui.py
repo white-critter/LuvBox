@@ -802,6 +802,7 @@ class App:
             if mode != "managed":
                 self.login_cancel.set()
             self.browser_button.configure(state="disabled" if self.login_busy else "normal")
+            self.fresh_browser_button.configure(state="disabled" if self.login_busy else "normal")
             self.default_browser_button.configure(state="disabled" if self.login_busy else "normal")
             self.token_button.configure(state="disabled" if self.login_busy else "normal")
             self.browser_button.configure(text="로그인 기다리는 중…" if self.login_busy else "Edge에서 X 로그인")
@@ -834,8 +835,13 @@ class App:
                             value=label, variable=self.auth).pack(anchor="w", pady=(0, 4))
 
         self.token_controls = ttk.Frame(body, style="Plain.TFrame")
-        self.default_browser_button = ttk.Button(self.token_controls, text="기본 브라우저 계정 연결",
-                                                 style="DialogPrimary.TButton", command=self.connect_default_browser)
+        self.fresh_browser_button = ttk.Button(self.token_controls, text="기본 브라우저에서 새 로그인",
+                                               style="DialogPrimary.TButton", command=self.connect_fresh_browser)
+        self.fresh_browser_button.pack(fill="x", pady=(0, 8))
+        self._wrapping_label(self.token_controls, text="확장 없이 기본 Chrome·Edge의 새 창에서 로그인합니다. 한 번 연결하면 다음부터 저장된 연결을 사용합니다.",
+                             style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(0, 16))
+        self.default_browser_button = ttk.Button(self.token_controls, text="기존 로그인 연결 (확장 필요)",
+                                                 command=self.connect_default_browser)
         self.default_browser_button.pack(fill="x", pady=(0, 8))
         self._wrapping_label(self.token_controls, text="기본 브라우저에 로그인된 X 계정을 사용합니다. 처음 한 번 연결 확장을 설치해 주세요.",
                              style="CardMuted.TLabel", wraplength=640).pack(fill="x", pady=(0, 8))
@@ -887,7 +893,7 @@ class App:
         window.bind("<Escape>", lambda _: self._close_connect())
         self._auth_changed()
         self._fit_popup(window)
-        (self.browser_button if AUTH_MODES[self.auth.get()] == "managed" else self.cookie_entry).focus_set()
+        (self.fresh_browser_button if AUTH_MODES[self.auth.get()] == "managed" else self.cookie_entry).focus_set()
 
     def toggle_manual_token(self):
         if self.manual_controls.winfo_manager():
@@ -898,6 +904,16 @@ class App:
             self.manual_button.configure(text="토큰 직접 입력 ▴")
             self.token_entry.focus_set()
         self._fit_popup(self.connect_window)
+
+    def connect_fresh_browser(self):
+        if self.login_busy or self.running or self.closing:
+            return
+        self.login_cancel = threading.Event()
+        self.login_busy = True
+        self.browser_status.set("기본 Chrome·Edge의 새 창에서 로그인해 주세요. 확장은 필요하지 않습니다.")
+        self._auth_changed()
+        threading.Thread(target=App._fresh_browser_worker,
+                         args=(self.events, self.login_cancel), daemon=True).start()
 
     def connect_browser(self):
         if self.login_busy or self.running or self.closing:
@@ -922,7 +938,7 @@ class App:
             return
         dialogs.showinfo("연결 확장 설치", "Chrome·Edge·Brave의 확장 관리에서 개발자 모드를 켜고 ‘압축해제된 확장 로드’로 "
                          "방금 열린 폴더 안의 chromium을 선택하세요. Firefox는 firefox 폴더의 안내를 확인하세요. "
-                         "설치 후 ‘기본 브라우저 계정 연결’을 누릅니다.",
+                         "설치 후 ‘기존 로그인 연결 (확장 필요)’을 누릅니다.",
                          parent=self.connect_window or self.root)
 
     def connect_default_browser(self):
@@ -966,6 +982,18 @@ class App:
         if (self.login_busy and isinstance(code, str) and re.fullmatch(r"[A-Z0-9_-]{8}", code)
                 and self.connect_window is not None and self.connect_window.winfo_exists()):
             self.browser_status.set(f"연결 코드 {code} · 브라우저 확장에 같은 코드가 표시되는지 확인한 뒤 연결을 누르세요.")
+
+    @staticmethod
+    def _fresh_browser_worker(events, cancel):
+        from .browser_login import sign_in_default, SignInError
+        message, identity = "", None
+        try:
+            identity = sign_in_default(cancel)
+        except SignInError as exc:
+            message = str(exc)
+        except Exception:
+            message = "로그인 연결을 마치지 못했습니다. 다시 시도하거나 ‘토큰 직접 입력’을 사용해 주세요."
+        events.put({"type": "browser-login", "message": message, "identity": identity})
 
     @staticmethod
     def _browser_worker(events, cancel):
@@ -1447,12 +1475,13 @@ class App:
     # -------------------------------------------------------------------- help
     HELP_SECTIONS = (
         ("처음 시작하기", (
-            "1. ‘로그인 연결 → 기본 브라우저 계정 연결’을 누릅니다. 처음에는 연결 확장 설치 안내를 확인하세요.",
-            "2. 브라우저 확장에서 연결 코드와 X 계정을 확인합니다. 로그인한 계정이 자동으로 목록에 추가됩니다.",
+            "1. ‘로그인 연결 → 기본 브라우저에서 새 로그인’을 누릅니다. 기본 Chrome·Edge를 확장 없이 사용할 수 있습니다.",
+            "2. 새 브라우저 창에서 X에 로그인하면 본인 아이디가 자동으로 목록에 추가됩니다.",
             "3. X 계정 목록에서 사용할 계정과 저장할 폴더를 고르고 ‘저장 시작’을 누릅니다.",
         ), "한 번 받은 파일은 건너뛰고, 다음부터는 새 Like만 받습니다."),
         ("로그인이 안 될 때", (
-            "확장 설치가 어려우면 ‘Edge에서 X 로그인’으로 별도 로그인할 수 있습니다.",
+            "기본 브라우저가 Chrome·Edge가 아니면 ‘Edge에서 X 로그인’을 사용할 수 있습니다.",
+            "브라우저의 기존 로그인을 그대로 연결하려면 ‘기존 로그인 연결 (확장 필요)’을 사용합니다.",
             "기존 토큰·쿠키 연결은 계속 사용할 수 있습니다. 필요하면 ‘토큰 직접 입력’을 펼쳐 안내대로 넣습니다.",
             "연결이 끊기면 같은 방법으로 다시 연결합니다.",
         ), "로그인 정보는 이 PC에만 보관합니다."),
@@ -1853,7 +1882,7 @@ class App:
                 return False
         if AUTH_MODES[self.auth.get()] == "managed" and not has_session():
             self.status.set("먼저 X 로그인을 연결해 주세요")
-            self.status_detail.set("‘기본 브라우저 계정 연결’로 로그인한 계정을 연결하세요.")
+            self.status_detail.set("‘기본 브라우저에서 새 로그인’으로 사용할 계정을 연결하세요.")
             self.show_connect("저장하려면 먼저 X 로그인을 연결해야 합니다.")
             return False
         try:

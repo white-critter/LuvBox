@@ -15,8 +15,10 @@ from luvbox import theme
 from luvbox.gallery import TILE
 from luvbox.preview import Thumbnail
 from tests import test_gallery as gallery_fixtures
+from tests.legacy_ui import previous_window
 
 
+@previous_window
 class GalleryCacheTests(unittest.TestCase):
     release = gallery_fixtures.GalleryLayoutTests.release
 
@@ -115,6 +117,7 @@ class GalleryCacheTests(unittest.TestCase):
 
     def test_reopening_the_same_theme_retains_photos_without_recomposing_them(self):
         self.show(self.rows(100))
+        self.wait(lambda: not self.grid._pending_keys)
         self.grid.select_many(("0", "1"), focus="0", scroll=False)
         photos = dict(self.grid.images)
         placeholders = self.grid.placeholder, self.grid.unavailable_placeholder

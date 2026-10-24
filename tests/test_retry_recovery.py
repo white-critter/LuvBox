@@ -48,8 +48,8 @@ class RetryRecoveryTests(unittest.TestCase):
         self.assertEqual(test_missing_files.FakeTweetExtractor.requested, ["100", "200"])
         self.assertEqual((code, events[-1]["status"], events[-1]["saved"], events[-1]["unavailable_tweets"]),
                          (0, "finished", 1, 1))
-        self.assertTrue((self.output / "200_1.jpg").is_file())
-        self.assertFalse((self.output / "100_1.jpg").exists())
+        self.assertTrue((self.output / "alice_200_1.jpg").is_file())
+        self.assertFalse((self.output / "alice_100_1.jpg").exists())
         self.assertIn("twitter100_1", self.entries())
         self.assertFalse([event for event in events if event.get("level") in {"warning", "error"}])
         notices = [event["message"] for event in events if event["type"] == "log"]
@@ -70,7 +70,7 @@ class RetryRecoveryTests(unittest.TestCase):
                     {"100": exception.AuthRequired(message=reason)})
                 self.assertEqual((code, events[-1]["status"]), (1, "error"))
                 self.assertEqual(test_missing_files.FakeTweetExtractor.requested, ["100"])
-                self.assertFalse((self.output / "200_1.jpg").exists())
+                self.assertFalse((self.output / "alice_200_1.jpg").exists())
 
     def test_visibility_exemption_only_applies_to_individual_tweet_retries(self):
         for reason in ("Protected Tweet", "NSFW Tweet"):
@@ -88,8 +88,8 @@ class RetryRecoveryTests(unittest.TestCase):
     def check_partial_recovery(self, code, events, status):
         self.assertEqual((code, events[-1]["status"], events[-1]["recovered"]),
                          (0 if status == "stopped" else 1, status, 1))
-        self.assertTrue((self.output / "100_1.jpg").is_file())
-        self.assertFalse((self.output / "200_1.jpg").exists())
+        self.assertTrue((self.output / "alice_100_1.jpg").is_file())
+        self.assertFalse((self.output / "alice_200_1.jpg").exists())
         self.assertTrue({"twitter100_1", "twitter200_1"} <= self.entries())
         location = test_core.resolve_storage(self.output, "myaccount")
         with closing(HistoryStore.for_storage(location)) as store:

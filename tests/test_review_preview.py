@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from luvbox.review_preview import FRAME_QUEUE_SIZE, ReviewFrame, ReviewPreview, _FrameQueue, _GifSampler
 
@@ -40,6 +40,61 @@ class FakeProcess:
 
 
 class GifSamplerTests(unittest.TestCase):
+    def test_scaled_frame_remainder_survives_immediate_consumer_release_without_rescaling(self):
+        for accepted in (True, False):
+            with self.subTest(accepted=accepted):
+                emitted = []
+
+                def send(frame):
+                    emitted.append((frame.image.size, frame.image.getpixel((16, 20)), frame.duration_ms))
+                    frame.image.paste((0, 0, 255, 255), (0, 0, *frame.image.size))
+                    frame.image.close()
+                    return accepted
+
+                sampler = _GifSampler((64, 40), Fraction(1000, 30), send, "GIF")
+                self.addCleanup(sampler.close)
+                with Image.new("RGBA", (128, 80), (255, 0, 0, 128)) as image:
+                    image.paste((0, 0, 0, 0), (64, 0, 128, 80))
+                    original_pixels = image.tobytes()
+                    with patch("luvbox.review_preview.ImageOps.contain", wraps=ImageOps.contain) as contain:
+                        self.assertEqual(sampler.add(image, 80), accepted)
+                    self.assertEqual(contain.call_count, 1)
+                    self.assertEqual(image.size, (128, 80))
+                    self.assertEqual(image.tobytes(), original_pixels)
+                    image.paste((0, 0, 255, 255), (0, 0, 128, 80))
+                self.assertEqual(len(emitted), 1)
+                self.assertEqual(emitted[0][:2], ((64, 40), (255, 0, 0, 128)))
+                self.assertAlmostEqual(emitted[0][2], 200 / 3)
+                self.assertEqual(sampler.image.getpixel((16, 20)), (255, 0, 0, 128))
+                self.assertEqual(sampler.image.getpixel((48, 20))[3], 0)
+                pending = sampler.image
+                sampler.close()
+                with self.assertRaises(ValueError):
+                    pending.getpixel((16, 20))
+
+    def test_scaled_palette_frame_keeps_alpha_and_exact_remainder_timing(self):
+        frames = []
+        sampler = _GifSampler((64, 40), Fraction(1000, 30), lambda frame: frames.append(frame) or True, "GIF")
+        self.addCleanup(sampler.close)
+        with Image.new("P", (128, 80), 0) as image:
+            image.putpalette([0, 0, 0, 255, 0, 0] + [0] * 762)
+            image.info["transparency"] = 0
+            image.paste(1, (0, 0, 64, 80))
+            with patch("luvbox.review_preview.ImageOps.contain", wraps=ImageOps.contain) as contain:
+                self.assertTrue(sampler.add(image, 80))
+                self.assertTrue(sampler.add(image, 20))
+            self.assertEqual(contain.call_count, 1)
+        self.assertEqual(sampler.duration, 0)
+        self.assertIsNone(sampler.image)
+        self.assertEqual(len(frames), 2)
+        self.assertAlmostEqual(math.fsum(frame.duration_ms for frame in frames), 100)
+        for frame in frames:
+            self.addCleanup(frame.image.close)
+            self.assertEqual(frame.image.mode, "RGBA")
+            self.assertEqual(frame.image.size, (64, 40))
+            self.assertEqual(frame.image.getpixel((16, 20)), (255, 0, 0, 255))
+            self.assertEqual(frame.image.getpixel((48, 20)), (0, 0, 0, 0))
+
     def test_small_source_frames_stay_detached_at_original_resolution(self):
         frames = []
         sampler = _GifSampler((640, 400), Fraction(1000, 30), lambda frame: frames.append(frame) or True, "GIF")

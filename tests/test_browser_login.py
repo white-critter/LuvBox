@@ -8,8 +8,9 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from luvbox import browser_login as login
 
@@ -25,6 +26,83 @@ def signed_in_cookies():
 def cookie(**changes):
     return dict(name="auth_token", value=TOKEN, domain=".x.com", path="/",
                 expires=-1, secure=True, httpOnly=True, **changes)
+
+
+class BrowserDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name) / "Browser Application"
+        self.directory.mkdir()
+        self.chrome = self.directory / "chrome.exe"
+        self.edge = self.directory / "msedge.exe"
+        self.chrome.write_bytes(b"synthetic executable fixture")
+        self.edge.write_bytes(b"synthetic executable fixture")
+
+    @staticmethod
+    def registry(values):
+        registry = SimpleNamespace(HKEY_CURRENT_USER="HKCU", HKEY_CLASSES_ROOT="HKCR", HKEY_LOCAL_MACHINE="HKLM",
+                                   KEY_READ=1, KEY_WOW64_64KEY=256, KEY_WOW64_32KEY=512,
+                                   OpenKey=Mock(return_value=MagicMock()), QueryValueEx=Mock(side_effect=values))
+        return registry
+
+    def test_default_https_association_resolves_only_browser_executable_and_discards_arguments(self):
+        for executable, program_id in ((self.chrome, "ChromeHTML.012345"), (self.edge, "MSEdgeHTM")):
+            with self.subTest(browser=executable.name):
+                command = f'"{executable}" --profile-directory="Existing Personal Profile" --single-argument "%1"'
+                registry = self.registry([(program_id, 1), (command, 1)])
+                with patch.dict(sys.modules, {"winreg": registry}), \
+                        patch("luvbox.browser_login.os", SimpleNamespace(name="nt", path=os.path)), \
+                        patch("subprocess.Popen", side_effect=AssertionError("association command was executed")):
+                    self.assertEqual(login.find_default_browser(), executable)
+                self.assertEqual(registry.OpenKey.call_args_list[0].args,
+                                 ("HKCU", r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice"))
+                self.assertEqual(registry.OpenKey.call_args_list[1].args,
+                                 ("HKCR", program_id + r"\shell\open\command"))
+
+    def test_unsupported_missing_relative_or_malformed_association_is_rejected(self):
+        firefox = self.directory / "firefox.exe"
+        firefox.write_bytes(b"synthetic unsupported browser")
+        commands = (None, 3, "", f'"{firefox}" "%1"', f'"{self.directory / "missing" / "chrome.exe"}" "%1"',
+                    'chrome.exe "%1"', f'"{self.chrome}"suffix "%1"', f'"{self.chrome}\n" "%1"',
+                    f'"{self.chrome}"\0 "%1"', f'cmd.exe /c "{self.chrome}" "%1"',
+                    f'{self.chrome} "%1"', '"' + "x" * 32769 + '"')
+        for command in commands:
+            with self.subTest(command_type=type(command).__name__):
+                self.assertIsNone(login._association_executable(command))
+
+    def test_invalid_program_id_and_unreadable_default_fail_without_a_fallback(self):
+        for program_id in (None, "", "../ChromeHTML", "ChromeHTML\\shell", "a" * 201):
+            registry = self.registry([(program_id, 1)])
+            with self.subTest(program_id_type=type(program_id).__name__), \
+                    patch.dict(sys.modules, {"winreg": registry}), \
+                    patch("luvbox.browser_login.os", SimpleNamespace(name="nt", path=os.path)):
+                self.assertIsNone(login.find_default_browser())
+            self.assertEqual(registry.OpenKey.call_count, 1)
+        registry = self.registry([])
+        registry.OpenKey.side_effect = PermissionError("synthetic inaccessible association")
+        with patch.dict(sys.modules, {"winreg": registry}), \
+                patch("luvbox.browser_login.os", SimpleNamespace(name="nt", path=os.path)):
+            self.assertIsNone(login.find_default_browser())
+
+    def test_mandatory_user_data_directory_policy_is_checked_for_the_selected_browser(self):
+        for executable, policy in ((self.chrome, r"SOFTWARE\Policies\Google\Chrome"),
+                                   (self.edge, r"SOFTWARE\Policies\Microsoft\Edge")):
+            registry = self.registry([("synthetic personal profile override", 1)])
+            with self.subTest(browser=executable.name), patch.dict(sys.modules, {"winreg": registry}), \
+                    patch("luvbox.browser_login.os", SimpleNamespace(name="nt", path=os.path)), \
+                    self.assertRaises(login.SignInError) as error:
+                login._check_profile_policy(executable)
+            self.assertEqual(str(error.exception), login.NO_DEBUGGING)
+            self.assertEqual(registry.OpenKey.call_args.args[1], policy)
+
+    def test_profile_cleanup_does_not_target_an_unrelated_directory(self):
+        with patch("luvbox.browser_login.app_directory", return_value=self.directory), \
+                patch("luvbox.browser_login.os", SimpleNamespace(name="nt")), \
+                patch("luvbox.browser_login.subprocess.run") as run:
+            login._stop_profile_processes(self.directory / "Personal Profile")
+            login._stop_profile_processes(self.directory.parent / "login-profile-unrelated")
+        run.assert_not_called()
 
 
 class BrowserLoginTests(unittest.TestCase):
@@ -220,6 +298,42 @@ class BrowserLoginTests(unittest.TestCase):
         with patch("luvbox.browser_login.find_edge", return_value=None), \
                 self.assertRaisesRegex(login.SignInError, login.NO_EDGE):
             login.sign_in(self.cancel, launch=self.launch)
+        self.save.assert_not_called()
+        self.assertFalse(hasattr(self, "profile"))
+
+    def test_default_chrome_and_edge_use_new_profiles_and_only_the_existing_private_pipe(self):
+        for executable in (self.directory / "chrome.exe", self.directory / "msedge.exe"):
+            with self.subTest(browser=executable.name), \
+                    patch("luvbox.browser_login.find_default_browser", return_value=executable), \
+                    patch("luvbox.browser_login._check_profile_policy") as policy, \
+                    patch("luvbox.browser_login.devtools_call", side_effect=self.call), \
+                    patch("socket.socket", side_effect=AssertionError("default login opened TCP")):
+                self.assertEqual(login.sign_in_default(self.cancel, launch=self.launch), IDENTITY)
+                self.assertEqual(self.args[0], str(executable))
+                policy.assert_called_once_with(executable)
+                self.assertEqual(self.profile.parent, self.directory)
+                self.assertTrue(self.profile.name.startswith(login._PROFILE_PREFIX))
+                self.assertFalse(self.profile.exists())
+                self.assertIn("--remote-debugging-pipe", self.args)
+                self.assertFalse(any(argument.startswith("--remote-debugging-port") for argument in self.args))
+                self.assertFalse(any(argument.startswith("--profile-directory") for argument in self.args))
+        self.assertEqual(self.save.call_count, 2)
+
+    def test_unsupported_default_browser_does_not_silently_launch_edge(self):
+        with patch("luvbox.browser_login.find_default_browser", return_value=None), \
+                patch("luvbox.browser_login.find_edge") as edge, \
+                self.assertRaisesRegex(login.SignInError, login.NO_DEFAULT_BROWSER):
+            login.sign_in_default(self.cancel, launch=self.launch)
+        edge.assert_not_called()
+        self.save.assert_not_called()
+        self.assertFalse(hasattr(self, "profile"))
+
+    def test_cancelled_default_login_does_not_resolve_or_launch_a_browser(self):
+        self.cancel.set()
+        with patch("luvbox.browser_login.find_default_browser") as browser, \
+                self.assertRaisesRegex(login.SignInError, login.CANCELLED):
+            login.sign_in_default(self.cancel, launch=self.launch)
+        browser.assert_not_called()
         self.save.assert_not_called()
         self.assertFalse(hasattr(self, "profile"))
 

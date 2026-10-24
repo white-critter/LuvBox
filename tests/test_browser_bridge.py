@@ -13,6 +13,7 @@ import socket
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
@@ -112,6 +113,41 @@ class BrowserBridgeTests(unittest.TestCase):
 
     def test_firefox_extension_origin_is_accepted(self):
         self.assertEqual(self.request(headers={"Origin": "moz-extension://01234567-89ab-cdef-0123-456789abcdef"})[0], 200)
+
+    def test_rejection_survives_a_body_sent_after_the_response(self):
+        body = b"untrusted-body" * 128
+        with patch("luvbox.browser_bridge._decrypt", side_effect=AssertionError("must not decrypt")):
+            for attempt in range(5):
+                with self.subTest(attempt=attempt), socket.create_connection(("127.0.0.1", self.port), timeout=2) as connection:
+                    headers = (f"POST /session HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
+                               f"Origin: {ORIGIN}/\r\nContent-Type: application/json\r\n"
+                               f"Content-Length: {len(body)}\r\n\r\n")
+                    connection.sendall(headers.encode())
+                    response = http.client.HTTPResponse(connection)
+                    response.begin()
+                    self.assertEqual(response.status, 403)
+                    for offset in range(0, len(body), 256):
+                        connection.sendall(body[offset:offset + 256])
+                    connection.shutdown(socket.SHUT_WR)
+                    self.assertEqual(response.read(), b"")
+                    self.assertEqual(connection.recv(1), b"")
+                    response.close()
+        self.assertIsNone(self.bridge._result)
+        self.assertEqual(self.request()[0], 200)
+
+    def test_rejected_stalled_body_cannot_hold_up_the_next_request(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=2) as connection:
+            headers = (f"POST /session HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
+                       f"Origin: {ORIGIN}\r\nContent-Type: application/json\r\n"
+                       "Content-Length: 9999999\r\n\r\n")
+            connection.sendall(headers.encode())
+            response = http.client.HTTPResponse(connection)
+            response.begin()
+            self.assertEqual(response.status, 400)
+            started = time.monotonic()
+            self.assertEqual(self.request()[0], 200)
+            self.assertLess(time.monotonic() - started, 1.0)
+            response.close()
 
     def test_dns_rebinding_other_paths_and_query_capabilities_are_rejected(self):
         self.assertEqual(self.request(headers={"Host": f"evil.example:{self.port}"})[0], 400)

@@ -16,3 +16,5 @@ cookies*.txt
 tools/exiftool/*
 !tools/exiftool/download.py
 tools/ffmpeg/*.tar.xz
+tools/qt/sources/
+tools/qt/notices/
