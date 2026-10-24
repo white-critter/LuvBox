@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 from urllib.parse import urlsplit
 
+from .file_mutex import replace_file
 from .protection import API_INTERVAL, MEDIA_INTERVAL, AccountGuard, ProtectionError
 from .history import CatalogDamaged, HistoryError, HistoryStore, _author_fields
 from .storage import OutputGuard, missing_media_help, resolve_storage, saved_media_missing
@@ -145,7 +146,7 @@ def _mark_transfer_complete(source: Path, modified=None) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(record, stream)
-        os.replace(temporary, str(source) + ".luvbox-complete")
+        replace_file(temporary, str(source) + ".luvbox-complete")
     finally:
         temporary.unlink(missing_ok=True)
 

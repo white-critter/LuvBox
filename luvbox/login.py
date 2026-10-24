@@ -17,7 +17,7 @@ import threading
 import time
 from pathlib import Path
 
-from .file_mutex import file_mutex
+from .file_mutex import file_mutex, replace_file
 
 
 _HEADER = b"LuvBox-DPAPI-v1\0"
@@ -164,7 +164,7 @@ def _write_payload(payload: dict, *, cancel=None) -> None:
             file.flush()
             os.fsync(file.fileno())
         _check_cancelled(cancel)
-        os.replace(temporary, target)
+        replace_file(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
 

@@ -22,6 +22,7 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .file_mutex import replace_file
 from .storage import (_RECORD_FOLDERS, StoragePaths, _DamagedDatabase, migrate_legacy_databases,
                       prepare_storage, records_root)
 
@@ -1599,7 +1600,7 @@ class HistoryStore:
                     for row in rows:
                         writer.writerow([_csv_cell(value) for value in row])
                         exported += 1
-            os.replace(temporary, destination)
+            replace_file(temporary, destination)
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)

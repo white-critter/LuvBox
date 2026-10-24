@@ -63,6 +63,9 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
     such as a download's temporary ``.part`` file.
     """
     path = Path(path)
+    # Metadata writes already refuse links. A preview must not follow one either.
+    if path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
+        return Thumbnail(None, "파일이 이동되었거나 삭제되었습니다.")
     kind = (suffix if suffix is not None else path.suffix).lower()
     if cloud_only(path):
         return Thumbnail(None, "파일이 클라우드에만 있습니다. 탐색기에서 내려받은 뒤 다시 확인해 주세요.")

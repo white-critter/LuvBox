@@ -145,6 +145,16 @@ class BrowserLoginTests(unittest.TestCase):
     def sign_in(self, **kwargs):
         return login.sign_in(self.cancel, edge=Path("offline-edge.exe"), launch=self.launch, **kwargs)
 
+    def test_identity_probe_failure_stays_a_fixed_message(self):
+        with patch("luvbox.browser_login.devtools_call", side_effect=self.call), \
+                patch("luvbox.browser_login._authenticated_identity",
+                      side_effect=ValueError("invalid devtools session")):
+            with self.assertRaises(login.SignInError) as error:
+                self.sign_in()
+        self.assertEqual(str(error.exception), login.NO_DEBUGGING)
+        self.assertNotIn("devtools", str(error.exception))
+        self.save.assert_not_called()
+
     def test_success_encrypts_only_x_token_and_cleans_only_own_profile(self):
         other = self.directory / "login-profile-other-attempt"
         other.mkdir()

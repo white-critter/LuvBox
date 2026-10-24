@@ -20,6 +20,8 @@ from urllib.parse import urlsplit
 
 from requests.exceptions import RequestException
 
+from .file_mutex import replace_file
+
 
 API_INTERVAL = 10.0
 MEDIA_INTERVAL = 2.0
@@ -205,7 +207,7 @@ class AccountGuard:
                 json.dump({"until": self.until}, fp)
                 fp.flush()
                 os.fsync(fp.fileno())
-            temporary.replace(self.state_path)
+            replace_file(temporary, self.state_path)
         except OSError:
             self.failure = _STATE_HELP
             raise ProtectionError(self.failure) from None

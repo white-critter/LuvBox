@@ -1,9 +1,10 @@
 # LuvBox Windows 작업 이어받기
 
-현재 제품 버전은 **1.1.3**이며 실행 UI는 PySide6 + Qt Quick 하나입니다. 최신 소스·검사·배포 결과는 [종합 검토](docs/comprehensive-review-20261024.md), [보안 검토](docs/security-review-20261024.md), [검증 기록](docs/verification.md)을 기준으로 확인합니다. 오래된 보고서의 성공 수치와 현재 실행 결과를 섞지 않습니다.
+현재 제품 버전은 **1.1.4**이며 실행 UI는 PySide6 + Qt Quick 하나입니다. 최신 소스·검사·배포 결과는 [종합 검토](docs/comprehensive-review-20261024.md), [보안 검토](docs/security-review-20261024.md), [검증 기록](docs/verification.md)을 기준으로 확인합니다. 오래된 보고서의 성공 수치와 현재 실행 결과를 섞지 않습니다.
 
 ## 현재 변경
 
+- 1.1.4: 파일 교체의 짧은 Windows 잠금을 재시도하고, 미리보기가 링크를 따라 열지 않게 했습니다. 상세 검사 수는 [검증 기록](docs/verification.md)을 봅니다.
 - 첫 HTTP 요청 전에 실패하던 EXE의 SSL 보조 파일 누락을 고치고 실제 추출기 초기화를 오프라인 빌드 게이트에 추가했습니다.
 - 설정 읽기·쓰기 실패 시 기존 파일과 UI의 마지막 저장 성공 상태를 보존하고, 설정 저장 후 다운로드를 시작합니다.
 - 계정·설정 변경은 Windows 프로세스 간 잠금으로 직렬화합니다.

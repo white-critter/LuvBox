@@ -23,6 +23,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .file_mutex import replace_file
 from .settings import AppDataError, app_directory, load_settings
 
 
@@ -233,7 +234,7 @@ def _write_last_run_json(path: Path, data: dict) -> None:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(data, stream, ensure_ascii=False)
-        os.replace(name, path)
+        replace_file(name, path)
     finally:
         Path(name).unlink(missing_ok=True)
 

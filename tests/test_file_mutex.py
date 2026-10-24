@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from luvbox import login
-from luvbox.file_mutex import file_mutex
+from luvbox.file_mutex import file_mutex, replace_file
 
 
 _WRITER = r'''
@@ -194,6 +194,44 @@ class FileMutexTests(unittest.TestCase):
                 self.assertFalse(result["include_videos"])
                 self.assertEqual(result["include_gifs"], not locked)
                 self.assertEqual(result["unknown"], {"preserved": True})
+
+
+class ReplaceFileTests(unittest.TestCase):
+    def test_transient_sharing_lock_retries_then_publishes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            source, target = directory / "next.txt", directory / "current.txt"
+            target.write_text("previous", encoding="utf-8")
+            source.write_text("next", encoding="utf-8")
+            original = os.replace
+            calls = []
+
+            def replace(src, dest):
+                calls.append(Path(dest).name)
+                if len(calls) == 1:
+                    raise PermissionError("scanner")
+                return original(src, dest)
+
+            with patch("luvbox.file_mutex.os.replace", side_effect=replace), \
+                    patch("luvbox.file_mutex.time.sleep") as sleep:
+                replace_file(source, target)
+            self.assertEqual(calls, ["current.txt", "current.txt"])
+            self.assertEqual(target.read_text(encoding="utf-8"), "next")
+            sleep.assert_called_once()
+
+    def test_lasting_permission_error_keeps_the_previous_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            source, target = directory / "next.txt", directory / "current.txt"
+            target.write_text("previous", encoding="utf-8")
+            source.write_text("next", encoding="utf-8")
+            with patch("luvbox.file_mutex.os.replace", side_effect=PermissionError("denied")), \
+                    patch("luvbox.file_mutex.time.sleep") as sleep:
+                with self.assertRaises(PermissionError):
+                    replace_file(source, target, attempts=3, pause=0)
+            self.assertEqual(target.read_text(encoding="utf-8"), "previous")
+            self.assertEqual(source.read_text(encoding="utf-8"), "next")
+            self.assertEqual(sleep.call_count, 2)
 
 
 class FileMutexValidationTests(unittest.TestCase):

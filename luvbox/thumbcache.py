@@ -23,6 +23,8 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .file_mutex import replace_file
+
 
 SIZE = (150, 112)
 LIMIT_BYTES = 300 * 1024 * 1024
@@ -109,7 +111,7 @@ def _mark_pruned(path: Path) -> None:
     try:
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(uuid.uuid4().bytes)
-        os.replace(staged, path.with_name(path.name + ".epoch"))
+        replace_file(staged, path.with_name(path.name + ".epoch"))
     finally:
         staged.unlink(missing_ok=True)
 

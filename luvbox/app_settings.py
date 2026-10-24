@@ -8,7 +8,7 @@ import tempfile
 import threading
 
 from .settings import load_settings, settings_path
-from .file_mutex import file_mutex
+from .file_mutex import file_mutex, replace_file
 
 
 _WRITE_LOCK = threading.RLock()
@@ -53,7 +53,7 @@ class SettingsRepository:
                         stream.write(serialized)
                         stream.flush()
                         os.fsync(stream.fileno())
-                    os.replace(temporary, target)
+                    replace_file(temporary, target)
                 finally:
                     temporary.unlink(missing_ok=True)
             except (OSError, ValueError, TypeError, UnicodeError):

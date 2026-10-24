@@ -9,9 +9,31 @@ import hashlib
 import math
 import os
 from pathlib import Path
+import time
 
 
 _LOCK_ERROR = "다른 LuvBox 창이 정보를 저장하고 있습니다. 잠시 뒤 다시 시도해 주세요."
+
+
+def replace_file(source, target, *, attempts=25, pause=0.02):
+    """Replace one complete file, retrying a brief Windows sharing lock.
+
+    Scanners and folder sync can hold the destination for a moment. The last
+    attempt still raises, so a real permission failure leaves the previous file.
+    """
+    if isinstance(attempts, bool) or not isinstance(attempts, int) or not 1 <= attempts <= 50:
+        raise ValueError("replace attempts must be between 1 and 50")
+    if (isinstance(pause, bool) or not isinstance(pause, (int, float))
+            or not math.isfinite(pause) or not 0 <= pause <= 1):
+        raise ValueError("replace pause must be between 0 and 1 second")
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            time.sleep(pause)
 
 
 @contextmanager

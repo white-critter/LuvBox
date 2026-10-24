@@ -1,6 +1,7 @@
 """Offline request-protection tests; no X account or network requests."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -105,6 +106,26 @@ class ProtectionTests(unittest.TestCase):
             session.send(request)
         self.assertEqual(original.call_count, 1)
         self.assertEqual(list(self.root.glob("cooldown-*.tmp")), [])
+
+    def test_transient_cooldown_replace_still_persists_for_the_next_run(self):
+        original = os.replace
+        calls = []
+
+        def replace(source, target):
+            calls.append(Path(target).name)
+            if len(calls) == 1:
+                raise PermissionError("scanner")
+            return original(source, target)
+
+        with patch("luvbox.file_mutex.os.replace", side_effect=replace), \
+                patch("luvbox.file_mutex.time.sleep"):
+            self.guard.record_limit({"Retry-After": "1800"}, fail=False)
+        self.assertGreaterEqual(len(calls), 2)
+        self.guard.close()
+        other = AccountGuard("offline", sleep=Mock(), root=self.root)
+        with self.assertRaisesRegex(ProtectionError, "한국 시간"):
+            other.acquire()
+        other.close()
 
     def test_real_requests_redirect_also_uses_protected_send_without_network(self):
         owner = self

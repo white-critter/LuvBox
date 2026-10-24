@@ -459,8 +459,8 @@ def sign_in(cancel: threading.Event, *, timeout: float = 600, edge: Path | None 
                         if cancel.is_set():
                             raise SignInError(CANCELLED)
                         return save_authenticated_session(token, identity, cancel=cancel)
-                except ValueError as exc:
-                    raise SignInError(str(exc)) from None
+                except ValueError:
+                    raise SignInError(NO_DEBUGGING) from None
                 except OSError:
                     raise SignInError(CLOSED) from None
                 if time.monotonic() - token_seen >= 30:

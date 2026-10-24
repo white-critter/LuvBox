@@ -569,6 +569,26 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(len(self.history_rows()), 1)
         self.assertEqual(self.archive_keys(), {"twitter100_1"})
 
+    def test_completion_record_retries_a_transient_sharing_lock(self):
+        import os
+        from luvbox import core
+        source = self.base / "100_1.jpg.part"
+        source.write_bytes(b"complete transfer")
+        original = os.replace
+        calls = []
+
+        def replace(src, dest):
+            calls.append(1)
+            if len(calls) == 1:
+                raise PermissionError(32, "sharing")
+            return original(src, dest)
+
+        with patch("luvbox.file_mutex.os.replace", side_effect=replace), \
+                patch("luvbox.file_mutex.time.sleep"):
+            core._mark_transfer_complete(source, "Wed, 01 Jan 2020 00:00:00 GMT")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(core._transfer_complete(source)["mtime_http"], "Wed, 01 Jan 2020 00:00:00 GMT")
+
     def test_completion_record_allows_synced_time_rounding_but_not_other_sizes(self):
         import os
         from luvbox import core

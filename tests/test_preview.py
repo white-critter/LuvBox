@@ -164,6 +164,25 @@ result.image.close()
                 expected.close()
                 difference.close()
 
+    def test_symlink_and_junction_previews_do_not_open_the_target(self):
+        path = self.image()
+        real_symlink = Path.is_symlink
+
+        def linked(candidate):
+            return candidate == path or real_symlink(candidate)
+
+        with patch.object(Path, "is_symlink", autospec=True, side_effect=linked), \
+                patch("luvbox.preview.Image.open", side_effect=AssertionError("linked preview was opened")):
+            result = thumbnail(path)
+        self.assertIsNone(result.image)
+        self.assertIn("삭제", result.note)
+        with patch.object(Path, "is_symlink", autospec=True, return_value=False), \
+                patch.object(Path, "is_junction", autospec=True,
+                             side_effect=lambda candidate: candidate == path, create=True), \
+                patch("luvbox.preview.Image.open", side_effect=AssertionError("junction preview was opened")):
+            result = thumbnail(path)
+        self.assertIsNone(result.image)
+
     def test_missing_corrupt_unsupported_and_large_image_have_clear_notices(self):
         self.assertIn("삭제", thumbnail(self.root / "missing.jpg").note)
         corrupt = self.root / "broken.jpg"

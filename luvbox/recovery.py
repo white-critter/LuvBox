@@ -20,6 +20,8 @@ from datetime import datetime
 from itertools import groupby
 from pathlib import Path
 
+from .file_mutex import replace_file
+
 
 HISTORY_NAME = ".luvbox-history.sqlite3"
 _KEEP_BACKUPS = 7
@@ -353,7 +355,7 @@ def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
             healthy = copy.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         if not healthy:
             return None
-        os.replace(temporary, target)
+        replace_file(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
     for old in sorted(folder.glob("history-*.sqlite3"))[:-_KEEP_BACKUPS]:
@@ -406,7 +408,7 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
                                  skip_unreadable=name != HISTORY_NAME)
         for suffix in ("-wal", "-shm"):
             (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
-        os.replace(rebuilt, record_dir / HISTORY_NAME)
+        replace_file(rebuilt, record_dir / HISTORY_NAME)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     result["kept"] = str(kept)
