@@ -27,8 +27,15 @@ Dialog {
         if (_responded)
             return
         _responded = true
+        const reviewId = item ? item.id : ""
+        const targetApp = app
         media.release()
-        app.respondReview(action)
+        // Qt closes animated-image devices through deferred deletion. Let
+        // that finish before the worker can rename or remove the source.
+        Qt.callLater(function() {
+            if (targetApp && targetApp.reviewItem && targetApp.reviewItem.id === reviewId)
+                targetApp.respondReview(action)
+        })
         close()
     }
 

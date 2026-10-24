@@ -298,25 +298,26 @@ def _busy(message: str) -> bool:
 def _notify_failure(outcome: dict) -> None:
     """Tell the signed-in user right away; a scheduled run has no window."""
     try:
-        import tkinter as tk
-        from . import dialogs, theme
-        root = tk.Tk()
-        root.withdraw()
-        from .app_icon import install
-        install(root)
-        try:
-            theme.apply(root, "dark" if load_settings().get("appearance") == "dark" else "light")
-        except (OSError, ValueError, tk.TclError):
-            pass
-        dialog = dialogs.Dialog(
-            root, "러브박스 자동 저장 실패",
-            f"{outcome['finished_at'][:16].replace('T', ' ')} 자동 저장을 마치지 못했습니다.\n\n{outcome['message']}"
-            + ("\n\n자세한 내용은 앱의 ‘자동 저장 → 실행 기록’에 있습니다." if outcome.get("log") else ""),
-            icon="warning", buttons=(("앱 열기", "open"), ("닫기", None)))
-        dialog.attributes("-topmost", True)
-        choice = dialog.run()
-        root.destroy()
-        if choice == "open":
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QIcon
+        from PySide6.QtWidgets import QApplication, QMessageBox
+
+        application = QApplication.instance() or QApplication([])
+        if not isinstance(application, QApplication):
+            return
+        dialog = QMessageBox()
+        dialog.setWindowTitle("러브박스 자동 저장 실패")
+        dialog.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[1] / "assets/icons/luvbox.ico")))
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setText(f"{outcome['finished_at'][:16].replace('T', ' ')} 자동 저장을 마치지 못했습니다.\n\n"
+                       f"{outcome['message']}")
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        open_button = dialog.addButton("앱 열기", QMessageBox.ButtonRole.AcceptRole)
+        close_button = dialog.addButton("닫기", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(close_button)
+        dialog.exec()
+        if dialog.clickedButton() is open_button:
             subprocess.Popen(app_command(), close_fds=True, creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
     except Exception:
         pass

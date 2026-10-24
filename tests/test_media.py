@@ -836,7 +836,7 @@ class MediaTests(unittest.TestCase):
             self.assertEqual((events[-1]["saved"], events[-1]["skipped"], events[-1]["author_deferred"]), (0, 1, 1))
             # Only the explicit existing-files action rewrites saved media.
             self.embed_source.assert_not_called()
-            self.assertTrue(any("기록 · 통계 → 파일 관리 → 이전 파일 출처·작성자 보완" in event.get("message", "")
+            self.assertTrue(any("작성자 정보를 저장 기록에 반영" in event.get("message", "")
                                 for event in events if event["type"] == "log"))
             row = self.history_rows()[0]
             self.assertEqual((row["author"], row["author_id"]), ("alice", "123"))
@@ -855,13 +855,7 @@ class MediaTests(unittest.TestCase):
         # The file still holds the older identity, so it is pending again.
         self.assertEqual((row["author_id"], row["author_metadata_status"]), ("123", "pending"))
 
-    def test_handle_case_change_is_deferred_then_explicitly_backfilled_once(self):
-        from contextlib import nullcontext
-        from queue import Queue
-        from threading import Event
-        from luvbox.history_gui import HistoryWindow
-        from luvbox.storage import resolve_storage
-
+    def test_handle_case_change_is_catalogued_without_rewriting_existing_file(self):
         options = replace(self.options, folder_mode="flat")
         self.worker([("100", 1, "photo", "Writer", None, 123)], options=options)
         original = self.history_rows()[0]
@@ -878,17 +872,6 @@ class MediaTests(unittest.TestCase):
                          ("writer", "123", "pending"))
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), (content, mtime))
 
-        paths = resolve_storage(self.output, "myaccount", separate_accounts=options.separate_accounts)
-        window = SimpleNamespace(_store=HistoryStore.for_storage, metadata_stop=Event(), results=Queue())
-        with patch("luvbox.metadata.persistent", return_value=nullcontext()), \
-                patch("requests.Session.request") as network:
-            HistoryWindow._backfill(window, 1, paths)
-            self.embed_source.assert_called_once_with(path, "100", author="writer", author_id="123")
-            HistoryWindow._backfill(window, 1, paths)
-            self.embed_source.assert_called_once()
-        network.assert_not_called()
-        row = self.history_rows()[0]
-        self.assertEqual((row["metadata_status"], row["author_metadata_status"]), ("embedded", "embedded"))
         self.assertEqual(row["saved_at"], original["saved_at"])
         with closing(sqlite3.connect(self.record_dir / ".luvbox-archive.flat.sqlite3")) as db:
             self.assertEqual({entry for entry, in db.execute("SELECT entry FROM archive")}, {"twitter100_1"})

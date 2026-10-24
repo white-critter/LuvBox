@@ -1,6 +1,5 @@
 """Damaged records databases are detected, kept, and rebuilt on this PC."""
 
-import queue
 import shutil
 import sqlite3
 import struct
@@ -13,7 +12,6 @@ from unittest.mock import patch
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import recovery
 from luvbox.history import CatalogDamaged, HistoryError, HistoryStore
-from luvbox.history_gui import HistoryWindow
 
 
 def damage_media_table(path: Path):
@@ -124,9 +122,6 @@ class RecoveryTests(unittest.TestCase):
 
         with self.assertRaises(CatalogDamaged):
             HistoryStore(self.account)
-        results = queue.Queue()
-        HistoryWindow._load_worker(results, 1, self.account, "all", "", 0, False)
-        self.assertEqual(results.get_nowait()[1], "damaged")
 
     def test_valid_catalog_constraint_error_does_not_offer_damage_recovery(self):
         with closing(sqlite3.connect(self.live)) as connection:
@@ -196,9 +191,6 @@ class RecoveryTests(unittest.TestCase):
         self.live.rename(old)
         with self.assertRaises(CatalogDamaged):
             HistoryStore(self.account)
-        results = queue.Queue()
-        HistoryWindow._load_worker(results, 1, self.account, "all", "", 0, False)
-        self.assertEqual(results.get_nowait()[1], "damaged")
         self.assertFalse(self.live.exists())
         result = recovery.repair_history(self.account, "myaccount")
         self.assertEqual(result["counts"]["media"], 600)
@@ -246,19 +238,6 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIsInstance(failure.exception, CatalogDamaged)
         self.assertEqual(archive.read_bytes(), b"damaged old database")
 
-    def test_records_window_offers_repair_and_reloads(self):
-        damage_media_table(self.live)
-        results = queue.Queue()
-        HistoryWindow._load_worker(results, 1, self.account, "all", "", 0, False)
-        kind, message = results.get_nowait()[1:]
-        self.assertEqual(kind, "damaged")
-        HistoryWindow._repair_worker(results, 2, self.account)
-        kind, message = results.get_nowait()[1:]
-        self.assertEqual(kind, "repaired")
-        self.assertIn("600개", message)
-        HistoryWindow._load_worker(results, 3, self.account, "all", "", 0, False)
-        kind, snapshot = results.get_nowait()[1:]
-        self.assertEqual((kind, snapshot[1]["files"]), ("loaded", 600))
 
     def test_backups_are_daily_and_limited(self):
         folder = recovery._catalog_backups("myaccount", self.account)

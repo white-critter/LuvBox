@@ -1,7 +1,6 @@
 """Preview cache bounds and cloud/link safety, using private local fixtures."""
 
 import os
-import queue
 import sqlite3
 import subprocess
 import sys
@@ -10,13 +9,12 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from PIL import Image
 
 from luvbox import thumbcache
-from luvbox.gallery import _GridDecoder
-from luvbox.preview import PreviewLoader, Thumbnail, thumbnail
+from luvbox.preview import thumbnail
 
 
 class ThumbCacheStabilityTests(unittest.TestCase):
@@ -250,14 +248,7 @@ class CloudPreviewSafetyTests(unittest.TestCase):
         flagged = patch.object(Path, "stat", marked)
         flagged.start()
         self.addCleanup(flagged.stop)
-        self.kept = Image.new("RGBA", (12, 9), "blue")
-        self.original = Image.new("RGBA", (100, 75), "red")
 
-    def stop(self, decoder):
-        decoder.close()
-        if decoder.thread is not None:
-            decoder.thread.join(timeout=5)
-            self.assertFalse(decoder.thread.is_alive())
 
     def test_direct_image_and_video_thumbnail_never_open_online_only_data(self):
         for suffix in (".jpg", ".mp4"):
@@ -270,58 +261,7 @@ class CloudPreviewSafetyTests(unittest.TestCase):
             open_image.assert_not_called()
             ffmpeg.assert_not_called()
 
-    def test_selected_preview_uses_kept_image_then_retries_when_local(self):
-        results = queue.Queue()
-        decode = Mock(return_value=Thumbnail(self.original, "local image"))
-        remember = Mock()
-        loader = PreviewLoader(results, decoder=decode)
-        self.addCleanup(self.stop, loader)
-        loader.request(1, self.path, lambda _: True, remember=remember, recall=lambda: self.kept)
-        _, result = results.get(timeout=5)
-        self.assertIs(result.image, self.kept)
-        self.assertIn("클라우드", result.note)
-        decode.assert_not_called()
-        remember.assert_not_called()
-        self.assertFalse(loader.cache)
-        self.cloud = False
-        for token in (2, 3):
-            loader.request(token, self.path, lambda _: True, remember=remember)
-            self.assertIs(results.get(timeout=5)[1].image, self.original)
-        self.assertEqual(decode.call_count, 1)
-        self.cloud = True
-        loader.request(4, self.path, lambda _: True, remember=remember)
-        self.assertIs(results.get(timeout=5)[1].image, self.original)
-        self.assertEqual(decode.call_count, 1)
 
-    def test_gallery_uses_kept_image_then_retries_when_local(self):
-        results = queue.Queue()
-        decode = Mock(return_value=Thumbnail(self.original, "local image"))
-        remember = Mock()
-        grid = _GridDecoder(results, decoder=decode)
-        self.addCleanup(self.stop, grid)
-        jobs = [("row", str(self.path), ("100", 1, "photo"))]
-        # Grid reads os.stat directly; inject the same Windows attributes.
-        real_stat = os.stat
-
-        def marked(path, *args, **kwargs):
-            if str(path) == str(self.path):
-                return SimpleNamespace(st_dev=self.status.st_dev, st_ino=self.status.st_ino,
-                                       st_size=self.status.st_size, st_mtime_ns=self.status.st_mtime_ns,
-                                       st_file_attributes=0x400000 if self.cloud else 0)
-            return real_stat(path, *args, **kwargs)
-
-        with patch("luvbox.gallery.os.stat", marked):
-            grid.request(1, jobs, set, remember=remember, recall=lambda _: self.kept)
-            self.assertIs(results.get(timeout=5)[2], self.kept)
-            decode.assert_not_called()
-            remember.assert_not_called()
-            self.assertFalse(grid.cache)
-            self.cloud = False
-            for token in (2, 3):
-                grid.request(token, jobs, set, remember=remember)
-                self.assertIs(results.get(timeout=5)[2], self.original)
-            self.assertEqual(decode.call_count, 1)
-            self.assertEqual(remember.call_count, 1)
 
 
 if __name__ == "__main__":

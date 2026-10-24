@@ -18,22 +18,25 @@ sys.path.insert(0, str(ROOT))
 from luvbox import __version__  # noqa: E402
 from tools.check_build_inputs import require_inputs  # noqa: E402
 from tools.qt.prepare_sources import release_files as qt_source_files
+from tools.check_download_startup import validate_report as validate_download_report
 
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
     "tools/draw_icon.py",
-    "tools/build_theme.py", "assets/theme/README.md", "assets/theme/light.zip", "assets/theme/dark.zip",
     "entry.py", "setup.ps1", "build.ps1", "run.bat", "tools/windows_version.py", "tools/check_qt_startup.py", "tools/package_browser_extension.py", ".gitattributes", "requirements.txt",
     "requirements-dev.txt", "requirements-lock.txt", "requirements-qt.txt", "README.md", "WINDOWS_CONTINUE.md", "LICENSE",
-    "CHANGELOG.md", "docs/ui-redesign-plan.md", "docs/legacy-1.0-guide.md", "docs/legacy-1.0-usage.txt", "tools/qt_gallery_preview.py",
+    "CHANGELOG.md", "docs/ui-redesign-plan.md", "tools/qt_gallery_preview.py",
     "tools/pyinstaller/hook-PySide6.py", "tools/pyinstaller/hook-PySide6.QtQml.py",
     "tools/pyinstaller/hook-PySide6.QtGui.py",
+    "tools/pyinstaller/hook-ssl.py",
+    "tools/check_download_startup.py",
+    "docs/security-review-20261024.md", "docs/comprehensive-review-20261024.md",
     "tools/qt/prepare_sources.py", "tools/qt/sources.json", "tools/qt/README.md",
     "assets/qt/licenses/GPL-2.0-only.txt", "assets/qt/licenses/GPL-3.0-only.txt",
     "assets/qt/licenses/LGPL-3.0-only.txt",
     "THIRD_PARTY_NOTICES.md", "LuvBox.code-workspace",
-    "tools/exiftool/download.py", "tools/package_release.py", "tools/check_build_inputs.py", "tools/ui_qa.py",
-    "tools/benchmark_history.py", "tools/benchmark_preview.py", "tools/benchmark_gallery.py",
+    "tools/exiftool/download.py", "tools/package_release.py", "tools/check_build_inputs.py",
+    "tools/benchmark_history.py", "tools/benchmark_preview.py",
     "tests/browser_bridge_extension_harness.js",
     "tools/ffmpeg/build.py", "tools/ffmpeg/README.md", "tools/ffmpeg/manifest.json",
     "tools/ffmpeg/configure-flags.json", "tools/ffmpeg/build-info.txt", "tools/ffmpeg/LICENSE.LGPLv2.1.txt",
@@ -100,6 +103,11 @@ def _collect_manifest(toc: Path, application_name: str) -> dict[Path, Path]:
         if kind not in {"EXECUTABLE", "BINARY", "EXTENSION", "DATA"} or "\0" in source or not Path(source).is_absolute():
             raise ValueError("Unsupported PyInstaller COLLECT entry")
         normalized = "/".join(parts).casefold()
+        basename = parts[-1].casefold()
+        if (parts[0].casefold() in {"tkinter", "_tcl_data", "_tk_data", "tcl", "tk"}
+                or basename.startswith(("_tkinter.", "_imagingtk."))
+                or (basename.startswith(("tcl8", "tk8")) and basename.endswith(".dll"))):
+            raise ValueError("Build manifest contains a removed UI runtime")
         # Qt links to Windows' unversioned ICU API. A PATH tool's ICU build
         # can share its filename while exporting only version-suffixed names.
         if parts[-1].casefold() in {"icuuc.dll", "icudt78.dll"}:
@@ -183,6 +191,12 @@ def _require_startup_report(executable: Path) -> None:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     if report.get("executable_sha256") != digest:
         raise ValueError("The executable changed after its Qt startup check")
+    try:
+        download_report = json.loads((ROOT / "build" / f"download-startup-{__version__}.json")
+                                     .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ValueError("Run the frozen download startup check before packaging") from None
+    validate_download_report(download_report, digest)
 
 
 def package() -> None:
@@ -262,10 +276,6 @@ def package() -> None:
             python_license = python_root / "LICENSE.txt"
             if python_license.is_file():
                 archive.write(python_license, "licenses/Python-LICENSE.txt")
-            for component in ("tcl8.6", "tk8.6"):
-                license_path = python_root / "tcl" / component / "license.terms"
-                if license_path.is_file():
-                    archive.write(license_path, f"licenses/{component}-license.terms")
         os.replace(staged, destination)
     finally:
         staged.unlink(missing_ok=True)

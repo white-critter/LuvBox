@@ -14,8 +14,7 @@ from gallery_dl import exception
 from gallery_dl.extractor.common import Extractor
 from gallery_dl.extractor.message import Message
 
-from tests import test_core, test_gui, test_history_gui
-from tests.legacy_ui import previous_window
+from tests import test_core
 from tests.test_core import SECRET, FakeHttpDownloader
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import JobOptions, run_worker
@@ -273,109 +272,8 @@ class RetryWorkerTests(unittest.TestCase):
         self.assertEqual(JobOptions("me", str(self.output)).targets, ())
 
 
-@previous_window
-class MissingTabTests(unittest.TestCase):
-    setUp = test_history_gui.HistoryGuiTests.setUp
-    load = test_history_gui.HistoryGuiTests.load
-    records = test_history_gui.HistoryGuiTests.records
-
-    def run_choice(self, ignored, confirm=True):
-        with patch("luvbox.history_gui.dialogs.askyesno", return_value=confirm) as ask,                 patch("luvbox.history_gui.threading.Thread") as thread:
-            self.window.choose_missing(ignored)
-        if thread.called:
-            thread.call_args.kwargs["target"](*thread.call_args.kwargs["args"])
-            with patch("luvbox.history_gui.threading.Thread"):
-                self.window._poll()
-            self.load()
-        return ask
-
-    def deleted(self):
-        self.records(2)
-        (self.account / "100_1.jpg").unlink()
-        self.load()
-
-    def tab_text(self):
-        return self.window.tabs.tab(self.window.missing_scroll_view, "text")
-
-    def test_missing_files_are_listed_and_can_be_kept_deleted_or_shown_again(self):
-        self.load()
-        self.assertEqual((self.tab_text(), self.window.missing_text.get()), ("사라진 파일", "사라진 파일이 없습니다"))
-        self.deleted()
-        self.assertEqual(self.tab_text(), "사라진 파일 1")
-        self.assertEqual(list(self.window.missing_rows), ["100_1"])
-        self.assertIn("사라진 파일 1개 · 트윗 1개", self.window.missing_text.get())
-        self.assertIn("사라진 파일 1개", self.window.date_text.get())
-        self.assertEqual(str(self.window.ignore_button.cget("state")), "disabled")
-        self.window.select_all_missing()
-        self.window._update_missing_actions()
-        self.assertEqual(str(self.window.ignore_button.cget("state")), "normal")
-        # Without a main window to download with, re-downloading is unavailable.
-        self.assertEqual(str(self.window.retry_button.cget("state")), "disabled")
-        self.run_choice(True, confirm=False)
-        self.assertEqual(list(self.window.missing_rows), ["100_1"])
-        ask = self.run_choice(True)
-        self.assertIn("1개", ask.call_args.args[1])
-        self.assertEqual((self.tab_text(), list(self.window.missing_rows)), ("사라진 파일", []))
-        self.assertIn("숨긴 파일 1개", self.window.missing_text.get())
-        self.assertNotIn("사라진 파일 1개", self.window.date_text.get())
-        self.window.show_ignored.set(True)
-        self.window._show_missing()
-        self.assertIn("숨김", self.window.missing_tree.item("100_1", "values")[1])
-        self.window.missing_tree.selection_set("100_1")
-        self.window._update_missing_actions()
-        self.assertEqual(str(self.window.unignore_button.cget("state")), "normal")
-        ask = self.run_choice(False)
-        ask.assert_not_called()
-        self.assertEqual(self.tab_text(), "사라진 파일 1")
-
-    def test_retry_hands_chosen_files_to_the_main_window_after_confirmation(self):
-        self.deleted()
-        started = []
-        self.window.retry_missing = lambda keys, account, location: started.append((keys, account, location)) or True
-        self.window.select_all_missing()
-        self.window._update_missing_actions()
-        self.assertEqual(self.window.retry_button.cget("text"), "다시 받기 (1개)")
-        with patch("luvbox.history_gui.dialogs.askyesno", return_value=False) as ask:
-            self.window.retry_missing_files()
-        self.assertEqual(started, [])
-        self.assertIn("트윗 1개", ask.call_args.args[1])
-        self.assertIn("약 1분", ask.call_args.args[1])
-        self.window.is_downloading = lambda: True
-        with patch("luvbox.history_gui.dialogs.showinfo") as notice:
-            self.window.retry_missing_files()
-        notice.assert_called_once()
-        self.window.is_downloading = lambda: False
-        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True):
-            self.window.retry_missing_files()
-        self.assertEqual(started, [(["100_1"], "offline", self.account)])
-        self.assertIn("메인 화면", self.window.status_text.get())
 
 
-class RetryStartTests(unittest.TestCase):
-    setUp = test_gui.GuiTests.setUp
-
-    def test_main_window_downloads_chosen_files_with_current_settings(self):
-        self.app.account.set("offline_test")
-        self.app.folder.set(self.temp.name)
-        self.session_mock.return_value = True
-        self.app.folder_mode.set("저장일별 폴더")
-        self.app.limited.set(True)
-        account, paths = self.app._history_location()
-        with patch("luvbox.gui.threading.Thread") as thread:
-            self.assertTrue(self.app.retry_missing(["100_1", "200_video_1"], account, paths))
-        options = thread.call_args.kwargs["args"][0]
-        self.assertEqual((options.targets, options.folder_mode, options.photo_limit),
-                         (("100_1", "200_video_1"), "date", 0))
-        self.assertIn("사라진 파일", self.app.status.get())
-        self.assertTrue(self.app.running)
-        with patch("luvbox.gui.threading.Thread") as thread:
-            self.assertFalse(self.app.retry_missing(["100_1"], account, paths))
-        thread.assert_not_called()
-        self.app.events.put({"type": "finished", "status": "finished", "saved": 1, "skipped": 0,
-                             "size_skipped": 0, "scan_mode": "retry", "message": "끝"})
-        with patch.object(self.root, "after"):
-            self.app._poll()
-        self.assertIn("다시 받은 파일 1개", self.app.status.get())
 
 
 if __name__ == "__main__":

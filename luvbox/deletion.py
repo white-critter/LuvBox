@@ -1,4 +1,4 @@
-"""Protected, journalled library deletion. No Tk or X requests are made here."""
+"""Protected, journalled library deletion without UI or X requests."""
 
 from __future__ import annotations
 

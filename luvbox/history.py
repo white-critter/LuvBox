@@ -10,6 +10,7 @@ import bisect
 import csv
 import functools
 import json
+import math
 import os
 import re
 import sqlite3
@@ -81,7 +82,7 @@ class CatalogDamaged(HistoryError):
     """The records database file itself is damaged; it can be rebuilt."""
 
 
-_DAMAGED_HELP = ("기록 DB가 손상됐습니다. ‘기록 · 통계’에서 ‘기록 복구’를 눌러 주세요. "
+_DAMAGED_HELP = ("저장 기록 DB가 손상되어 기록 복구가 필요합니다. 앱을 종료한 뒤 기록을 확인해 주세요. "
                  "사진·영상과 중복 방지 기록은 그대로 있습니다.")
 # SQLITE_CORRUPT and SQLITE_NOTADB, including their extended codes.
 _DAMAGED_CODES = {11, 26}
@@ -1734,7 +1735,7 @@ class LikeOrder:
             "SELECT started_at FROM runs WHERE status='finished' AND id<? AND started_at>=? "
             "AND scan_mode!='retry' ORDER BY started_at DESC,id DESC LIMIT 1", (run_id, since)).fetchone()
         self._after = previous[0] if previous else None
-        self._upper = None      # key of the last known tweet seen in this run
+        self._upper = None      # last known tweet; its key can be rebalanced
         self._pending = []      # new tweets since then, newest first
         self._visited = set()
 
@@ -1744,12 +1745,11 @@ class LikeOrder:
         if tweet_id in self._visited or not re.fullmatch(r"[0-9]{1,20}", tweet_id):
             return
         self._visited.add(tweet_id)
-        key = self._keys.get(tweet_id)
-        if key is None:
+        if tweet_id not in self._keys:
             self._pending.append(tweet_id)
             return
-        self._place(key)
-        self._upper = key
+        self._place(tweet_id)
+        self._upper = tweet_id
 
     @_safe
     def flush(self) -> None:
@@ -1774,19 +1774,39 @@ class LikeOrder:
             return [high - LikeOrder.STEP * (index + 1) for index in range(count)]
         return [low + (high - low) * (count - index) / (count + 1) for index in range(count)]
 
+    def _bounds(self, lower):
+        if self._upper is None:
+            return self._sorted[-1] if self._sorted else None, None
+        upper = self._keys[self._upper]
+        if lower is not None:
+            lower = self._keys[lower]
+            return lower, upper if upper > lower else self._above(lower)
+        return self._below(upper), upper
+
+    def _rebalance(self):
+        # Repeated inserts into one gap eventually round to an existing REAL
+        # key. Restore spacing without changing first-seen dates or order.
+        tweets = sorted(self._keys, key=lambda tweet: (self._keys[tweet], tweet))
+        keys = {tweet: self.STEP * (index + 1) for index, tweet in enumerate(tweets)}
+        with self._store._db:
+            self._store._db.executemany("UPDATE likes SET like_key=? WHERE tweet_id=?",
+                                       [(key, tweet) for tweet, key in keys.items()])
+        self._keys = keys
+        self._sorted = list(keys.values())
+
     def _place(self, lower):
         pending, self._pending = self._pending, []
         if not pending:
             return
         top = self._upper is None
-        if top:
-            # Newest Likes: above every key, including those of un-liked tweets.
-            keys = self._between(self._sorted[-1] if self._sorted else None, None, len(pending))
-        elif lower is not None:
-            high = self._upper if self._upper > lower else self._above(lower)
-            keys = self._between(lower, high, len(pending))
-        else:
-            keys = self._between(self._below(self._upper), self._upper, len(pending))
+        low, high = self._bounds(lower)
+        keys = self._between(low, high, len(pending))
+        bounded = ([high] if high is not None else []) + keys + ([low] if low is not None else [])
+        if (not all(math.isfinite(key) for key in bounded) or
+                any(first <= second for first, second in zip(bounded, bounded[1:]))):
+            self._rebalance()
+            low, high = self._bounds(lower)
+            keys = self._between(low, high, len(pending))
         after = self._after if top else None
         rows = [(tweet_id, key, after, self._seen_by) for tweet_id, key in zip(pending, keys)]
         with self._store._db:
@@ -1794,4 +1814,7 @@ class LikeOrder:
                 "INSERT OR IGNORE INTO likes(tweet_id,like_key,liked_after,liked_before) VALUES (?,?,?,?)", rows)
         for tweet_id, key, *_ in rows:
             self._keys[tweet_id] = key
-            bisect.insort(self._sorted, key)
+        # Each new batch is already ordered. A single merge/sort avoids
+        # shifting the existing list once per Like on a large first scan.
+        self._sorted.extend(keys)
+        self._sorted.sort()

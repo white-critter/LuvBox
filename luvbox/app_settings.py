@@ -8,6 +8,7 @@ import tempfile
 import threading
 
 from .settings import load_settings, settings_path
+from .file_mutex import file_mutex
 
 
 _WRITE_LOCK = threading.RLock()
@@ -35,11 +36,13 @@ class SettingsRepository:
     def update(self, changes: dict) -> dict:
         if not isinstance(changes, dict) or any(not isinstance(key, str) for key in changes):
             raise ValueError(_SAVE_ERROR)
-        with _WRITE_LOCK:
-            values = {**load_settings(), **deepcopy(changes)}
+        target = settings_path()
+        with _WRITE_LOCK, file_mutex(target):
+            # A tolerant first display must not turn a damaged or inaccessible
+            # settings file into an empty document on the next update.
+            values = {**load_settings(strict=True), **deepcopy(changes)}
             try:
                 serialized = json.dumps(values, ensure_ascii=False, indent=2, allow_nan=False)
-                target = settings_path()
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if target.is_symlink() or getattr(target, "is_junction", lambda: False)():
                     raise OSError(_SAVE_ERROR)

@@ -1,16 +1,14 @@
 from io import BytesIO
 from pathlib import Path
-import queue
 import subprocess
 import sys
 import tempfile
-from threading import Event
 import unittest
 from unittest.mock import patch
 
 from PIL import Image, ImageChops, ImageOps, ImageStat
 
-from luvbox.preview import PREVIEW_SIZE, PreviewLoader, Thumbnail, thumbnail
+from luvbox.preview import PREVIEW_SIZE, thumbnail
 
 
 class PreviewTests(unittest.TestCase):
@@ -222,143 +220,10 @@ result.image.close()
         self.assertIn("첫 프레임", result.note)
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
 
-    def test_loader_checks_permission_even_for_cache_and_invalidates_modified_file(self):
-        path = self.image()
-        results = queue.Queue(maxsize=2)
-        with patch("luvbox.preview.thumbnail", wraps=thumbnail):
-            loader = PreviewLoader(results, decoder=thumbnail)
-        self.addCleanup(loader.close)
-        with patch.object(loader, "decoder", wraps=thumbnail) as decode:
-            loader.request(1, path, lambda _: True)
-            self.assertEqual(results.get(timeout=3)[0], 1)
-            loader.request(2, path, lambda _: True)
-            self.assertEqual(results.get(timeout=3)[0], 2)
-            self.assertEqual(decode.call_count, 1)
-            loader.request(3, path, lambda _: False)
-            _, result = results.get(timeout=3)
-            self.assertIsNone(result.image)
-            self.assertEqual(decode.call_count, 1)
-            self.image(size=(120, 70))
-            loader.request(4, path, lambda _: True)
-            results.get(timeout=3)
-            self.assertEqual(decode.call_count, 2)
 
-    def test_loader_keeps_only_latest_pending_selection_and_closes_without_late_result(self):
-        started, release = Event(), Event()
-        decoded = []
 
-        def decode(path):
-            decoded.append(path.name)
-            if len(decoded) == 1:
-                started.set()
-                release.wait(3)
-            return Thumbnail(Image.new("RGB", (10, 10)), "ready")
 
-        paths = [self.image(f"{index}.jpg") for index in range(4)]
-        results = queue.Queue(maxsize=2)
-        loader = PreviewLoader(results, decoder=decode, cache_size=1)
-        self.addCleanup(loader.close)
-        loader.request(1, paths[0], lambda _: True)
-        self.assertTrue(started.wait(3))
-        for index in range(1, 4):
-            loader.request(index + 1, paths[index], lambda _: True)
-        release.set()
-        self.assertEqual(results.get(timeout=3)[0], 1)
-        self.assertEqual(results.get(timeout=3)[0], 4)
-        self.assertEqual(decoded, ["0.jpg", "3.jpg"])
-        self.assertEqual(len(loader.cache), 1)
-        loader.close()
-        self.assertFalse(loader.cache)
 
-        started.clear()
-        release.clear()
-        late = PreviewLoader(queue.Queue(maxsize=2), decoder=lambda _: (started.set(), release.wait(3), Thumbnail(None, "late"))[-1])
-        self.addCleanup(late.close)
-        late.request(1, paths[0], lambda _: True)
-        self.assertTrue(started.wait(3))
-        late.close()
-        release.set()
-        late.thread.join(3)
-        self.assertTrue(late.results.empty())
-        self.assertFalse(late.cache)
-
-    def test_loader_retries_failed_unchanged_file_then_caches_success(self):
-        path = self.image()
-        stamp = (path.stat().st_size, path.stat().st_mtime_ns)
-        results = queue.Queue(maxsize=2)
-        ready = Thumbnail(Image.new("RGB", (10, 10)), "ready")
-        with patch("luvbox.preview.thumbnail", side_effect=[Thumbnail(None, "temporary failure"), ready]) as decode:
-            loader = PreviewLoader(results, decoder=decode)
-            try:
-                loader.request(1, path, lambda _: True)
-                _, result = results.get(timeout=3)
-                self.assertIsNone(result.image)
-                self.assertFalse(loader.cache)
-                loader.request(2, path, lambda _: True)
-                _, result = results.get(timeout=3)
-                self.assertIs(result, ready)
-                loader.request(3, path, lambda _: True)
-                _, result = results.get(timeout=3)
-                self.assertIs(result, ready)
-                self.assertEqual(decode.call_count, 2)
-                self.assertEqual(len(loader.cache), 1)
-                self.assertEqual((path.stat().st_size, path.stat().st_mtime_ns), stamp)
-            finally:
-                loader.close()
-                if loader.thread is not None:
-                    loader.thread.join(3)
-                    self.assertFalse(loader.thread.is_alive())
-
-    def test_cache_only_reads_are_background_coalesced_and_do_not_touch_media(self):
-        started, release = Event(), Event()
-        calls = []
-        image = Image.new("RGBA", (12, 8), "blue")
-
-        def recall(token):
-            calls.append(token)
-            if token == 1:
-                started.set()
-                release.wait(3)
-            return image
-
-        loader = PreviewLoader(queue.Queue(maxsize=2))
-        self.addCleanup(loader.close)
-        self.addCleanup(release.set)
-        with patch.object(Path, "stat", side_effect=AssertionError("cache-only request touched media")), \
-                patch.object(loader, "decoder", side_effect=AssertionError("cache-only request decoded media")):
-            loader.request_cached(1, lambda: recall(1))
-            self.assertTrue(started.wait(3))
-            worker = loader.thread
-            loader.request_cached(2, lambda: recall(2))
-            loader.request_cached(3, lambda: recall(3))
-            release.set()
-            self.assertIs(loader.results.get(timeout=3)[1].image, image)
-            self.assertEqual(loader.results.get(timeout=3)[0], 3)
-        self.assertIs(loader.thread, worker)
-        self.assertEqual(calls, [1, 3])
-        self.assertFalse(loader.cache)
-        loader.close()
-        worker.join(3)
-        self.assertFalse(worker.is_alive())
-
-    def test_close_discards_inflight_cache_only_result(self):
-        started, release = Event(), Event()
-        loader = PreviewLoader(queue.Queue(maxsize=2))
-        self.addCleanup(loader.close)
-        self.addCleanup(release.set)
-
-        def recall():
-            started.set()
-            release.wait(3)
-            return Image.new("RGB", (8, 8), "red")
-
-        loader.request_cached(1, recall)
-        self.assertTrue(started.wait(3))
-        loader.close()
-        release.set()
-        loader.thread.join(3)
-        self.assertFalse(loader.thread.is_alive())
-        self.assertTrue(loader.results.empty())
 
 
 if __name__ == "__main__":

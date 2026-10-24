@@ -1,11 +1,11 @@
 """UI-independent ownership of one isolated download worker and its IPC."""
 
 from contextlib import ExitStack
+from collections import deque
 from dataclasses import asdict
 import json
 import os
 from pathlib import Path
-import queue
 import subprocess
 import sys
 import tempfile
@@ -14,6 +14,16 @@ import time
 
 from .core import JobOptions
 from .review import CONTROL_NAME, ReviewControl
+
+
+_READ_BYTES = 64 * 1024
+_MAX_EVENT_BYTES = 256 * 1024
+_PROTOCOL_ERROR = "저장 작업의 진행 정보를 읽지 못해 중단했습니다. 앱을 다시 시작한 뒤 다시 시도해 주세요."
+_START_ERROR = "저장 작업을 시작하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
+
+
+class _ProtocolError(ValueError):
+    pass
 
 
 def worker_command(request, events, stop):
@@ -26,7 +36,7 @@ def worker_command(request, events, stop):
 class DownloadService:
     def __init__(self):
         self._lock = Lock()
-        self._events = queue.Queue()
+        self._events = deque()
         self._stop = Event()
         self._thread = None
         self._process = None
@@ -67,7 +77,12 @@ class DownloadService:
             self._stop.clear()
             self._thread = Thread(target=self._run, args=(job_id, options),
                                   name="download-process-owner", daemon=True)
-            self._thread.start()
+            try:
+                self._thread.start()
+            except RuntimeError:
+                self._thread = None
+                self._running = False
+                raise ValueError(_START_ERROR) from None
         return True
 
     def stop(self):
@@ -84,13 +99,9 @@ class DownloadService:
         return not self.running
 
     def drain(self, limit=200):
-        events = []
-        for _ in range(max(0, min(int(limit), 1000))):
-            try:
-                events.append(self._events.get_nowait())
-            except queue.Empty:
-                break
-        return events
+        limit = max(0, min(int(limit), 1000))
+        with self._lock:
+            return [self._events.popleft() for _ in range(min(limit, len(self._events)))]
 
     def resolve_review(self, ident, action, *, enabled=None):
         if action not in {"save", "skip", "never", "stop"}:
@@ -120,15 +131,26 @@ class DownloadService:
                 self._review_id = None
             elif event["type"] == "review-request":
                 self._review_id = event.get("id")
-        self._events.put({**event, "job_id": job_id})
+            event = {**event, "job_id": job_id}
+            # A paused UI needs the newest transfer counters, while saved,
+            # review and terminal events must retain their exact ordering.
+            if (event["type"] == "progress" and self._events and
+                    self._events[-1]["type"] == "progress" and self._events[-1]["job_id"] == job_id):
+                self._events[-1] = event
+            else:
+                self._events.append(event)
 
     def _read_lines(self, job_id, data):
         lines = data.split(b"\n")
         for line in lines[:-1]:
+            if len(line) > _MAX_EVENT_BYTES:
+                raise _ProtocolError(_PROTOCOL_ERROR)
             try:
                 self._emit(job_id, json.loads(line))
             except (ValueError, UnicodeError):
                 pass
+        if len(lines[-1]) > _MAX_EVENT_BYTES:
+            raise _ProtocolError(_PROTOCOL_ERROR)
         return lines[-1]
 
     def _update_control(self):
@@ -173,10 +195,14 @@ class DownloadService:
                     terminated_at = None
                     heartbeat_at = time.monotonic()
                     while True:
-                        partial = self._read_lines(job_id, partial + stream.read())
+                        partial = self._read_lines(job_id, partial + stream.read(_READ_BYTES))
                         if process.poll() is not None:
-                            remaining = partial + stream.read()
-                            self._read_lines(job_id, remaining + (b"\n" if remaining else b""))
+                            # Drain the worker's final flush in bounded chunks;
+                            # retain bytes until a complete UTF-8 JSON line.
+                            while chunk := stream.read(_READ_BYTES):
+                                partial = self._read_lines(job_id, partial + chunk)
+                            if partial:
+                                self._read_lines(job_id, partial + b"\n")
                             return_code = process.returncode
                             break
                         self._update_control()

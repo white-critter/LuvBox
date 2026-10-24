@@ -1,14 +1,12 @@
 """Two X accounts saving into one output folder, and combining an old
 account's records into the current one. gallery-dl runs offline."""
 
-import queue
 import hashlib
 import json
 import os
 import shutil
 import sqlite3
 import tempfile
-import tkinter as tk
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -17,13 +15,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import test_core as core_support
-from tests.legacy_ui import previous_window
-from tests.test_gui import destroy_tk, release_tk
 from luvbox.core import JobOptions, run_worker
 from luvbox.history import HistoryStore
-from luvbox.history_gui import HistoryWindow
 from luvbox.recovery import _catalog_backups
-from luvbox.storage import (MigrationError, OutputGuard, merge_account_records, merge_accounts_records,
+from luvbox.storage import (MigrationError, merge_account_records, merge_accounts_records,
                                 other_account_records, publish_snapshot, resolve_storage, saved_media_missing)
 
 
@@ -118,7 +113,7 @@ class AccountMergeTests(unittest.TestCase):
 
 
 class AccountMergeStorageTests(unittest.TestCase):
-    """Pure database/file fixtures; no account, Tk window or network access."""
+    """Pure database/file fixtures; no account or network access."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -424,71 +419,6 @@ class AccountMergeStorageTests(unittest.TestCase):
         other.record_dir.mkdir(parents=True)
         shutil.copy2(paths.record_dir / ".luvbox-history.sqlite3", other.record_dir / ".luvbox-history.sqlite3")
         self.assertFalse(saved_media_missing(other))
-
-
-@previous_window
-class AccountMergeWindowTests(unittest.TestCase):
-    write_cookies = core_support.CoreTests.write_cookies
-
-    def setUp(self):
-        core_support.CoreTests.setUp(self)
-        self.addCleanup(core_support.CoreTests.tearDown, self)
-        self.output = self.base / "Likes"
-        self.paths = resolve_storage(self.output, "new_account")
-        cobi = resolve_storage(self.output, "old_account")
-        with closing(HistoryStore.for_storage(cobi)) as store:
-            for tweet in ("100", "101"):
-                path = cobi.media_dir / f"{tweet}_1.jpg"
-                path.write_bytes(b"offline-image")
-                store.record_media("flat", {"tweet_id": tweet, "num": 1, "type": "photo"}, path)
-        self.root = tk.Tk()
-        self.root.withdraw()
-        self.addCleanup(release_tk, self, "window", "root")
-        self.addCleanup(destroy_tk, self.root)
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.window = HistoryWindow(self.root, lambda: ("new_account", self.paths))
-        self.window.withdraw()
-
-    def load(self):
-        self.window._load(self.window.generation, self.paths, "all", "", 0, True)
-        self.window._poll()
-
-    def test_notice_merges_once_then_disappears(self):
-        self.load()
-        self.assertIn("@old_account(기록 2개)", self.window.accounts_text.get())
-        self.assertTrue(self.window.accounts_notice.winfo_manager())
-        self.assertEqual(self.window.tile_values["files"].get(), "0")
-        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True) as ask, \
-                patch("luvbox.history_gui.threading.Thread") as thread:
-            self.window.merge_accounts()
-        self.assertIn("@old_account · 기록 2개", ask.call_args.args[1])
-        self.assertTrue(self.window.choice_active)
-        results = queue.Queue()
-        HistoryWindow._merge_worker(results, *thread.call_args.kwargs["args"])
-        generation, kind, message = results.get_nowait()
-        self.assertEqual(kind, "accounts-merged")
-        self.assertIn("새로 더함 2개", message)
-        self.window.results.put((generation, kind, message))
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.window._poll()
-        self.load()
-        self.assertEqual(self.window.tile_values["files"].get(), "2")
-        self.assertFalse(self.window.accounts_notice.winfo_manager())
-        self.assertEqual(str(self.window.merge_button.cget("state")), "normal")   # merge again later
-
-    def test_merge_waits_for_other_work_and_reports_failure(self):
-        self.load()
-        guard = OutputGuard(self.paths.output_dir)
-        guard.acquire()
-        try:
-            results = queue.Queue()
-            HistoryWindow._merge_worker(results, 1, self.paths, ["old_account"])
-            _, kind, _ = results.get_nowait()
-        finally:
-            guard.close()
-        self.assertEqual(kind, "error")
-        with closing(HistoryStore.for_storage(self.paths, create_media=False)) as store:
-            self.assertEqual(store.merged_accounts(), set())
 
 
 if __name__ == "__main__":

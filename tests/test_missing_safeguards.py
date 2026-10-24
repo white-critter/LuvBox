@@ -3,32 +3,23 @@ on this PC, and what the missing-files list shows. Offline fixtures only."""
 
 import io
 import os
-import queue
 import sqlite3
 import string
 import tempfile
-import time
-import threading
-import tkinter as tk
 import unittest
 
-from tests.legacy_ui import previous_window
 from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from PIL import Image
 
 from tests import test_core as core_support
-from tests.test_gui import destroy_tk, release_tk
 from luvbox import thumbcache
-from luvbox.gui import App
 from luvbox.history import HistoryStore
-from luvbox.history_gui import HistoryWindow, _publish
-from luvbox.preview import PreviewLoader, Thumbnail
-from luvbox.gallery import _GridDecoder
+from luvbox.qt_library import LibraryRepository, _Request
 from luvbox.storage import missing_media_help, resolve_storage, saved_media_missing
 
 
@@ -71,19 +62,15 @@ class MovedFolderTests(StateTestCase):
         self.saved(2)
         self.paths.media_dir.rename(self.base / "Likes-moved")
         self.assertTrue(saved_media_missing(self.paths))
-        results = queue.Queue()
-        HistoryWindow._load_worker(results, 1, self.paths, "all", "", 0, True)
-        kinds = []
-        while not results.empty():
-            _, kind, result = results.get_nowait()
-            kinds.append(kind)
-            summary = result[1]
-        # No rescan: a rescan would turn every saved file into a missing one.
-        self.assertEqual(kinds, ["loaded"])
-        self.assertIn("저장 폴더를 찾을 수 없습니다", summary["media_offline"])
-        self.assertEqual((summary["files"], summary["missing_files"]), (2, 0))
-        self.assertFalse(self.paths.media_dir.exists())
-        _publish(self.paths)
+        repository = LibraryRepository()
+        repository.provider = SimpleNamespace(register=Mock())
+        repository.configure(_Request(1, "offline", str(self.paths.output_dir), False))
+        count, rows = repository.read("1", 0, 100)
+        # Qt browsing reads the catalog without rescanning or publishing into
+        # the disconnected folder. The saved paths stay available for recovery.
+        self.assertEqual((count, len(rows)), (2, 2))
+        self.assertTrue(all("파일 없음" in row["caption"] for row in rows))
+        repository.provider.register.assert_not_called()
         self.assertFalse(self.paths.media_dir.exists())
         with closing(HistoryStore(self.paths.record_dir)) as store:
             self.assertTrue(all(row["path"] for row in store.records()))
@@ -110,27 +97,6 @@ class MovedFolderTests(StateTestCase):
             _options_from_settings(settings, False)
         self.assertIn("자동 저장을 건너뛰었습니다", str(raised.exception))
         self.assertFalse(self.paths.media_dir.exists())
-
-    def test_starting_a_save_asks_before_making_a_new_empty_folder(self):
-        self.saved(1)
-        self.paths.media_dir.rename(self.base / "Likes-moved")
-        texts = {"status": [], "detail": []}
-        fake = SimpleNamespace(root=None, status=SimpleNamespace(set=texts["status"].append),
-                               status_detail=SimpleNamespace(set=texts["detail"].append))
-        options = SimpleNamespace(output_dir=str(self.paths.output_dir), account="offline", separate_accounts=False)
-        with patch("luvbox.gui.dialogs.askyesno", return_value=False) as ask:
-            self.assertFalse(App._confirm_missing_media(fake, options))
-        self.assertFalse(fake._allow_recreate_media)
-        self.assertEqual(ask.call_args.kwargs["default"], "no")
-        self.assertIn("시작하지 않았습니다", texts["status"][-1])
-        with patch("luvbox.gui.dialogs.askyesno", return_value=True):
-            self.assertTrue(App._confirm_missing_media(fake, options))
-        self.assertTrue(fake._allow_recreate_media)
-        self.paths.media_dir.mkdir()
-        with patch("luvbox.gui.dialogs.askyesno") as ask:
-            self.assertTrue(App._confirm_missing_media(fake, options))
-        self.assertFalse(fake._allow_recreate_media)
-        ask.assert_not_called()
 
 
 class MissingLocationTests(StateTestCase):
@@ -216,31 +182,7 @@ class PreviewCacheTests(StateTestCase):
             self.assertIsNotNone(image)
             image.close()
 
-    def test_gallery_keeps_decoded_previews_and_reuses_them_for_missing_files(self):
-        [path] = self.saved(1)
-        results = queue.Queue()
-        decoder = _GridDecoder(results)
-        kept = {}
-        decoder.request(1, [("a", str(path), ("100", 1, "photo")),
-                            ("b", str(path.with_name("gone_1.jpg")), ("200", 1, "photo"))],
-                        lambda paths: set(paths), remember=lambda key, image: kept.setdefault(key, image),
-                        recall=lambda key: Image.new("RGBA", (10, 10)) if key == ("200", 1, "photo") else None)
-        found = {}
-        for _ in range(2):
-            token, key, image = results.get(timeout=10)
-            found[key] = image
-        decoder.close()
-        self.assertIn(("100", 1, "photo"), kept)
-        self.assertEqual(found["b"].size, (10, 10))
 
-    def test_file_preview_falls_back_to_the_kept_preview(self):
-        results = queue.Queue()
-        loader = PreviewLoader(results)
-        loader.request(1, self.base / "gone.jpg", lambda path: True, recall=lambda: Image.new("RGBA", (12, 9)))
-        token, result = results.get(timeout=10)
-        loader.close()
-        self.assertEqual(result.image.size, (12, 9))
-        self.assertTrue(result.note.startswith("저장해 둔 작은 미리보기"))
 
 
 class RealPhotoDownloader(core_support.FakeHttpDownloader):
@@ -271,155 +213,6 @@ class WorkerPreviewTests(unittest.TestCase):
         saved = [event for event in events if event.get("type") == "saved"]
         self.assertEqual(len(saved), 1)
         self.assertIsNotNone(thumbcache.recall("myaccount", ("123", 1, "photo")))
-
-
-@previous_window
-class MissingTabTests(StateTestCase):
-    def setUp(self):
-        super().setUp()
-        self.root = tk.Tk()
-        self.root.withdraw()
-        self.addCleanup(release_tk, self, "window", "root")
-        self.addCleanup(destroy_tk, self.root)
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.window = HistoryWindow(self.root, lambda: ("offline", self.paths))
-        self.window.withdraw()
-
-    def load(self, do_import=True):
-        # The window's own refresh started this load; run it here in order.
-        self.window._load(self.window.generation, self.paths, "all", "", 0, do_import)
-        self.window._poll()
-
-    def test_detail_shows_kept_preview_location_and_time_then_opens_folder(self):
-        [path] = self.saved(1)
-        thumbcache.remember("offline", ("100", 1, "photo"), Image.open(path))
-        path.unlink()
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.load()
-        [key] = self.window.missing_rows
-        self.window.missing_tree.selection_set(key)
-        self.window.missing_tree.focus(key)
-        self.window._missing_selected()
-        deadline = time.monotonic() + 3
-        while self.window._missing_image is None and time.monotonic() < deadline:
-            self.window._poll_missing_previews()
-            time.sleep(.01)
-        detail = self.window.missing_detail.get()
-        self.assertIn("저장해 둔 미리보기입니다", detail)
-        self.assertIn(str(self.paths.media_dir), detail.replace("\n", ""))   # wrapped at separators
-        self.assertNotIn("알 수 없음", detail)
-        self.assertIsNotNone(self.window._missing_image)
-        with patch("luvbox.history_gui.os.startfile") as start:
-            self.window.open_missing_folder()
-        start.assert_called_once_with(str(self.paths.media_dir))
-
-    def test_every_page_can_be_chosen_and_a_click_ends_it(self):
-        files = self.saved(130)
-        for path in files:
-            path.unlink()
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.load()
-        self.assertEqual(len(self.window.missing_rows), 100)
-        self.window.select_every_missing()
-        self.assertEqual(len(self.window._missing_selection()), 130)
-        self.assertIn("모든 페이지의 130개", self.window.missing_text.get())
-        self.window.change_page(1, missing=True)
-        self.assertEqual(set(self.window.missing_tree.selection()), set(self.window.missing_rows))
-        self.assertEqual(len(self.window._missing_selection()), 130)
-        with patch("luvbox.history_gui.dialogs.askyesno", return_value=True) as ask, \
-                patch("luvbox.history_gui.threading.Thread") as thread:
-            self.window.choose_missing(True)
-        self.assertIn("130개", ask.call_args.args[1])
-        self.assertEqual(len(thread.call_args.kwargs["args"][2]), 130)
-        self.window.busy = False
-        first = next(iter(self.window.missing_rows))
-        self.window.missing_tree.selection_set(first)
-        self.window._missing_selected()
-        self.assertFalse(self.window.missing_all)
-        self.assertEqual(len(self.window._missing_selection()), 1)
-
-    def test_too_many_files_to_download_again_are_explained(self):
-        files = self.saved(3)
-        for path in files:
-            path.unlink()
-        self.window.retry_missing = lambda *args: True
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.load()
-        self.window.select_every_missing()
-        with patch("luvbox.core.RETRY_LIMIT", 2), \
-                patch("luvbox.history_gui.dialogs.showinfo") as info, \
-                patch("luvbox.history_gui.dialogs.askyesno") as ask:
-            self.window.retry_missing_files()
-        self.assertIn("2개까지", info.call_args.args[1])
-        ask.assert_not_called()
-
-    def test_moved_folder_banner_blocks_downloads_and_file_jobs(self):
-        self.saved(2)
-        self.paths.media_dir.rename(self.base / "Likes-moved")
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.load()
-        self.assertTrue(self.window.media_offline)
-        self.assertIn("저장 폴더를 찾을 수 없습니다", self.window.offline_text.get())
-        self.assertTrue(self.window.offline_label.winfo_manager())
-        self.assertEqual(self.window.tile_values["files"].get(), "2")
-        for start in (self.window.backfill, self.window.save_previews):
-            with self.subTest(job=start.__name__), \
-                    patch("luvbox.history_gui.dialogs.showinfo") as info, \
-                    patch("luvbox.history_gui.threading.Thread") as thread:
-                start()
-            info.assert_called_once()
-            thread.assert_not_called()
-        self.assertFalse(self.paths.media_dir.exists())
-
-    def test_library_basics_for_new_users(self):
-        from luvbox.history_gui import format_bytes
-        self.assertEqual(format_bytes(1536), "1.5 KB")
-        self.assertEqual(format_bytes(5 * 1024 * 1024), "5.0 MB")
-        self.saved(1)
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.load()
-        # Files that are gone, however they went, have one tab.
-        self.assertEqual([self.window.tabs.tab(tab, "text").split(" ")[0] for tab in self.window.tabs.tabs()],
-                         ["파일", "실행", "통계", "사라진"])
-        self.assertEqual(self.window.tile_values["bytes"].get().split()[-1], "KB")
-        with patch("luvbox.history_gui.os.startfile") as opened:
-            self.window.open_media_folder()
-        opened.assert_called_once_with(str(self.paths.media_dir))
-        self.paths.media_dir.rename(self.base / "Likes-moved")
-        with patch("luvbox.history_gui.os.startfile") as opened, \
-                patch("luvbox.history_gui.dialogs.showinfo") as info:
-            self.window.open_media_folder()
-        opened.assert_not_called()
-        info.assert_called_once()
-        self.assertFalse(self.paths.media_dir.exists())
-
-    def test_status_suggests_recording_sources_only_for_old_files(self):
-        self.saved(2)
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.load()
-        self.assertIn("출처가 기록되지 않은 예전 파일 2개", self.window.status_text.get())
-        with closing(HistoryStore.for_storage(self.paths)) as store:
-            for row in store.records():
-                store.mark_metadata(row, "embedded")
-        with patch("luvbox.history_gui.threading.Thread"):
-            self.load()
-        self.assertNotIn("출처가 기록되지 않은", self.window.status_text.get())
-
-    def test_preview_job_keeps_local_files_and_skips_cloud_only_ones(self):
-        files = self.saved(3)
-        results = queue.Queue()
-        stop = threading.Event()
-        cloud = str(files[2])
-        with patch("luvbox.history_gui.thumbcache.cloud_only", side_effect=lambda path: str(path) == cloud):
-            HistoryWindow._previews_worker(results, stop, 1, self.paths, "offline")
-        _, kind, message = results.get_nowait()
-        self.assertEqual(kind, "previews-saved")
-        self.assertIn("새로 저장 2개", message)
-        self.assertIn("클라우드 전용이라 건너뜀 1개", message)
-        HistoryWindow._previews_worker(results, stop, 1, self.paths, "offline")
-        _, kind, message = results.get_nowait()
-        self.assertIn("이미 있음 2개", message)
-        self.assertIsNotNone(thumbcache.recall("offline", ("100", 1, "photo")))
 
 
 if __name__ == "__main__":

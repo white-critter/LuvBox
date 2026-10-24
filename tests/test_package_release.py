@@ -69,23 +69,18 @@ class BrowserExtensionPackagingTests(unittest.TestCase):
         self.assertNotIn("assets/browser-extension", data)  # Never bundle unknown files recursively.
 
 
-class ThemePackagingTests(unittest.TestCase):
-    def test_build_generates_then_collects_only_the_two_theme_archives(self):
+class QtOnlyPackagingTests(unittest.TestCase):
+    def test_build_uses_only_current_ui_runtime_and_assets(self):
         root = Path(__file__).resolve().parents[1]
         build = (root / "build.ps1").read_text(encoding="utf-8-sig")
-        self.assertLess(build.index("'tools\\build_theme.py'"), build.index("-m PyInstaller"))
-        data = {}
-        for argument in re.findall(r"--add-data\s+'([^']+)'", build):
-            source, destination = argument.split(";", 1)
-            data[source.replace("\\", "/")] = destination.replace("\\", "/")
-        for name in ("assets/theme/light.zip", "assets/theme/dark.zip"):
-            self.assertEqual(data.get(name), "assets/theme")
-            self.assertIn(name, package_release.SOURCE_FILES)
-            self.assertTrue((root / name).is_file())
-        for name in ("tools/build_theme.py", "assets/theme/README.md"):
-            self.assertIn(name, package_release.SOURCE_FILES)
-            self.assertTrue((root / name).is_file())
-        self.assertNotIn("assets/theme", data)
+        self.assertIn("--exclude-module tkinter", build)
+        self.assertIn("--exclude-module _tkinter", build)
+        self.assertIn("--exclude-module PIL._imagingtk", build)
+        self.assertNotIn("--collect-binaries PIL", build)
+        self.assertNotIn("assets\\theme", build)
+        self.assertNotIn("build_theme.py", build)
+        self.assertFalse(any("assets/theme" in name or name.endswith("build_theme.py")
+                             for name in package_release.SOURCE_FILES))
 
 
 class BuildInputPackagingTests(unittest.TestCase):
@@ -129,6 +124,7 @@ class StartupReportPackagingTests(unittest.TestCase):
         self.executable.write_bytes(b"synthetic frozen executable")
         self.report_path = self.root / "build" / f"qt-startup-{package_release.__version__}.json"
         self.report_path.parent.mkdir()
+        self.download_path = self.report_path.with_name(f"download-startup-{package_release.__version__}.json")
 
     def write_report(self, **changes):
         report = {
@@ -139,6 +135,11 @@ class StartupReportPackagingTests(unittest.TestCase):
         }
         report.update(changes)
         self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        download = {"ok": True, "frozen": True, "isolated": True, "managed_cookies": True,
+                    "authentication_or_network": False, "prepared_requests": 1,
+                    "extractor": "TwitterLikesExtractor", "version": package_release.__version__,
+                    "executable_sha256": hashlib.sha256(self.executable.read_bytes()).hexdigest()}
+        self.download_path.write_text(json.dumps(download), encoding="utf-8")
 
     def test_missing_startup_report_blocks_packaging(self):
         with self.assertRaisesRegex(ValueError, "startup check before packaging"):
@@ -170,6 +171,23 @@ class StartupReportPackagingTests(unittest.TestCase):
     def test_successful_startup_report_for_exact_executable_allows_packaging(self):
         self.write_report()
         package_release._require_startup_report(self.executable)
+
+    def test_qt_success_cannot_bypass_missing_download_startup_check(self):
+        self.write_report()
+        self.download_path.unlink()
+        with self.assertRaisesRegex(ValueError, "download startup check before packaging"):
+            package_release._require_startup_report(self.executable)
+
+    def test_failed_or_stale_download_report_blocks_direct_packaging(self):
+        for change in ({"ok": False}, {"authentication_or_network": True},
+                       {"prepared_requests": True}, {"version": "0.0.0"},
+                       {"executable_sha256": "another executable"}):
+            with self.subTest(change=change):
+                self.write_report()
+                report = json.loads(self.download_path.read_text(encoding="utf-8"))
+                self.download_path.write_text(json.dumps({**report, **change}), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    package_release._require_startup_report(self.executable)
 
 
 class ReleaseManifestTests(unittest.TestCase):
@@ -278,6 +296,14 @@ class ReleaseManifestTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.write_toc([*self.entries, (name, str(self.root / "foreign-icu.dll"), "BINARY")])
                 with self.assertRaisesRegex(ValueError, "unexpected ICU runtime"):
+                    self.manifest()
+
+    def test_removed_ui_runtime_cannot_return_through_dependencies(self):
+        for name in ("_tkinter.pyd", "tcl86t.dll", "tk86t.dll", "_tk_data/init.tcl",
+                     "_tcl_data/encoding/ascii.enc", "PIL/_imagingtk.cp312-win_amd64.pyd"):
+            with self.subTest(name=name):
+                self.write_toc([*self.entries, (name, str(self.root / "obsolete-input"), "DATA")])
+                with self.assertRaisesRegex(ValueError, "removed UI runtime"):
                     self.manifest()
 
     def test_destination_escape_and_windows_aliases_are_rejected(self):

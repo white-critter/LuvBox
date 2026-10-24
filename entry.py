@@ -6,24 +6,127 @@ import sys
 from pathlib import Path
 
 
-def _check_theme_images(root) -> str:
-    """Check actual Tk images and required frozen assets, without a disk cache."""
-    import struct
-    from luvbox import theme
+def _check_download_start() -> dict:
+    """Reach the real X extractor's first HTTP request, entirely offline.
 
-    images = getattr(root._root(), "_luvbox_theme_images", {})
-    assert set(images) == theme._ASSET_NAMES, "incomplete theme images"
-    key = theme._asset_key()
-    assets = theme._ASSET_CACHE.get(key, {})
-    assert set(assets) == theme._ASSET_NAMES, "incomplete theme PNGs"
-    for name in theme._ASSET_NAMES:
-        size = struct.unpack(">II", assets[name][16:24])
-        assert (images[name].width(), images[name].height()) == size, name
-    bundled = theme._read_bundled_assets(key)
-    uses_bundle = bundled is not None and bundled == assets
-    if getattr(sys, "frozen", False):
-        assert uses_bundle, "missing, invalid or unused bundled theme images"
-    return "bundled" if uses_bundle else "generated-or-cached"
+    Finding an extractor or stopping before authentication does not initialize
+    its browser adapter and dynamically imported transaction helper. Frozen
+    builds must exercise those too, without reading a real saved connection.
+    """
+    from luvbox import __version__
+
+    report = {"ok": False, "version": __version__, "frozen": bool(getattr(sys, "frozen", False)),
+              "isolated": True, "authentication_or_network": False,
+              "managed_cookies": False, "prepared_requests": 0}
+
+    class RequestPrepared(BaseException):
+        pass
+
+    class NetworkBlocked(BaseException):
+        pass
+
+    try:
+        import socket
+        import tempfile
+        from urllib.parse import urlsplit
+        from requests.sessions import Session
+        from gallery_dl import extractor
+        from gallery_dl.extractor.common import Extractor
+        from gallery_dl.extractor.twitter import TwitterAPI
+        from luvbox import login, metadata
+        from luvbox.core import JobOptions, run_worker
+
+        account = "luvboxsmoke"
+        auth = "offline-luvbox-auth-placeholder"
+        csrf = "offline-luvbox-csrf-placeholder"
+        cookies_loaded = False
+
+        def fake_cookies(*, account=None):
+            nonlocal cookies_loaded
+            if account != "luvboxsmoke":
+                raise ValueError("Unexpected smoke-test account")
+            cookies_loaded = True
+            return [{"name": name, "value": value, "domain": ".x.com",
+                     "path": "/", "secure": True, "httpOnly": name == "auth_token"}
+                    for name, value in (("auth_token", auth), ("ct0", csrf))]
+
+        def prepare_request(_session, request, **_kwargs):
+            report["prepared_requests"] += 1
+            url = urlsplit(request.url)
+            prepared_cookies = dict(part.strip().split("=", 1)
+                                    for part in request.headers.get("Cookie", "").split(";")
+                                    if "=" in part)
+            if (request.method != "GET" or url.scheme != "https" or url.hostname != "x.com"
+                    or url.path != "/home" or not cookies_loaded
+                    or prepared_cookies.get("auth_token") != auth
+                    or prepared_cookies.get("ct0") != csrf):
+                raise NetworkBlocked()
+            report["managed_cookies"] = True
+            # Neither gallery-dl nor the worker may convert this into a normal
+            # download error and continue. Their finally blocks still run.
+            raise RequestPrepared()
+
+        def block_network(*_args, **_kwargs):
+            raise NetworkBlocked()
+
+        initialize_extractor = Extractor.initialize
+
+        def check_initialization(self):
+            try:
+                return initialize_extractor(self)
+            except Exception as error:
+                frames = []
+                trace = error.__traceback__
+                while trace is not None:
+                    code = trace.tb_frame.f_code
+                    frames.append({"file": Path(code.co_filename).name,
+                                   "line": trace.tb_lineno, "function": code.co_name})
+                    trace = trace.tb_next
+                report["initialization_error"] = {"type": type(error).__name__, "frames": frames}
+                raise
+
+        originals = (Session.send, login.load_session_cookies, metadata.available,
+                     socket.socket.connect, socket.socket.connect_ex, socket.getaddrinfo,
+                     TwitterAPI.client_transaction, Extractor.initialize)
+        environment = {name: os.environ.get(name) for name in ("LOCALAPPDATA", "APPDATA")}
+        with tempfile.TemporaryDirectory(prefix="luvbox-download-smoke-") as folder:
+            try:
+                os.environ["LOCALAPPDATA"] = folder
+                os.environ["APPDATA"] = str(Path(folder) / "roaming")
+                Session.send = prepare_request
+                login.load_session_cookies = fake_cookies
+                metadata.available = lambda: False
+                socket.socket.connect = socket.socket.connect_ex = block_network
+                socket.getaddrinfo = block_network
+                TwitterAPI.client_transaction = None
+                Extractor.initialize = check_initialization
+                match = extractor.find(f"https://x.com/{account}/likes")
+                if match is None or type(match).__name__ != "TwitterLikesExtractor":
+                    raise RuntimeError("X likes extractor unavailable")
+                report["extractor"] = type(match).__name__
+                try:
+                    code = run_worker(JobOptions(account, str(Path(folder) / "media")), lambda _event: None)
+                    report["worker_exit_code"] = code
+                    report["error"] = "The X extractor did not prepare its first request."
+                except RequestPrepared:
+                    report["ok"] = report["managed_cookies"] and report["prepared_requests"] == 1
+                except NetworkBlocked:
+                    report["error"] = "An unexpected network request was blocked."
+            finally:
+                (Session.send, login.load_session_cookies, metadata.available,
+                 socket.socket.connect, socket.socket.connect_ex, socket.getaddrinfo,
+                 TwitterAPI.client_transaction, Extractor.initialize) = originals
+                for name, value in environment.items():
+                    if value is None:
+                        os.environ.pop(name, None)
+                    else:
+                        os.environ[name] = value
+    except Exception as error:
+        # Even a packaging failure must not write exception text or credentials.
+        report["ok"] = False
+        report["error"] = type(error).__name__
+    return report
+
 
 
 def main() -> int:
@@ -33,368 +136,24 @@ def main() -> int:
         sys.stdout = open(os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    if len(sys.argv) > 1 and sys.argv[1] == "--download-smoke":
+        if len(sys.argv) != 3:
+            return 2
+        report = _check_download_start()
+        Path(sys.argv[2]).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        return 0 if report["ok"] else 1
     if len(sys.argv) > 1 and sys.argv[1] == "--qt-smoke":
         if len(sys.argv) != 3:
             return 2
         from luvbox.qt_smoke import run
 
         return run(Path(sys.argv[2]))
-    # Previous Tk window check. The current app is checked with --qt-smoke.
     if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
         if len(sys.argv) != 3:
             return 2
-        report = {"ok": False}
-        root = None
-        # Keep the check's settings, locks and records out of the user's app
-        # data (the worker child process inherits this too).
-        import tempfile as _tempfile
-        app_data = _tempfile.TemporaryDirectory(prefix="luvbox-selftest-", ignore_cleanup_errors=True)
-        os.environ["LOCALAPPDATA"] = app_data.name
-        try:
-            import importlib
-            import base64
-            import subprocess
-            import tempfile
-            import tkinter as tk
-            from tkinter import font as tkfont
-            import certifi
-            from gallery_dl import extractor, version
-            from luvbox.gui import App, worker_command
-            from luvbox import __version__, metadata
-            from luvbox.core import check_gallery_hooks
-            from luvbox.history import HistoryStore
-            from luvbox.storage import migrate_records, resolve_storage
-            from luvbox.media import convert_mp4_to_gif, ffmpeg_path
-            from luvbox.preview import thumbnail
-            from luvbox import charts, gallery  # bundled UI modules
-            from PIL import Image
+        from luvbox.selftest import run
 
-            importlib.import_module("gallery_dl.extractor.utils.twitter_transaction_id")
-            importlib.import_module("gallery_dl.downloader.http")
-            # Every private gallery-dl member the worker replaces still exists.
-            check_gallery_hooks()
-            match = extractor.find("https://x.com/example/likes")
-            assert match and match.subcategory == "likes"
-            assert Path(certifi.where()).is_file()
-            root = tk.Tk()
-            root.withdraw()
-            app = App(root)
-            from luvbox.app_icon import asset_directory, install
-            assert (asset_directory() / "luvbox.ico").is_file()
-            assert (asset_directory() / "luvbox.png").is_file()
-            assert install(root)
-            root.update_idletasks()
-            if os.name == "nt":
-                import ctypes
-                user = ctypes.WinDLL("user32")
-                user.SendMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t)
-                user.SendMessageW.restype = ctypes.c_ssize_t
-                get_class = user.GetClassLongPtrW if ctypes.sizeof(ctypes.c_void_p) == 8 else user.GetClassLongW
-                get_class.argtypes = (ctypes.c_void_p, ctypes.c_int)
-                get_class.restype = ctypes.c_size_t
-                handle = int(root.wm_frame(), 16)
-                for slot, class_slot in ((1, -14), (0, -34)):
-                    native = user.SendMessageW(handle, 0x007F, slot, 0)
-                    assert native and native == get_class(handle, class_slot)
-                from luvbox.app_icon import _taskbar_properties, _taskbar_values
-                assert _taskbar_properties(handle, None) == _taskbar_values(str(asset_directory() / "luvbox.ico"))
-            from luvbox import fonts, theme
-            actual_font = tkfont.Font(root=root, font=theme.BODY).actual("family")
-            assert actual_font == fonts.FAMILY
-            report["font"] = actual_font
-            for name in fonts.FILES:
-                assert (fonts.asset_directory() / name).is_file()
-            original_mode = theme.mode(root)
-            theme_sources = set()
-            theme.apply(root, "dark")
-            assert app.log.cget("background") == theme.DARK["CARD"]
-            theme_sources.add(_check_theme_images(root))
-            theme.apply(root, "light")
-            assert app.log.cget("background") == theme.LIGHT["CARD"]
-            theme_sources.add(_check_theme_images(root))
-            theme.apply(root, original_mode)
-            theme_images = ("bundled-light-and-dark" if theme_sources == {"bundled"}
-                            else "generated-or-cached-light-and-dark")
-            assert int(app.progress.cget("highlightthickness")) == 0
-            assert app.auth.get()
-            assert app.content_view.winfo_manager() == "grid"
-            app.show_options()
-            assert len(app.option_tabs.tabs()) == 3
-            assert app.options_window.footer.winfo_manager() == "pack"
-            app._close_options(save=False, restore=True)
-            assert app.options_window is None
-            assert metadata.available()
-            # This also verifies the extracted Perl runtime and Unicode paths.
-            with tempfile.TemporaryDirectory(prefix="luvbox-check-") as folder:
-                target = Path(folder) / "한글 출처 확인.png"
-                target.write_bytes(base64.b64decode(
-                    "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGNUjl/AwMDAxAAGAA1FASYPxkisAAAAAElFTkSuQmCC"))
-                author = {"author": "Example_Author", "author_id": "1234567890",
-                          "profile_url": "https://x.com/Example_Author"}
-                result = metadata.embed_source(target, "100", author["author"], author["author_id"])
-                assert result["status"] == "embedded"
-                assert result["author_status"] == "embedded"
-                assert metadata.read_source(target) == "https://x.com/i/web/status/100"
-                assert metadata.read_author(target) == author
-                local_preview = thumbnail(target)
-                assert local_preview.image is not None and local_preview.image.size == (2, 2)
-                # Previews kept for files deleted later: WebP must be bundled.
-                from luvbox import thumbcache
-                previews = thumbcache.Cache("example")
-                try:
-                    previews.put(("100", 1, "photo"), local_preview.image)
-                    assert previews.get(("100", 1, "photo")).startswith(b"RIFF")
-                finally:
-                    previews.close()
-                assert thumbcache.recall("example", ("100", 1, "photo")) is not None
-                executable = ffmpeg_path()
-                assert executable is not None and executable.is_file()
-                video = Path(folder) / "GIF 원본 확인.mp4"
-                generated = subprocess.run(
-                    [str(executable), "-nostdin", "-v", "error", "-f", "lavfi", "-i",
-                     "testsrc2=size=64x48:rate=8", "-t", "0.5", "-an", "-c:v", "mpeg4", "-q:v", "2", str(video)],
-                    capture_output=True, timeout=15,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                assert generated.returncode == 0
-                animated = convert_mp4_to_gif(video)
-                with Image.open(animated) as decoded:
-                    assert decoded.format == "GIF" and decoded.n_frames >= 4 and decoded.size == (64, 48)
-                assert metadata.embed_source(animated, "102", author["author"], author["author_id"])["status"] == "embedded"
-                assert metadata.read_source(animated) == "https://x.com/i/web/status/102"
-                assert metadata.read_author(animated) == author
-                assert thumbnail(video).image is not None and thumbnail(animated).image is not None
-                # Playback reads only our temporary fixtures. Keep its frame
-                # buffer bounded and wait for handles before continuing.
-                from luvbox.review_preview import ReviewPreview
-                for preview_path, kind in ((video, "video"), (animated, "animated_gif")):
-                    playback = ReviewPreview(preview_path, kind, size=(160, 120))
-                    try:
-                        for _ in range(2):
-                            frame = playback.frames.get(timeout=8)
-                            assert frame.image is not None and frame.duration_ms > 0
-                            frame.image.close()
-                    finally:
-                        playback.close()
-                        assert playback.finished.wait(8) and not playback.release_error
-                # Source/frozen review window: no real account or downloader.
-                # Cancel the app's startup/scheduler polls before pumping Tk.
-                for timer in root.tk.call("after", "info"):
-                    root.tk.call("after", "cancel", timer)
-                from luvbox.review_gui import ReviewWindow
-                import time as _time
-                choices = []
-                chooser = ReviewWindow(root, {"path": str(target), "media_type": "photo",
-                                              "filename": target.name, "author": "Example_Author"},
-                                       choices.append, lambda path: Path(path) == target)
-                deadline = _time.monotonic() + 8
-                while chooser._photo is None and _time.monotonic() < deadline:
-                    root.update()
-                    _time.sleep(.01)
-                assert chooser._photo is not None and chooser.grab_current() is not chooser
-                chooser.choose("save")
-                while not choices and _time.monotonic() < deadline:
-                    root.update()
-                    _time.sleep(.01)
-                assert choices == ["save"] and not chooser.winfo_exists()
-                # Smaller GIF preset: fitted size and an exact capped frame count.
-                wide = Path(folder) / "GIF 크기 확인.mp4"
-                generated = subprocess.run(
-                    [str(executable), "-nostdin", "-v", "error", "-f", "lavfi", "-i",
-                     "testsrc2=size=640x360:rate=30", "-t", "1", "-an", "-c:v", "mpeg4", "-q:v", "2", str(wide)],
-                    capture_output=True, timeout=15,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                assert generated.returncode == 0
-                smaller = convert_mp4_to_gif(wide, size="480")
-                with Image.open(smaller) as decoded:
-                    assert decoded.size == (480, 270) and decoded.n_frames == 12
-                from luvbox import dialogs
-                dialog = dialogs.Dialog(root, "확인", "자체 점검", buttons=(("예", True), ("아니요", False)),
-                                        default=1, cancel=False)
-                assert dialog.default_button is dialog.buttons[1]
-                dialog.buttons[0].invoke()
-                assert dialog.result is True
-                resident = Path(folder) / "상주 출처 확인.png"
-                resident.write_bytes(target.read_bytes())
-                with metadata.persistent():
-                    assert metadata._session is not None
-                    assert Path(metadata._session._process.args[0]).name.lower() == "perl.exe"
-                    assert metadata.embed_source(resident, "101", author["author"], author["author_id"])["status"] == "embedded"
-                    assert metadata.read_source(resident) == "https://x.com/i/web/status/101"
-                    assert metadata.read_author(resident) == author
-                assert metadata._session is None
-                paths = resolve_storage(Path(folder), "example")
-                assert paths.media_dir == Path(folder).resolve()
-                store = HistoryStore.for_storage(paths)
-                try:
-                    assert store.summary()["files"] == 0
-                    store.record_media("flat", {"tweet_id": "100", "num": 1, "type": "photo",
-                                                "author": {"name": author["author"], "id": author["author_id"]},
-                                                "_luvbox_metadata_status": "embedded",
-                                                "_luvbox_author_metadata_status": "embedded"}, target)
-                    previous = store.records()[0]
-                finally:
-                    store.close()
-                # Live records are in app data; the media folder gets a snapshot.
-                assert not paths.record_dir.is_relative_to(Path(folder))
-                relocated = resolve_storage(Path(folder) / "새 저장 폴더", "example")
-                migration = migrate_records(paths, relocated)
-                assert migration.changed and migration.media_records == 1
-                assert (relocated.snapshot_dir / ".luvbox-history.sqlite3").is_file()
-                store = HistoryStore.for_storage(relocated)
-                try:
-                    store.import_legacy(refresh=True)
-                    record = store.records()[0]
-                    assert record["path"] == str(target) and store.is_media_path(target)
-                    assert record["saved_at"] == previous["saved_at"]
-                    assert record["metadata_status"] == "embedded"
-                    assert record["author_metadata_status"] == "embedded"
-                    assert record["author_id"] == author["author_id"]
-                    page = store.record_page(page=9, page_size=50)
-                    assert page["total"] == 1 and page["page"] == 0 and len(page["rows"]) == 1
-                    assert store.run_page()["total"] == 0
-                    # Like order is kept beside the records and sorts them.
-                    run = store.start_run("flat")
-                    order = store.like_order(run)
-                    order.visit("100")
-                    order.flush()
-                    store.finish_run(run, "finished")
-                    liked = store.record_page(order="liked", period=("posted", "", ""))["rows"][0]
-                    assert liked["liked_before"] and liked["like_key"] is not None
-                    store.record_tweets([("100", "자체 점검 글", ["점검"])])
-                    assert store.record_page(query="#점검")["total"] == 1
-                    assert store.record_page(author="Example_Author")["total"] == 1
-                    assert store.statistics()["authors"][0]["files"] == 1
-                    store.record_media("author", {"tweet_id": "100", "num": 1, "type": "photo",
-                                                   "author": {"name": author["author"], "id": author["author_id"]}},
-                                       target, status="existing")
-                    totals = store.overview()
-                    assert totals["files"] == 1 and totals["record_count"] == 2
-                    assert totals["photo"] == 1 and totals["bytes"] == target.stat().st_size
-                    assert totals["stats"]["authors"][0]["files"] == 1
-                    # A deleted file is listed once, can stay deleted, and is
-                    # requested again only by its archive key.
-                    assert totals["missing_files"] == 0 and totals["missing"] == []
-                    gone = relocated.media_dir / "200_1.jpg"
-                    gone.write_bytes(b"deleted later")
-                    store.record_media("flat", {"tweet_id": "200", "num": 1, "type": "photo"}, gone)
-                    gone.unlink()
-                    store.import_legacy(refresh=True)
-                    [missing] = store.missing_media()
-                    assert missing["archive_key"] == "200_1" and store.summary()["missing_files"] == 1
-                    store.set_missing_ignored([("200", 1, "photo")], True)
-                    assert store.summary()["ignored_missing"] == 1 and store.ignored_media() == {("200", 1, "photo")}
-                    from luvbox.core import JobOptions
-                    retry = JobOptions("example", folder, targets=["200_1", "200_1"]).validate()
-                    assert retry.targets == ("200_1",)
-                    assert charts.bins([("2026-01", 1), ("2026-03", 2)])[0][1] == ("2026-02", 0)
-                    assert gallery.TILE == (150, 112)
-                    # Exercise external removal and restoration with a fixture.
-                    disposable = relocated.media_dir / "300_1.jpg"
-                    disposable.write_bytes(b"isolated external removal self-test")
-                    store.record_media("flat", {"tweet_id": "300", "num": 1, "type": "photo"}, disposable)
-                    receipt = disposable.with_name("externally-moved-selftest.jpg")
-                    disposable.rename(receipt)
-                    store.import_legacy(refresh=True)
-                    assert store.summary()["missing_files"] == 1
-                    assert ("300", 1, "photo") not in store.ignored_media()
-                    receipt.rename(disposable)
-                    store.import_legacy(refresh=True)
-                    assert store.summary()["missing_files"] == 0
-                    assert store.summary()["files"] == 2
-                    from luvbox.history_gui import HistoryWindow
-                    assert hasattr(HistoryWindow, "start_deletion")
-                    # Damaged-database salvage reads the catalog page by page.
-                    from luvbox.recovery import salvage
-                    assert len(salvage(store.path)["media"]["rows"]) == 4
-                finally:
-                    store.close()
-                # Exercise the protected deletion and restore bookkeeping with
-                # a temporary GIF. Substitute only the native move: a self-test
-                # must never touch the user's actual Windows Recycle Bin.
-                import threading
-                from luvbox import deletion, recycling
-                disposable_gif = relocated.media_dir / "400_animated_gif_1.gif"
-                disposable_gif.write_bytes(animated.read_bytes())
-                store = HistoryStore.for_storage(relocated)
-                try:
-                    store.record_media("flat", {"tweet_id": "400", "num": 1, "type": "animated_gif"}, disposable_gif)
-                    chosen = next(row for row in store.records() if row["tweet_id"] == "400")
-                finally:
-                    store.close()
-                chosen["_delete_signature"] = recycling.file_signature(disposable_gif)
-                parked = Path(folder) / "simulated-recycled-selftest.gif"
-                original_recycle = deletion.recycle_file
-
-                def simulate_recycle(path, *, expected):
-                    assert Path(path) == disposable_gif
-                    assert recycling.file_signature(path) == expected
-                    Path(path).rename(parked)
-                    return str(parked)
-
-                deletion.recycle_file = simulate_recycle
-                try:
-                    outcome = deletion.run_deletion(relocated, [chosen], True, threading.Event(), lambda _: None)
-                finally:
-                    deletion.recycle_file = original_recycle
-                assert outcome["recycled"] == 1 and outcome["failed"] == 0
-                assert not disposable_gif.exists() and parked.is_file()
-                store = HistoryStore.for_storage(relocated)
-                try:
-                    after = next(row for row in store.records() if row["tweet_id"] == "400")
-                    assert after["path"] == "" and after["last_path"] == str(disposable_gif)
-                    assert after["saved_at"] == chosen["saved_at"]
-                    assert ("400", 1, "animated_gif") in store.ignored_media()
-                    assert store.deletion_page()["rows"][0]["status"] == "recycled"
-                    parked.rename(disposable_gif)
-                    store.import_legacy(refresh=True)
-                    restored = next(row for row in store.records() if row["tweet_id"] == "400")
-                    assert restored["path"] == str(disposable_gif)
-                    assert ("400", 1, "animated_gif") not in store.ignored_media()
-                finally:
-                    store.close()
-                # Exercise the actual child executable under the frozen
-                # parent's environment, stopping before auth or HTTP requests.
-                request, events, stop = (Path(folder) / name for name in
-                                         ("request.json", "events.jsonl", "stop.flag"))
-                request.write_text(json.dumps({"account": "example", "output_dir": folder}), encoding="utf-8")
-                stop.touch()
-                worker = subprocess.run(worker_command(request, events, stop),
-                                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                        stderr=subprocess.DEVNULL, timeout=30,
-                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                assert worker.returncode == 0
-                final = json.loads(events.read_text(encoding="utf-8").splitlines()[-1])
-                assert final["type"] == "finished" and final["status"] == "stopped"
-                assert final["saved"] == 0
-            report = {"ok": True, "version": __version__, "gallery_dl": version.__version__,
-                      "icon": "transparent-multisize-default",
-                      "taskbar_icon": "native-window-class-and-explicit-shell-icon",
-                      "font": actual_font, "record_pagination": "queried-and-clamped",
-                      "appearance": "light-dark-live-switch", "theme_images": theme_images,
-                      "local_previews": "photo-video-gif",
-                      "gif_conversion": "animated-with-source-author-metadata", "gif_size_presets": "fitted-exact-frames",
-                      "dialogs": "themed", "like_order": "recorded-and-sorted", "tweet_text": "searchable",
-                      "statistics": "authors-and-months", "catalog_recovery": "salvage-verified",
-                      "records": "local-with-folder-snapshot", "progress": "rounded-borderless",
-                      "missing_files": "listed-keep-deleted-or-retry-by-tweet",
-                      "external_files": "missing-and-restored",
-                      "library_deletion": "mock-recycle-journal-and-gif-restoration",
-                      "interactive_save": "muted-video-gif-playback-and-nonmodal-choice",
-                      "missing_previews": "webp-kept-on-this-pc",
-                      "workspace": "sidebar-scrollable-dashboard-three-settings-tabs",
-                      "tk": tk.TkVersion, "python": sys.version.split()[0],
-                      "extractor": type(match).__name__, "frozen": bool(getattr(sys, "frozen", False)),
-                      "source_metadata": "embedded-and-read-back", "author_metadata": "handle-profile-and-user-id-read-back",
-                      "flat_storage": "direct",
-                      "worker": "stopped-before-authentication", "record_relocation": "preserved-old-file",
-                      "gallery_hooks": "verified", "resident_exiftool": "direct-writer-embedded-and-read-back"}
-        except Exception as exc:
-            report["error"] = type(exc).__name__
-        finally:
-            if root is not None:
-                root.destroy()
-        Path(sys.argv[2]).write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        return 0 if report["ok"] else 1
+        return run(Path(sys.argv[2]), _check_download_start)
 
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
         if len(sys.argv) != 5:
@@ -427,12 +186,6 @@ def main() -> int:
         from luvbox.scheduled import run_saved
 
         return run_saved(full=len(sys.argv) == 3)
-
-    if len(sys.argv) == 2 and sys.argv[1] == "--legacy-ui":
-        from luvbox.gui import launch
-
-        launch()
-        return 0
 
     if len(sys.argv) > 1:
         return 2

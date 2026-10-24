@@ -7,6 +7,7 @@ LuvBox DPAPI format; prior headers and entropy remain readable for migration.
 from __future__ import annotations
 
 import ctypes
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -15,6 +16,8 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+from .file_mutex import file_mutex
 
 
 _HEADER = b"LuvBox-DPAPI-v1\0"
@@ -32,6 +35,15 @@ _USER_ID = re.compile(r"[1-9][0-9]{0,31}\Z")
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
 _SESSION_LOCK = threading.RLock()
 _MAX_ACCOUNTS = 100
+
+
+@contextmanager
+def _session_mutation():
+    # Atomic replacement prevents partial ciphertext, while this process lock
+    # also prevents another app window from overwriting a newer account list.
+    with _SESSION_LOCK:
+        with file_mutex(session_path()):
+            yield
 
 
 class SessionCancelled(ValueError):
@@ -224,7 +236,7 @@ def _store_session_cookies(cookies: list[dict]) -> None:
     clean = _x_cookies(cookies)
     if not _has_auth(clean):
         raise ValueError(_SESSION_HELP)
-    with _SESSION_LOCK:
+    with _session_mutation():
         payload = {"version": 1, "cookies": clean}
         accounts = _existing_accounts()
         if accounts:
@@ -250,7 +262,7 @@ def save_authenticated_session(token: str, identity: dict, *, cookies: list[dict
     tokens = [item["value"] for item in clean if item["name"] == "auth_token" and item["path"] == "/"]
     if not tokens or any(value != token for value in tokens):
         raise ValueError(_TOKEN_HELP)
-    with _SESSION_LOCK:
+    with _session_mutation():
         try:
             accounts = [row for row in _existing_accounts()
                         if row["identity"]["user_id"] != normalized["user_id"]]
@@ -302,7 +314,7 @@ def select_account(user_id: str) -> dict:
     """Atomically make an already connected account the downloader session."""
     if not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id):
         raise ValueError(_ACCOUNT_HELP)
-    with _SESSION_LOCK:
+    with _session_mutation():
         try:
             accounts = _account_records(_read_payload())
             selected = next(row for row in accounts if row["identity"]["user_id"] == user_id)
@@ -316,7 +328,7 @@ def remove_account(user_id: str) -> None:
     """Remove one account; select another if the removed account was active."""
     if not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id):
         raise ValueError(_ACCOUNT_HELP)
-    with _SESSION_LOCK:
+    with _session_mutation():
         try:
             payload = _read_payload()
             accounts = [row for row in _account_records(payload)
@@ -342,7 +354,7 @@ def clear_active_session() -> None:
     Clearing it must therefore leave the encrypted account collection intact,
     without silently connecting one of those accounts in its place.
     """
-    with _SESSION_LOCK:
+    with _session_mutation():
         try:
             payload = _read_payload()
             active = _active_identity(payload)
@@ -421,7 +433,7 @@ def has_session() -> bool:
 
 def clear_session() -> None:
     """Remove only this app's saved session; leave Chrome profiles untouched."""
-    with _SESSION_LOCK:
+    with _session_mutation():
         session_path().unlink(missing_ok=True)
 
 

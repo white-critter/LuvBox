@@ -257,7 +257,7 @@ class BrowserBridgeTests(unittest.TestCase):
     def test_extension_artifacts_and_permissions_are_bounded(self):
         root = extension_directory()
         for browser in ("chromium", "firefox"):
-            manifest = json.loads((root / browser / "manifest.json").read_text())
+            manifest = json.loads((root / browser / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["permissions"], ["cookies"])
             self.assertEqual(set(manifest["host_permissions"]), {"https://x.com/*", "http://127.0.0.1/*"})
             self.assertNotIn("externally_connectable", manifest)

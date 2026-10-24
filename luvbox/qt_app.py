@@ -28,6 +28,7 @@ _CHOICES = {
 }
 _BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_each"}
 _PUBLIC_PREFERENCES = {*_CHOICES, *_BOOLEANS, "max_video_mb"}
+_SETTINGS_ERROR = "설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요."
 
 
 class ApplicationController(QObject):
@@ -64,9 +65,15 @@ class ApplicationController(QObject):
         except ValueError:
             pass
         self._preferences["record_locations"] = locations
+        self._committed_preferences = dict(self._preferences)
         self._message = ""
         self._error = ""
         self._preparing = False
+        self._settings_revision = 0
+        self._pending_settings = {}
+        self._settings_versions = {}
+        self._pending_download = None
+        self._save_after_settings = False
         self._closing = False
         self._shutdown_ready = False
         self._pending_start = None
@@ -150,7 +157,8 @@ class ApplicationController(QObject):
     @Property(bool, notify=changed)
     def busy(self):
         return bool(self._closing or self._preparing or self._pending_start is not None
-                    or self._accounts.busy or self._download.running or self._schedule.mutating)
+                    or self._pending_settings or self._accounts.busy or self._download.running
+                    or self._schedule.mutating)
 
     @Property(bool, notify=changed)
     def closing(self):
@@ -170,6 +178,8 @@ class ApplicationController(QObject):
             return "작업을 정리하고 닫습니다"
         if self._preparing:
             return "저장 폴더를 준비합니다"
+        if self._pending_settings:
+            return "설정을 저장합니다"
         if self._accounts.busy:
             return self._accounts.status
         if self._schedule.mutating:
@@ -193,7 +203,8 @@ class ApplicationController(QObject):
         return self._gallery_dirty
 
     def _state_changed(self):
-        locked = self._closing or self._preparing or self._pending_start is not None or self._download.running
+        locked = (self._closing or self._preparing or self._pending_start is not None
+                  or bool(self._pending_settings) or self._download.running)
         account_locked = locked or self._schedule.mutating
         if self._accounts.locked != account_locked:
             self._accounts.setLocked(account_locked)
@@ -202,9 +213,49 @@ class ApplicationController(QObject):
             self._schedule.setLocked(schedule_locked)
         self.changed.emit()
 
-    def _persist(self, changes):
+    def _persist(self, changes, *, rollback=None):
+        self._settings_revision += 1
+        revision = self._settings_revision
+        self._pending_settings[revision] = (dict(changes), rollback or {})
+        self._settings_versions.update({name: revision for name in changes})
         self._preferences.update(changes)
-        self._commands.put(("settings", dict(changes)))
+        self._commands.put(("settings", (revision, dict(changes))))
+        return revision
+
+    def _settings_finished(self, revision, success):
+        pending = self._pending_settings.pop(revision, None)
+        if pending is None:
+            return
+        changes, fields = pending
+        if success:
+            self._committed_preferences.update(changes)
+            if self._error == _SETTINGS_ERROR:
+                self._error = ""
+        else:
+            self._save_after_settings = False
+            for name in changes:
+                if self._settings_versions.get(name) != revision:
+                    continue
+                value = self._committed_preferences.get(name)
+                if name in self._committed_preferences:
+                    self._preferences[name] = value
+                else:
+                    self._preferences.pop(name, None)
+                if name == "confirm_each":
+                    self._download.setReviewEnabled(bool(value))
+            for field, (name, value) in fields.items():
+                if self._settings_versions.get(name) == revision:
+                    setattr(self, field, value)
+            self._load_library()
+        self.preferencesChanged.emit()
+        pending_download = self._pending_download
+        if pending_download is not None and pending_download[0] == revision:
+            self._pending_download = None
+            if success and not self._closing:
+                self._download.start(pending_download[1])
+        if success and not self._pending_settings and self._save_after_settings:
+            self._save_after_settings = False
+            self.startSave()
 
     @Slot(str)
     def setAccount(self, value):
@@ -213,10 +264,11 @@ class ApplicationController(QObject):
         account = value.strip().lstrip("@")[:15]
         if account == self._account:
             return
+        previous = self._account
         self._account = account
-        self._persist({"account": self._account})
+        self._persist({"account": self._account}, rollback={"_account": ("account", previous)})
         self._load_library()
-        self.changed.emit()
+        self._state_changed()
 
     @Slot(str)
     def setOutputFolder(self, value):
@@ -227,10 +279,11 @@ class ApplicationController(QObject):
             value = url.toLocalFile()
         if not value.strip() or "\x00" in value:
             return
+        previous = self._output
         self._output = value.strip()
-        self._persist({"output_dir": self._output})
+        self._persist({"output_dir": self._output}, rollback={"_output": ("output_dir", previous)})
         self._load_library()
-        self.changed.emit()
+        self._state_changed()
 
     @Slot(str, "QVariant")
     def setPreference(self, name, value):
@@ -254,6 +307,7 @@ class ApplicationController(QObject):
         if name == "separate_accounts":
             self._load_library()
         self.preferencesChanged.emit()
+        self._state_changed()
 
     def _account_changed(self):
         if self._closing:
@@ -292,6 +346,12 @@ class ApplicationController(QObject):
     @Slot()
     def startSave(self):
         if self.busy:
+            # The Save button commits a typed account immediately before this
+            # call. Continue that click after the queued settings commit.
+            if self._pending_settings and not (self._closing or self._preparing
+                    or self._pending_start is not None or self._accounts.busy
+                    or self._download.running or self._schedule.mutating):
+                self._save_after_settings = True
             return
         if not self._accounts.connected:
             self.loginRequested.emit()
@@ -355,8 +415,9 @@ class ApplicationController(QObject):
                 return
             try:
                 if kind == "settings":
-                    self._settings.update(payload)
-                    result = None
+                    revision, changes = payload
+                    self._settings.update(changes)
+                    result = {"revision": revision}
                 elif kind == "prepare":
                     if self._closing:
                         continue
@@ -382,27 +443,36 @@ class ApplicationController(QObject):
                     continue
                 self._completed.emit(kind, True, result)
             except Exception as error:
-                if kind == "review":
+                if kind == "settings":
+                    message = _SETTINGS_ERROR
+                elif kind == "review":
                     message = "저장 확인 중 파일이 바뀌었습니다."
                 elif isinstance(error, ValueError) and kind in {"prepare", "open"}:
                     message = str(error)
                 else:
                     message = "작업을 마치지 못했습니다. 저장 위치와 권한을 확인해 주세요."
-                self._completed.emit(kind, False, message)
+                result = {"revision": payload[0], "message": message} if kind == "settings" else message
+                self._completed.emit(kind, False, result)
 
     @Slot(str, bool, object)
     def _accept(self, kind, success, value):
         if self._closing:
             return
         if not success:
-            self._error = str(value)
+            if kind == "settings":
+                self._settings_finished(value["revision"], False)
+                self._error = value["message"]
+            else:
+                self._error = str(value)
             if kind == "prepare":
                 self._preparing = False
             if kind == "review":
                 self._download.stop()
             self._state_changed()
             return
-        if kind == "prepare":
+        if kind == "settings":
+            self._settings_finished(value["revision"], True)
+        elif kind == "prepare":
             self._preparing = False
             if "choice" in value:
                 snapshot, consents = value["request"]
@@ -416,10 +486,10 @@ class ApplicationController(QObject):
             locations = dict(locations) if isinstance(locations, dict) else {}
             locations[options.account] = options.output_dir
             self._account, self._output = options.account, options.output_dir
-            self._persist({"account": options.account, "output_dir": options.output_dir,
-                           "record_locations": locations, "auth_mode": "managed"})
+            revision = self._persist({"account": options.account, "output_dir": options.output_dir,
+                                      "record_locations": locations, "auth_mode": "managed"})
             self._message = self._error = ""
-            self._download.start(options)
+            self._pending_download = (revision, options)
             self._load_library()
         elif kind == "review":
             if (self._download.running and not self._download.stopping
@@ -482,6 +552,8 @@ class ApplicationController(QObject):
             return
         self._closing = True
         self._pending_start = None
+        self._pending_download = None
+        self._save_after_settings = False
         self._accounts.setLocked(True)
         self._dismiss_review()
         self._commands.put(("quit", None))

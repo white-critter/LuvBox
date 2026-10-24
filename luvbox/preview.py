@@ -1,13 +1,10 @@
 """Small local media previews. Decoding never contacts X or writes media."""
 
-from collections import OrderedDict
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
 from pathlib import Path
-import queue
 import subprocess
-from threading import Condition, Thread
 import warnings
 
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -106,97 +103,3 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
     except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError,
             Image.DecompressionBombWarning, subprocess.SubprocessError):
         return Thumbnail(None, "미리보기를 읽지 못했습니다. 파일 열기로 확인해 주세요.")
-
-
-class PreviewLoader:
-    """One daemon decoder, one pending selection and a small in-memory cache."""
-
-    def __init__(self, results, *, decoder=thumbnail, cache_size=24):
-        self.results = results
-        self.decoder = decoder
-        self.cache_size = cache_size
-        self.cache = OrderedDict()
-        self.condition = Condition()
-        self.pending = None
-        self.closed = False
-        self.thread = None
-
-    def request(self, token, path, permitted, *, remember=None, recall=None):
-        """``remember(image)`` keeps a decoded preview; ``recall()`` returns a
-        kept one when the file itself cannot be read. Both run on this thread."""
-        self._request(token, Path(path), permitted, remember, recall)
-
-    def request_cached(self, token, recall):
-        """Read only a kept preview, on the same coalescing worker thread."""
-        self._request(token, None, None, None, recall)
-
-    def _request(self, token, path, permitted, remember, recall):
-        with self.condition:
-            if self.closed:
-                return
-            self.pending = (token, path, permitted, remember, recall)
-            if self.thread is None:
-                self.thread = Thread(target=self._work, daemon=True, name="local-media-preview")
-                self.thread.start()
-            self.condition.notify()
-
-    def close(self):
-        with self.condition:
-            self.closed = True
-            self.pending = None
-            self.cache.clear()
-            self.condition.notify()
-
-    def _work(self):
-        while True:
-            with self.condition:
-                self.condition.wait_for(lambda: self.closed or self.pending is not None)
-                if self.closed:
-                    return
-                token, path, permitted, remember, recall = self.pending
-                self.pending = None
-            try:
-                if path is None:
-                    result = Thumbnail(None, "저장해 둔 미리보기가 없습니다.")
-                elif not permitted(path):
-                    result = Thumbnail(None, "파일 위치를 확인할 수 없습니다. 기록을 새로고침해 주세요.")
-                else:
-                    stat = path.stat()
-                    key = (str(path.resolve()), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-                    result = self.cache.get(key)
-                    if result is None:
-                        result = (Thumbnail(None, "파일이 클라우드에만 있습니다. 탐색기에서 내려받은 뒤 다시 확인해 주세요.")
-                                  if cloud_only(path, status=stat) else self.decoder(path))
-                        # A cloud file or busy decoder can fail temporarily
-                        # without changing the file's size or timestamp.
-                        if result.image is not None:
-                            self.cache[key] = result
-                            while len(self.cache) > self.cache_size:
-                                self.cache.popitem(last=False)
-                    else:
-                        self.cache.move_to_end(key)
-            except FileNotFoundError:
-                result = Thumbnail(None, "파일이 이동되었거나 삭제되었습니다.")
-            except Exception:
-                result = Thumbnail(None, "미리보기를 읽지 못했습니다. 파일 열기로 확인해 주세요.")
-            try:
-                if result.image is not None and remember is not None:
-                    remember(result.image)
-                elif result.image is None and recall is not None:
-                    kept = recall()
-                    if kept is not None:
-                        result = Thumbnail(kept, "저장해 둔 작은 미리보기 · " + result.note)
-            except Exception:
-                pass
-            with self.condition:
-                if self.closed:
-                    self.cache.clear()
-                    return
-                # UI validates this token again. Retain at most a few decoded
-                # results even when the window is temporarily busy elsewhere.
-                while self.results.full():
-                    try:
-                        self.results.get_nowait()
-                    except queue.Empty:
-                        break
-                self.results.put_nowait((token, result))

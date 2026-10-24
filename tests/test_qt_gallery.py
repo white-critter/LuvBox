@@ -1,4 +1,5 @@
 from importlib.util import find_spec
+import os
 from pathlib import Path
 import tempfile
 from threading import Event, Thread, get_ident
@@ -342,6 +343,25 @@ class SafeThumbnailProviderTests(unittest.TestCase):
         self.assertEqual(second.pixelColor(0, 0).red(), 200)
         self.assertEqual(self.provider.snapshot()["decoded"], 2)
 
+    def test_replaced_file_with_same_size_and_timestamp_invalidates_image_cache(self):
+        with Image.new("RGBA", (24, 16), "red") as picture:
+            picture.save(self.path, compress_level=0)
+        first = self.request()
+        before = self.path.stat()
+        replacement = self.folder / "replacement.png"
+        with Image.new("RGBA", (24, 16), "blue") as picture:
+            picture.save(replacement, compress_level=0)
+        self.assertEqual(replacement.stat().st_size, before.st_size)
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        replacement.replace(self.path)
+        after = self.path.stat()
+        self.assertEqual((after.st_size, after.st_mtime_ns), (before.st_size, before.st_mtime_ns))
+        self.assertNotEqual(after.st_ino, before.st_ino)
+        second = self.request()
+        self.assertEqual(first.pixelColor(0, 0).red(), 255)
+        self.assertEqual(second.pixelColor(0, 0).blue(), 255)
+        self.assertEqual(self.provider.snapshot()["decoded"], 2)
+
     def test_cloud_and_redirected_file_do_not_decode(self):
         with patch("luvbox.qt_gallery.cloud_only", return_value=True), patch.object(self.provider, "_decoder") as decoder:
             self.assertTrue(self.request().isNull())
@@ -379,6 +399,32 @@ class SafeThumbnailProviderTests(unittest.TestCase):
         stats = provider.snapshot()
         self.assertEqual((stats["active"], stats["cache_count"], stats["registered"]), (0, 0, 0))
         self.assertTrue(self.request(provider=provider).isNull())
+
+    def test_registry_reset_discards_decode_from_the_previous_library(self):
+        entered, release = Event(), Event()
+        self.addCleanup(release.set)
+
+        def decoder(path, dimensions):
+            entered.set()
+            release.wait(3)
+            return thumbnail(path, dimensions)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(lambda: provider.join_workers(2))
+        self.addCleanup(provider.close)
+        provider.register("photo", self.path)
+        provider.schedule(["photo"], 220, 168)
+        self.assertTrue(entered.wait(1))
+        provider.clear_registry()
+        # A refresh may reuse an identity, even when its file is unchanged.
+        provider.register("photo", self.path)
+        release.set()
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(provider.snapshot()["cache_count"], 0)
+        provider.schedule(["photo"], 220, 168)
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(provider.snapshot()["cache_count"], 1)
+        self.assertFalse(self.request(provider=provider).isNull())
 
     def test_wait_for_idle_observes_worker_completion_without_closing_provider(self):
         entered, release = Event(), Event()

@@ -404,7 +404,7 @@ class JobOptions:
 
 def _auth_help(mode: str) -> str:
     if mode == "managed":
-        return "로그인 연결이 만료됐습니다. ‘로그인 연결 → Edge에서 X 로그인’으로 다시 연결해 주세요."
+        return "X 연결이 만료됐습니다. ‘X 연결’에서 브라우저를 다시 연결하거나 새 토큰을 입력해 주세요."
     return "X에 다시 로그인한 뒤 새 cookies.txt를 내보내 선택해 주세요."
 
 
@@ -760,11 +760,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             metadata_status = previous_status
             author_status = previous_author_status if known_author else "unknown"
         elif previous_status == "embedded" and media_status == "existing":
-            # An already saved file is rewritten during a run only to retry a
-            # missing source. Adding or updating just its author is left to the
-            # explicit '이전 파일 출처·작성자 보완' file tool, so a complete scan
-            # never rewrites a whole library (or makes cloud sync re-upload it).
-            # The catalog keeps the current author for that action.
+            # Retry a missing source, but keep an already saved file intact
+            # when only its author changed. Updating the catalog avoids
+            # rewriting a whole library or making cloud sync re-upload it.
             metadata_status = "embedded"
             author_status = previous_author_status if same_author else "pending"
             author_deferred += 1
@@ -1840,8 +1838,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             logger.propagate = propagate
     if author_deferred:
         emit({"type": "log", "level": "info",
-              "message": f"이미 있던 파일 {author_deferred:,}개는 작성자를 기록에만 넣었습니다. "
-                         "파일에도 넣으려면 ‘기록 · 통계 → 파일 관리 → 이전 파일 출처·작성자 보완’을 누르세요."})
+              "message": f"이미 있던 파일 {author_deferred:,}개의 작성자 정보를 저장 기록에 반영했습니다. "
+                         "기존 파일의 메타데이터는 유지했습니다."})
     if status == "error":
         emit({"type": "log", "level": "error", "message": message})
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,

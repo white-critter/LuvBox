@@ -123,11 +123,20 @@ def settings_path() -> Path:
     return app_directory() / "settings.json"
 
 
-def load_settings() -> dict:
+def load_settings(*, strict: bool = False) -> dict:
     # A failed migration must not be mistaken for absent preferences.
     path = settings_path()
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
+        if isinstance(value, dict):
+            return value
+        if strict:
+            raise ValueError("invalid settings object")
+        return {}
+    except FileNotFoundError:
+        return {}
     except (OSError, ValueError):
+        if strict:
+            raise AppDataError("기존 설정을 읽지 못해 변경을 저장하지 않았습니다. "
+                               "설정 파일을 확인한 뒤 다시 시도해 주세요.") from None
         return {}

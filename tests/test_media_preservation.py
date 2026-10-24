@@ -2,7 +2,6 @@
 
 import os
 from pathlib import Path
-import queue
 import tempfile
 import time
 from types import SimpleNamespace
@@ -12,45 +11,8 @@ from unittest.mock import patch
 from PIL import Image
 
 from luvbox import metadata
-from luvbox.gallery import _GridDecoder
-from luvbox.preview import PreviewLoader
 
 
-class PreviewFileIdentityTests(unittest.TestCase):
-    def test_replaced_equal_size_and_mtime_file_is_decoded_again(self):
-        for kind in ("selection", "gallery"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="luvbox-preview-identity-") as root:
-                path, replacement = Path(root) / "image.png", Path(root) / "replacement.png"
-                Image.new("RGB", (16, 16), "red").save(path)
-                Image.new("RGB", (16, 16), "blue").save(replacement)
-                # PNG permits trailing padding; keep the stat values used by
-                # the old cache key equal while replacing the actual file.
-                size = max(path.stat().st_size, replacement.stat().st_size)
-                for candidate in (path, replacement):
-                    candidate.write_bytes(candidate.read_bytes() + b"\0" * (size - candidate.stat().st_size))
-                original = path.stat()
-                os.utime(replacement, ns=(original.st_atime_ns, original.st_mtime_ns))
-                results = queue.Queue(maxsize=240)
-                loader = PreviewLoader(results) if kind == "selection" else _GridDecoder(results)
-
-                def image(token):
-                    if kind == "selection":
-                        loader.request(token, path, lambda _: True)
-                        return results.get(timeout=5)[1].image
-                    loader.request(token, [("row", str(path))], set)
-                    return results.get(timeout=5)[2]
-
-                try:
-                    self.assertEqual(image(1).getpixel((0, 0))[:3], (255, 0, 0))
-                    os.replace(replacement, path)
-                    self.assertNotEqual(path.stat().st_ino, original.st_ino)
-                    self.assertEqual((path.stat().st_size, path.stat().st_mtime_ns),
-                                     (original.st_size, original.st_mtime_ns))
-                    self.assertEqual(image(2).getpixel((0, 0))[:3], (0, 0, 255))
-                finally:
-                    loader.close()
-                    loader.thread.join(timeout=5)
-                    self.assertFalse(loader.thread.is_alive())
 
 
 class LegacyAuthorIdentityTests(unittest.TestCase):

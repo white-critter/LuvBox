@@ -1,5 +1,6 @@
 """Like order and first-seen periods, which X itself does not report."""
 
+import math
 import sqlite3
 import tempfile
 import time
@@ -80,6 +81,33 @@ class LikeOrderTests(unittest.TestCase):
         self.walk(["3", "2", "1"])
         self.walk(["4", "2", "1"])
         self.assertEqual(self.order()[:2], ["4", "3"])
+
+    def test_repeated_backfills_keep_order_when_float_gaps_are_exhausted(self):
+        self.walk(["900", "100"])
+        first_seen = self.likes()["900"]
+        previous = "100"
+        inserted = []
+        for index in range(60):
+            tweet = str(200 + index)
+            self.walk(["900", tweet, previous])
+            inserted.insert(0, tweet)
+            previous = tweet
+        self.assertEqual(self.order(), ["900", *inserted, "100"])
+        self.assertEqual(self.likes()["900"]["before"], first_seen["before"])
+        self.assertEqual(self.likes()["900"]["after"], first_seen["after"])
+        keys = [value["key"] for value in self.likes().values()]
+        self.assertEqual(len(set(keys)), len(keys))
+
+    def test_stopped_tail_keeps_its_place_when_neighboring_keys_are_adjacent(self):
+        self.walk(["900", "100"])
+        with self.store._db:
+            self.store._db.execute("UPDATE likes SET like_key=? WHERE tweet_id='100'", (1024.0,))
+            self.store._db.execute("UPDATE likes SET like_key=? WHERE tweet_id='900'",
+                                   (math.nextafter(1024.0, math.inf),))
+        self.walk(["900", "200"], status="stopped")
+        self.assertEqual(self.order(), ["900", "200", "100"])
+        keys = [value["key"] for value in self.likes().values()]
+        self.assertEqual(len(set(keys)), len(keys))
 
     def test_runs_before_tracking_do_not_count_as_a_lower_bound(self):
         self.walk(["3"], track=False)

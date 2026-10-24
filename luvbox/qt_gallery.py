@@ -51,6 +51,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                          QQuickImageProvider.Flag.ForceAsynchronousImageLoading)
         self._lock = Condition()
         self._registry = {}
+        self._registry_generation = 0
         self._cache = OrderedDict()
         self._fresh = {}
         self._cache_size = cache_size
@@ -94,6 +95,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
         with self._lock:
             if self._closed:
                 return
+            self._registry_generation += 1
             self._registry.clear()
             self._cache.clear()
             self._fresh.clear()
@@ -120,6 +122,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             self._wanted = set()
             self._failures.clear()
             self._published.clear()
+            self._notified.clear()
             self._inflight.clear()
             self._lock.notify_all()
 
@@ -161,6 +164,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             if self._closed:
                 return
             self._wanted = set(wanted)
+            generation = self._registry_generation
             self._target_size = (width, height)
             self._failures = {item for item in self._failures
                               if item[0] in self._wanted and item[1] == width and item[2] == height}
@@ -186,7 +190,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._enqueue_locked(key, width, height, index)
             self._start_workers_locked()
         for key in publish:
-            self._publish(key)
+            self._publish(key, generation)
 
     def reset_notifications(self):
         with self._lock:
@@ -258,9 +262,9 @@ class SafeThumbnailProvider(QQuickImageProvider):
             del values[:len(values) - _TIMING_CAP]
             self._timing_truncated = True
 
-    def _publish(self, key):
+    def _publish(self, key, generation):
         with self._lock:
-            if self._closed:
+            if self._closed or generation != self._registry_generation:
                 return
             self._notified[key] = time.perf_counter()
         self.ready.emit(key)
@@ -326,6 +330,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._priority.pop(key, None)
                 self._queued_size.pop(key, None)
                 path = self._registry.get(key)
+                generation = self._registry_generation
                 token = (key, width, height)
                 self._inflight.add(token)
                 self._active += 1
@@ -339,19 +344,24 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._inflight.discard(token)
                 self._active -= 1
                 closed = self._closed
-                if not closed and image.isNull():
+                stale = generation != self._registry_generation
+                if not closed and not stale and image.isNull():
                     self._failures.add(token)
-                elif (not closed and not image.isNull() and key in self._wanted
+                elif (not closed and not stale and not image.isNull() and key in self._wanted
                       and self._target_size == (width, height) and token not in self._published):
                     self._published.add(token)
                     publish = True
                 self._lock.notify_all()
             if publish:
-                self._publish(key)
+                self._publish(key, generation)
             if closed:
                 return
 
     def _read(self, key, path, width, height, *, decode=True, deliver=True):
+        with self._lock:
+            if self._closed or self._registry.get(key) != path:
+                return QImage(), False
+            generation = self._registry_generation
         if path is None or path.is_symlink() or path.resolve() != path:
             return QImage(), False
         try:
@@ -363,7 +373,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
         stamp = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
         cache_key = key, stamp, width, height
         with self._lock:
-            if self._closed:
+            if self._closed or generation != self._registry_generation:
                 return QImage(), False
             cached = self._cache.get(cache_key)
             if cached is not None:
@@ -401,7 +411,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             return QImage(), False
         with self._lock:
             self._record("decode_ms", decode_ms)
-            if self._closed:
+            if self._closed or generation != self._registry_generation:
                 return QImage(), False
             self._decoded += 1
             self._cache[cache_key] = image

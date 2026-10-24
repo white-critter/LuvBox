@@ -1,4 +1,4 @@
-"""Tweet text search, author filter, statistics and chart binning."""
+"""Tweet text search, author filter, statistics."""
 
 import json
 import sqlite3
@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from tests import test_core
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
-from luvbox import charts, storage
+from luvbox import storage
 from luvbox.core import run_worker
 from luvbox.history import HistoryError, HistoryStore
 
@@ -96,18 +96,6 @@ class BrowseCatalogTests(unittest.TestCase):
         self.assertEqual(tuple(target._db.execute("SELECT content,hashtags FROM tweets").fetchone()), ("글", "#tag"))
 
 
-class ChartTests(unittest.TestCase):
-    def test_bins_fill_gaps_and_switch_to_years_for_long_spans(self):
-        self.assertEqual(charts.bins([]), ([], "month"))
-        filled, unit = charts.bins([("2025-11", 2), ("2026-02", 5)])
-        self.assertEqual(unit, "month")
-        self.assertEqual(filled, [("2025-11", 2), ("2025-12", 0), ("2026-01", 0), ("2026-02", 5)])
-        years, unit = charts.bins([("2019-01", 1), ("2019-05", 2), ("2026-02", 4)])
-        self.assertEqual(unit, "year")
-        self.assertEqual(years[0], ("2019", 3))
-        self.assertEqual(years[-1], ("2026", 4))
-        self.assertEqual(len(years), 8)
-        self.assertEqual([charts._nice(value) for value in (0, 1, 3, 7, 12, 480)], [1, 1, 5, 10, 20, 500])
 
 
 class TweetTextWorkerTests(unittest.TestCase):

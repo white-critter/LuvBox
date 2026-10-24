@@ -53,7 +53,7 @@ def _read(path):
 
 
 class ReviewControl:
-    """Thread-safe parent state. No Tk object is retained by this class."""
+    """Thread-safe parent state without UI object ownership."""
 
     def __init__(self, enabled=False):
         self._lock = threading.Lock()

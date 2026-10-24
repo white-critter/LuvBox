@@ -841,7 +841,7 @@ class CoreTests(unittest.TestCase):
         for raw in ("AuthRequired: authenticated cookies needed", "AuthorizationError: Account temporarily locked",
                     "Invalid login credentials", "'401 Unauthorized'", "403 Forbidden", "cookie expired"):
             with self.subTest(raw=raw):
-                self.assertIn("Edge에서 X 로그인", _safe_diagnostic(raw, "managed"))
+                self.assertIn("‘X 연결’", _safe_diagnostic(raw, "managed"))
         for raw in ("1849: Missing 'author' data", "Failed to download 1429_1.jpg",
                     "Failed to download 1840412345_1.jpg"):
             with self.subTest(raw=raw):
@@ -938,7 +938,7 @@ class CoreTests(unittest.TestCase):
             code, events = self.worker(options=replace(self.options, auth_mode="managed"))
         self.assertNotEqual(code, 0)
         self.assertEqual(events[-1]["status"], "error")
-        self.assertIn("Edge에서 X 로그인", events[-1]["message"])
+        self.assertIn("‘X 연결’", events[-1]["message"])
 
     def test_managed_job_uses_target_account_session_without_switching_active_account(self):
         from luvbox import login

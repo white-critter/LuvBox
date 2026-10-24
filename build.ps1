@@ -10,8 +10,6 @@ if ($LASTEXITCODE -ne 0) { throw 'ExifTool 준비에 실패했습니다.' }
 if ($LASTEXITCODE -ne 0) { throw '번들 GIF 변환 도구 확인에 실패했습니다. tools\ffmpeg\README.md를 확인하세요.' }
 & $taskPython 'tools\qt\prepare_sources.py'
 if ($LASTEXITCODE -ne 0) { throw 'Qt 배포 소스와 원본 라이선스 준비에 실패했습니다. tools\qt\README.md를 확인하세요.' }
-& $taskPython 'tools\build_theme.py'
-if ($LASTEXITCODE -ne 0) { throw '테마 이미지 준비에 실패했습니다.' }
 & $taskPython 'tools\check_build_inputs.py'
 if ($LASTEXITCODE -ne 0) { throw '필수 빌드 파일 확인에 실패했습니다. setup.ps1의 준비 과정을 완료하세요.' }
 
@@ -40,7 +38,9 @@ try {
     --icon 'assets\icons\luvbox.ico' --add-data 'assets\icons;assets/icons' `
     --distpath release --workpath build\onedir `
     --additional-hooks-dir 'tools\pyinstaller' `
-    --collect-all gallery_dl --collect-binaries PIL --collect-data PIL --exclude-module imageio_ffmpeg `
+    --collect-all gallery_dl --exclude-module imageio_ffmpeg `
+    --exclude-module tkinter --exclude-module _tkinter --exclude-module turtle `
+    --exclude-module PIL.ImageTk --exclude-module PIL._imagingtk --exclude-module PIL._tkinter_finder `
     --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtQml `
     --hidden-import PySide6.QtQuick --hidden-import PySide6.QtQuickControls2 `
     --hidden-import PySide6.QtMultimedia --hidden-import PySide6.QtNetwork `
@@ -51,8 +51,6 @@ try {
     --add-data 'tools\exiftool\runtime;tools/exiftool/runtime' `
     --add-data 'tools\ffmpeg\runtime;tools/ffmpeg/runtime' `
     --add-data 'assets\fonts\Pretendard;assets/fonts/Pretendard' `
-    --add-data 'assets\theme\light.zip;assets/theme' `
-    --add-data 'assets\theme\dark.zip;assets/theme' `
     --add-data 'assets\browser-extension\README.md;assets/browser-extension' `
     --add-data 'assets\browser-extension\PRIVACY.md;assets/browser-extension' `
     --add-data 'assets\browser-extension\chromium\manifest.json;assets/browser-extension/chromium' `
@@ -79,6 +77,8 @@ finally {
 }
 & $taskPython 'tools\check_qt_startup.py' $target (Join-Path $PSScriptRoot "build\qt-startup-$version.json")
 if ($LASTEXITCODE -ne 0) { throw '실제 Qt EXE의 시작 점검에 실패했습니다. ZIP을 만들지 않습니다.' }
+& $taskPython 'tools\check_download_startup.py' $target (Join-Path $PSScriptRoot "build\download-startup-$version.json")
+if ($LASTEXITCODE -ne 0) { throw '실제 EXE의 오프라인 저장 시작 점검에 실패했습니다. ZIP을 만들지 않습니다.' }
 & $taskPython 'tools\package_browser_extension.py'
 if ($LASTEXITCODE -ne 0) { throw '브라우저 확장 제출 자료 준비에 실패했습니다.' }
 & $taskPython 'tools\package_release.py'
