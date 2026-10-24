@@ -15,8 +15,11 @@ Dialog {
     focus: true
     closePolicy: Popup.CloseOnEscape
     width: Math.min(560, parent ? Math.max(240, parent.width - 32) : 560)
-    implicitHeight: contentColumn.implicitHeight + 128
-    height: Math.min(implicitHeight, parent ? Math.max(180, parent.height - 32) : 720)
+    readonly property int windowLimit: parent ? Math.max(180, parent.height - 32) : 720
+    readonly property int chromeHeight: topPadding + bottomPadding
+        + (header ? header.implicitHeight : 0) + (footer ? footer.implicitHeight : 0)
+    implicitHeight: contentColumn.implicitHeight + chromeHeight
+    height: Math.min(implicitHeight, windowLimit)
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
     padding: 24
@@ -67,11 +70,12 @@ Dialog {
         id: scrollView
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-        ScrollBar.vertical.policy: contentHeight > availableHeight ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+        ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
 
         ColumnLayout {
             id: contentColumn
             width: scrollView.availableWidth
+            height: implicitHeight
             spacing: 16
 
             RowLayout {

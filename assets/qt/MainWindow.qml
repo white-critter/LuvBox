@@ -279,7 +279,7 @@ ApplicationWindow {
                 contentWidth: availableWidth
                 contentHeight: saveForm.implicitHeight + 32
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-                ScrollBar.vertical.policy: contentHeight > availableHeight ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
                 ColumnLayout {
                     id: saveForm
                     width: Math.max(1, Math.min(saveScroll.availableWidth - 24, 640))
@@ -730,10 +730,15 @@ ApplicationWindow {
                 elide: Text.ElideRight
             }
             ScrollView {
+                id: bodyScroll
                 Layout.fillWidth: true
-                Layout.preferredHeight: 80
+                Layout.preferredHeight: Math.min(140, Math.max(1, bodyText.implicitHeight))
                 visible: window.app && window.app.library.selectedBody.length > 0
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ScrollBar.vertical.policy: bodyText.implicitHeight > height + 2 ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
                 TextArea {
+                    id: bodyText
+                    width: bodyScroll.availableWidth
                     text: window.app ? window.app.library.selectedBody : ""
                     textFormat: TextEdit.PlainText
                     readOnly: true
