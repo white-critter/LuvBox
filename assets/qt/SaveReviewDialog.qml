@@ -16,6 +16,12 @@ Dialog {
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
     padding: 20
+    background: Rectangle {
+        color: "#141414"
+        radius: 16
+        border.width: 1
+        border.color: "#2a2a2a"
+    }
 
     function submit(action) {
         if (_responded)
@@ -49,9 +55,9 @@ Dialog {
             textFormat: Text.PlainText
             font.bold: true
         }
-        ToolButton {
+        FlatButton {
             Layout.rightMargin: 12
-            text: "×"
+            text: "닫기"
             Accessible.name: "저장을 중단하고 닫기"
             onClicked: dialog.submit("stop")
         }
@@ -96,7 +102,7 @@ Dialog {
             anchors.margins: 12
             spacing: 8
 
-            ToolButton {
+            FlatButton {
                 id: moreButton
                 text: "더보기"
                 Accessible.name: "추가 저장 선택"
@@ -105,6 +111,12 @@ Dialog {
                 Menu {
                     id: moreMenu
                     y: -height
+                    background: Rectangle {
+                        radius: 10
+                        color: "#1c1c1c"
+                        border.width: 1
+                        border.color: "#2e2e2e"
+                    }
                     MenuItem {
                         text: "이 사진 다시 받지 않기"
                         onTriggered: dialog.submit("never")
@@ -116,14 +128,14 @@ Dialog {
                 }
             }
             Item { Layout.fillWidth: true }
-            Button {
+            FlatButton {
                 text: "건너뛰기"
                 onClicked: dialog.submit("skip")
             }
-            Button {
+            FlatButton {
                 id: saveButton
                 text: "저장"
-                highlighted: true
+                tone: "primary"
                 onClicked: dialog.submit("save")
             }
         }

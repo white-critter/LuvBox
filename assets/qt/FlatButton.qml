@@ -22,11 +22,20 @@ Button {
                     return "#e24b59"
                 return control.palette.highlight
             }
-            if (control.checked || control.down)
-                return "#2a2a2a"
-            if (control.hovered && control.enabled)
-                return "#222222"
-            return "transparent"
+            if (control.tone === "nav") {
+                if (control.checked || control.down)
+                    return "#2a2a2a"
+                if (control.hovered && control.enabled)
+                    return "#222222"
+                return "transparent"
+            }
+            if (!control.enabled)
+                return "#1a1a1a"
+            if (control.down)
+                return "#1f1f1f"
+            if (control.hovered)
+                return "#343434"
+            return "#2a2a2a"
         }
     }
     contentItem: Text {

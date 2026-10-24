@@ -300,7 +300,7 @@ ApplicationWindow {
                             Label { text: "X 계정"; color: window.mutedColor }
                             RowLayout {
                                 Layout.fillWidth: true
-                                ComboBox {
+                                FlatCombo {
                                     Layout.fillWidth: true
                                     model: window.app ? window.app.accounts.accounts : []
                                     textRole: "handle"
@@ -324,7 +324,7 @@ ApplicationWindow {
                                     onClicked: connectionDialog.open()
                                 }
                             }
-                            TextField {
+                            FlatField {
                                 id: accountInput
                                 Layout.fillWidth: true
                                 visible: window.app && !window.app.accounts.identity.handle
@@ -434,7 +434,7 @@ ApplicationWindow {
                 RowLayout {
                     spacing: 12
                     Layout.fillWidth: true
-                    TextField {
+                    FlatField {
                         id: search
                         objectName: "searchBox"
                         placeholderText: "사진 검색"
@@ -447,7 +447,7 @@ ApplicationWindow {
                             searchDelay.restart()
                         }
                     }
-                    ComboBox {
+                    FlatCombo {
                         objectName: "thumbSizeChoice"
                         model: ["작게", "보통", "크게"]
                         currentIndex: window.densityChoice
@@ -462,21 +462,21 @@ ApplicationWindow {
                     Label { text: window.galleryModel.total.toLocaleString() + "개"; color: window.mutedColor }
                     Label { text: window.galleryModel.error; color: window.errorColor; visible: text.length > 0 }
                     Item { Layout.fillWidth: true }
-                    ComboBox {
+                    FlatCombo {
                         id: mediaFilter
                         visible: !!window.app
                         model: ["전체", "사진", "영상", "GIF"]
-                        implicitWidth: 96
+                        implicitWidth: 112
                         Accessible.name: "미디어 종류"
                         onActivated: window.app.library.setFilters(
                             ["all", "photo", "video", "animated_gif"][currentIndex],
                             ["saved", "posted", "posted_oldest", "liked"][orderChoice.currentIndex], "")
                     }
-                    ComboBox {
+                    FlatCombo {
                         id: orderChoice
                         visible: !!window.app
                         model: ["최근 저장", "최신 게시물", "오래된 게시물", "좋아요 순"]
-                        implicitWidth: 136
+                        implicitWidth: 168
                         Accessible.name: "사진 정렬"
                         onActivated: window.app.library.setFilters(
                             ["all", "photo", "video", "animated_gif"][mediaFilter.currentIndex],
@@ -687,7 +687,29 @@ ApplicationWindow {
         modal: true
         onAboutToShow: window.stopWheel()
         onClosed: selectedMedia.release()
-        standardButtons: Dialog.Close
+        background: Rectangle {
+            color: "#141414"
+            radius: 16
+            border.width: 1
+            border.color: "#2a2a2a"
+        }
+        header: Label {
+            text: previewDialog.title
+            leftPadding: 24
+            rightPadding: 24
+            topPadding: 20
+            bottomPadding: 4
+            font.pixelSize: 18
+            background: null
+        }
+        footer: DialogButtonBox {
+            background: null
+            FlatButton {
+                text: "닫기"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+            onRejected: previewDialog.close()
+        }
         contentItem: ColumnLayout {
             spacing: 12
             MediaPreview {
@@ -783,7 +805,33 @@ ApplicationWindow {
         width: Math.min(window.width - 48, 440)
         modal: true
         closePolicy: Popup.NoAutoClose
-        standardButtons: Dialog.Yes | Dialog.No
+        background: Rectangle {
+            color: "#141414"
+            radius: 16
+            border.width: 1
+            border.color: "#2a2a2a"
+        }
+        header: Label {
+            text: storageDialog.title
+            leftPadding: 24
+            rightPadding: 24
+            topPadding: 20
+            bottomPadding: 4
+            font.pixelSize: 18
+            background: null
+        }
+        footer: DialogButtonBox {
+            background: null
+            FlatButton {
+                text: "계속"
+                tone: "primary"
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+            FlatButton {
+                text: "취소"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+        }
         onAccepted: if (window.app) window.app.confirmStorage(true)
         onRejected: if (window.app) window.app.confirmStorage(false)
         Label {
