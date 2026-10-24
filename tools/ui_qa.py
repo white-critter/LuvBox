@@ -195,6 +195,22 @@ def make_contact_sheets(output, screenshots):
     return files
 
 
+def gallery_ready(grid, *, unavailable=False):
+    height = grid.canvas.winfo_height()
+    if not grid.columns or height <= 1 or any(
+            getattr(grid, name) is not None for name in ("_layout_timer", "_region_timer", "_viewport_timer")):
+        return False
+    top = max(0, grid.canvas.canvasy(0))
+    first = int(top // grid._cell_height) * grid.columns
+    last = (int((top + height) // grid._cell_height) + 1) * grid.columns
+    keys = grid.order[first:last]
+    return bool(keys) and all(
+        key in grid.tiles and key in grid._valid_sources and (
+            key in grid._unavailable and grid._source_images.get(key) is None if unavailable else
+            grid._source_images.get(key) is not None and key in grid.images)
+        for key in keys)
+
+
 class CaptureSession:
     def __init__(self, root, app, output, *, include, scale, simulated_screen=False):
         self.root, self.app, self.output = root, app, output
@@ -277,6 +293,11 @@ class CaptureSession:
             # The main view belongs to App, whereas popups/HistoryWindow keep
             # it on their Toplevel. Settle resize before choosing an endpoint.
             view = self.app.content_view if window is self.root else getattr(window, "content_view", None)
+            tabs = getattr(window, "tabs", None)
+            if view is None and tabs is not None and tabs.select():
+                active = tabs.nametowidget(tabs.select())
+                if hasattr(active, "canvas") and hasattr(active, "content"):
+                    view = active
             if view is not None:
                 view.canvas.yview_moveto(1 if scroll == "bottom" else 0)
             self.settle(minimum=.25)
@@ -294,6 +315,8 @@ class CaptureSession:
             ImageGrab.grab(bbox=(x, y, x + width, y + height)).save(filename)
             self.manifest.append({"name": name, "file": filename.name, "width": width, "height": height,
                                   "scaling": self.scale, "scroll": scroll, "window_state": window.state(), "viewable": True,
+                                  "scroll_view": {"widget": str(view), "fractions": list(view.canvas.yview())}
+                                  if view is not None else None,
                                   "client_origin": {"x": x, "y": y},
                                   "controls": self._geometry(window), "buttons": self._buttons(window)})
             print(f"Captured {name}: {width}x{height}", flush=True)
@@ -514,10 +537,19 @@ class CaptureSession:
         self.capture(history, f"library-filters-{selected}", "1200x860")
         history.toggle_filters()
         self.capture(history, f"library-compact-{selected}", "820x700")
-        self.capture(history, f"library-compact-detail-{selected}", "820x700", scroll="bottom")
+        history.geometry("820x700")
+        self.settle()
+        history.preview_toggle_button.invoke()
+        try:
+            self.settle(lambda: history._preview_open and history._preview_window.winfo_viewable()
+                        and bool(history._compact_preview_label.cget("image")))
+            self.capture(history._preview_window, f"library-compact-detail-{selected}")
+        finally:
+            if history._preview_open:
+                history.preview_toggle_button.invoke()
         history.geometry("1200x860+90+80")
         history.set_view("grid")
-        self.settle(lambda: len(history.grid_view.images) >= min(25, len(history.rows)), timeout=12)
+        self.settle(lambda: gallery_ready(history.grid_view), timeout=12)
         self.capture(history, f"library-gallery-{selected}", "1200x860")
         self.capture(history, f"library-gallery-selection-{selected}", "1200x860")
         # Exercise a completed decode with no image, separately from loading.
@@ -530,9 +562,7 @@ class CaptureSession:
         try:
             history.grid_view.show(no_preview_rows, lambda paths: set(paths))
             history.grid_view.select_many(())
-            self.settle(lambda: all(key in history.grid_view._source_images
-                                   and history.grid_view._source_images[key] is None
-                                   for key, _ in no_preview_rows), timeout=8)
+            self.settle(lambda: gallery_ready(history.grid_view, unavailable=True), timeout=8)
             self.capture(history, f"library-gallery-no-preview-{selected}", "1200x860")
         finally:
             history._show_grid()
@@ -546,7 +576,7 @@ class CaptureSession:
         self.settle(lambda: bool(history.author_tree.get_children()), timeout=8)
         history.author_tree.selection_set(history.author_tree.get_children()[0])
         history._show_author_samples()
-        self.settle(lambda: bool(history.sample_rows) and bool(history.sample_view.images), timeout=8)
+        self.settle(lambda: bool(history.sample_rows) and gallery_ready(history.sample_view), timeout=8)
         self.capture(history, f"library-stats-{selected}", "1200x860")
         self.capture(history, f"library-stats-compact-{selected}", "820x700")
         history.tabs.select(3)

@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import argparse
 from collections import deque
+import ctypes
 import gc
 import json
 import platform
+import re
 import sys
 import tempfile
 import threading
@@ -272,6 +274,29 @@ class _SlowTrace:
             gc.callbacks.remove(self._gc_callback)
 
 
+def _working_set_bytes():
+    if sys.platform != "win32":
+        return None
+    from ctypes import wintypes
+
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+
+    counters = Counters()
+    counters.cb = ctypes.sizeof(Counters)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    measure = kernel.K32GetProcessMemoryInfo
+    measure.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    measure.restype = wintypes.BOOL
+    if not measure(kernel.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+        return None
+    return int(counters.WorkingSetSize)
+
+
 def percentile(values, fraction):
     if not values:
         return None
@@ -359,7 +384,7 @@ def _preview_snapshot(grid):
             "current_generation_failed_sources": failed_sources}
 
 
-def measure(count, decoded, *, unique=False, unique_captions=False, scroll=False, poll_ms=120, scroll_steps=120, scroll_ms=24, trace_slow=False, trace_scheduler=False):
+def measure(count, decoded, *, unique=False, unique_captions=False, scroll=False, poll_ms=120, scroll_steps=120, scroll_ms=24, trace_slow=False, trace_scheduler=False, timeout_seconds=None, fixed_geometry=None):
     with tempfile.TemporaryDirectory(prefix="luvbox-gallery-benchmark-") as temporary:
         rows = _records(Path(temporary), count, decoded, unique, unique_captions)
         root = tk.Tk()
@@ -410,8 +435,12 @@ def measure(count, decoded, *, unique=False, unique_captions=False, scroll=False
             started = last = time.perf_counter()
             phase_started = started
             durations = {}
-            deadline = started + 60 + (2 * scroll_steps * scroll_ms / 1000 if scroll else 0)
+            duration_limit = (timeout_seconds if timeout_seconds is not None else
+                              60 + (2 * scroll_steps * scroll_ms / 1000 if scroll else 0))
+            deadline = started + duration_limit
             last_snapshot = 0
+            working_sets = []
+            last_rss = 0.
             if trace_slow or trace_scheduler:
                 trace = _SlowTrace(started, lambda: phase, scheduler=trace_scheduler)
                 attach = grid._attach_image
@@ -462,7 +491,7 @@ def measure(count, decoded, *, unique=False, unique_captions=False, scroll=False
                     trace.record("observer", span)
 
             def heartbeat():
-                nonlocal last, last_snapshot, last_heartbeat_trace
+                nonlocal last, last_snapshot, last_heartbeat_trace, last_rss
                 now = time.perf_counter()
                 if trace is not None:
                     end = trace.sample()
@@ -472,11 +501,16 @@ def measure(count, decoded, *, unique=False, unique_captions=False, scroll=False
                     last_heartbeat_trace = end
                 heartbeats[phase].append((now - last) * 1000)
                 last = now
+                if fixed_geometry and phase == "scroll" and now - last_rss >= .1:
+                    resident = _working_set_bytes()
+                    if resident is not None:
+                        working_sets.append(resident)
+                    last_rss = now
                 if now - last_snapshot >= .05:
                     snapshot()
                     last_snapshot = now
                 if now > deadline:
-                    raise RuntimeError("Gallery benchmark exceeded its configured sweep duration plus 60 seconds")
+                    raise RuntimeError(f"Gallery benchmark exceeded its {duration_limit:g}-second limit")
                 if active:
                     root.after(5, heartbeat)
 
@@ -510,6 +544,14 @@ def measure(count, decoded, *, unique=False, unique_captions=False, scroll=False
 
             def resize(index=0):
                 set_phase("resize")
+                if fixed_geometry:
+                    root.geometry(fixed_geometry)
+                    snapshot()
+                    if scroll:
+                        scroll_view()
+                    else:
+                        finish_when_settled()
+                    return
                 if index == len(widths):
                     snapshot()
                     if scroll:
@@ -536,7 +578,7 @@ def measure(count, decoded, *, unique=False, unique_captions=False, scroll=False
                 root.after(0, poll)
             root.after(0, wait_for_initial)
             grid.show(rows, set)
-            root.geometry("1440x900")
+            root.geometry(fixed_geometry or "1440x900")
             root.deiconify()
             root.mainloop()
             set_phase("done")
@@ -552,8 +594,16 @@ def measure(count, decoded, *, unique=False, unique_captions=False, scroll=False
                     "memory_definition": "Observed PIL source/worker-cache/queue pixel buffers only; excludes decoder local/in-flight references, Tk storage, metadata and process RSS.",
                     "poll_interval_ms": None if self_polling else poll_ms,
                     "self_polling": self_polling, "poll_limit": None if self_polling else 24,
-                    "geometry_requests": len(widths), "scroll_requests": len(fractions) if scroll else 0,
+                    "geometry_requests": 1 if fixed_geometry else len(widths),
+                    "fixed_geometry": fixed_geometry,
+                    "canvas": {"width": grid.canvas.winfo_width(), "height": grid.canvas.winfo_height(),
+                               "cell_width": grid._cell_width, "cell_height": grid._cell_height},
+                    "rss_working_set": {"samples": len(working_sets),
+                                        "max_bytes": max(working_sets) if working_sets else None,
+                                        "end_bytes": working_sets[-1] if working_sets else None},
+                    "scroll_requests": len(fractions) if scroll else 0,
                     "scroll_interval_ms": scroll_ms if scroll else None,
+                    "timeout_seconds": duration_limit,
                     "scroll_fraction_per_request": round(1 / scroll_steps, 6) if scroll else None,
                     "result_queue_capacity": grid._results.maxsize,
                     "first_visible_settled_ms": initial_settled_ms,
@@ -595,6 +645,8 @@ def main():
     parser.add_argument("--poll-ms", type=int, default=120, help="Fallback polling interval for an eager grid; ignored by the self-polling viewport grid")
     parser.add_argument("--scroll-steps", type=int, default=120, help="Scroll requests per direction")
     parser.add_argument("--scroll-ms", type=int, default=24, help="Delay between scroll requests")
+    parser.add_argument("--timeout-seconds", type=int, help="Override the measured-phase deadline for slow native UI sweeps")
+    parser.add_argument("--fixed-geometry", help="Use WxH and skip the resize sweep, for a matched scroll comparison")
     parser.add_argument("--trace-slow", action="store_true", help="Record bounded slow spans, GC and CPU quota diagnostics")
     parser.add_argument("--trace-scheduler", action="store_true", help="Include slow tracing and optional Linux UI-thread scheduler counters per heartbeat")
     options = parser.parse_args()
@@ -602,11 +654,16 @@ def main():
         parser.error("rows must be between 1 and 100000")
     if min(options.poll_ms, options.scroll_steps, options.scroll_ms) < 1:
         parser.error("poll-ms, scroll-steps and scroll-ms must be positive")
+    if options.timeout_seconds is not None and options.timeout_seconds < 1:
+        parser.error("timeout-seconds must be positive")
+    if options.fixed_geometry and re.fullmatch(r"[1-9]\d{2,4}x[1-9]\d{2,4}", options.fixed_geometry) is None:
+        parser.error("fixed-geometry must look like 1032x517")
     results = measure(options.rows, options.decoded or options.unique, unique=options.unique,
                       unique_captions=options.unique_captions,
                       scroll=options.scroll, poll_ms=options.poll_ms,
                       scroll_steps=options.scroll_steps, scroll_ms=options.scroll_ms,
-                      trace_slow=options.trace_slow, trace_scheduler=options.trace_scheduler)
+                      trace_slow=options.trace_slow, trace_scheduler=options.trace_scheduler,
+                      timeout_seconds=options.timeout_seconds, fixed_geometry=options.fixed_geometry)
     print(json.dumps({"python": platform.python_version(), "platform": platform.system(),
                       "tk": tk.TkVersion, "results": results}, indent=2))
 

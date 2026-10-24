@@ -1,10 +1,16 @@
 # LuvBox 개발 안내
 
+## 진행 중인 UI 재설계
+
+2026-10-24부터 [UI 재설계 계획과 이어받기](ui-redesign-plan.md)의 PySide6 + Qt Quick 시제품을 별도로 검증합니다. 선택적 의존성은 `requirements-qt.txt`, 실행은 `python tools/qt_gallery_preview.py --rows 1000`입니다. 생성한 사진·기록만 사용하며 실제 계정/사용자 DB와 연결하지 않습니다. 기본 `entry.py`는 아직 기존 Tk 앱이고, 현재 `release/`는 재설계 이전 빌드입니다. 성능·실제 화면 검증 전 제품 기본 UI를 전환하지 않습니다.
+
+새 저장 파일은 `작성자아이디_트윗ID_번호.ext` 형식을 사용하며 기존 파일은 자동 이름 변경하지 않습니다. 작성자 미상은 접두사를 생략합니다. 메타데이터는 작성자/원본 링크/게시글 본문/숫자 계정 ID를 분리하고 타인이 기록한 설명을 보존합니다. 본문 기록 충돌은 API/이벤트에서 구분하며, 이 상태의 DB 영속·Qt 안내 연결은 아직입니다. 상세 경계·회귀·다음 작업은 위 계획을 따릅니다.
+
 현재 정식 버전은 **1.0.0**입니다. 이 문서는 현재 동작과 개발 절차를 설명합니다. 사용자 안내는 [README](../README.md)와 [사용안내](사용안내.txt), 최신 검사 결과는 [검증 기록](verification.md)을 참고하세요. 이전 개발 검토 문서는 Git 이력에 남아 있습니다.
 
 ## 준비와 실행
 
-Windows 64비트와 Tkinter가 포함된 Python 3.12 이상을 사용합니다. 보조 Edge 로그인은 취소·시간 제한을 위해 Windows 비동기 파이프를 사용하며, 정확한 의존성 버전은 `requirements-lock.txt`의 제약으로 고정합니다. 별도 서버나 Node.js, X 개발자 API 키는 필요하지 않습니다.
+Windows 64비트와 Tkinter가 포함된 Python 3.12 이상을 사용합니다. 기본 Chrome·Edge의 새 로그인과 보조 Edge 로그인은 취소·시간 제한을 위해 Windows 비동기 파이프를 사용하며, 정확한 의존성 버전은 `requirements-lock.txt`의 제약으로 고정합니다. 별도 서버나 Node.js, X 개발자 API 키는 필요하지 않습니다.
 
 ```powershell
 .\setup.ps1
@@ -29,8 +35,8 @@ Pretendard 글꼴과 FFmpeg 실행 파일은 Git LFS 대상입니다. 새 체크
 | `luvbox/media.py`, `preview.py`, `thumbcache.py` | GIF 변환, 로컬 미리보기와 섬네일 캐시 |
 | `luvbox/gallery.py`, `tools/benchmark_gallery.py` | 가시 범위 배치·디코딩, 상한이 있는 이미지 캐시와 스크롤 계측 |
 | `luvbox/review.py`, `review_gui.py`, `review_preview.py` | 파일별 저장 선택, 작업 제어, 움직이는 미리보기 |
-| `luvbox/browser_bridge.py`, `assets/browser-extension/` | 기본 브라우저의 확장 기반 계정 연결과 일회성 로컬 전달 |
-| `luvbox/browser_login.py`, `login.py` | 보조 Edge 로그인, 연결 계정 선택과 Windows DPAPI 보관 |
+| `luvbox/browser_bridge.py`, `assets/browser-extension/` | 기존 브라우저 로그인 계정의 선택적 확장 연결과 일회성 로컬 전달 |
+| `luvbox/browser_login.py`, `login.py` | 기본 Chrome·Edge의 새 로그인, 보조 Edge 로그인, 연결 계정 선택과 Windows DPAPI 보관 |
 | `luvbox/settings.py`, `scheduled.py` | 사용자 설정, Windows 작업 스케줄러 연동 |
 | `luvbox/theme.py`, `app_icon.py`, `fonts.py` | 테마, 창·작업표시줄 아이콘, 프로세스 전용 글꼴 |
 | `build.ps1`, `tools/build_theme.py`, `tools/package_release.py` | 테마 이미지 사전 생성, 실행 폴더, 소스·라이선스를 포함한 배포 ZIP |
@@ -54,11 +60,13 @@ Tk 위젯과 `PhotoImage`는 UI 스레드에서만 만듭니다. 작업 스레�
 
 ## 로그인과 예약
 
-기본 연결은 사용자가 설치한 브라우저 확장을 통해 현재 기본 브라우저의 X 로그인을 사용합니다. 앱이 일회성 `127.0.0.1` 리스너를 먼저 열고 기본 브라우저에 연결 페이지를 띄웁니다. 사용자는 앱과 확장의 8자리 연결 코드를 비교하고, 확장 자체 화면에서 현재 X 계정의 `@아이디`를 확인한 뒤 전달을 승인합니다. 토큰은 로컬 안내 페이지에 노출하지 않으며, 만료 시간·일회성 비밀 값·확장 origin 검사를 거쳐 이 PC의 앱에 전달합니다. 설치 절차와 지원 범위는 [브라우저 연결 안내](browser-login.md)에 있습니다.
+기본 연결은 **기본 브라우저에서 새 로그인**입니다. Windows 기본 HTTPS 연결에서 Chrome·Edge 실행 파일을 확인하고, 확장 없이 새 임시 프로필의 X 로그인 창을 엽니다. `find_default_browser()`는 등록 명령의 실행 파일만 읽고 `chrome.exe`·`msedge.exe`를 허용하며 명령 전체를 실행하지 않습니다. 기본 Firefox·Brave 등은 이 경로에서 지원하지 않으며 사용자가 보조 Edge 로그인이나 기존 로그인 연결을 선택합니다. 지원하지 않는 기본 브라우저에서 Edge로 자동 전환하지 않습니다.
 
-Chromium 계열은 개발자 모드에서 `assets/browser-extension/chromium`을 압축해제된 확장으로 로드합니다. Firefox 128 이상은 `firefox/manifest.json`을 임시 부가 기능으로 로드하며 브라우저 재시작 뒤 다시 설치해야 합니다. Firefox 영구 배포에는 서명이 필요합니다. Safari·비공개 창·Firefox 컨테이너와 확장 설치를 막는 관리 정책은 지원하지 않습니다. 확장 설치나 정책 변경을 앱이 자동 수행하지 않습니다.
+새 로그인과 **Edge에서 X 로그인**은 상속된 전용 익명 파이프를 사용하고 TCP 디버깅 포트를 열지 않습니다. 기존 사용자의 브라우저 프로필을 읽거나 복사하지 않으며, 사용자 데이터 경로를 강제로 지정하는 브라우저 정책이 있으면 개인 프로필에 연결하지 않고 중단합니다. 완료·취소·시간 초과 때 이번 연결 시도의 창과 임시 프로필만 정리하고, 창을 닫을 때도 작업 정리를 기다립니다. 로그인 결과는 DPAPI에 보관하므로 연결이 유효한 동안 다음 앱 실행에서 다시 로그인할 필요가 없습니다.
 
-다른 계정으로 새로 로그인하는 보조 수단은 **Edge에서 X 로그인**입니다. 새 임시 프로필과 상속된 전용 익명 파이프를 사용합니다. 완료·취소·시간 초과 때 이번 연결 시도의 창과 임시 프로필만 정리하고, 창을 닫을 때도 작업 정리를 기다립니다. 두 연결 방식 모두 사용 중인 브라우저 프로필 디렉터리를 직접 읽지 않습니다.
+이미 로그인한 기본 브라우저 계정을 그대로 연결하는 선택 사항은 **기존 로그인 연결 (확장 필요)**입니다. 앱이 일회성 `127.0.0.1` 리스너를 먼저 열고 기본 브라우저에 연결 페이지를 띄웁니다. 사용자는 앱과 확장의 8자리 연결 코드를 비교하고, 확장 자체 화면에서 현재 X 계정의 `@아이디`를 확인한 뒤 전달을 승인합니다. 토큰은 로컬 안내 페이지에 노출하지 않으며, 만료 시간·일회성 비밀 값·확장 origin 검사를 거쳐 이 PC의 앱에 전달합니다.
+
+확장 연결의 Chromium 계열은 개발자 모드에서 `assets/browser-extension/chromium`을 압축해제된 확장으로 로드합니다. Firefox 128 이상은 `firefox/manifest.json`을 임시 부가 기능으로 로드하며 브라우저 재시작 뒤 다시 설치해야 합니다. Firefox 영구 배포에는 서명이 필요합니다. Safari·비공개 창·Firefox 컨테이너와 확장 설치를 막는 관리 정책은 확장 연결을 지원하지 않습니다. 확장 설치나 정책 변경을 앱이 자동 수행하지 않습니다. 설치 절차와 연결별 지원 범위는 [브라우저 연결 안내](browser-login.md)에 있습니다.
 
 정상 연결은 확인한 계정 정보를 X 계정란에 자동 반영하며, 연결한 여러 계정을 목록에서 선택할 수 있습니다. 계정 정보와 로그인 쿠키는 현재 Windows 사용자 범위의 DPAPI로 암호화해 `%LOCALAPPDATA%\LuvBox\session.bin`에 함께 보관합니다. 기존 암호화 세션과 토큰 직접 입력·Netscape `cookies.txt`도 지원하며, 확인된 계정 정보가 없는 연결은 사용자가 아이디를 직접 확인합니다. 원문 토큰·쿠키·브라우저 프로필은 로그·설정·Git·배포 파일에 넣지 않습니다. `cookies.txt`는 암호화되지 않은 사용자 파일이며 경로를 설정에 저장하지 않습니다.
 
@@ -123,10 +131,11 @@ Windows 파일 점유는 전체 제한 시간 안에서 최대 약 1초 재시�
 후속 구조 정리·오류 재현·화면 검수는 [리팩토링 검수](refactoring-review.md)에 있습니다.
 클라우드 소스를 Windows 로컬 세션에서 이어받는 순서와 실제 화면·로그인·실행 파일 검사 범위는 [Windows 이어받기](windows-handoff.md)에 있습니다.
 
+현재 화면 검사는 Qt 쪽입니다. `unittest discover`는 저장 엔진과 Qt 검사를 돌리고, 이전 Tk 창을 띄우는 검사는 빼 둡니다. 그 창이 필요할 때만 `LUVBOX_LEGACY_UI_TESTS=1`을 붙입니다. `entry.py --self-test`와 `tools/ui_qa.py`는 이전 Tk 화면용입니다. 지금 실행 파일의 창 확인은 `entry.py --qt-smoke`입니다.
+
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-.\.venv\Scripts\python.exe entry.py --self-test .test-output\source-selftest.json
-.\.venv\Scripts\python.exe tools\ui_qa.py --output .test-output\ui
+.\.venv\Scripts\python.exe -m unittest discover -s tests
+.\.venv\Scripts\python.exe entry.py --qt-smoke .test-output\qt-smoke.json
 .\build.ps1
 ```
 
