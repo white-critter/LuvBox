@@ -716,31 +716,27 @@ class CoreTests(unittest.TestCase):
         code, events = self.worker(rows, options=replace(self.options, scan_mode="quick", folder_mode="flat"))
         self.assertEqual(events[-1]["scan_mode"], "full")
 
-    def test_merging_new_archive_keys_requires_one_full_scan_before_the_saved_streak(self):
+    def test_combined_records_require_one_full_scan_before_the_saved_streak(self):
         from luvbox.history import HistoryStore
-        from luvbox.storage import merge_account_records
 
         baseline = [("400", 1, "photo", "bob")]
-        combined = [("100", 1, "photo", "alice"), ("101", 1, "photo", "alice")]
         self.assertEqual(self.worker(baseline)[0], 0)
-        self.assertEqual(self.worker(combined, options=replace(self.options, account="otheraccount"))[0], 0)
         paths = resolve_storage(self.output, "myaccount", True)
-        merged = merge_account_records(paths, "otheraccount")
-        self.assertEqual((merged["added"], merged["keys"]), (2, 2))
-        rows = combined + [("300", 1, "photo", "charlie")] + baseline
+        # Records an earlier version combined from another account mark the
+        # latest run: that traversal did not reach the combined files.
+        with closing(sqlite3.connect(paths.record_dir / ".luvbox-history.sqlite3")) as db, db:
+            run = db.execute("SELECT MAX(id) FROM runs").fetchone()[0]
+            db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('quick_scan_merge_run',?)", (str(run),))
+        rows = [("100", 1, "photo", "alice"), ("300", 1, "photo", "charlie")] + baseline
         quick = replace(self.options, scan_mode="quick")
         with closing(HistoryStore.for_storage(paths, create_media=False)) as store:
             self.assertEqual(store.quick_scan_readiness(quick.folder_mode, quick.media_signature), "records-changed")
         with patch("luvbox.core.QUICK_STOP_AFTER", 2):
             code, events = self.worker(rows, options=quick)
-            self.assertEqual(code, 0)
-            self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["visited"]),
-                             ("full", 1, 4))
-            self.assertTrue((self.output / "myaccount" / "charlie" / "charlie_300_1.jpg").is_file())
+            self.assertEqual((code, events[-1]["scan_mode"], events[-1]["saved"], events[-1]["visited"]),
+                             (0, "full", 2, 3))
             self.assertTrue(any("기록을 합쳐" in event.get("message", "") for event in events))
-            # Repeating an unchanged merge must not invalidate the full scan.
-            again = merge_account_records(paths, "otheraccount")
-            self.assertEqual((again["added"], again["keys"]), (0, 0))
+            # That complete scan clears the marker; the next run stops early.
             code, events = self.worker(rows, options=quick)
             self.assertEqual((code, events[-1]["scan_mode"], events[-1]["saved"], events[-1]["visited"]),
                              (0, "quick", 0, 2))

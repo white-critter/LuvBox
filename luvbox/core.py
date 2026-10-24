@@ -643,6 +643,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     status = "error"
     message = ""
     exit_code = 1
+    # The window offers its record repair only for this specific failure.
+    catalog_damaged = False
     normalized = options
     active_job = None
     quick_scan = False
@@ -1757,6 +1759,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         status, exit_code, message = "error", 1, _RECORD_ERROR
     except CatalogDamaged as exc:
         status, exit_code, message = "error", 1, str(exc)
+        catalog_damaged = True
     except HistoryError:
         status, exit_code, message = "error", 1, _HISTORY_ERROR
     except OSError as exc:
@@ -1850,5 +1853,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
           "last_posted_at": last_posted_at,
           "scan_mode": "retry" if targets else "quick" if quick_scan else "full",
           "recovered": len(recovered), "unavailable_tweets": unavailable_tweets, "absent_files": absent_files,
-          "retry_at": guard.retry_at if guard is not None else "", "message": message})
+          "retry_at": guard.retry_at if guard is not None else "", "catalog_damaged": catalog_damaged,
+          "message": message})
     return exit_code

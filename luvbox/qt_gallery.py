@@ -1,4 +1,4 @@
-"""Optional Qt gallery experiment; callers supply an isolated fixture reader."""
+"""Qt gallery model and thumbnail provider over a caller-supplied catalog reader."""
 
 from collections import OrderedDict
 import heapq

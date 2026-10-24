@@ -24,7 +24,8 @@ ApplicationWindow {
     readonly property color errorColor: "#ff8791"
     readonly property color noticeColor: "#e6bd79"
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
-        preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || folderDialog.visible
+        preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
+        folderDialog.visible
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
     color: "#101010"
     palette.window: color
@@ -376,6 +377,14 @@ ApplicationWindow {
                                 color: window.errorColor
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
+                            }
+                            FlatButton {
+                                objectName: "repairButton"
+                                text: "기록 복구"
+                                visible: !!(window.app && window.app.download.repairNeeded)
+                                enabled: window.app && !window.app.busy
+                                Accessible.name: "손상된 저장 기록 복구"
+                                onClicked: repairDialog.open()
                             }
                             Item {
                                 id: saveProgress
@@ -879,6 +888,53 @@ ApplicationWindow {
         }
     }
 
+    Dialog {
+        id: repairDialog
+        objectName: "repairDialog"
+        parent: Overlay.overlay
+        title: "기록 복구"
+        anchors.centerIn: parent
+        width: Math.min(window.width - 48, 460)
+        modal: true
+        closePolicy: Popup.CloseOnEscape
+        background: Rectangle {
+            color: "#141414"
+            radius: 16
+            border.width: 1
+            border.color: "#2a2a2a"
+        }
+        header: Label {
+            text: repairDialog.title
+            leftPadding: 24
+            rightPadding: 24
+            topPadding: 20
+            bottomPadding: 4
+            font.pixelSize: 18
+            background: null
+        }
+        footer: DialogButtonBox {
+            background: null
+            FlatButton {
+                text: "복구"
+                tone: "primary"
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+            FlatButton {
+                text: "취소"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+        }
+        onAccepted: if (window.app) window.app.repairRecords()
+        Label {
+            width: parent.width
+            text: "손상된 기록 DB를 고칩니다.\n\n· 손상된 파일은 먼저 이 PC에 백업해 둡니다.\n" +
+                  "· 읽을 수 있는 기록과 최근 백업으로 기록 DB를 다시 만듭니다.\n" +
+                  "· 사진·영상과 중복 방지 기록은 건드리지 않습니다."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+        }
+    }
+
     Connections {
         target: window.app
         function onChanged() {
@@ -888,6 +944,7 @@ ApplicationWindow {
                 connectionDialog.close()
                 preferencesDialog.close()
                 storageDialog.close()
+                repairDialog.close()
                 folderDialog.close()
             }
         }

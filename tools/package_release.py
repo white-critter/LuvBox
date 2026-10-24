@@ -52,7 +52,6 @@ SOURCE_FILES = (
     "assets/browser-extension/firefox/profile.js", "assets/browser-extension/firefox/connect.js",
     "assets/browser-extension/firefox/connect.html", "assets/browser-extension/firefox/connect.css",
     "assets/browser-extension/firefox/extension-page.js", "docs/browser-login.md", "docs/windows-handoff.md",
-    "docs/windows-validation-20261022.md",
 )
 DEPENDENCIES = (
     "gallery_dl", "pillow", "requests", "urllib3", "certifi", "charset-normalizer", "idna",
@@ -249,7 +248,7 @@ def package() -> None:
             # Ship the current guide and verification, without obsolete reports.
             for name in (
                 "docs/사용안내.txt", "docs/development.md", "docs/verification.md",
-                "docs/performance.md", "docs/refactoring-review.md", "docs/security-review.md",
+                "docs/performance.md", "docs/security-review.md",
             ):
                 archive.write(ROOT / name, "source/" + name)
             for folder, pattern in (("luvbox", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):

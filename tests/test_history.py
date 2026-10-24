@@ -274,43 +274,13 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(sorted(actual[0], key=key), sorted(expected[0], key=key))
         self.assertEqual(actual[1:], expected[1:])
 
-    def test_author_samples_skip_deleted_files_without_truncating_available_samples(self):
-        for index in range(40):
-            path = self.file(f"{200 + index}_1.jpg")
-            self.store.record_media("flat", {"tweet_id": str(200 + index), "num": 1, "type": "photo",
-                                             "author": {"name": "alice"},
-                                             "date": datetime(2020, 1, 1, tzinfo=timezone.utc)}, path)
-            if index >= 4:
-                path.unlink()
-        self.assertEqual([row["tweet_id"] for row in self.store.author_samples("alice", 4)],
-                         ["203", "202", "201", "200"])
-
-    def test_author_samples_are_newest_present_files_once_each(self):
-        for index in range(12):
-            path = self.file(f"{100 + index}_1.jpg")
-            for mode in ("flat", "author") if index == 11 else ("flat",):
-                self.store.record_media(mode, {"tweet_id": str(100 + index), "num": 1, "type": "photo",
-                                               "author": {"name": "Alice"},
-                                               "date": datetime(2020, 1, 1 + index, tzinfo=timezone.utc)}, path)
-        with self.store._db:
-            self.store._db.execute("UPDATE media SET path='' WHERE tweet_id='110'")  # a deleted file
-        samples = self.store.author_samples("alice", 4)
-        self.assertEqual([row["tweet_id"] for row in samples], ["111", "109", "108", "107"])
-        every = self.store.author_samples("alice", None)
-        self.assertEqual([row["tweet_id"] for row in every], [str(index) for index in range(111, 99, -1) if index != 110])
-        for bad_limit in (0, 101, True, "8"):
-            with self.subTest(limit=bad_limit), self.assertRaises(HistoryError):
-                self.store.author_samples("alice", bad_limit)
-        self.assertEqual(self.store.author_samples("nobody"), [])
-        for bad in ("", "x" * 16, "bad name"):
-            with self.subTest(bad=bad), self.assertRaises(HistoryError):
-                self.store.author_samples(bad)
+    def test_overview_ranks_twenty_authors_unless_all_are_requested(self):
         authors = [{"name": f"author{index:02d}"} for index in range(25)]
         for index, author in enumerate(authors):
             path = self.file(f"{500 + index}_1.jpg")
             self.store.record_media("flat", {"tweet_id": str(500 + index), "num": 1, "type": "photo", "author": author}, path)
         self.assertEqual(len(self.store.overview(verify_files=False)["stats"]["authors"]), 20)
-        self.assertEqual(len(self.store.overview(verify_files=False, top=None)["stats"]["authors"]), 26)
+        self.assertEqual(len(self.store.overview(verify_files=False, top=None)["stats"]["authors"]), 25)
 
     def test_gif_without_a_kind_marker_imports_as_an_animation(self):
         self.file("100_1.gif", b"GIF89a" + b"offline-local-animation")
@@ -333,27 +303,11 @@ class HistoryTests(unittest.TestCase):
             db.commit()
         return path
 
-    def test_mp4_gifs_are_listed_and_a_converted_file_keeps_its_save_time(self):
-        mp4 = self.file("100_gif_1.mp4")
-        self.store.record_media("flat", dict(self.metadata(kind="animated_gif"), _luvbox_metadata_status="embedded"), mp4)
+    def test_summary_counts_animated_gifs_still_saved_as_mp4(self):
+        self.store.record_media("flat", self.metadata(kind="animated_gif"), self.file("100_gif_1.mp4"))
         self.store.record_media("flat", self.metadata(kind="animated_gif", ident="101"), self.file("101_gif_1.gif"))
         self.store.record_media("flat", self.metadata(kind="video", ident="102"), self.file("102_video_1.mp4"))
         self.assertEqual(self.store.summary()["mp4_gifs"], 1)
-        [row] = self.store.mp4_gif_records()
-        self.assertEqual(row["path"], str(mp4.resolve()))
-        gif = self.file("100_gif_1.gif", b"GIF89a converted animation")
-        with self.assertRaises(HistoryError):
-            self.store.replace_media_file(row, gif, "unknown-status", author_status="embedded")
-        with self.assertRaises(HistoryError):
-            self.store.replace_media_file(row, Path(self.temp.name) / "outside.gif", "embedded", author_status="embedded")
-        self.assertTrue(self.store.replace_media_file(row, gif, "embedded", author_status="embedded"))
-        updated = self.store.records(media_type="animated_gif", query="100")[0]
-        self.assertEqual((updated["path"], updated["filename"], updated["filesize"]),
-                         (str(gif.resolve()), "100_gif_1.gif", gif.stat().st_size))
-        self.assertEqual((updated["saved_at"], updated["author_metadata_status"]), (row["saved_at"], "embedded"))
-        self.assertEqual((self.store.summary()["mp4_gifs"], self.store.mp4_gif_records()), (0, []))
-        # A record that moved meanwhile is left alone.
-        self.assertFalse(self.store.replace_media_file(row, gif, "embedded", author_status="embedded"))
 
     def test_source_metadata_status_and_csv_do_not_change_original_save_time(self):
         path = self.file("100_1.jpg")
@@ -361,13 +315,13 @@ class HistoryTests(unittest.TestCase):
         self.store.record_media("flat", data, path)
         original = self.store.records()[0]
         self.assertEqual(original["source_url"], "https://x.com/i/web/status/100")
-        self.assertEqual(self.store.get_metadata_status("flat", data), "pending")
+        self.assertEqual(self.store.media_record("flat", data)["metadata_status"], "pending")
         path.write_bytes(b"updated-offline-file-with-tags")
         self.store.mark_metadata(original, "embedded")
         record = self.store.records()[0]
         self.assertEqual(record["saved_at"], original["saved_at"])
         self.assertEqual(record["filesize"], path.stat().st_size)
-        self.assertEqual(self.store.get_metadata_status("flat", data), "embedded")
+        self.assertEqual(self.store.media_record("flat", data)["metadata_status"], "embedded")
         self.store.import_legacy(refresh=True)
         self.assertEqual(self.store.records()[0]["metadata_status"], "embedded")
         csv_path = Path(self.temp.name) / "sources.csv"
@@ -525,20 +479,6 @@ class HistoryTests(unittest.TestCase):
         is_symlink = Path.is_symlink
         with patch.object(Path, "is_symlink", lambda candidate: candidate == self.account or is_symlink(candidate)):
             self.assertFalse(relocated.is_media_path(known))
-
-    def test_converted_gif_beside_a_former_root_original_can_replace_its_record(self):
-        original = self.file("100_gif_1.mp4")
-        self.store.record_media("flat", self.metadata(kind="animated_gif"), original)
-        relocated = self.relocated_store()
-        [row] = relocated.mp4_gif_records()
-        elsewhere = self.file("other/100_gif_1.gif", b"GIF89a not beside the original")
-        with self.assertRaises(HistoryError):
-            relocated.replace_media_file(row, elsewhere, "embedded", author_status="embedded")
-        converted = self.file("100_gif_1.gif", b"GIF89a converted")
-        self.assertTrue(relocated.replace_media_file(row, converted, "embedded", author_status="embedded"))
-        self.assertEqual(relocated.records()[0]["path"], str(converted.resolve()))
-        self.assertTrue(relocated.is_media_path(converted))
-        self.assertFalse(relocated.is_media_path(elsewhere))
 
     def test_missing_former_file_keeps_location_until_drive_or_file_returns(self):
         path = self.file("100_1.jpg")
@@ -828,8 +768,7 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(list(destination.parent.glob(".luvbox-export-*")), [])
 
     def test_list_and_sample_decode_failures_release_cursors_while_errors_are_retained(self):
-        readers = (lambda store: store.records(), lambda store: store.mp4_gif_records(),
-                   lambda store: store.author_samples("alice"))
+        readers = (lambda store: store.records(), lambda store: store.missing_media(verify_files=False))
         for index, read in enumerate(readers):
             with self.subTest(reader=index):
                 with closing(HistoryStore(self.account / f"decode-{index}")) as store:

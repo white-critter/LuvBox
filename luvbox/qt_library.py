@@ -90,6 +90,10 @@ class LibraryRepository:
             return 0, []
         try:
             with closing(_ReadOnlyHistory(request.location())) as store:
+                # Check each folder's links once per page, as a library rescan
+                # does. The thumbnail provider checks each file again (link
+                # and resolved path) before and after decoding it.
+                store._folder_cache = {}
                 page = store.record_page(offset // limit, limit, request.media_type, request.query,
                                          order=request.order, author=request.author, include_deleted=False)
                 rows = []
@@ -153,14 +157,13 @@ class LibraryRepository:
                     "media_type": row["media_type"], "public_info": info}
 
     def decode(self, path, size):
-        request = self.current()
-        if request is None:
+        # Only paths that read() checked against this request's catalog are
+        # registered, and the provider rejects a link or a changed resolved
+        # path before decoding. Reopening the catalog for every thumbnail
+        # cost more than the decode itself.
+        if self.current() is None:
             return Thumbnail(None, "")
-        with closing(_ReadOnlyHistory(request.location())) as store:
-            permitted = self._path(store, {"path": str(path)})
-            if permitted is None:
-                return Thumbnail(None, "")
-            return thumbnail(permitted, size)
+        return thumbnail(path, size)
 
     def action(self, key, generation, action):
         selection = self.selected(key, generation)
@@ -271,10 +274,6 @@ class LibraryController(QObject):
     def selectedMissingNote(self):
         return self._selected.get("missing_note", "")
 
-    @Property(bool, constant=True)
-    def canTrash(self):
-        return False
-
     @Property(bool, notify=changed)
     def busy(self):
         return self._busy
@@ -368,10 +367,6 @@ class LibraryController(QObject):
     @Slot()
     def revealSelected(self):
         self._action("reveal")
-
-    @Slot()
-    def trashSelected(self):
-        return None
 
     def _work(self):
         while True:

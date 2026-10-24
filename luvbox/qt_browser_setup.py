@@ -7,7 +7,7 @@ from queue import Queue
 from PySide6.QtCore import QObject, Property, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 
-from .browser_login import find_default_browser, find_edge
+from .browser_discovery import find_default_browser, find_edge
 
 
 _WORKING = {

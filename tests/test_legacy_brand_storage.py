@@ -11,8 +11,7 @@ from unittest.mock import patch
 
 from luvbox.history import HistoryError, HistoryStore
 from luvbox.recovery import latest_backup
-from luvbox.storage import (MigrationError, other_account_records, prepare_storage,
-                            merge_account_records, publish_snapshot, resolve_storage,
+from luvbox.storage import (MigrationError, prepare_storage, publish_snapshot, resolve_storage,
                             saved_media_missing)
 
 
@@ -147,18 +146,6 @@ class LegacyBrandStorageTests(unittest.TestCase):
                           side_effect=lambda path: path == old or original(path)):
             with self.assertRaises(ValueError):
                 resolve_storage(self.output, "alice")
-
-    def test_old_snapshot_account_is_available_for_account_merge(self):
-        directory = self.output / ".xlikesaver" / "bob"
-        old, expected = self.old_history(directory)
-        self.assertEqual(other_account_records(self.paths), [{"account": "bob", "records": 1}])
-        with closing(HistoryStore.for_storage(self.paths)):
-            pass
-        result = merge_account_records(self.paths, "bob")
-        self.assertEqual(result["added"], 1)
-        with closing(HistoryStore.for_storage(self.paths)) as store:
-            self.assertEqual(store.records()[0]["saved_at"], expected["saved_at"])
-        self.assertTrue(old.is_file())
 
     def test_backup_lookup_keeps_the_scope_hash_from_the_old_app_root(self):
         previous = self.app.with_name("XlikeSaver") / self.paths.record_dir.relative_to(self.app)

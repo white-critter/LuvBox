@@ -44,6 +44,7 @@ class DownloadController(QObject):
         self._notice = ""
         self._progress = -1.0
         self._final = None
+        self._repair_needed = False
         self._job_id = 0
         self._timer = QTimer(self)
         self._timer.setInterval(40)
@@ -89,6 +90,20 @@ class DownloadController(QObject):
     def progress(self):
         return self._progress
 
+    @Property(bool, notify=changed)
+    def repairNeeded(self):
+        """The last save stopped on a damaged records database."""
+        return self._repair_needed
+
+    def markRepaired(self):
+        """A rebuilt records database replaces the damaged-records error."""
+        if self._running or not self._repair_needed:
+            return
+        self._repair_needed = False
+        self._error = ""
+        self._status = "저장할 준비가 됐습니다"
+        self.changed.emit()
+
     def start(self, options):
         if self._running or self._closing:
             return False
@@ -107,6 +122,7 @@ class DownloadController(QObject):
         self._stopping = False
         self._saved = self._skipped = 0
         self._final = None
+        self._repair_needed = False
         self._error = ""
         self._notice = ""
         self._progress = -1.0
@@ -219,6 +235,7 @@ class DownloadController(QObject):
             if self._final == "error":
                 self._error = summary or "저장 작업이 중단됐습니다."
                 self._status = self._error
+                self._repair_needed = event.get("catalog_damaged") is True
             else:
                 self._status = "저장 결과를 정리하고 있습니다"
         elif kind == "process_exit":

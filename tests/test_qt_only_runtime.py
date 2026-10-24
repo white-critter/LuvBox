@@ -12,7 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 OBSOLETE_MODULES = {
-    "app_icon", "charts", "dialogs", "fonts", "gallery", "gui", "history_gui",
+    "app_icon", "browser_login", "charts", "dialogs", "fonts", "gallery", "gui", "history_gui",
     "popup_menu", "presentation", "review_gui", "review_preview", "theme",
 }
 

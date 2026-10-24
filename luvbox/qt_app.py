@@ -11,6 +11,7 @@ from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon,
 from . import __version__
 from .app_settings import SettingsRepository, default_settings
 from .core import JobOptions, _normal_account
+from .protection import ProtectionError
 from .qt_accounts import AccountController
 from .qt_browser_setup import BrowserSetupController
 from .qt_download import DownloadController
@@ -29,6 +30,8 @@ _CHOICES = {
 _BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_each"}
 _PUBLIC_PREFERENCES = {*_CHOICES, *_BOOLEANS, "max_video_mb"}
 _SETTINGS_ERROR = "설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요."
+_REPAIR_ERROR = ("기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
+                 "저장 폴더 권한을 확인하고 다시 시도해 주세요.")
 
 
 class ApplicationController(QObject):
@@ -69,6 +72,8 @@ class ApplicationController(QObject):
         self._message = ""
         self._error = ""
         self._preparing = False
+        self._repairing = False
+        self._repair_target = None
         self._settings_revision = 0
         self._pending_settings = {}
         self._settings_versions = {}
@@ -156,7 +161,7 @@ class ApplicationController(QObject):
 
     @Property(bool, notify=changed)
     def busy(self):
-        return bool(self._closing or self._preparing or self._pending_start is not None
+        return bool(self._closing or self._preparing or self._repairing or self._pending_start is not None
                     or self._pending_settings or self._accounts.busy or self._download.running
                     or self._schedule.mutating)
 
@@ -178,6 +183,8 @@ class ApplicationController(QObject):
             return "작업을 정리하고 닫습니다"
         if self._preparing:
             return "저장 폴더를 준비합니다"
+        if self._repairing:
+            return "기록 DB를 복구하는 중입니다"
         if self._pending_settings:
             return "설정을 저장합니다"
         if self._accounts.busy:
@@ -203,7 +210,7 @@ class ApplicationController(QObject):
         return self._gallery_dirty
 
     def _state_changed(self):
-        locked = (self._closing or self._preparing or self._pending_start is not None
+        locked = (self._closing or self._preparing or self._repairing or self._pending_start is not None
                   or bool(self._pending_settings) or self._download.running)
         account_locked = locked or self._schedule.mutating
         if self._accounts.locked != account_locked:
@@ -252,7 +259,11 @@ class ApplicationController(QObject):
         if pending_download is not None and pending_download[0] == revision:
             self._pending_download = None
             if success and not self._closing:
-                self._download.start(pending_download[1])
+                options = pending_download[1]
+                if self._download.start(options):
+                    # A damaged catalog is reported for this save's records,
+                    # even if the folder or account changes afterwards.
+                    self._repair_target = (options.account, options.output_dir, options.separate_accounts)
         if success and not self._pending_settings and self._save_after_settings:
             self._save_after_settings = False
             self.startSave()
@@ -381,6 +392,44 @@ class ApplicationController(QObject):
             self._message = "저장 폴더를 유지했습니다"
         self._state_changed()
 
+    @Slot()
+    def repairRecords(self):
+        """Rebuild the records database the last save reported as damaged."""
+        if self.busy or not self._download.repairNeeded or self._repair_target is None:
+            return
+        self._repairing = True
+        self._message = self._error = ""
+        self._commands.put(("repair", self._repair_target))
+        self._state_changed()
+
+    @staticmethod
+    def _repair_records(account, output_dir, separate_accounts):
+        import sqlite3
+        from .protection import AccountGuard
+        from .recovery import repair_history
+        from .storage import MigrationError, OutputGuard, publish_snapshot, resolve_storage
+
+        paths = resolve_storage(output_dir, account, separate_accounts)
+        # The locks a save holds: no worker writes these records meanwhile.
+        account_guard = AccountGuard(paths.account, sleep=lambda *_: None)
+        account_guard.acquire(respect_cooldown=False)
+        try:
+            output_guard = OutputGuard(paths.output_dir)
+            output_guard.acquire()
+            try:
+                result = repair_history(paths.record_dir, paths.account)
+                # A moved folder is not recreated just for the records copy.
+                if paths.output_dir.is_dir():
+                    try:
+                        publish_snapshot(paths)
+                    except (MigrationError, OSError, sqlite3.Error, ValueError):
+                        pass  # the next save writes it again
+            finally:
+                output_guard.close()
+        finally:
+            account_guard.close()
+        return result
+
     @staticmethod
     def _prepare_save(snapshot, consents):
         from .storage import initialize_storage, migrate_records, resolve_storage, saved_media_missing
@@ -423,6 +472,10 @@ class ApplicationController(QObject):
                         continue
                     result = self._prepare_save(*payload)
                     result["request"] = payload
+                elif kind == "repair":
+                    if self._closing:
+                        continue
+                    result = self._repair_records(*payload)
                 elif kind == "review":
                     from .recycling import file_signature
                     from .thumbcache import cloud_only
@@ -447,6 +500,9 @@ class ApplicationController(QObject):
                     message = _SETTINGS_ERROR
                 elif kind == "review":
                     message = "저장 확인 중 파일이 바뀌었습니다."
+                elif kind == "repair":
+                    # Lock messages are fixed text; anything else may name a path.
+                    message = str(error) if isinstance(error, ProtectionError) else _REPAIR_ERROR
                 elif isinstance(error, ValueError) and kind in {"prepare", "open"}:
                     message = str(error)
                 else:
@@ -466,6 +522,8 @@ class ApplicationController(QObject):
                 self._error = str(value)
             if kind == "prepare":
                 self._preparing = False
+            if kind == "repair":
+                self._repairing = False
             if kind == "review":
                 self._download.stop()
             self._state_changed()
@@ -491,6 +549,15 @@ class ApplicationController(QObject):
             self._message = self._error = ""
             self._pending_download = (revision, options)
             self._load_library()
+        elif kind == "repair":
+            self._repairing = False
+            self._download.markRepaired()
+            counts = value.get("counts", {})
+            self._error = ""
+            self._message = (f"기록 복구를 마쳤습니다 · 파일 기록 {counts.get('media', 0):,}개, "
+                             f"실행 기록 {counts.get('runs', 0):,}개를 살렸습니다. "
+                             f"손상된 원본은 {value.get('kept', '')}에 보관했습니다.")
+            self._library.refresh()
         elif kind == "review":
             if (self._download.running and not self._download.stopping
                     and value.get("job_id") == self._download.jobId):

@@ -83,7 +83,7 @@ class CatalogDamaged(HistoryError):
     """The records database file itself is damaged; it can be rebuilt."""
 
 
-_DAMAGED_HELP = ("저장 기록 DB가 손상되어 기록 복구가 필요합니다. 앱을 종료한 뒤 기록을 확인해 주세요. "
+_DAMAGED_HELP = ("저장 기록 DB가 손상되어 기록 복구가 필요합니다. 저장 화면의 ‘기록 복구’로 고칠 수 있습니다. "
                  "사진·영상과 중복 방지 기록은 그대로 있습니다.")
 # SQLITE_CORRUPT and SQLITE_NOTADB, including their extended codes.
 _DAMAGED_CODES = {11, 26}
@@ -772,11 +772,6 @@ class HistoryStore:
         return dict(row) if row else None
 
     @_safe
-    def get_metadata_status(self, folder_mode: str, metadata: dict) -> str:
-        row = self.media_record(folder_mode, metadata)
-        return row["metadata_status"] if row else "pending"
-
-    @_safe
     def mark_metadata(self, row: dict, status: str, *, author_status: str | None = None) -> None:
         """Update a local tag operation without changing the original save time."""
         if status not in {"embedded", "failed", "unsupported", "pending"}:
@@ -798,48 +793,6 @@ class HistoryStore:
             if author_status is not None:
                 self._db.execute("UPDATE media SET author_metadata_status=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
                                  (author_status, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
-
-    @_safe
-    def mp4_gif_records(self) -> list[dict]:
-        """Animated GIF tweets that are still stored as MP4 files."""
-        return self._read_rows(
-            "SELECT * FROM media WHERE media_type='animated_gif' AND lower(path) LIKE '%.mp4' "
-            "ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num")
-
-    @_safe
-    def replace_media_file(self, row: dict, path: Path | str, status: str, *, author_status: str) -> bool:
-        """Point one record at its converted file, keeping its save time.
-
-        Only a record still at its old path changes, so a concurrent refresh
-        or download that moved it meanwhile is never overwritten.
-        """
-        if status not in {"embedded", "failed", "unsupported", "pending"}:
-            raise HistoryError(_HISTORY_HELP)
-        if author_status not in {"embedded", "unknown", "error", "pending"}:
-            raise HistoryError(_HISTORY_HELP)
-        candidate = Path(path)
-        # A former output root only authorizes paths already in the catalog,
-        # so also accept the converted file beside such a recorded original.
-        beside_original = (row.get("path") and self.is_media_path(row["path"]) and
-                           Path(os.path.abspath(candidate)).parent == Path(os.path.abspath(row["path"])).parent and
-                           any(self._path_in_root(candidate, root) is not None for root in self.media_roots))
-        if not (beside_original or self.is_media_path(candidate)):
-            raise HistoryError(_HISTORY_HELP)
-        try:
-            candidate = candidate.resolve(strict=True)
-            size = candidate.stat().st_size
-        except OSError:
-            raise HistoryError(_HISTORY_HELP) from None
-        if not candidate.is_file():
-            raise HistoryError(_HISTORY_HELP)
-        actual, filename = str(candidate), candidate.name
-        with self._db:
-            changed = self._db.execute(
-                "UPDATE media SET path=?,filename=?,filesize=?,metadata_status=?,author_metadata_status=?,updated_at=? "
-                "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
-                (actual, filename, size, status, author_status, _now(),
-                 row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row["path"]))
-        return changed.rowcount == 1
 
     def _legacy_row(self, mode: str, tweet_id: str, number: int, *, path="", filesize=None,
                     filename="", media_type="photo", author="", source="archive") -> dict:
@@ -1239,16 +1192,6 @@ class HistoryStore:
             result["stats"] = self._statistics(files, top)
             result["missing"] = self._missing(rows, found)
         return result
-
-    @_safe
-    def merged_accounts(self) -> set[str]:
-        """Other accounts whose records were combined into this one."""
-        row = self._db.execute("SELECT value FROM catalog_meta WHERE key='merged_accounts'").fetchone()
-        try:
-            values = json.loads(row[0]) if row else []
-        except (ValueError, TypeError):
-            return set()
-        return {value for value in values if isinstance(value, str)} if isinstance(values, list) else set()
 
     @_safe
     def present_files(self) -> list[dict]:
@@ -1664,41 +1607,6 @@ class HistoryStore:
             "SELECT substr(liked_before,1,7),COUNT(*) FROM likes WHERE liked_after IS NOT NULL GROUP BY 1")
             if isinstance(month, str) and re.fullmatch(r"\d{4}-\d\d", month))
         return {"authors": authors if top is None else authors[:top], "months": months}
-
-    @_safe
-    def author_samples(self, author: str, limit: int | None = 8) -> list[dict]:
-        """The author's files from their newest tweets, one row per file.
-
-        ``limit=None`` lists every present file of the author.
-        """
-        if (not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author)
-                or (limit is not None and (isinstance(limit, bool) or not isinstance(limit, int)
-                                           or not 1 <= limit <= 100))):
-            raise HistoryError(_HISTORY_HELP)
-        samples, seen = [], set()
-        # Listing every file of a prolific author checks each folder once,
-        # as a library rescan does; each file itself is still checked.
-        own_cache = self._folder_cache is None
-        if own_cache:
-            self._folder_cache = {}
-        try:
-            with closing(self._db.execute(
-                    "SELECT * FROM media WHERE author=? COLLATE NOCASE AND path!='' "
-                    "ORDER BY COALESCE(posted_at,'') DESC,tweet_id DESC,num,folder_mode", (author,))) as rows:
-                for row in rows:
-                    key = self._file_key(row["path"])
-                    if key in seen:
-                        continue
-                    path = self._media_path(row["path"])
-                    if path is not None and path.is_file():
-                        seen.add(key)
-                        samples.append(dict(row))
-                        if len(samples) == limit:
-                            break
-        finally:
-            if own_cache:
-                self._folder_cache = None
-        return samples
 
     @_safe
     def close(self) -> None:
