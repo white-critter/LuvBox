@@ -34,6 +34,21 @@ Dialog {
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
     padding: 24
+    background: Rectangle {
+        color: "#141414"
+        radius: 16
+        border.width: 1
+        border.color: "#2a2a2a"
+    }
+    header: Label {
+        text: dialog.title
+        leftPadding: 24
+        rightPadding: 24
+        topPadding: 20
+        bottomPadding: 4
+        font.pixelSize: 18
+        background: null
+    }
 
     function pref(key, fallback) {
         return app && app.preferences[key] !== undefined ? app.preferences[key] : fallback
@@ -74,20 +89,20 @@ Dialog {
                     font.pixelSize: 17
                     textFormat: Text.PlainText
                 }
-                Switch {
+                FlatSwitch {
                     Layout.fillWidth: true
                     text: "동영상 저장"
                     checked: dialog.pref("include_videos", true) === true
                     onToggled: dialog.app.setPreference("include_videos", checked)
                 }
-                Switch {
+                FlatSwitch {
                     Layout.fillWidth: true
                     text: "움직이는 사진 저장"
                     checked: dialog.pref("include_gifs", true) === true
                     onToggled: dialog.app.setPreference("include_gifs", checked)
                 }
                 Label { text: "폴더 구성"; textFormat: Text.PlainText }
-                ComboBox {
+                FlatCombo {
                     Layout.fillWidth: true
                     model: dialog.folderModes
                     textRole: "label"
@@ -96,13 +111,13 @@ Dialog {
                     Accessible.name: "폴더 구성"
                     onActivated: index => dialog.setOption("folder_mode", dialog.folderModes, index)
                 }
-                Switch {
+                FlatSwitch {
                     Layout.fillWidth: true
                     text: "연결 계정별로 폴더 나누기"
                     checked: dialog.pref("separate_accounts", false) === true
                     onToggled: dialog.app.setPreference("separate_accounts", checked)
                 }
-                Switch {
+                FlatSwitch {
                     Layout.fillWidth: true
                     text: "저장 전 사진 확인"
                     checked: dialog.pref("confirm_each", false) === true
@@ -116,7 +131,7 @@ Dialog {
                     font.pixelSize: 17
                     textFormat: Text.PlainText
                 }
-                ComboBox {
+                FlatCombo {
                     Layout.fillWidth: true
                     model: dialog.gifFormats
                     textRole: "label"
@@ -125,7 +140,7 @@ Dialog {
                     Accessible.name: "움직이는 사진 형식"
                     onActivated: index => dialog.setOption("gif_format", dialog.gifFormats, index)
                 }
-                ComboBox {
+                FlatCombo {
                     Layout.fillWidth: true
                     enabled: dialog.pref("gif_format", "gif") === "gif"
                     model: dialog.gifSizes
@@ -140,9 +155,14 @@ Dialog {
                     id: advancedToggle
                     Layout.topMargin: 12
                     Layout.fillWidth: true
+                    implicitHeight: 40
                     text: checked ? "고급 ▾" : "고급 ▸"
                     checkable: true
                     Accessible.name: "고급 설정"
+                    background: Rectangle {
+                        radius: 10
+                        color: advancedToggle.hovered || advancedToggle.checked ? "#242424" : "#1c1c1c"
+                    }
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
@@ -150,7 +170,7 @@ Dialog {
                     spacing: 10
 
                     Label { text: "목록 확인 범위"; textFormat: Text.PlainText }
-                    ComboBox {
+                    FlatCombo {
                         Layout.fillWidth: true
                         model: dialog.scanModes
                         textRole: "label"
@@ -168,7 +188,7 @@ Dialog {
                         opacity: 0.72
                     }
                     Label { text: "동영상·GIF 크기 제한 (MB)"; textFormat: Text.PlainText }
-                    TextField {
+                    FlatField {
                         Layout.fillWidth: true
                         text: String(dialog.pref("max_video_mb", 200))
                         validator: IntValidator { bottom: 0; top: 1000000 }
@@ -185,7 +205,7 @@ Dialog {
                         textFormat: Text.PlainText
                         opacity: 0.72
                     }
-                    Button {
+                    FlatButton {
                         text: "기록 폴더 열기"
                         onClicked: dialog.app.openRecordsFolder()
                     }
@@ -210,12 +230,12 @@ Dialog {
                         }
                         RowLayout {
                             Layout.fillWidth: true
-                            Button {
+                            FlatButton {
                                 text: "다시 확인"
                                 enabled: dialog.app && !dialog.app.schedule.busy
                                 onClicked: dialog.app.schedule.refresh()
                             }
-                            Button {
+                            FlatButton {
                                 text: "현재 버전으로 변경"
                                 visible: dialog.app && dialog.app.schedule.registered && dialog.app.schedule.enabled && !dialog.app.schedule.current
                                 enabled: dialog.app && !dialog.app.schedule.busy && !dialog.app.schedule.locked && !dialog.app.schedule.running
@@ -224,7 +244,7 @@ Dialog {
                                     scheduleConfirmation.open()
                                 }
                             }
-                            Button {
+                            FlatButton {
                                 text: "예약 해제"
                                 visible: dialog.app && dialog.app.schedule.registered
                                 enabled: dialog.app && !dialog.app.schedule.busy && !dialog.app.schedule.locked
@@ -255,7 +275,8 @@ Dialog {
     }
 
     footer: DialogButtonBox {
-        Button {
+        background: null
+        FlatButton {
             text: "닫기"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
         }
@@ -288,12 +309,12 @@ Dialog {
                 dialog.app.schedule.useCurrentVersion()
         }
         footer: DialogButtonBox {
-            Button {
+            FlatButton {
                 text: dialog.scheduleAction === "remove" ? "예약 해제" : "현재 버전으로 변경"
-                highlighted: true
+                tone: "primary"
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
-            Button {
+            FlatButton {
                 id: scheduleCancel
                 text: "취소"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole

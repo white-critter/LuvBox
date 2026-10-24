@@ -6,6 +6,7 @@ Dialog {
     id: dialog
     property var accounts: null
     property var app: null
+    property int methodIndex: 0
     readonly property var browserSetup: app ? app.browserSetup : null
     readonly property bool unavailable: !accounts || accounts.locked || (app && app.closing)
     readonly property bool setupUnavailable: unavailable || !browserSetup || browserSetup.busy || accounts.busy
@@ -19,6 +20,21 @@ Dialog {
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
     padding: 24
+    background: Rectangle {
+        color: "#141414"
+        radius: 16
+        border.width: 1
+        border.color: "#2a2a2a"
+    }
+    header: Label {
+        text: dialog.title
+        leftPadding: 24
+        rightPadding: 24
+        topPadding: 20
+        bottomPadding: 4
+        font.pixelSize: 18
+        background: null
+    }
 
     function submitToken() {
         if (unavailable || accounts.busy || !tokenField.text.trim())
@@ -58,25 +74,42 @@ Dialog {
             width: scrollView.availableWidth
             spacing: 16
 
-            TabBar {
-                id: methodBar
+            RowLayout {
                 Layout.fillWidth: true
                 enabled: !dialog.unavailable && !dialog.accounts.busy
-                TabButton { text: "브라우저 연결" }
-                TabButton { text: "토큰 입력" }
+                spacing: 8
+                FlatButton {
+                    text: "브라우저 연결"
+                    tone: "nav"
+                    checkable: true
+                    checked: dialog.methodIndex === 0
+                    onClicked: dialog.methodIndex = 0
+                }
+                FlatButton {
+                    text: "토큰 입력"
+                    tone: "nav"
+                    checkable: true
+                    checked: dialog.methodIndex === 1
+                    onClicked: dialog.methodIndex = 1
+                }
             }
 
             ColumnLayout {
                 Layout.fillWidth: true
-                visible: methodBar.currentIndex === 0
+                visible: dialog.methodIndex === 0
                 spacing: 12
 
                 ToolButton {
                     id: setupToggle
                     Layout.fillWidth: true
+                    implicitHeight: 40
                     visible: !dialog.accounts || !dialog.accounts.browserConnecting
                     checkable: true
                     text: checked ? "처음 설치 안내 ▾" : "처음 설치 안내 ▸"
+                    background: Rectangle {
+                        radius: 10
+                        color: setupToggle.hovered || setupToggle.checked ? "#242424" : "#1c1c1c"
+                    }
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
@@ -88,7 +121,7 @@ Dialog {
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                     }
-                    Button {
+                    FlatButton {
                         text: "브라우저에 확장 불러오기"
                         enabled: !dialog.setupUnavailable
                         onClicked: dialog.browserSetup.installExtension()
@@ -99,7 +132,7 @@ Dialog {
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                     }
-                    Button {
+                    FlatButton {
                         text: "확장 관리 열기"
                         enabled: !dialog.setupUnavailable
                         onClicked: dialog.browserSetup.openManager()
@@ -113,12 +146,12 @@ Dialog {
                     Flow {
                         Layout.fillWidth: true
                         spacing: 8
-                        Button {
+                        FlatButton {
                             text: "폴더 경로 복사"
                             enabled: !dialog.setupUnavailable
                             onClicked: dialog.browserSetup.copyExtensionPath()
                         }
-                        Button {
+                        FlatButton {
                             text: "폴더 열기"
                             enabled: !dialog.setupUnavailable
                             onClicked: dialog.browserSetup.openExtensionFolder()
@@ -130,7 +163,7 @@ Dialog {
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                     }
-                    Button {
+                    FlatButton {
                         text: "X 열기"
                         enabled: !dialog.setupUnavailable
                         onClicked: dialog.browserSetup.openX()
@@ -159,11 +192,11 @@ Dialog {
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                 }
-                Button {
+                FlatButton {
                     Layout.fillWidth: true
                     text: dialog.accounts && dialog.accounts.cancelling ? "연결을 취소하는 중…"
                           : dialog.accounts && dialog.accounts.busy ? "연결 기다리는 중…" : "브라우저에서 연결"
-                    highlighted: true
+                    tone: "primary"
                     enabled: !dialog.unavailable && !dialog.accounts.busy && (!dialog.browserSetup || !dialog.browserSetup.busy)
                     onClicked: dialog.accounts.connectBrowser()
                 }
@@ -171,6 +204,7 @@ Dialog {
                 Frame {
                     Layout.fillWidth: true
                     visible: dialog.accounts && dialog.accounts.pairingCode.length > 0
+                    background: Rectangle { color: "#1c1c1c"; radius: 12 }
 
                     ColumnLayout {
                         width: parent.width
@@ -206,12 +240,12 @@ Dialog {
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                         }
-                        Button {
+                        FlatButton {
                             Layout.fillWidth: true
                             visible: dialog.accounts && dialog.accounts.approvalPending
                             enabled: !dialog.unavailable && !dialog.accounts.cancelling
                             text: "이 계정 연결 승인"
-                            highlighted: true
+                            tone: "primary"
                             onClicked: dialog.accounts.approveBrowser()
                         }
                     }
@@ -220,7 +254,7 @@ Dialog {
 
             ColumnLayout {
                 Layout.fillWidth: true
-                visible: methodBar.currentIndex === 1
+                visible: dialog.methodIndex === 1
                 spacing: 12
 
                 Label {
@@ -229,7 +263,7 @@ Dialog {
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                 }
-                TextField {
+                FlatField {
                     id: tokenField
                     Layout.fillWidth: true
                     enabled: !dialog.unavailable && !dialog.accounts.busy
@@ -248,10 +282,10 @@ Dialog {
                     wrapMode: Text.Wrap
                     opacity: 0.72
                 }
-                Button {
+                FlatButton {
                     Layout.fillWidth: true
                     text: "연결 저장"
-                    highlighted: true
+                    tone: "primary"
                     enabled: !dialog.unavailable && !dialog.accounts.busy && tokenField.text.trim().length > 0
                     onClicked: dialog.submitToken()
                 }
@@ -269,14 +303,15 @@ Dialog {
     }
 
     footer: DialogButtonBox {
-        Button {
+        background: null
+        FlatButton {
             text: "현재 계정 연결 해제"
             visible: dialog.accounts && dialog.accounts.connected
             enabled: !dialog.unavailable && !dialog.accounts.busy
             DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
             onClicked: dialog.accounts.disconnectAccount()
         }
-        Button {
+        FlatButton {
             text: dialog.accounts && dialog.accounts.cancelling ? "취소하는 중…"
                   : dialog.accounts && dialog.accounts.browserConnecting ? "연결 취소" : "닫기"
             enabled: !dialog.accounts || !dialog.accounts.cancelling
