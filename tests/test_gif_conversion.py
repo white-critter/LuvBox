@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -153,6 +154,44 @@ class GifConversionTests(unittest.TestCase):
                 raise Stopped()
         with self.assertRaises(Stopped):
             media.convert_mp4_to_gif(self.source, check_stop=stop)
+        self.assert_source_only()
+
+    def test_process_protection_failure_stops_helper_and_preserves_source(self):
+        processes = []
+        start = subprocess.Popen
+
+        def capture(*args, **kwargs):
+            # Keep this disposable helper alive until the failed setup is
+            # retired, even on a machine that converts the tiny fixture fast.
+            process = start([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+            processes.append(process)
+            return process
+
+        with patch.object(media.subprocess, "Popen", side_effect=capture), \
+                patch.object(media, "ChildProcessJob", side_effect=OSError("private Windows failure details")), \
+                self.assertRaises(media.ConversionError) as error:
+            media.convert_mp4_to_gif(self.source)
+        self.assertNotIn("private Windows failure details", str(error.exception))
+        self.assertEqual(len(processes), 1)
+        self.assertIsNotNone(processes[0].poll())
+        self.assert_source_only()
+
+    @unittest.skipUnless(os.name == "nt", "Windows private process jobs")
+    def test_completed_conversion_is_accepted_if_job_assignment_loses_the_exit_race(self):
+        create_job = media.ChildProcessJob
+
+        def after_exit(process):
+            process.wait(timeout=5)
+            return create_job(process)
+
+        with patch.object(media, "ChildProcessJob", side_effect=after_exit):
+            converted = media.convert_mp4_to_gif(self.source)
+        try:
+            with Image.open(converted) as image:
+                self.assertEqual(image.format, "GIF")
+                self.assertEqual(image.size, (80, 64))
+        finally:
+            converted.unlink()
         self.assert_source_only()
 
 

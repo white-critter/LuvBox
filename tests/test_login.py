@@ -109,15 +109,19 @@ class LoginTests(unittest.TestCase):
     def test_encryption_failure_does_not_write_or_replace_session(self):
         self.session.parent.mkdir()
         self.session.write_bytes(b"previous-encrypted-session")
-        with patch("luvbox.login._dpapi", side_effect=ValueError("cannot encrypt")), self.assertRaises(ValueError):
+        with patch("luvbox.login._read_payload", return_value={"version": 1, "cookies": [cookie()]}), \
+                patch("luvbox.login._dpapi", side_effect=ValueError("cannot encrypt")) as encrypt, \
+                self.assertRaises(ValueError):
             login._store_session_cookies([cookie()])
+        self.assertTrue(encrypt.call_args.kwargs["protect"])
         self.assertEqual(self.session.read_bytes(), b"previous-encrypted-session")
         self.assertEqual(list(self.session.parent.iterdir()), [self.session])
 
     def test_atomic_replace_failure_keeps_previous_file_and_removes_temp(self):
         self.session.parent.mkdir()
         self.session.write_bytes(b"previous-encrypted-session")
-        with patch("luvbox.login._dpapi", return_value=b"ciphertext"), \
+        with patch("luvbox.login._read_payload", return_value={"version": 1, "cookies": [cookie()]}), \
+                patch("luvbox.login._dpapi", return_value=b"ciphertext"), \
                 patch("luvbox.login.os.replace", side_effect=PermissionError), self.assertRaises(PermissionError):
             login._store_session_cookies([cookie()])
         self.assertEqual(self.session.read_bytes(), b"previous-encrypted-session")
@@ -171,9 +175,11 @@ class LoginTests(unittest.TestCase):
     def test_public_save_normalizes_encryption_failure_and_preserves_previous_session(self):
         self.session.parent.mkdir()
         self.session.write_bytes(b"previous-encrypted-session")
-        with patch("luvbox.login._dpapi", side_effect=ValueError(SECRET)), \
+        with patch("luvbox.login._read_payload", return_value={"version": 1, "cookies": [cookie()]}), \
+                patch("luvbox.login._dpapi", side_effect=ValueError(SECRET)) as encrypt, \
                 self.assertRaisesRegex(ValueError, "암호화해 저장") as error:
             login.save_auth_token(SECRET)
+        self.assertTrue(encrypt.call_args.kwargs["protect"])
         self.assertNotIn(SECRET, str(error.exception))
         self.assertEqual(self.session.read_bytes(), b"previous-encrypted-session")
         self.assertEqual(list(self.session.parent.iterdir()), [self.session])
@@ -181,7 +187,8 @@ class LoginTests(unittest.TestCase):
     def test_public_save_normalizes_atomic_replace_failure_and_cleans_ciphertext_temp(self):
         self.session.parent.mkdir()
         self.session.write_bytes(b"previous-encrypted-session")
-        with patch("luvbox.login._dpapi", return_value=b"encrypted-fixture"), \
+        with patch("luvbox.login._read_payload", return_value={"version": 1, "cookies": [cookie()]}), \
+                patch("luvbox.login._dpapi", return_value=b"encrypted-fixture"), \
                 patch("luvbox.login.os.replace", side_effect=PermissionError(SECRET)), \
                 self.assertRaisesRegex(ValueError, "암호화해 저장") as error:
             login.save_auth_token(SECRET)
@@ -230,6 +237,35 @@ class AccountSessionTests(unittest.TestCase):
         patch("luvbox.login._dpapi", side_effect=lambda data, **_: bytes(value ^ 0xA5 for value in data)).start()
         self.first = {"user_id": "123", "handle": "First_User", "display_name": "첫 번째 계정"}
         self.second = {"user_id": "456", "handle": "second_user", "display_name": "두 번째 계정"}
+
+    def test_unreadable_existing_accounts_are_never_replaced_by_a_new_login(self):
+        login.save_authenticated_session(SECRET, self.first)
+        previous = self.session.read_bytes()
+        for failure in (PermissionError(SECRET), ValueError(SECRET), UnicodeError(SECRET)):
+            for save in (lambda: login.save_auth_token("manual-token"),
+                         lambda: login.save_authenticated_session("second-token", self.second)):
+                with self.subTest(failure=type(failure).__name__, save=save), \
+                        patch("luvbox.login._read_payload", side_effect=failure), \
+                        patch("luvbox.login._write_payload") as write:
+                    with self.assertRaises(ValueError) as error:
+                        save()
+                    self.assertNotIn(SECRET, str(error.exception))
+                    write.assert_not_called()
+                self.assertEqual(self.session.read_bytes(), previous)
+        self.assertEqual(login.list_accounts()[0]["user_id"], "123")
+
+    def test_invalid_existing_account_collection_is_preserved_for_recovery(self):
+        login.save_authenticated_session(SECRET, self.first)
+        payload = login._read_payload()
+        payload["accounts"] = {"unexpected": "shape"}
+        login._write_payload(payload)
+        previous = self.session.read_bytes()
+        for save in (lambda: login.save_auth_token("manual-token"),
+                     lambda: login.save_authenticated_session("second-token", self.second)):
+            with self.subTest(save=save), self.assertRaises(ValueError):
+                save()
+            self.assertEqual(self.session.read_bytes(), previous)
+        self.assertEqual(list(self.session.parent.iterdir()), [self.session])
 
     def test_connected_accounts_switch_cookies_and_keep_identity_inside_ciphertext(self):
         self.assertEqual(login.save_authenticated_session(SECRET, self.first)["handle"], "first_user")

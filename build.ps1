@@ -31,13 +31,15 @@ if (Test-Path -LiteralPath $target) {
 # A folder build keeps Qt DLLs replaceable; a one-file exe would extract its
 # runtime again on every launch, including each save's worker.
 $buildOriginalPath = $env:PATH
+& $taskPython 'tools\build_snapshot.py' 'record'
+if ($LASTEXITCODE -ne 0) { throw '빌드 입력 기록에 실패했습니다. 소스와 배포 입력을 확인하세요.' }
 try {
     $env:PATH = "$(Join-Path $env:SystemRoot 'System32');$buildOriginalPath"
     & $taskPython -m PyInstaller --noconfirm --clean --windowed --onedir --name $name `
-    --version-file 'build\windows-version.txt' `
-    --icon 'assets\icons\luvbox.ico' --add-data 'assets\icons;assets/icons' `
-    --distpath release --workpath build\onedir `
-    --additional-hooks-dir 'tools\pyinstaller' `
+    --version-file "$PSScriptRoot\build\windows-version.txt" `
+    --icon "$PSScriptRoot\assets\icons\luvbox.ico" --add-data "$PSScriptRoot\assets\icons;assets/icons" `
+    --distpath release --workpath build\onedir --specpath build\spec `
+    --additional-hooks-dir "$PSScriptRoot\tools\pyinstaller" `
     --collect-all gallery_dl --exclude-module imageio_ffmpeg `
     --exclude-module tkinter --exclude-module _tkinter --exclude-module turtle `
     --exclude-module PIL.ImageTk --exclude-module PIL._imagingtk --exclude-module PIL._tkinter_finder `
@@ -45,36 +47,38 @@ try {
     --hidden-import PySide6.QtQuick --hidden-import PySide6.QtQuickControls2 `
     --hidden-import PySide6.QtMultimedia --hidden-import PySide6.QtNetwork `
     --copy-metadata PySide6 --copy-metadata PySide6_Essentials --copy-metadata PySide6_Addons `
-    --copy-metadata shiboken6 --add-data 'assets\qt;assets/qt' `
+    --copy-metadata shiboken6 --add-data "$PSScriptRoot\assets\qt;assets/qt" `
     --copy-metadata pillow --copy-metadata requests --copy-metadata urllib3 `
     --copy-metadata certifi --copy-metadata charset-normalizer --copy-metadata idna `
-    --add-data 'tools\exiftool\runtime;tools/exiftool/runtime' `
-    --add-data 'tools\ffmpeg\runtime;tools/ffmpeg/runtime' `
-    --add-data 'assets\fonts\Pretendard;assets/fonts/Pretendard' `
-    --add-data 'assets\browser-extension\README.md;assets/browser-extension' `
-    --add-data 'assets\browser-extension\PRIVACY.md;assets/browser-extension' `
-    --add-data 'assets\browser-extension\chromium\manifest.json;assets/browser-extension/chromium' `
-    --add-data 'assets\browser-extension\chromium\background.js;assets/browser-extension/chromium' `
-    --add-data 'assets\browser-extension\chromium\profile.js;assets/browser-extension/chromium' `
-    --add-data 'assets\browser-extension\chromium\connect.js;assets/browser-extension/chromium' `
-    --add-data 'assets\browser-extension\chromium\connect.html;assets/browser-extension/chromium' `
-    --add-data 'assets\browser-extension\chromium\connect.css;assets/browser-extension/chromium' `
-    --add-data 'assets\browser-extension\chromium\extension-page.js;assets/browser-extension/chromium' `
-    --add-data 'assets\browser-extension\firefox\manifest.json;assets/browser-extension/firefox' `
-    --add-data 'assets\browser-extension\firefox\background.js;assets/browser-extension/firefox' `
-    --add-data 'assets\browser-extension\firefox\profile.js;assets/browser-extension/firefox' `
-    --add-data 'assets\browser-extension\firefox\connect.js;assets/browser-extension/firefox' `
-    --add-data 'assets\browser-extension\firefox\connect.html;assets/browser-extension/firefox' `
-    --add-data 'assets\browser-extension\firefox\connect.css;assets/browser-extension/firefox' `
-    --add-data 'assets\browser-extension\firefox\extension-page.js;assets/browser-extension/firefox' `
-    --add-data 'docs\browser-login.md;docs' `
-    --add-data 'README.md;.' --add-data 'CHANGELOG.md;.' `
-    --add-data 'LICENSE;.' --add-data 'THIRD_PARTY_NOTICES.md;.' entry.py
+    --add-data "$PSScriptRoot\tools\exiftool\runtime;tools/exiftool/runtime" `
+    --add-data "$PSScriptRoot\tools\ffmpeg\runtime;tools/ffmpeg/runtime" `
+    --add-data "$PSScriptRoot\assets\fonts\Pretendard;assets/fonts/Pretendard" `
+    --add-data "$PSScriptRoot\assets\browser-extension\README.md;assets/browser-extension" `
+    --add-data "$PSScriptRoot\assets\browser-extension\PRIVACY.md;assets/browser-extension" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\manifest.json;assets/browser-extension/chromium" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\background.js;assets/browser-extension/chromium" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\profile.js;assets/browser-extension/chromium" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\connect.js;assets/browser-extension/chromium" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\connect.html;assets/browser-extension/chromium" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\connect.css;assets/browser-extension/chromium" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\extension-page.js;assets/browser-extension/chromium" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\manifest.json;assets/browser-extension/firefox" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\background.js;assets/browser-extension/firefox" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\profile.js;assets/browser-extension/firefox" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\connect.js;assets/browser-extension/firefox" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\connect.html;assets/browser-extension/firefox" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\connect.css;assets/browser-extension/firefox" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\extension-page.js;assets/browser-extension/firefox" `
+    --add-data "$PSScriptRoot\docs\browser-login.md;docs" `
+    --add-data "$PSScriptRoot\README.md;." --add-data "$PSScriptRoot\CHANGELOG.md;." `
+    --add-data "$PSScriptRoot\LICENSE;." --add-data "$PSScriptRoot\THIRD_PARTY_NOTICES.md;." entry.py
     if ($LASTEXITCODE -ne 0) { throw '실행 파일 빌드에 실패했습니다.' }
 }
 finally {
     $env:PATH = $buildOriginalPath
 }
+& $taskPython 'tools\build_snapshot.py' 'seal'
+if ($LASTEXITCODE -ne 0) { throw '빌드 중 소스나 입력이 변경되었습니다. 다시 빌드하세요.' }
 & $taskPython 'tools\check_qt_startup.py' $target (Join-Path $PSScriptRoot "build\qt-startup-$version.json")
 if ($LASTEXITCODE -ne 0) { throw '실제 Qt EXE의 시작 점검에 실패했습니다. ZIP을 만들지 않습니다.' }
 & $taskPython 'tools\check_download_startup.py' $target (Join-Path $PSScriptRoot "build\download-startup-$version.json")

@@ -58,9 +58,9 @@ class BrowserExtensionPackagingTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         build = (root / "build.ps1").read_text(encoding="utf-8-sig")
         data = {}
-        for argument in re.findall(r"--add-data\s+'([^']+)'", build):
+        for _, argument in re.findall(r"--add-data\s+(['\"])(.*?)\1", build):
             source, destination = argument.split(";", 1)
-            data[source.replace("\\", "/")] = destination.replace("\\", "/")
+            data[source.replace("\\", "/").removeprefix("$PSScriptRoot/")] = destination.replace("\\", "/")
         required = [name for name in package_release.SOURCE_FILES
                     if name.startswith("assets/browser-extension/") or name == "docs/browser-login.md"]
         self.assertGreater(len(required), 2)
@@ -98,6 +98,19 @@ class BuildInputPackagingTests(unittest.TestCase):
         self.assertTrue((root / "tools/check_build_inputs.py").is_file())
         # Python test files are shipped by the existing tests/*.py allowlist.
         self.assertTrue((root / "tests/test_build_inputs.py").is_file())
+
+    def test_build_records_inputs_before_pyinstaller_and_seals_before_startup(self):
+        root = Path(__file__).resolve().parents[1]
+        build = (root / "build.ps1").read_text(encoding="utf-8-sig")
+        record = build.index("'tools\\build_snapshot.py' 'record'")
+        freeze = build.index("-m PyInstaller")
+        seal = build.index("'tools\\build_snapshot.py' 'seal'")
+        startup = build.index("'tools\\check_qt_startup.py'")
+        self.assertLess(record, freeze)
+        self.assertLess(freeze, seal)
+        self.assertLess(seal, startup)
+        self.assertIn("--specpath build\\spec", build)
+        self.assertIn("tools/build_snapshot.py", package_release.SOURCE_FILES)
 
     def test_package_refuses_missing_pinned_inputs_before_prepare_or_output(self):
         with tempfile.TemporaryDirectory(prefix="luvbox-package-preflight-") as folder:

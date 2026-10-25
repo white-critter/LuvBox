@@ -228,7 +228,9 @@ def _account_records(payload: dict) -> list[dict]:
 def _existing_accounts() -> list[dict]:
     try:
         return _account_records(_read_payload())
-    except (OSError, ValueError, UnicodeError, TypeError):
+    except FileNotFoundError:
+        # A new login may create an absent store, but must never replace one
+        # whose existing accounts could not be read or decrypted.
         return []
 
 

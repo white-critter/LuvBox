@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from .process_limits import ChildProcessJob
+
 
 CONVERSION_TIMEOUT = 600
 # GIF size presets: longest side in pixels and maximum frames per second.
@@ -55,7 +57,17 @@ def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: floa
         process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.DEVNULL, stderr=errors,
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        job = None
         try:
+            # A forced worker exit skips finally blocks. Its job handle still
+            # closes in Windows, retiring FFmpeg before it can keep writing.
+            try:
+                job = ChildProcessJob(process)
+            except OSError:
+                # A tiny conversion can finish before Windows assigns its
+                # job. Its normal exit result remains authoritative then.
+                if process.poll() is None:
+                    raise
             while True:
                 check_stop()
                 if time.monotonic() >= deadline:
@@ -69,13 +81,17 @@ def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: floa
                     return errors.read(1024 * 1024)
                 time.sleep(0.1)
         finally:
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=2)
+            try:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=2)
+            finally:
+                if job is not None:
+                    job.close()
 
 
 def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | None = None,

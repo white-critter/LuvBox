@@ -529,6 +529,12 @@ ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
                     Label { text: window.galleryModel.total.toLocaleString() + "개"; color: window.mutedColor }
+                    BusyIndicator {
+                        running: window.galleryModel.busy
+                        visible: running
+                        implicitWidth: 24
+                        implicitHeight: 24
+                    }
                     Label { text: window.galleryModel.error; color: window.errorColor; visible: text.length > 0 }
                     Item { Layout.fillWidth: true }
                     FlatCombo {
@@ -561,7 +567,6 @@ ApplicationWindow {
                         visible: gallery.currentIndex >= 0
                         onClicked: previewDialog.open()
                     }
-                    BusyIndicator { running: window.galleryModel.busy; implicitWidth: 24; implicitHeight: 24 }
                 }
 
                 GridView {
@@ -745,16 +750,6 @@ ApplicationWindow {
         }
     }
     Shortcut { sequence: "Ctrl+F"; enabled: window.currentScreen === 1; onActivated: search.forceActiveFocus() }
-    Shortcut {
-        sequence: "Left"
-        enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canPrevious
-        onActivated: window.app.library.previousItem()
-    }
-    Shortcut {
-        sequence: "Right"
-        enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canNext
-        onActivated: window.app.library.nextItem()
-    }
     Dialog {
         id: previewDialog
         objectName: "previewDialog"
@@ -766,6 +761,19 @@ ApplicationWindow {
         height: Math.max(0, parent.height - 24)
         padding: 16
         modal: true
+        focus: true
+        // A modal popup blocks shortcuts owned by the window underneath it.
+        // Keep navigation in this popup's scope, including toolbar focus.
+        Shortcut {
+            sequence: "Left"
+            enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canPrevious
+            onActivated: window.app.library.previousItem()
+        }
+        Shortcut {
+            sequence: "Right"
+            enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canNext
+            onActivated: window.app.library.nextItem()
+        }
         onAboutToShow: {
             detailsVisible = false
             window.stopWheel()

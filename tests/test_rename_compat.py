@@ -137,9 +137,13 @@ class AppDataMigrationTests(unittest.TestCase):
         with patch("luvbox.login._dpapi", return_value=json.dumps(payload).encode()) as decrypt:
             self.assertEqual(login.load_session_cookies()[0]["name"], "auth_token")
         decrypt.assert_called_once_with(b"legacy-ciphertext", protect=False, entropy=login._LEGACY_ENTROPY)
-        with patch("luvbox.login._dpapi", return_value=b"current-ciphertext") as encrypt:
+        with patch("luvbox.login._dpapi", side_effect=[json.dumps(payload).encode(), b"current-ciphertext"]) as encrypt:
             login.save_auth_token("offline-fixture")
         self.assertEqual(session.read_bytes(), login._HEADER + b"current-ciphertext")
+        self.assertEqual(encrypt.call_count, 2)
+        self.assertEqual(encrypt.call_args_list[0].args, (b"legacy-ciphertext",))
+        self.assertEqual(encrypt.call_args_list[0].kwargs,
+                         {"protect": False, "entropy": login._LEGACY_ENTROPY})
         self.assertEqual(encrypt.call_args.kwargs, {"protect": True})
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI")
@@ -152,6 +156,26 @@ class AppDataMigrationTests(unittest.TestCase):
         self.assertEqual(login.load_session_cookies()[0]["value"], "offline-native-fixture")
         self.assertFalse(self.old.exists())
         self.assertEqual((self.new / "session.bin").read_bytes(), login._LEGACY_HEADER + encrypted)
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI")
+    def test_native_relogin_preserves_old_dpapi_account_in_the_current_format(self):
+        self.old.mkdir()
+        cookies = [{"name": "auth_token", "value": "offline-native-fixture", "domain": ".x.com",
+                    "path": "/", "expires": -1, "secure": True, "httpOnly": True}]
+        identity = {"user_id": "123", "handle": "legacy_fixture", "display_name": "Legacy fixture"}
+        payload = {"version": 1, "cookies": cookies, "identity": identity}
+        encrypted = login._dpapi(json.dumps(payload).encode(), protect=True, entropy=login._LEGACY_ENTROPY)
+        (self.old / "session.bin").write_bytes(login._LEGACY_HEADER + encrypted)
+
+        login.save_auth_token("new-native-fixture")
+
+        self.assertFalse(self.old.exists())
+        self.assertTrue((self.new / "session.bin").read_bytes().startswith(login._HEADER))
+        self.assertEqual(login.load_session_cookies()[0]["value"], "new-native-fixture")
+        self.assertEqual([row["user_id"] for row in login.list_accounts()], ["123"])
+        login.select_account("123")
+        self.assertEqual(login.active_account(), identity)
+        self.assertEqual(login.load_session_cookies()[0]["value"], "offline-native-fixture")
 
 
 class UnattendedTransferTests(unittest.TestCase):

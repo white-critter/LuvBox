@@ -1,10 +1,10 @@
-러브박스 (LuvBox) 1.2.0
+러브박스 (LuvBox) 1.2.1
 
 좋아요한 사진과 영상을 내 폴더에 저장하고 갤러리에서 보는 Windows 앱입니다.
 
 실행
 
-ZIP 전체를 푼 뒤 LuvBox-1.2.0 폴더의 LuvBox-1.2.0.exe를 실행하세요.
+ZIP 전체를 푼 뒤 LuvBox-1.2.1 폴더의 LuvBox-1.2.1.exe를 실행하세요.
 같은 폴더의 _internal을 함께 보관하세요. EXE만 옮기면 실행되지 않습니다.
 앱은 저장 화면에서 시작합니다.
 
@@ -82,4 +82,4 @@ Firefox 임시 확장은 브라우저를 다시 시작하면 다시 불러와야
 테마는 블랙·레드 하나입니다. CSV·통계·일괄 파일 관리 메뉴는 기본 화면에 없습니다.
 소스와 라이선스는 배포 ZIP에 함께 있습니다.
 검사와 보안 변경의 자세한 내용은 동봉 소스의 docs/verification.md,
-docs/comprehensive-review-20261024.md, docs/security-review-20261024.md를 참고하세요.
+docs/development.md, docs/security-review.md를 참고하세요.

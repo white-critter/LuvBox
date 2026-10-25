@@ -1,13 +1,13 @@
-"""Private Windows job for a metadata helper and any children it launches."""
+"""Private Windows jobs for local helpers and any children they launch."""
 
 import ctypes
 import os
 
 
-class MetadataJob:
-    """Bound helper memory; closing the job also retires its remaining children."""
+class ChildProcessJob:
+    """Retire a helper and its children when their owning process exits."""
 
-    def __init__(self, process, memory_bytes=512 * 1024 * 1024):
+    def __init__(self, process, memory_bytes=None):
         self.handle = None
         if os.name != "nt":
             return
@@ -43,8 +43,10 @@ class MetadataJob:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
             limits = ExtendedLimits()
-            limits.basic.flags = 0x2000 | 0x100 | 0x200  # kill on close; process and aggregate memory
-            limits.process_memory = limits.job_memory = memory_bytes
+            limits.basic.flags = 0x2000  # kill on close
+            if memory_bytes is not None:
+                limits.basic.flags |= 0x100 | 0x200  # process and aggregate memory
+                limits.process_memory = limits.job_memory = memory_bytes
             if not kernel.SetInformationJobObject(handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
                 raise ctypes.WinError(ctypes.get_last_error())
             if not kernel.AssignProcessToJobObject(handle, int(process._handle)):
@@ -58,3 +60,10 @@ class MetadataJob:
         if self.handle is not None:
             handle, self.handle = self.handle, None
             self.kernel.CloseHandle(handle)
+
+
+class MetadataJob(ChildProcessJob):
+    """Retain the metadata writer's existing per-process and aggregate memory cap."""
+
+    def __init__(self, process, memory_bytes=512 * 1024 * 1024):
+        super().__init__(process, memory_bytes)

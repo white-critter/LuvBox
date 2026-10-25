@@ -22,12 +22,13 @@ ROOT = Path(__file__).resolve().parents[1]
 def check_scene(*, baseline=False, screenshots=None, features=False):
     sys.path.insert(0, str(ROOT))
     from PIL import Image, ImageDraw
-    from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPointF, QUrl, qInstallMessageHandler
+    from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPointF, Qt, QUrl, qInstallMessageHandler
     from PySide6.QtGui import QFont, QFontDatabase, QGuiApplication, QWindow
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuick import QQuickItem
     from PySide6.QtQuickControls2 import QQuickStyle
     from PySide6.QtMultimedia import QMediaPlayer
+    from PySide6.QtTest import QTest
     from shiboken6 import delete, isValid
     from luvbox.app_settings import default_settings
     from luvbox.qt_app import ApplicationController
@@ -280,7 +281,63 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                 if find("galleryGrid").property("currentIndex") != 0:
                     raise AssertionError("Preview navigation and the gallery selection diverged")
                 report["checks"].append("preview-adjacent-buttons-and-zoom-reset")
+
+                # Exercise the real key delivery path, including focus on a
+                # popup child and a toolbar button; emitting a clicked signal
+                # cannot detect keys falling through to the grid underneath.
+                window.requestActivate()
+                settle()
+                dialog.property("contentItem").forceActiveFocus()
+                QTest.keyClick(window, Qt.Key.Key_Right)
+                wait(lambda: not library.busy and library.selectedIndex == 1 and media.property("ready"),
+                     "right arrow in the preview")
+                zoom.forceActiveFocus()
+                QTest.keyClick(window, Qt.Key.Key_Left)
+                wait(lambda: not library.busy and library.selectedIndex == 0 and media.property("ready"),
+                     "left arrow with toolbar focus")
+                QTest.keyClick(window, Qt.Key.Key_Left)
+                settle()
+                if library.selectedIndex != 0:
+                    raise AssertionError("Left arrow left the first filtered photo")
+                QTest.keyClick(window, Qt.Key.Key_Right)
+                wait(lambda: not library.busy and library.selectedIndex == 1, "last photo by keyboard")
+                QTest.keyClick(window, Qt.Key.Key_Right)
+                settle()
+                if library.selectedIndex != 1:
+                    raise AssertionError("Right arrow left the final filtered photo")
+                invoke(find("previewDetailsButton"), "clicked")
+                body_text = next(item for item in find("previewBodyScroll").findChildren(QQuickItem)
+                                 if item.property("readOnly") is True)
+                body_text.forceActiveFocus()
+                QTest.keyClick(window, Qt.Key.Key_Left)
+                settle()
+                if library.selectedIndex != 1 or not body_text.property("activeFocus"):
+                    raise AssertionError("A body-text cursor key navigated to another photo")
+                invoke(find("previewDetailsButton"), "clicked")
+                report["checks"].append("preview-real-arrow-keys-focus-and-boundaries")
                 invoke(dialog, "close")
+
+                window.setProperty("currentScreen", 1)
+                grid = find("galleryGrid")
+                grid.setProperty("currentIndex", 0)
+                for width, height in ((680, 480), (1080, 760), (1600, 1000)):
+                    window.resize(width, height)
+                    settle(.1)
+                    density = find("thumbSizeChoice")
+                    preview_button = next(item for item in window.findChildren(QQuickItem)
+                                          if item.property("text") == "미리보기" and item.property("down") is not None)
+                    for busy in (True, False):
+                        library.model._busy = busy
+                        library.model.changed.emit()
+                        settle()
+                        right_edge = density.mapToScene(QPointF(density.width(), 0)).x()
+                        preview_right = preview_button.mapToScene(QPointF(preview_button.width(), 0)).x()
+                        if abs(right_edge - preview_right) > 1:
+                            raise AssertionError(f"Gallery filter buttons do not align at {width}px: {right_edge}, {preview_right}")
+                        bounds(preview_button, "gallery preview button")
+                    capture(f"gallery-toolbar-{width}")
+                report["checks"].append("gallery-toolbar-right-edges-aligned")
+                window.setProperty("currentScreen", 0)
 
             controller._review = {"id": "synthetic-review", "url": QUrl.fromLocalFile(str(photo_path)).toString(),
                                   "filename": "landscape.png", "author": "example", "media_type": "photo"}
@@ -451,16 +508,18 @@ class PreviewSizeTests(unittest.TestCase):
         self.assertGreater(report["gallery"]["1080x760"]["canvas"][1], 420)
 
     def test_saved_details_and_preview_controls_work_in_the_real_window(self):
-        environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
-                           PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scene", "--features"],
-                                cwd=ROOT, env=environment, capture_output=True, text=True,
-                                encoding="utf-8", errors="replace", timeout=55,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        report = json.loads(result.stdout)
-        self.assertEqual(len(report["checks"]), 8)
-        self.assertEqual(report["qml_errors"], [])
+        for scale in ("1", "1.5"):
+            with self.subTest(scale=scale):
+                environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
+                                   QT_SCALE_FACTOR=scale, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+                result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scene", "--features"],
+                                        cwd=ROOT, env=environment, capture_output=True, text=True,
+                                        encoding="utf-8", errors="replace", timeout=55,
+                                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                report = json.loads(result.stdout)
+                self.assertEqual(len(report["checks"]), 10)
+                self.assertEqual(report["qml_errors"], [])
 
 
 if __name__ == "__main__":

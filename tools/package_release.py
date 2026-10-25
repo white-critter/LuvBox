@@ -19,25 +19,23 @@ from luvbox import __version__  # noqa: E402
 from tools.check_build_inputs import require_inputs  # noqa: E402
 from tools.qt.prepare_sources import release_files as qt_source_files
 from tools.check_download_startup import validate_report as validate_download_report
+from tools.build_snapshot import require_snapshot
 
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
     "tools/draw_icon.py",
     "entry.py", "setup.ps1", "build.ps1", "run.bat", "tools/windows_version.py", "tools/check_qt_startup.py", "tools/package_browser_extension.py", ".gitattributes", "requirements.txt",
     "requirements-dev.txt", "requirements-lock.txt", "requirements-qt.txt", "README.md", "WINDOWS_CONTINUE.md", "LICENSE",
-    "CHANGELOG.md", "docs/ui-redesign-plan.md", "tools/qt_gallery_preview.py",
+    "CHANGELOG.md", "tools/qt_gallery_preview.py",
     "tools/pyinstaller/hook-PySide6.py", "tools/pyinstaller/hook-PySide6.QtQml.py",
     "tools/pyinstaller/hook-PySide6.QtGui.py",
     "tools/pyinstaller/hook-ssl.py",
     "tools/check_download_startup.py",
-    "docs/security-review-20261024.md", "docs/comprehensive-review-20261024.md",
-    "docs/login-ux-1.1.8.md",
-    "docs/review-1.2.0.md",
     "tools/qt/prepare_sources.py", "tools/qt/sources.json", "tools/qt/README.md",
     "assets/qt/licenses/GPL-2.0-only.txt", "assets/qt/licenses/GPL-3.0-only.txt",
     "assets/qt/licenses/LGPL-3.0-only.txt",
     "THIRD_PARTY_NOTICES.md", "LuvBox.code-workspace",
-    "tools/exiftool/download.py", "tools/package_release.py", "tools/check_build_inputs.py",
+    "tools/exiftool/download.py", "tools/package_release.py", "tools/check_build_inputs.py", "tools/build_snapshot.py",
     "tools/benchmark_history.py", "tools/benchmark_preview.py",
     "tests/browser_bridge_extension_harness.js",
     "tools/ffmpeg/build.py", "tools/ffmpeg/README.md", "tools/ffmpeg/manifest.json",
@@ -77,6 +75,32 @@ def _plain_entry(path: Path):
     if not (stat.S_ISREG(details.st_mode) or stat.S_ISDIR(details.st_mode)):
         raise ValueError("Release inputs must be regular files or directories")
     return details
+
+
+def project_file(path: Path, root: Path):
+    """Reject redirects in an allowlisted project's file or its parent path."""
+    if not path.is_relative_to(root) or ".." in path.relative_to(root).parts:
+        raise ValueError("Release inputs must be inside the project")
+    for parent in (path, *path.parents):
+        _plain_entry(parent)
+        if parent == root:
+            break
+
+
+def project_source_files(root: Path) -> list[Path]:
+    paths = {root / name for name in SOURCE_FILES}
+    paths.update(root / name for name in (
+        "docs/사용안내.txt", "docs/development.md", "docs/verification.md",
+        "docs/performance.md", "docs/security-review.md",
+    ))
+    for folder, pattern in (("luvbox", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):
+        paths.update((root / folder).glob(pattern))
+    paths.update((root / "assets/qt").rglob("*.qml"))
+    for path in paths:
+        project_file(path, root)
+        if not path.is_file():
+            raise ValueError("Release source inputs must be regular files")
+    return sorted(paths)
 
 
 def _collect_manifest(toc: Path, application_name: str) -> dict[Path, Path]:
@@ -213,11 +237,13 @@ def package() -> None:
     executable = application / f"LuvBox-{__version__}.exe"
     if not executable.is_file():
         raise FileNotFoundError("Build the application first")
+    require_snapshot(executable, ROOT)
     _require_startup_report(executable)
     manifest = _collect_manifest(ROOT / "build/onedir" / application.name / "COLLECT-00.toc", application.name)
     application_files = _verified_files(application, manifest)
     runtimes = {component: _runtime_files(manifest, component) for component in ("ffmpeg", "exiftool")}
     qt_materials = qt_source_files()
+    source_files = project_source_files(ROOT)
     destination = output / f"LuvBox-{__version__}.zip"
     descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".zip", dir=output)
     os.close(descriptor)
@@ -241,22 +267,8 @@ def package() -> None:
             archive.write(ROOT / "tools/ffmpeg/ffmpeg-7.1.tar.xz", "source/tools/ffmpeg/ffmpeg-7.1.tar.xz")
             for path in runtimes["ffmpeg"]:
                 archive.write(path, "source/tools/ffmpeg/runtime/" + path.relative_to(ROOT / "tools/ffmpeg/runtime").as_posix())
-            for name in SOURCE_FILES:
-                archive.write(ROOT / name, "source/" + name)
-            for path in sorted((ROOT / "assets/qt").rglob("*.qml")):
-                if path.is_file():
-                    _plain_entry(path)
-                    archive.write(path, "source/" + path.relative_to(ROOT).as_posix())
-            # Ship the current guide and verification, without obsolete reports.
-            for name in (
-                "docs/사용안내.txt", "docs/development.md", "docs/verification.md",
-                "docs/performance.md", "docs/security-review.md",
-            ):
-                archive.write(ROOT / name, "source/" + name)
-            for folder, pattern in (("luvbox", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):
-                for path in sorted((ROOT / folder).glob(pattern)):
-                    if path.is_file():
-                        archive.write(path, "source/" + path.relative_to(ROOT).as_posix())
+            for path in source_files:
+                archive.write(path, "source/" + path.relative_to(ROOT).as_posix())
             # The GPL downloader's corresponding Python sources are explicit
             # and easy to find; no caches, browser profile, or workspace scans.
             gallery = Path(importlib.metadata.distribution("gallery_dl").locate_file("gallery_dl"))
@@ -277,6 +289,9 @@ def package() -> None:
             python_license = python_root / "LICENSE.txt"
             if python_license.is_file():
                 archive.write(python_license, "licenses/Python-LICENSE.txt")
+        # Compression can outlast a concurrent source edit or runtime rebuild.
+        # Keep the previous ZIP unless the exact sealed inputs still exist.
+        require_snapshot(executable, ROOT)
         os.replace(staged, destination)
     finally:
         staged.unlink(missing_ok=True)
