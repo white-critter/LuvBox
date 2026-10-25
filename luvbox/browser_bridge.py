@@ -11,6 +11,7 @@ credential. This module does not save credentials or make outbound requests.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections import deque
 import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -27,6 +28,9 @@ import webbrowser
 
 
 _MAX_PAYLOAD = 8192
+_MAX_PROGRESS = 128
+_PROGRESS_STAGES = frozenset({"extension_ready", "checking_account", "login_required",
+                              "account_changed", "account_error", "awaiting_approval"})
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
 _USER_ID = re.compile(r"[1-9][0-9]{0,31}\Z")
 _EXTENSION_HOST = re.compile(r"[a-zA-Z0-9-]{1,128}\Z")
@@ -37,7 +41,7 @@ _PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <main><h1>LuvBox에 X 계정 연결</h1>
 <p>현재 브라우저의 X 로그인을 사용합니다. 연결할 계정은 다음 화면에서 확인합니다.</p>
 <p id="extension-status">LuvBox 연결 확장을 확인하고 있습니다. 확장이 없다면 앱에서
-‘연결 확장 설치 안내’를 열어 안내에 따라 설치한 다음, 앱에서 연결을 다시 시작해 주세요.</p>
+‘확장 설치·연결 도움말’을 열어 안내에 따라 설치하세요. 이미 설치했다면 같은 브라우저 프로필인지 확인하고 확장을 새로고침하세요.</p>
 <p>브라우저의 비밀번호는 LuvBox에 전달되지 않습니다. 연결을 승인하면 X 로그인 쿠키와
 계정 정보가 이 컴퓨터의 LuvBox에 전달됩니다. 창을 닫거나 앱에서 취소할 수 있습니다.</p>
 </main></body></html>""".encode("utf-8")
@@ -93,8 +97,8 @@ def _session(payload: object) -> BrowserSession:
     return BrowserSession(token, handle.lower(), user_id, display_name)
 
 
-def _derive_key(secret: str, port: int, purpose: str) -> bytes:
-    endpoint = f"http://127.0.0.1:{port}/session"
+def _derive_key(secret: str, port: int, purpose: str, *, path: str = "/session") -> bytes:
+    endpoint = f"http://127.0.0.1:{port}{path}"
     return hashlib.sha256(f"LuvBox browser bridge {purpose} v1\0{endpoint}\0{secret}".encode("ascii")).digest()
 
 
@@ -104,7 +108,7 @@ def _decode(value: object, *, maximum: int) -> bytes:
     return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
 
 
-def _decrypt(payload: object, secret: str, port: int) -> BrowserSession:
+def _decrypt_payload(payload: object, secret: str, port: int, *, path: str = "/session") -> object:
     if (not isinstance(payload, dict) or payload.get("version") != 1 or
             isinstance(payload.get("version"), bool) or
             set(payload) != {"version", "nonce", "ciphertext", "proof"}):
@@ -117,12 +121,27 @@ def _decrypt(payload: object, secret: str, port: int) -> BrowserSession:
     # An independent, constant-time HMAC check precedes the pinned library's
     # pure-Python GCM verification (which compares its tag as a Python list).
     # It also prevents unauthenticated requests from spending time in AES.
-    expected = hmac.digest(_derive_key(secret, port, "proof"), nonce + cipher, "sha256")
+    expected = hmac.digest(_derive_key(secret, port, "proof", path=path), nonce + cipher, "sha256")
     if not hmac.compare_digest(proof, expected):
         raise ValueError("invalid encrypted bridge payload")
     from gallery_dl.aes import aes_gcm_decrypt_and_verify_bytes
-    raw = aes_gcm_decrypt_and_verify_bytes(cipher[:-16], _derive_key(secret, port, "encryption"), cipher[-16:], nonce)
-    return _session(json.loads(raw))
+    raw = aes_gcm_decrypt_and_verify_bytes(
+        cipher[:-16], _derive_key(secret, port, "encryption", path=path), cipher[-16:], nonce)
+    return json.loads(raw)
+
+
+def _decrypt(payload: object, secret: str, port: int) -> BrowserSession:
+    return _session(_decrypt_payload(payload, secret, port))
+
+
+def _decrypt_progress(payload: object, secret: str, port: int) -> tuple[int, str]:
+    progress = _decrypt_payload(payload, secret, port, path="/progress")
+    if (not isinstance(progress, dict) or set(progress) != {"version", "stage", "sequence"} or
+            type(progress["version"]) is not int or progress["version"] != 1 or
+            type(progress["sequence"]) is not int or not 1 <= progress["sequence"] <= _MAX_PROGRESS or
+            not isinstance(progress["stage"], str) or progress["stage"] not in _PROGRESS_STAGES):
+        raise ValueError("invalid bridge progress")
+    return progress["sequence"], progress["stage"]
 
 
 class BrowserBridge:
@@ -148,6 +167,8 @@ class BrowserBridge:
         self._thread = None
         self._deadline = 0.0
         self._result = None
+        self._progress = deque()
+        self._progress_sequence = 0
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._closed = False
@@ -239,7 +260,8 @@ class BrowserBridge:
                     self._reply(200, _PAGE, "text/html; charset=utf-8")
 
             def do_POST(self):
-                if not self._valid_request("/session"):
+                is_progress = self.path == "/progress"
+                if not self._valid_request("/progress" if is_progress else "/session"):
                     return
                 origins = self.headers.get_all("Origin", [])
                 if len(origins) != 1 or not _extension_origin(origins[0]):
@@ -247,7 +269,7 @@ class BrowserBridge:
                     return
                 lengths = self.headers.get_all("Content-Length", [])
                 if (len(lengths) != 1 or not re.fullmatch(r"[0-9]{1,5}", lengths[0]) or
-                        not 0 < int(lengths[0]) <= _MAX_PAYLOAD or
+                        not 0 < int(lengths[0]) <= (1024 if is_progress else _MAX_PAYLOAD) or
                         self.headers.get_all("Content-Type", []) != ["application/json"]):
                     self._reply(400)
                     return
@@ -255,7 +277,8 @@ class BrowserBridge:
                     raw = self.rfile.read(int(lengths[0]))
                     if len(raw) != int(lengths[0]):
                         raise ValueError("short payload")
-                    result = _decrypt(json.loads(raw), bridge._secret, bridge._server.server_port)
+                    decrypt = _decrypt_progress if is_progress else _decrypt
+                    result = decrypt(json.loads(raw), bridge._secret, bridge._server.server_port)
                 except (ValueError, UnicodeError, TimeoutError, OSError):
                     self._reply(400)
                     return
@@ -264,12 +287,21 @@ class BrowserBridge:
                             time.monotonic() >= bridge._deadline):
                         self._reply(409)
                         return
-                    bridge._result = result
-                    bridge._secret = ""
+                    if is_progress:
+                        sequence, stage = result
+                        if sequence <= bridge._progress_sequence:
+                            self._reply(409)
+                            return
+                        bridge._progress_sequence = sequence
+                        bridge._progress.append(stage)
+                    else:
+                        bridge._result = result
+                        bridge._secret = ""
                 try:
                     self._reply(200, b'{"ok":true}')
                 finally:
-                    bridge._event.set()
+                    if not is_progress:
+                        bridge._event.set()
 
         class Server(HTTPServer):
             allow_reuse_address = False
@@ -320,18 +352,37 @@ class BrowserBridge:
             self.close()
             raise BrowserBridgeError("기본 브라우저를 열지 못했습니다. 기본 브라우저 설정을 확인해 주세요.")
 
-    def wait(self, *, cancel=None) -> BrowserSession:
+    def wait(self, *, cancel=None, on_progress=None) -> BrowserSession:
+        """Wait for explicit consent, reporting authenticated fixed stages only.
+
+        Progress never extends the attempt, saves a session or constitutes
+        consent. Callbacks run on this waiting thread, outside server locks.
+        Older extensions can still deliver a v1 session without progress.
+        """
         self.start()
+        def report_progress():
+            with self._lock:
+                stages = list(self._progress)
+                self._progress.clear()
+            if on_progress is not None:
+                for stage in stages:
+                    if cancel is not None and cancel.is_set():
+                        break
+                    on_progress(stage)
         try:
             while True:
                 if cancel is not None and cancel.is_set():
                     raise BrowserBridgeError("브라우저 연결을 취소했습니다.")
                 if self._closed:
                     raise BrowserBridgeError("브라우저 연결을 취소했습니다.")
+                report_progress()
                 if self._event.wait(0.05):
                     if cancel is not None and cancel.is_set():
                         raise BrowserBridgeError("브라우저 연결을 취소했습니다.")
                     if self._result is not None:
+                        report_progress()
+                        if self._closed or (cancel is not None and cancel.is_set()):
+                            raise BrowserBridgeError("브라우저 연결을 취소했습니다.")
                         return self._result
                 if time.monotonic() >= self._deadline:
                     raise BrowserBridgeError("브라우저 연결 시간이 지났습니다. 확장 설치를 확인한 뒤 다시 연결해 주세요.")
@@ -342,6 +393,8 @@ class BrowserBridge:
         self._closed = True
         self._event.set()
         self._secret = ""
+        with self._lock:
+            self._progress.clear()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=1.1)
         if self._server is not None:

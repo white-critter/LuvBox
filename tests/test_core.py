@@ -834,8 +834,8 @@ class CoreTests(unittest.TestCase):
     def test_diagnostics_match_whole_terms(self):
         from luvbox.core import _safe_diagnostic
 
-        for raw in ("AuthRequired: authenticated cookies needed", "AuthorizationError: Account temporarily locked",
-                    "Invalid login credentials", "'401 Unauthorized'", "403 Forbidden", "cookie expired"):
+        for raw in ("AuthRequired: authenticated cookies needed",
+                    "Invalid login credentials", "'401 Unauthorized'", "cookie expired"):
             with self.subTest(raw=raw):
                 self.assertIn("‘X 연결’", _safe_diagnostic(raw, "managed"))
         for raw in ("1849: Missing 'author' data", "Failed to download 1429_1.jpg",
@@ -846,6 +846,10 @@ class CoreTests(unittest.TestCase):
                 self.assertNotIn("요청 한도", message)
                 self.assertNotIn("찾지 못했습니다", message)
         self.assertIn("요청 한도", _safe_diagnostic("HTTP 429 Too Many Requests", "managed"))
+        self.assertIn("접근 권한", _safe_diagnostic("403 Forbidden", "managed"))
+        self.assertNotIn("만료", _safe_diagnostic("403 Forbidden", "managed"))
+        self.assertIn("추가 인증", _safe_diagnostic("AuthorizationError: Account temporarily locked", "managed"))
+        self.assertNotIn("만료", _safe_diagnostic("AuthorizationError: Account temporarily locked", "managed"))
 
     def test_gallery_hook_change_stops_before_any_request(self):
         from gallery_dl.extractor.twitter import TwitterExtractor

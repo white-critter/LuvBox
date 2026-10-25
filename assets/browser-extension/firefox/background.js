@@ -4,6 +4,11 @@ const api = globalThis.browser || globalThis.chrome;
 const pairings = new Map();
 const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 const publicError = "연결하지 못했습니다. X 로그인과 앱의 연결 대기 상태를 확인한 뒤 다시 시도해 주세요.";
+const progressStages = new Set(["extension_ready", "checking_account", "login_required",
+  "account_changed", "account_error", "awaiting_approval"]);
+const errorCode = error => ["login_required", "account_changed", "account_error", "expired"].includes(error?.code)
+  ? error.code : "account_error";
+function failure(code) { const error = new Error(); error.code = code; return error; }
 
 function pairingSource(sender) {
   if (sender.frameId !== 0 || !sender.tab || !Number.isInteger(sender.tab.id) || typeof sender.url !== "string") throw new Error();
@@ -25,7 +30,7 @@ async function currentPairing(message, sender) {
   const pairing = pairings.get(tab.id);
   if (!pairing || Date.now() > pairing.expires) {
     pairings.delete(tab.id);
-    throw new Error();
+    throw failure("expired");
   }
   return {pairing, tabId: tab.id};
 }
@@ -47,28 +52,51 @@ async function sessionCookies(storeId) {
       !["x.com", ".x.com"].includes(auth.domain) ||
       !["x.com", ".x.com"].includes(twid.domain) ||
       !auth.secure || !auth.httpOnly || !auth.value || auth.value.length > 4096 ||
-      /[\x00-\x20\x7f-\uffff",;\\]/.test(auth.value)) throw new Error();
-  return {auth_token: auth.value, user_id: userId(twid.value), storeId};
+      /[\x00-\x20\x7f-\uffff",;\\]/.test(auth.value)) throw failure("login_required");
+  let id;
+  try { id = userId(twid.value); } catch { throw failure("login_required"); }
+  return {auth_token: auth.value, user_id: id, storeId};
 }
 
 function encoded(bytes) {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function encryptSession(pairing) {
+async function encryptPayload(pairing, payload, path) {
   const encoder = new TextEncoder();
-  const endpoint = `http://127.0.0.1:${pairing.port}/session`;
+  const endpoint = `http://127.0.0.1:${pairing.port}${path}`;
   const derive = purpose => crypto.subtle.digest("SHA-256", encoder.encode(
     `LuvBox browser bridge ${purpose} v1\0${endpoint}\0${pairing.secret}`));
   const encryptionKey = await crypto.subtle.importKey("raw", await derive("encryption"), "AES-GCM", false, ["encrypt"]);
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const cipher = new Uint8Array(await crypto.subtle.encrypt({name: "AES-GCM", iv: nonce, tagLength: 128},
-    encryptionKey, encoder.encode(JSON.stringify(pairing.session))));
+    encryptionKey, encoder.encode(JSON.stringify(payload))));
   const proofKey = await crypto.subtle.importKey("raw", await derive("proof"), {name: "HMAC", hash: "SHA-256"}, false, ["sign"]);
   const signed = new Uint8Array(nonce.length + cipher.length);
   signed.set(nonce); signed.set(cipher, nonce.length);
   const proof = new Uint8Array(await crypto.subtle.sign("HMAC", proofKey, signed));
   return {version: 1, nonce: encoded(nonce), ciphertext: encoded(cipher), proof: encoded(proof)};
+}
+
+async function encryptSession(pairing) {
+  return encryptPayload(pairing, pairing.session, "/session");
+}
+
+function reportProgress(pairing, stage) {
+  if (!progressStages.has(stage) || (pairing.sequence || 0) >= 128) return Promise.resolve();
+  const sequence = pairing.sequence = (pairing.sequence || 0) + 1;
+  // Serial delivery keeps stages ordered without retaining any cookie in the
+  // progress payload. Older apps can reject /progress and still accept /session.
+  pairing.progress = (pairing.progress || Promise.resolve()).then(async () => {
+    if (Date.now() > pairing.expires) return;
+    const envelope = await encryptPayload(pairing, {version: 1, stage, sequence}, "/progress");
+    await fetch(`http://127.0.0.1:${pairing.port}/progress`, {
+      method: "POST", mode: "cors", cache: "no-store", credentials: "omit", redirect: "error",
+      referrerPolicy: "no-referrer", signal: AbortSignal.timeout(1500),
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify(envelope)
+    });
+  }).catch(() => {});
+  return pairing.progress;
 }
 
 async function inspectAccount(pairing) {
@@ -83,21 +111,29 @@ async function inspectAccount(pairing) {
     const store = stores.find(candidate => candidate.tabIds.includes(tab.id));
     const storeId = tab.cookieStoreId ?? store?.id;
     const start = await sessionCookies(storeId);
-    if (start.auth_token !== before.auth_token || start.user_id !== before.user_id) throw new Error();
+    if (start.auth_token !== before.auth_token || start.user_id !== before.user_id) throw failure("account_changed");
     const deadline = Date.now() + 25000;
     let profile;
     while (Date.now() < deadline && Date.now() < pairing.expires) {
       try {
         const current = await api.tabs.get(tab.id);
-        if (current.url && new URL(current.url).origin !== "https://x.com") throw new Error();
+        if (current.url) {
+          const url = new URL(current.url);
+          if (url.origin !== "https://x.com") throw failure("account_error");
+          if (["/i/flow/login", "/login", "/account/access"].some(route => url.pathname.startsWith(route)))
+            throw failure("login_required");
+        }
         profile = await api.tabs.sendMessage(tab.id, {type: "luvbox-profile"});
         if (profile?.ready && /^[A-Za-z0-9_]{1,15}$/.test(profile.username)) break;
-      } catch { /* The new tab may still be loading its content script. */ }
+      } catch (error) {
+        if (error?.code) throw error;
+        // The new tab may still be loading its content script.
+      }
       await wait(250);
     }
     if (!profile?.ready) throw new Error();
     const after = await sessionCookies(storeId);
-    if (start.auth_token !== after.auth_token || start.user_id !== after.user_id) throw new Error();
+    if (start.auth_token !== after.auth_token || start.user_id !== after.user_id) throw failure("account_changed");
     pairing.session = {version: 1, auth_token: after.auth_token, user_id: after.user_id,
       username: profile.username, display_name: profile.display_name || ""};
     pairing.storeId = storeId;
@@ -121,6 +157,7 @@ async function dispatch(message, sender) {
     // Consent belongs to an extension-owned page. A localhost page must never
     // be able to call DOM .click() or overlay the credential approval buttons.
     await api.tabs.update(tabId, {url: api.runtime.getURL("connect.html")});
+    await reportProgress(pairing, "extension_ready");
     return {ok: true};
   }
   const {pairing, tabId} = await currentPairing(message, sender);
@@ -129,7 +166,16 @@ async function dispatch(message, sender) {
     if (pairing.busy) throw new Error();
     pairing.busy = true;
     pairing.session = undefined;
-    try { return await inspectAccount(pairing); }
+    try {
+      await reportProgress(pairing, "checking_account");
+      const result = await inspectAccount(pairing);
+      await reportProgress(pairing, "awaiting_approval");
+      return result;
+    } catch (error) {
+      const code = errorCode(error);
+      await reportProgress(pairing, code === "expired" ? "account_error" : code);
+      throw failure(code);
+    }
     finally { pairing.busy = false; }
   }
   if (message.type === "luvbox-connect") {
@@ -137,8 +183,8 @@ async function dispatch(message, sender) {
     pairing.busy = true;
     try {
       const current = await sessionCookies(pairing.storeId);
-      if (current.auth_token !== pairing.session.auth_token || current.user_id !== pairing.session.user_id) throw new Error();
-      if (Date.now() > pairing.expires) throw new Error();
+      if (current.auth_token !== pairing.session.auth_token || current.user_id !== pairing.session.user_id) throw failure("account_changed");
+      if (Date.now() > pairing.expires) throw failure("expired");
       const envelope = await encryptSession(pairing);
       const response = await fetch(`http://127.0.0.1:${pairing.port}/session`, {
         method: "POST", mode: "cors", cache: "no-store", credentials: "omit", redirect: "error",
@@ -149,6 +195,10 @@ async function dispatch(message, sender) {
       if (!response.ok || !(await response.json()).ok) throw new Error();
       pairings.delete(tabId);
       return {ok: true};
+    } catch (error) {
+      const code = errorCode(error);
+      await reportProgress(pairing, code === "expired" ? "account_error" : code);
+      throw failure(code);
     } finally {
       // Every submission requires a new account check, including a failed one.
       pairing.session = undefined;
@@ -159,7 +209,7 @@ async function dispatch(message, sender) {
 }
 
 api.runtime.onMessage.addListener((message, sender, respond) => {
-  dispatch(message, sender).then(respond, () => respond({ok: false, error: publicError}));
+  dispatch(message, sender).then(respond, error => respond({ok: false, code: errorCode(error), error: publicError}));
   return true;
 });
 api.tabs.onRemoved.addListener(tabId => pairings.delete(tabId));

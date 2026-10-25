@@ -414,7 +414,7 @@ def _auth_help(mode: str) -> str:
 _RATE_TERMS = re.compile(r"rate ?limit|\b429\b")
 _STORAGE_TERMS = re.compile(r"permission|access is denied|read-only|disk full|no space|winerror 5\b")
 _AUTH_TERMS = re.compile(r"\bdecrypt|\bdpapi\b|\bcookies?\b|\bauth(?:enticat\w*|oriz\w*|_token|required)?\b|"
-                         r"\blog ?in\b|\bcredentials?\b|\b40[13]\b")
+                         r"\blog ?in\b|\bcredentials?\b|\b401\b")
 # Ordinary per-post conditions in a likes list. They are informational, never
 # the reason a run failed, and never a hint to reconnect the account.
 _SKIPPED_POST_NOTICES = (
@@ -445,8 +445,15 @@ def _safe_diagnostic(message: str, mode: str) -> str:
         return "X 요청 한도에 도달해 중단했습니다. 잠시 후 다시 실행하면 저장한 파일은 건너뜁니다."
     if _STORAGE_TERMS.search(text):
         return "파일에 접근할 수 없습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
+    if "temporarily locked" in text or "additional authentication" in text:
+        return "X 계정에 잠금 또는 추가 인증이 필요합니다. 브라우저의 X에서 계정 상태를 확인해 주세요."
+    if text.startswith(("authorizationerror:", "authrequired: protected tweet", "authrequired: nsfw tweet")):
+        return "X가 접근을 거부했습니다. X에서 계정 상태·추가 인증과 게시물 접근 권한을 확인해 주세요."
     if _AUTH_TERMS.search(text):
         return _auth_help(mode)
+    if re.search(r"\b403\b", text):
+        # A denied post, challenge or proxy is not proof of an expired login.
+        return "X가 접근을 거부했습니다. X에서 계정 상태·추가 인증과 게시물 접근 권한을 확인해 주세요."
     if "not found" in text or re.search(r"\b404\b", text):
         return "계정 또는 미디어를 찾지 못했습니다. 본인 X 아이디와 게시물의 공개 상태를 확인해 주세요."
     if any(part in text for part in ("timeout", "connection", "network", "ssl", "certificate")):
@@ -456,6 +463,64 @@ def _safe_diagnostic(message: str, mode: str) -> str:
     if "download" in text:
         return "일부 파일을 저장하지 못했습니다. 연결과 저장 폴더를 확인한 뒤 다시 실행해 주세요."
     return "X 목록을 읽지 못했습니다. 잠시 뒤 다시 시도해 주세요."
+
+
+def _response_authentication_state(response, url: str) -> str:
+    """Recognize private API evidence, never a saved cookie or public photo.
+
+    A denied post does not by itself revoke a login. The Likes timeline is
+    private; recognize only the pinned extractor's response shape and leave
+    changed/unknown formats unverified.
+    """
+    try:
+        parsed = urlsplit(url)
+    except (TypeError, ValueError):
+        return ""
+    if (parsed.scheme != "https" or parsed.hostname != "x.com" or
+            parsed.username is not None or parsed.password is not None or
+            not parsed.path.startswith("/i/api/")):
+        return ""
+    status = response.status_code
+    if status == 401:
+        return "reconnect_required"
+    if status not in {200, 403} or "json" not in str(response.headers.get("Content-Type", "")).lower():
+        return ""
+    try:
+        payload = response.json()
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    errors = payload.get("errors")
+    if isinstance(errors, list):
+        # Reconnecting cannot remove request limits or account challenges.
+        codes = {error.get("code") for error in errors if isinstance(error, dict)
+                 and type(error.get("code")) is int}
+        if codes & {88, 420, 326}:
+            return ""
+        if codes & {32, 89, 135, 215}:
+            return "reconnect_required"
+    if status != 200 or errors or not re.fullmatch(r"/i/api/graphql/[^/]+/Likes", parsed.path):
+        return ""
+    try:
+        instructions = payload["data"]["user"]["result"]["timeline"]["timeline"]["instructions"]
+    except (KeyError, TypeError):
+        return ""
+    return "verified" if isinstance(instructions, list) else ""
+
+
+def _observe_authentication(session, notify) -> None:
+    """Observe before request protection can reject an authentication reply."""
+    original_send = session.send
+
+    def observed_send(request, **kwargs):
+        response = original_send(request, **kwargs)
+        state = _response_authentication_state(response, request.url)
+        if state:
+            notify(state)
+        return response
+
+    session.send = observed_send
 
 
 # Worker aborts that end a run regardless of which post was being handled.
@@ -478,6 +543,8 @@ class _GalleryLogHandler(logging.Handler):
         # problems that must end the whole run are logged then.
         self.per_tweet = False
         self.fatal = False
+        self.auth_state = ""
+        self.error_kind = ""
 
     def emit(self, record: logging.LogRecord) -> None:
         # INFO can contain URLs, arbitrary server text or other user metadata.
@@ -493,6 +560,12 @@ class _GalleryLogHandler(logging.Handler):
         # error fatal, including either message accompanied by 401/403.
         if self.per_tweet and text in {"authrequired: protected tweet", "authrequired: nsfw tweet"}:
             return
+        authentication_error = (record.name == "twitter" and record.levelno >= logging.ERROR and
+                                text.startswith(("authenticationerror:", "authrequired:")) and
+                                not text.startswith(("authrequired: protected tweet", "authrequired: nsfw tweet")))
+        if authentication_error:
+            # AuthorizationError also covers post visibility and challenges.
+            self.auth_state = "reconnect_required"
         notice = _skipped_post_notice(raw) if record.levelno < logging.ERROR else ""
         if notice:
             level, message, priority = "info", notice, 0
@@ -511,6 +584,7 @@ class _GalleryLogHandler(logging.Handler):
         if priority and priority >= self._error_priority:
             self.last_error = message
             self._error_priority = priority
+            self.error_kind = "authentication" if authentication_error else ""
         if message != self._last_message:
             self._last_message = message
             media = getattr(getattr(record, "job", None), "current_media", None)
@@ -645,6 +719,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     exit_code = 1
     # The window offers its record repair only for this specific failure.
     catalog_damaged = False
+    auth_state = ""
+    error_kind = ""
+    auth_response_rejected = False
     normalized = options
     active_job = None
     quick_scan = False
@@ -693,6 +770,22 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             stop_reason = "user"
             handler.stopping = True
             raise exception.StopExtraction()
+
+    def authentication_changed(state):
+        nonlocal auth_state
+        if normalized.auth_mode != "managed" or state == auth_state:
+            return
+        # A later redirect cannot undo a credential rejection in the same run.
+        if auth_state == "reconnect_required" and state == "verified":
+            return
+        auth_state = state
+        emit({"type": "authentication", "auth_state": state})
+
+    def authentication_response(state):
+        nonlocal auth_response_rejected
+        if state == "reconnect_required":
+            auth_response_rejected = True
+        authentication_changed(state)
 
     def sleep(seconds: float, reason: str = "") -> None:
         check_stop()
@@ -884,6 +977,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
             def protected_session():
                 initialize_session()
+                if normalized.auth_mode == "managed":
+                    _observe_authentication(self.extractor.session, authentication_response)
                 guard.protect_session(self.extractor.session)
 
             self.extractor._init_session = protected_session
@@ -1713,6 +1808,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             message = "저장을 중단했습니다. 다시 실행하면 저장한 파일은 건너뜁니다."
         elif exit_code:
             message = guard.failure or handler.last_error or "미디어를 모두 저장하지 못했습니다. 로그인과 저장 폴더를 확인한 뒤 다시 실행해 주세요."
+            error_kind = ("authentication" if auth_response_rejected else "") if guard.failure else handler.error_kind
         elif targets:
             status = "finished"
             message = _retry_message(saved, sum(value == "existing" for value in recovered.values()),
@@ -1743,6 +1839,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         message = "저장을 중단했습니다."
     except ProtectionError as exc:
         status, exit_code, message = "error", 1, str(exc)
+        error_kind = "authentication" if auth_response_rejected else ""
     except ValueError as exc:
         # Only our validation messages are permitted here.
         if active_job is None:
@@ -1767,6 +1864,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         exit_code = 1
     except Exception as exc:
         message = _safe_diagnostic(str(exc), normalized.auth_mode)
+        if isinstance(exc, (exception.AuthenticationError, exception.AuthRequired)):
+            authentication_changed("reconnect_required")
+            error_kind = "authentication"
         exit_code = 1
     finally:
         if history is not None:
@@ -1797,6 +1897,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                        last_posted_at=last_posted_at, message=message)
             except HistoryError:
                 status, exit_code, message = "error", 1, _HISTORY_ERROR
+                error_kind = ""
             finally:
                 if previews is not None:
                     previews.close()
@@ -1808,6 +1909,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     history.close()
                 except HistoryError:
                     status, exit_code, message = "error", 1, _HISTORY_ERROR
+                    error_kind = ""
             # A verified copy on this PC, so a damaged catalog can be restored.
             try:
                 from .recovery import backup_catalog
@@ -1846,6 +1948,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                          "기존 파일의 메타데이터는 유지했습니다."})
     if status == "error":
         emit({"type": "log", "level": "error", "message": message})
+    if handler.auth_state:
+        authentication_changed(handler.auth_state)
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,
           "size_skipped": size_skipped, "review_skipped": review_skipped, "review_never": review_never,
           "metadata_failed": metadata_failed, "author_deferred": author_deferred,
@@ -1854,5 +1958,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
           "scan_mode": "retry" if targets else "quick" if quick_scan else "full",
           "recovered": len(recovered), "unavailable_tweets": unavailable_tweets, "absent_files": absent_files,
           "retry_at": guard.retry_at if guard is not None else "", "catalog_damaged": catalog_damaged,
+          **({"auth_state": auth_state} if auth_state else {}),
+          **({"error_kind": error_kind} if status == "error" and error_kind else {}),
           "message": message})
     return exit_code

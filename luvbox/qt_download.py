@@ -30,6 +30,7 @@ class DownloadController(QObject):
     reviewRequested = Signal(object)
     reviewDismissed = Signal()
     eventReceived = Signal(object)
+    authenticationChanged = Signal(str)
     shutdownFinished = Signal()
 
     def __init__(self, parent=None, *, service=None):
@@ -48,6 +49,8 @@ class DownloadController(QObject):
         self._final = None
         self._repair_needed = False
         self._job_id = 0
+        self._authentication_state = ""
+        self._authentication_error = False
         self._timer = QTimer(self)
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._pump)
@@ -106,6 +109,17 @@ class DownloadController(QObject):
         self._status = "저장할 준비가 됐습니다"
         self.changed.emit()
 
+    @Slot()
+    def clearAuthenticationError(self):
+        """A new connection clears only a prior typed authentication failure."""
+        if self._running or self._closing or not self._authentication_error:
+            return
+        self._authentication_error = False
+        self._error = ""
+        self._status = "저장할 준비가 됐습니다"
+        self._final = None
+        self.changed.emit()
+
     def start(self, options):
         if self._running or self._closing:
             return False
@@ -124,6 +138,8 @@ class DownloadController(QObject):
         self._stopping = False
         self._saved = self._skipped = 0
         self._final = None
+        self._authentication_state = ""
+        self._authentication_error = False
         self._repair_needed = False
         self._error = ""
         self._notice = ""
@@ -202,6 +218,14 @@ class DownloadController(QObject):
 
     def _handle(self, event):
         kind = event.get("type")
+        if (self._running and not self._closing and self._final is None and
+                kind in {"authentication", "finished"}):
+            state = event.get("auth_state")
+            if (isinstance(state, str) and state in {"verified", "reconnect_required"} and
+                    state != self._authentication_state and
+                    self._authentication_state != "reconnect_required"):
+                self._authentication_state = state
+                self.authenticationChanged.emit(state)
         if kind == "progress":
             try:
                 total = max(0, int(event.get("total") or 0))
@@ -238,6 +262,9 @@ class DownloadController(QObject):
                 self._error = summary or "저장 작업이 중단됐습니다."
                 self._status = self._error
                 self._repair_needed = event.get("catalog_damaged") is True
+                self._authentication_error = (event.get("error_kind") == "authentication" and
+                                              event.get("auth_state") == "reconnect_required" and
+                                              not self._repair_needed)
             else:
                 self._status = "저장 결과를 정리하고 있습니다"
         elif kind == "process_exit":

@@ -7,9 +7,12 @@ Dialog {
     property var accounts: null
     property var app: null
     property int methodIndex: 0
+    property bool lastSetupNeeded: false
+    property bool lastExtensionReady: false
     readonly property var browserSetup: app ? app.browserSetup : null
     readonly property bool unavailable: !accounts || accounts.locked || (app && app.closing)
-    readonly property bool setupUnavailable: unavailable || !browserSetup || browserSetup.busy || accounts.busy
+    readonly property bool setupUnavailable: unavailable || !browserSetup || browserSetup.busy
+        || (accounts.busy && !accounts.browserConnecting)
     title: "X 로그인 연결"
     modal: true
     focus: true
@@ -51,7 +54,12 @@ Dialog {
 
     onOpened: {
         tokenField.clear()
-        setupToggle.checked = !accounts || !accounts.connected
+        methodIndex = 0
+        lastSetupNeeded = !!(accounts && accounts.setupNeeded)
+        lastExtensionReady = !!(accounts && accounts.extensionReady)
+        setupToggle.checked = lastSetupNeeded
+        if (browserSetup)
+            browserSetup.prepareExtension()
     }
     onClosed: {
         tokenField.clear()
@@ -64,6 +72,16 @@ Dialog {
         function onConnectionCompleted() {
             if (dialog.visible)
                 dialog.close()
+        }
+        function onChanged() {
+            if (!dialog.accounts || !dialog.visible)
+                return
+            if (dialog.accounts.setupNeeded && !dialog.lastSetupNeeded)
+                setupToggle.checked = true
+            else if (dialog.accounts.extensionReady && !dialog.lastExtensionReady)
+                setupToggle.checked = false
+            dialog.lastSetupNeeded = dialog.accounts.setupNeeded
+            dialog.lastExtensionReady = dialog.accounts.extensionReady
         }
     }
 
@@ -79,26 +97,11 @@ Dialog {
             height: implicitHeight
             spacing: 16
 
-            RowLayout {
+            Label {
                 Layout.fillWidth: true
-                enabled: !dialog.unavailable && !dialog.accounts.busy
-                spacing: 8
-                FlatButton {
-                    Layout.fillWidth: true
-                    text: "브라우저 연결"
-                    tone: "nav"
-                    checkable: true
-                    checked: dialog.methodIndex === 0
-                    onClicked: dialog.methodIndex = 0
-                }
-                FlatButton {
-                    Layout.fillWidth: true
-                    text: "토큰 입력"
-                    tone: "nav"
-                    checkable: true
-                    checked: dialog.methodIndex === 1
-                    onClicked: dialog.methodIndex = 1
-                }
+                text: "사용 중인 브라우저의 X 계정을 연결합니다. 이미 연결했다면 다시 설치할 필요가 없습니다."
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
             }
 
             ColumnLayout {
@@ -106,13 +109,126 @@ Dialog {
                 visible: dialog.methodIndex === 0
                 spacing: 12
 
+                Label { text: "연결할 브라우저" }
+                FlatCombo {
+                    objectName: "connectionBrowser"
+                    Layout.fillWidth: true
+                    model: dialog.browserSetup ? dialog.browserSetup.browsers : []
+                    textRole: "label"
+                    valueRole: "id"
+                    currentIndex: {
+                        if (!dialog.browserSetup)
+                            return -1
+                        var choices = dialog.browserSetup.browsers
+                        for (var i = 0; i < choices.length; ++i)
+                            if (choices[i].id === dialog.browserSetup.selectedBrowser)
+                                return i
+                        return -1
+                    }
+                    enabled: !dialog.setupUnavailable && !dialog.accounts.busy
+                    displayText: currentIndex < 0 ? "브라우저를 확인하는 중…" : currentText
+                    Accessible.name: "X 계정을 연결할 브라우저"
+                    onActivated: dialog.browserSetup.setBrowser(currentValue)
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: "X에 로그인하고 확장을 설치한 일반 프로필을 사용하세요. 여러 프로필을 쓴다면 열린 창의 프로필을 확인해 주세요."
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
+                    opacity: 0.72
+                }
+                FlatButton {
+                    objectName: "connectBrowserButton"
+                    Layout.fillWidth: true
+                    text: dialog.accounts && dialog.accounts.cancelling ? "연결을 취소하는 중…"
+                          : dialog.accounts && dialog.accounts.busy ? "연결 진행 중…"
+                          : dialog.accounts && dialog.accounts.connected ? "다시 연결" : "X 계정 연결"
+                    tone: "primary"
+                    enabled: !dialog.setupUnavailable && !dialog.accounts.busy
+                        && dialog.browserSetup.selectedBrowser.length > 0
+                    onClicked: dialog.accounts.connectBrowser(dialog.browserSetup.selectedBrowser)
+                }
+                Frame {
+                    Layout.fillWidth: true
+                    visible: dialog.accounts && dialog.accounts.browserConnecting
+                    background: Rectangle { color: "#1c1c1c"; radius: 12 }
+                    ColumnLayout {
+                        width: parent.width
+                        spacing: 10
+                        Label {
+                            Layout.fillWidth: true
+                            text: dialog.accounts && dialog.accounts.approvalPending ? "3 / 3 · 앱에서 최종 승인"
+                                : dialog.accounts && dialog.accounts.extensionReady ? "2 / 3 · 브라우저에서 계정 확인"
+                                : "1 / 3 · 연결 확장 확인"
+                            font.bold: true
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: dialog.accounts ? dialog.accounts.status : ""
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                        }
+                        Label {
+                            visible: dialog.accounts && dialog.accounts.secondsRemaining > 0
+                            text: dialog.accounts ? "남은 시간 " + dialog.accounts.secondsRemaining + "초" : ""
+                            opacity: 0.72
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: dialog.accounts && dialog.accounts.pairingCode.length > 0
+                            text: "브라우저 확장의 코드와 비교하세요."
+                            wrapMode: Text.Wrap
+                        }
+                        Label {
+                            text: dialog.accounts ? dialog.accounts.pairingCode : ""
+                            font.pixelSize: 28
+                            font.bold: true
+                            font.letterSpacing: 3
+                            textFormat: Text.PlainText
+                            Accessible.name: "연결 코드 " + text
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: dialog.accounts && dialog.accounts.approvalPending
+                            text: dialog.accounts && dialog.accounts.pendingIdentity.handle
+                                ? "@" + dialog.accounts.pendingIdentity.handle : ""
+                            font.bold: true
+                            font.pixelSize: 18
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: dialog.accounts && dialog.accounts.approvalPending
+                            text: dialog.accounts ? (dialog.accounts.pendingIdentity.display_name || "") : ""
+                            wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                        }
+                        FlatButton {
+                            objectName: "approveConnectionButton"
+                            Layout.fillWidth: true
+                            visible: dialog.accounts && dialog.accounts.approvalPending
+                            enabled: !dialog.unavailable && !dialog.accounts.cancelling
+                            text: "이 계정 연결 승인"
+                            tone: "primary"
+                            onClicked: dialog.accounts.approveBrowser()
+                        }
+                        FlatButton {
+                            visible: dialog.accounts && dialog.accounts.connectionStage === "login_required"
+                            text: "선택한 브라우저에서 X 열기"
+                            enabled: !dialog.setupUnavailable
+                            onClicked: dialog.browserSetup.openX()
+                        }
+                    }
+                }
                 ToolButton {
                     id: setupToggle
                     Layout.fillWidth: true
                     implicitHeight: 40
-                    visible: !dialog.accounts || !dialog.accounts.browserConnecting
                     checkable: true
-                    text: checked ? "처음 설치 안내 ▾" : "처음 설치 안내 ▸"
+                    text: checked ? "확장 설치·연결 도움말 ▾" : "처음 연결하거나 확장 응답이 없나요? ▸"
                     background: Rectangle {
                         radius: 10
                         color: setupToggle.hovered || setupToggle.checked ? "#242424" : "#1c1c1c"
@@ -120,35 +236,49 @@ Dialog {
                 }
                 ColumnLayout {
                     Layout.fillWidth: true
-                    visible: setupToggle.checked && (!dialog.accounts || !dialog.accounts.browserConnecting)
+                    visible: setupToggle.checked
                     spacing: 8
                     Label {
                         Layout.fillWidth: true
-                        text: "처음 한 번 확장을 설치한 뒤, 같은 브라우저 프로필의 X 계정을 연결합니다."
+                        text: "선택한 브라우저의 같은 프로필에 확장을 한 번 설치합니다. 설치 후에는 이 안내를 건너뛰어도 됩니다."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
-                    }
-                    FlatButton {
-                        text: "브라우저에 확장 불러오기"
-                        enabled: !dialog.setupUnavailable
-                        onClicked: dialog.browserSetup.installExtension()
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: "1. 확장 관리 화면에서 개발자 모드를 켜세요."
+                        text: dialog.browserSetup && dialog.browserSetup.extensionKind === "firefox"
+                            ? "1. 부가 기능 디버깅 화면에서 ‘임시 부가 기능 로드’를 누르세요. Firefox를 다시 시작하면 확장을 다시 불러와야 합니다."
+                            : "1. 확장 관리 화면에서 개발자 모드를 켜세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                     }
                     FlatButton {
-                        text: "확장 관리 열기"
+                        text: "확장 관리 주소 복사·브라우저 열기"
                         enabled: !dialog.setupUnavailable
                         onClicked: dialog.browserSetup.openManager()
                     }
+                    FlatField {
+                        Layout.fillWidth: true
+                        readOnly: true
+                        selectByMouse: true
+                        text: dialog.browserSetup ? dialog.browserSetup.managerAddress : ""
+                        Accessible.name: "확장 관리 주소"
+                    }
                     Label {
                         Layout.fillWidth: true
-                        text: "2. ‘압축해제된 확장 로드’를 누르고 아래 폴더를 선택하세요."
+                        text: dialog.browserSetup && dialog.browserSetup.extensionKind === "firefox"
+                            ? "2. 아래 폴더의 manifest.json 파일을 선택하세요."
+                            : "2. ‘압축해제된 확장 프로그램 로드’를 누르세요. 폴더 창 주소창에 아래 경로를 붙여 넣고 Enter를 누르세요. ‘문서’ 폴더가 아니라 manifest.json이 있는 폴더를 선택합니다."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
+                    }
+                    FlatField {
+                        Layout.fillWidth: true
+                        readOnly: true
+                        selectByMouse: true
+                        text: dialog.browserSetup ? dialog.browserSetup.extensionPath : ""
+                        placeholderText: "확장 폴더를 준비하는 중…"
+                        Accessible.name: "확장 폴더 경로"
                     }
                     Flow {
                         Layout.fillWidth: true
@@ -166,7 +296,7 @@ Dialog {
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: "3. 확장을 설치한 프로필에서 X에 로그인하세요."
+                        text: "3. 같은 프로필에서 X에 로그인한 뒤, 위의 연결 버튼을 누르세요. 연결 중이라면 열린 연결 탭을 새로고침하지 말고 취소 후 다시 연결하세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                     }
@@ -177,88 +307,21 @@ Dialog {
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: "Chrome·Edge용 안내입니다. Firefox 설치는 확장 폴더 상위의 README를 확인하세요."
+                        text: "앱을 업데이트한 뒤 확장이 응답하지 않으면 확장 관리에서 ‘새로고침’을 누르고 다시 연결하세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                         opacity: 0.72
                     }
-                    Label {
-                        Layout.fillWidth: true
-                        visible: dialog.browserSetup && (dialog.browserSetup.error.length > 0 || dialog.browserSetup.status.length > 0)
-                        text: dialog.browserSetup ? (dialog.browserSetup.error || dialog.browserSetup.status) : ""
-                        textFormat: Text.PlainText
-                        wrapMode: Text.Wrap
-                        Accessible.role: Accessible.StaticText
-                    }
                     MenuSeparator { Layout.fillWidth: true }
-                }
-                Label {
-                    Layout.fillWidth: true
-                    visible: !dialog.accounts || !dialog.accounts.browserConnecting
-                    text: "설치와 로그인이 끝나면 연결을 시작하세요. 확장의 코드와 계정을 확인한 뒤 이 창에서 승인합니다."
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                }
-                FlatButton {
-                    Layout.fillWidth: true
-                    text: dialog.accounts && dialog.accounts.cancelling ? "연결을 취소하는 중…"
-                          : dialog.accounts && dialog.accounts.busy ? "연결 기다리는 중…" : "브라우저에서 연결"
-                    tone: "primary"
-                    enabled: !dialog.unavailable && !dialog.accounts.busy && (!dialog.browserSetup || !dialog.browserSetup.busy)
-                    onClicked: dialog.accounts.connectBrowser()
-                }
-
-                Frame {
-                    Layout.fillWidth: true
-                    visible: dialog.accounts && dialog.accounts.pairingCode.length > 0
-                    background: Rectangle { color: "#1c1c1c"; radius: 12 }
-
-                    ColumnLayout {
-                        width: parent.width
-                        spacing: 10
-                        Label {
-                            text: "확장에 표시된 코드와 같은지 확인하세요."
-                            Layout.fillWidth: true
-                            wrapMode: Text.Wrap
-                            textFormat: Text.PlainText
-                        }
-                        Label {
-                            text: dialog.accounts ? dialog.accounts.pairingCode : ""
-                            font.pixelSize: 28
-                            font.bold: true
-                            font.letterSpacing: 3
-                            textFormat: Text.PlainText
-                            Accessible.name: "연결 코드 " + text
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: dialog.accounts && dialog.accounts.approvalPending
-                            text: dialog.accounts && dialog.accounts.pendingIdentity.handle
-                                  ? "@" + dialog.accounts.pendingIdentity.handle : ""
-                            font.bold: true
-                            font.pixelSize: 18
-                            textFormat: Text.PlainText
-                            wrapMode: Text.Wrap
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: dialog.accounts && dialog.accounts.approvalPending
-                            text: dialog.accounts ? (dialog.accounts.pendingIdentity.display_name || "") : ""
-                            textFormat: Text.PlainText
-                            wrapMode: Text.Wrap
-                        }
-                        FlatButton {
-                            Layout.fillWidth: true
-                            visible: dialog.accounts && dialog.accounts.approvalPending
-                            enabled: !dialog.unavailable && !dialog.accounts.cancelling
-                            text: "이 계정 연결 승인"
-                            tone: "primary"
-                            onClicked: dialog.accounts.approveBrowser()
-                        }
-                    }
                 }
             }
 
+            ToolButton {
+                Layout.fillWidth: true
+                text: dialog.methodIndex === 1 ? "고급 연결 · 토큰 입력 ▾" : "고급 연결 · 토큰 입력 ▸"
+                enabled: !dialog.unavailable && !dialog.accounts.busy
+                onClicked: dialog.methodIndex = dialog.methodIndex === 1 ? 0 : 1
+            }
             ColumnLayout {
                 Layout.fillWidth: true
                 visible: dialog.methodIndex === 1
@@ -284,14 +347,14 @@ Dialog {
                 }
                 Label {
                     Layout.fillWidth: true
-                    text: "이 Windows 계정에 암호화해 저장합니다. 값은 다른 사람에게 보내지 마세요."
+                    text: "이 Windows 계정에 암호화해 보관합니다. 저장만으로 실제 X 인증이 확인되지는 않습니다. 값은 다른 사람에게 보내지 마세요."
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     opacity: 0.72
                 }
                 FlatButton {
                     Layout.fillWidth: true
-                    text: "연결 저장"
+                    text: "토큰 보관"
                     tone: "primary"
                     enabled: !dialog.unavailable && !dialog.accounts.busy && tokenField.text.trim().length > 0
                     onClicked: dialog.submitToken()
@@ -300,7 +363,24 @@ Dialog {
 
             Label {
                 Layout.fillWidth: true
-                visible: dialog.accounts && (dialog.accounts.error.length > 0 || dialog.accounts.status.length > 0)
+                visible: dialog.browserSetup && (dialog.browserSetup.error.length > 0
+                    || (setupToggle.checked && dialog.browserSetup.status.length > 0))
+                text: dialog.browserSetup ? (dialog.browserSetup.error || dialog.browserSetup.status) : ""
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+                Accessible.role: Accessible.StaticText
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: dialog.accounts && dialog.accounts.connected && !dialog.accounts.busy
+                text: dialog.accounts ? dialog.accounts.authenticationLabel : ""
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: dialog.accounts && (dialog.accounts.error.length > 0
+                    || (!dialog.accounts.browserConnecting && dialog.accounts.status.length > 0))
                 text: dialog.accounts ? (dialog.accounts.error || dialog.accounts.status) : ""
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap

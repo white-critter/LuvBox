@@ -87,16 +87,17 @@ class ApplicationController(QObject):
         self._gallery_dirty = False
         self._gallery_visible = False
         self._shutdown_parts = set()
-        self._accounts = AccountController(self, settings=self._settings)
+        self._browser_setup = BrowserSetupController(self, settings=self._settings)
+        self._accounts = AccountController(self, settings=self._settings, browser_setup=self._browser_setup)
         self._download = DownloadController(self)
         self._library = LibraryController(self)
-        self._browser_setup = BrowserSetupController(self)
         self._schedule = ScheduleController(self)
         self._accounts.changed.connect(self._state_changed)
         self._accounts.accountChanged.connect(self._account_changed)
         self._download.changed.connect(self._state_changed)
         self._schedule.changed.connect(self._state_changed)
         self._download.eventReceived.connect(self._download_event)
+        self._download.authenticationChanged.connect(self._accounts.updateAuthentication)
         self._download.reviewRequested.connect(self._prepare_review)
         self._download.reviewDismissed.connect(self._dismiss_review)
         self._accounts.shutdownFinished.connect(lambda: self._part_closed("accounts"))
@@ -323,6 +324,8 @@ class ApplicationController(QObject):
     def _account_changed(self):
         if self._closing:
             return
+        if self._accounts.authenticationState != "reconnect_required":
+            self._download.clearAuthenticationError()
         identity = self._accounts.identity
         if identity:
             self._account = identity["handle"]
@@ -364,7 +367,7 @@ class ApplicationController(QObject):
                     or self._download.running or self._schedule.mutating):
                 self._save_after_settings = True
             return
-        if not self._accounts.connected:
+        if not self._accounts.connected or self._accounts.authenticationState == "reconnect_required":
             self.loginRequested.emit()
             return
         identity = self._accounts.identity

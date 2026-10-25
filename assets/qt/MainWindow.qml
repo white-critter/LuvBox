@@ -316,14 +316,23 @@ ApplicationWindow {
                                 Label {
                                     Layout.fillWidth: true
                                     visible: !window.app || window.app.accounts.accounts.length === 0
-                                    text: window.app && window.app.accounts.connected ? "토큰 연결됨" : "X 로그인을 연결해 주세요"
+                                    text: window.app && window.app.accounts.connected ? "연결 정보 저장됨" : "X 로그인을 연결해 주세요"
                                     color: window.mutedColor
                                 }
                                 FlatButton {
-                                    text: "X 연결"
+                                    text: window.app && window.app.accounts.authenticationState === "reconnect_required" ? "다시 연결" : "X 연결"
                                     enabled: window.app && !window.app.busy
                                     onClicked: connectionDialog.open()
                                 }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                visible: window.app && window.app.accounts.connected
+                                text: window.app ? window.app.accounts.authenticationLabel : ""
+                                color: window.app && window.app.accounts.authenticationState === "reconnect_required"
+                                    ? window.errorColor : window.mutedColor
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
                             }
                             FlatField {
                                 id: accountInput
@@ -445,7 +454,8 @@ ApplicationWindow {
                             RowLayout {
                                 Layout.fillWidth: true
                                 FlatButton {
-                                    text: "저장 시작"
+                                    text: window.app && window.app.accounts.authenticationState === "reconnect_required"
+                                        ? "X 계정 다시 연결" : "저장 시작"
                                     tone: "primary"
                                     Layout.fillWidth: true
                                     enabled: window.app && !window.app.busy && window.app.accounts.connected &&

@@ -15,11 +15,12 @@ class AbsenceNoteTests(unittest.TestCase):
 
 
 class ExtensionLaunchTests(unittest.TestCase):
-    def test_closed_edge_loads_the_unpacked_extension(self):
+    def test_closed_edge_keeps_the_manual_installation_without_a_temporary_launch(self):
         browser = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
         folder = Path("C:/LuvBox/assets/browser-extension/chromium")
         plan = plan_extension_launch(browser, False, folder)
-        self.assertEqual(plan["command"], [str(browser), "--load-extension=" + str(folder)])
+        self.assertNotIn("command", plan)
+        self.assertIn("직접 불러와", plan["status"])
 
     def test_chrome_is_not_told_it_loaded_an_extension_it_ignores(self):
         # Chrome's stable builds ignore --load-extension; only the manual load works.
@@ -28,14 +29,22 @@ class ExtensionLaunchTests(unittest.TestCase):
             plan = plan_extension_launch(browser, running, Path("C:/extension"))
             self.assertNotIn("command", plan)
             self.assertIn("직접 불러와", plan["status"])
+            self.assertIn("문서", plan["status"])
 
     def test_running_browser_is_left_open(self):
         browser = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
         plan = plan_extension_launch(browser, True, Path("C:/extension"))
         self.assertNotIn("command", plan)
-        self.assertIn("이미 켜져", plan["status"])
+        self.assertIn("직접 불러와", plan["status"])
 
     def test_missing_browser_keeps_the_manual_steps(self):
         plan = plan_extension_launch(None, False, Path("C:/extension"))
         self.assertNotIn("command", plan)
         self.assertIn("찾지 못했습니다", plan["status"])
+
+    def test_firefox_uses_its_own_temporary_addon_instructions(self):
+        plan = plan_extension_launch(Path("C:/Mozilla Firefox/firefox.exe"), False, Path("C:/extension"))
+        self.assertNotIn("command", plan)
+        self.assertIn("임시 부가 기능", plan["status"])
+        self.assertIn("다시 시작하면 제거", plan["status"])
+        self.assertNotIn("개발자 모드", plan["status"])

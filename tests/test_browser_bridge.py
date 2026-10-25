@@ -18,7 +18,8 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
-from luvbox.browser_bridge import BrowserBridge, BrowserBridgeError, _decrypt, _derive_key, _session, extension_directory
+from luvbox.browser_bridge import (BrowserBridge, BrowserBridgeError, _decrypt, _decrypt_progress,
+                                   _derive_key, _session, extension_directory)
 
 
 PAYLOAD = {"version": 1, "auth_token": "synthetic-bridge-token", "username": "Offline_User",
@@ -26,14 +27,14 @@ PAYLOAD = {"version": 1, "auth_token": "synthetic-bridge-token", "username": "Of
 ORIGIN = "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
 
 
-def envelope(payload, secret, port):
+def envelope(payload, secret, port, *, path="/session"):
     """Test-only GCM encryption using the pinned dependency's AES primitives.
 
     The Node/WebCrypto cross-check below independently exercises the format.
     """
     from gallery_dl import aes
     nonce = os.urandom(12)
-    key = list(_derive_key(secret, port, "encryption"))
+    key = list(_derive_key(secret, port, "encryption", path=path))
     raw = list(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     cipher = aes.aes_ctr_encrypt(raw, key, list(nonce) + [0, 0, 0, 2])
     hash_subkey = aes.aes_encrypt([0] * 16, aes.key_expansion(key))
@@ -41,7 +42,7 @@ def envelope(payload, secret, port):
     digest = aes.ghash(hash_subkey, tagged)
     tag = aes.aes_ctr_encrypt(digest, key, list(nonce) + [0, 0, 0, 1])
     encrypted = bytes(cipher + tag)
-    proof = hmac.digest(_derive_key(secret, port, "proof"), nonce + encrypted, "sha256")
+    proof = hmac.digest(_derive_key(secret, port, "proof", path=path), nonce + encrypted, "sha256")
     encode = lambda value: base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
     return {"version": 1, "nonce": encode(nonce), "ciphertext": encode(encrypted), "proof": encode(proof)}
 
@@ -55,7 +56,8 @@ class BrowserBridgeTests(unittest.TestCase):
 
     def request(self, method="POST", path="/session", *, payload=PAYLOAD, headers=None, secret=None, encrypted=False):
         if payload is not None and not encrypted:
-            payload = envelope(payload, self.secret if secret is None else secret, self.port)
+            payload = envelope(payload, self.secret if secret is None else secret, self.port,
+                               path="/progress" if path == "/progress" else "/session")
         body = json.dumps(payload).encode("utf-8") if payload is not None else None
         standard = {"Origin": ORIGIN, "Content-Type": "application/json"}
         if headers:
@@ -78,6 +80,83 @@ class BrowserBridgeTests(unittest.TestCase):
         self.assertEqual(session.auth_token, PAYLOAD["auth_token"])
         self.assertEqual(session.identity, {"handle": "offline_user", "user_id": "123456789", "display_name": "오프라인 계정"})
         self.assertEqual(self.bridge._secret, "")
+
+    def test_authenticated_progress_does_not_consume_session_and_reports_in_order(self):
+        deadline = self.bridge._deadline
+        for sequence, stage in enumerate(("extension_ready", "checking_account", "awaiting_approval"), 1):
+            self.assertEqual(self.request(path="/progress", payload={
+                "version": 1, "stage": stage, "sequence": sequence})[0], 200)
+            self.assertIsNone(self.bridge._result)
+            self.assertEqual(self.bridge._secret, self.secret)
+            self.assertEqual(self.bridge._deadline, deadline)
+        self.assertEqual(self.request()[0], 200)
+        stages = []
+        def progress(stage):
+            # A UI callback can inspect bridge state without a server-lock
+            # deadlock; cookies and account names are never callback arguments.
+            self.assertTrue(self.bridge._lock.acquire(blocking=False))
+            self.bridge._lock.release()
+            stages.append(stage)
+        result = self.bridge.wait(on_progress=progress)
+        self.assertEqual(result.auth_token, PAYLOAD["auth_token"])
+        self.assertEqual(stages, ["extension_ready", "checking_account", "awaiting_approval"])
+
+    def test_progress_callback_runs_before_final_consent_arrives(self):
+        self.assertEqual(self.request(path="/progress", payload={
+            "version": 1, "stage": "extension_ready", "sequence": 1})[0], 200)
+        def progress(stage):
+            self.assertEqual(stage, "extension_ready")
+            self.assertIsNone(self.bridge._result)
+            self.assertEqual(self.request()[0], 200)
+        self.assertEqual(self.bridge.wait(on_progress=progress).username, "offline_user")
+
+    def test_progress_replays_and_unbounded_sequences_are_rejected(self):
+        progress = {"version": 1, "stage": "extension_ready", "sequence": 1}
+        wire = envelope(progress, self.secret, self.port, path="/progress")
+        self.assertEqual(self.request(path="/progress", payload=wire, encrypted=True)[0], 200)
+        self.assertEqual(self.request(path="/progress", payload=wire, encrypted=True)[0], 409)
+        self.assertEqual(self.request(path="/progress", payload=dict(progress, sequence=128))[0], 200)
+        self.assertEqual(self.request(path="/progress", payload=dict(progress, sequence=127))[0], 409)
+        for sequence in (0, 129, True, 1.5, "2"):
+            self.assertEqual(self.request(path="/progress", payload=dict(progress, sequence=sequence))[0], 400)
+        self.assertLessEqual(len(self.bridge._progress), 128)
+        self.assertEqual(self.request()[0], 200)
+
+    def test_progress_is_path_bound_fixed_shape_and_authenticated(self):
+        progress = {"version": 1, "stage": "extension_ready", "sequence": 1}
+        for changes in ({"stage": "token=" + PAYLOAD["auth_token"]}, {"extra": "unexpected"},
+                        {"auth_token": PAYLOAD["auth_token"]}, {"version": True}):
+            self.assertEqual(self.request(path="/progress", payload=dict(progress, **changes))[0], 400)
+        self.assertEqual(self.request(path="/progress", payload=progress, headers={"Origin": "https://x.com"})[0], 403)
+        self.assertEqual(self.request(path="/progress", payload=progress, secret="wrong")[0], 400)
+        self.assertEqual(self.request(path="/progress", payload=progress, headers={"Content-Length": "1025"})[0], 400)
+        self.assertEqual(self.request(path="/progress", payload=progress, encrypted=True)[0], 400)
+        session_wire = envelope(PAYLOAD, self.secret, self.port)
+        progress_wire = envelope(progress, self.secret, self.port, path="/progress")
+        self.assertEqual(self.request(path="/progress", payload=session_wire, encrypted=True)[0], 400)
+        self.assertEqual(self.request(payload=progress_wire, encrypted=True)[0], 400)
+        self.assertEqual(self.request(path="/progress", payload=progress)[0], 200)
+        self.assertEqual(self.request()[0], 200)
+
+    def test_cancellation_does_not_deliver_queued_progress(self):
+        self.assertEqual(self.request(path="/progress", payload={
+            "version": 1, "stage": "login_required", "sequence": 1})[0], 200)
+        cancel = threading.Event()
+        cancel.set()
+        stages = []
+        with self.assertRaisesRegex(BrowserBridgeError, "취소"):
+            self.bridge.wait(cancel=cancel, on_progress=stages.append)
+        self.assertEqual(stages, [])
+        self.assertEqual(list(self.bridge._progress), [])
+
+    def test_progress_callback_failure_closes_listener_and_clears_capability(self):
+        self.assertEqual(self.request(path="/progress", payload={
+            "version": 1, "stage": "extension_ready", "sequence": 1})[0], 200)
+        with self.assertRaisesRegex(RuntimeError, "offline callback"):
+            self.bridge.wait(on_progress=lambda stage: (_ for _ in ()).throw(RuntimeError("offline callback")))
+        self.assertEqual(self.bridge._secret, "")
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", self.port), timeout=0.2)
 
     def test_browser_uses_already_bound_port_and_fragment_only(self):
         def opener(url):
@@ -247,12 +326,16 @@ class BrowserBridgeTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "Node is optional for WebCrypto compatibility tests")
     def test_extension_api_boundaries_and_webcrypto_interoperate(self):
         harness = Path(__file__).with_name("browser_bridge_extension_harness.js")
-        result = subprocess.run([shutil.which("node"), str(harness), str(extension_directory() / "chromium")],
-                                capture_output=True, text=True, timeout=10, check=True)
-        encrypted = json.loads(result.stdout)
-        session = _decrypt(encrypted, "offline-pairing-secret-for-webcrypto", 49123)
-        self.assertEqual(session.auth_token, PAYLOAD["auth_token"])
-        self.assertEqual(session.user_id, PAYLOAD["user_id"])
+        for browser in ("chromium", "firefox"):
+            with self.subTest(browser=browser):
+                result = subprocess.run([shutil.which("node"), str(harness), str(extension_directory() / browser)],
+                                        capture_output=True, text=True, timeout=10, check=True)
+                encrypted = json.loads(result.stdout)
+                session = _decrypt(encrypted["session"], "offline-pairing-secret-for-webcrypto", 49123)
+                self.assertEqual(session.auth_token, PAYLOAD["auth_token"])
+                self.assertEqual(session.user_id, PAYLOAD["user_id"])
+                self.assertEqual(_decrypt_progress(encrypted["progress"], "offline-pairing-secret-for-webcrypto", 49123),
+                                 (1, "extension_ready"))
 
     def test_extension_artifacts_and_permissions_are_bounded(self):
         root = extension_directory()
@@ -308,7 +391,6 @@ class BrowserBridgeExtensionTests(unittest.TestCase):
                 page.get_by_text(bridge.pairing_code, exact=True).wait_for()
                 self.assertEqual(page.locator("#pairing-code").inner_text(), bridge.pairing_code)
                 page.get_by_role("checkbox").check()
-                page.get_by_role("button", name="현재 X 계정 확인", exact=True).click()
                 page.get_by_role("button", name="@Offline_User 연결", exact=True).wait_for(timeout=30000)
                 self.assertEqual(urlsplit(page.url).fragment, "")
                 # Explicit second click is required; viewing an account is not consent.
