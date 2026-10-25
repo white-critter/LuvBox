@@ -356,7 +356,7 @@ ApplicationWindow {
                                     textFormat: Text.PlainText
                                     elide: Text.ElideMiddle
                                 }
-                                FlatButton { text: "폴더 선택"; enabled: window.app && !window.app.busy; onClicked: folderDialog.open() }
+                                FlatButton { text: "폴더 선택"; enabled: window.app && !window.app.busy; onClicked: window.chooseSaveFolder() }
                                 FlatButton { text: "열기"; onClicked: if (window.app) window.app.openOutputFolder() }
                             }
                         }
@@ -836,10 +836,20 @@ ApplicationWindow {
 
     FolderDialog {
         id: folderDialog
+        objectName: "saveFolderDialog"
         title: "사진을 저장할 폴더"
-        options: FolderDialog.DontUseNativeDialog
-        currentFolder: window.app ? window.app.outputUrl : ""
+        // Qt's own folder dialog stays on the drive it opened on, so a folder
+        // on D: made C: unreachable. The Windows dialog lists every drive.
         onAccepted: if (window.app) window.app.setOutputFolder(selectedFolder.toString())
+    }
+
+    function chooseSaveFolder() {
+        if (!window.app)
+            return
+        const current = window.app.outputUrl
+        if (current && String(current).length > 0)
+            folderDialog.currentFolder = current
+        folderDialog.open()
     }
 
     ConnectionDialog {

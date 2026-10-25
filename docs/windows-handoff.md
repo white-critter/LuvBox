@@ -1,4 +1,4 @@
-# LuvBox 1.1.8 Windows 실행 순서
+# LuvBox 1.1.9 Windows 실행 순서
 
 Windows 10·11 64비트, Python 3.12 이상과 PowerShell을 사용합니다. 앱은 PySide6 + Qt Quick으로 실행합니다. [개발 안내](development.md), [종합 검토](comprehensive-review-20261024.md), [보안 검토](security-review-20261024.md), [검증 기록](verification.md)이 현재 동작과 검사 범위의 기준입니다.
 
@@ -62,10 +62,10 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 산출물:
 
-- `release/LuvBox-1.1.8/LuvBox-1.1.8.exe`
+- `release/LuvBox-1.1.9/LuvBox-1.1.9.exe`
 - 같은 폴더의 `_internal/`
-- `release/LuvBox-1.1.8.zip`
-- `release/SHA256-1.1.8.txt`
+- `release/LuvBox-1.1.9.zip`
+- `release/SHA256-1.1.9.txt`
 
 ZIP의 EXE·소스·라이선스와 체크섬을 확인하고 새 경로에 풀어 실행합니다. EXE만 옮기지 않습니다. ZIP의 소스에는 사용자 설정·세션·쿠키·미디어·기록 DB가 없어야 합니다. Qt/PySide6와 재생 구성요소의 소스·고지는 [Qt 배포 자료](../tools/qt/README.md)를 함께 보관합니다.
 
