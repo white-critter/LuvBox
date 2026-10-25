@@ -213,7 +213,7 @@ ApplicationWindow {
     id: window
     required property var fixture
     width: 800; height: 600; visible: true
-    readonly property var preview: chooser.contentItem.children[0]
+    readonly property var preview: chooser.previewMedia
     function approve() { chooser.submit("save") }
     function approveThenReplace() {
         chooser.submit("save")

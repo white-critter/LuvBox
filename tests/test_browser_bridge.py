@@ -286,8 +286,8 @@ class BrowserBridgeTests(unittest.TestCase):
         with self.assertRaises(OSError):
             socket.create_connection(("127.0.0.1", port), timeout=0.2)
 
-    def test_missing_default_browser_is_secret_free_and_closes_listener(self):
-        with self.assertRaisesRegex(BrowserBridgeError, "기본 브라우저") as caught:
+    def test_missing_selected_browser_is_secret_free_and_closes_listener(self):
+        with self.assertRaisesRegex(BrowserBridgeError, "선택한 브라우저") as caught:
             self.bridge.open_browser(opener=lambda url: (_ for _ in ()).throw(OSError(url)))
         self.assertNotIn(self.secret, str(caught.exception))
         self.assertEqual(self.bridge._secret, "")

@@ -117,7 +117,7 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertEqual(options.account, "another")
         self.controller.download.start.assert_called_once()
 
-    def test_failed_account_switch_restores_the_previous_account_and_folder(self):
+    def test_failed_account_preferences_keep_the_actual_session_and_previous_folder(self):
         previous_account, previous_output = self.controller.account, self.controller.outputFolder
         other = str(self.folder / "other-account")
         self.controller._preferences["record_locations"] = {"otheracct": other}
@@ -129,9 +129,10 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertEqual((self.controller.account, self.controller.outputFolder), ("otheracct", other))
         self.release.set()
         self.wait_for(lambda: not self.controller.busy)
-        self.assertEqual(self.controller.account, previous_account)
+        self.assertEqual(self.controller.account, "otheracct")
         self.assertEqual(self.controller.outputFolder, previous_output)
-        self.assertEqual(self.controller._preferences["account"], previous_account)
+        self.assertEqual(self.controller._preferences["account"], "otheracct")
+        self.assertEqual(self.controller._committed_preferences["account"], previous_account)
         self.assertEqual(self.controller._preferences["output_dir"], previous_output)
         self.assertIn("설정을 저장하지 못했습니다", self.controller.error)
 
@@ -186,3 +187,23 @@ class SettingsCommitTests(unittest.TestCase):
         self.wait_for(lambda: not self.controller.busy)
         self.assertFalse(self.controller.preferences["confirm_each"])
         self.assertFalse(self.controller.download._service._review_enabled)
+
+    def test_failed_details_toggle_restores_the_hidden_state(self):
+        self.settings.update.side_effect = self.blocked_update
+        self.controller.setPreference("detailed_progress", True)
+        self.assertTrue(self.entered.wait(1))
+        self.assertTrue(self.controller.download.detailsEnabled)
+        self.release.set()
+        self.wait_for(lambda: not self.controller.busy)
+        self.assertFalse(self.controller.preferences["detailed_progress"])
+        self.assertFalse(self.controller.download.detailsEnabled)
+
+    def test_details_toggle_is_available_during_a_save(self):
+        self.controller.download._running = True
+        try:
+            self.controller.setPreference("detailed_progress", True)
+            self.wait_for(lambda: not self.controller._pending_settings)
+            self.assertTrue(self.controller.download.detailsEnabled)
+            self.settings.update.assert_called_with({"detailed_progress": True})
+        finally:
+            self.controller.download._running = False

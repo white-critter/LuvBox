@@ -197,6 +197,20 @@ def _media_details(metadata: dict) -> dict:
             "author_metadata_status": metadata.get("_luvbox_author_metadata_status", "pending")}
 
 
+def _saved_post_details(metadata: dict) -> dict:
+    """Only bounded, already received public post fields for the optional card."""
+    author = metadata.get("author")
+    display_name = author.get("nick") if isinstance(author, dict) else ""
+    def text(value, maximum, multiline=False):
+        if not isinstance(value, str):
+            return ""
+        return "".join(char for char in value[:maximum]
+                       if (ord(char) >= 32 and not 127 <= ord(char) <= 159)
+                       or (multiline and char in "\n\t"))
+    return {"display_name": text(display_name, 200),
+            "body": text(metadata.get("content"), 5000, multiline=True)}
+
+
 class GalleryCompatibilityError(RuntimeError):
     """The pinned gallery-dl internals this worker replaces have changed."""
 
@@ -1250,7 +1264,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     if media_exists:
                         record_source(kwdict, media_path, media_status, previous)
                     emit({"type": "saved" if media_status == "saved" else "skipped", "path": media_path,
-                          **_media_details(kwdict)})
+                          **_media_details(kwdict),
+                          **(_saved_post_details(kwdict) if media_status == "saved" else {})})
                     if media_exists:
                         # Keep the preview independently of catalog writes:
                         # the file is already finalized even if recording it

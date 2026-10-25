@@ -6,6 +6,8 @@ from io import BytesIO
 from pathlib import Path
 import subprocess
 import warnings
+import struct
+import zlib
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -15,6 +17,82 @@ from .thumbcache import cloud_only
 PREVIEW_SIZE = (220, 168)
 MAX_PIXELS = 60_000_000
 PHOTO_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
+
+
+def _png_exif_orientation(path: Path) -> int:
+    """Read a possibly late eXIf chunk without inflating PNG image data."""
+    with path.open("rb") as stream:
+        if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+            raise ValueError("invalid PNG header")
+        length = path.stat().st_size
+        if length > 256 * 1024 * 1024:
+            raise ValueError("PNG metadata scan limit")
+        for _ in range(4096):
+            header = stream.read(8)
+            if len(header) != 8:
+                raise ValueError("short PNG chunk")
+            size, kind = struct.unpack(">I4s", header)
+            if size > length - stream.tell() - 4:
+                raise ValueError("invalid PNG chunk size")
+            if kind == b"eXIf":
+                if not 0 < size <= 1024 * 1024:
+                    raise ValueError("PNG EXIF limit")
+                payload = stream.read(size)
+                checksum = stream.read(4)
+                if len(checksum) != 4 or struct.unpack(">I", checksum)[0] != zlib.crc32(kind + payload):
+                    raise ValueError("invalid PNG EXIF checksum")
+                metadata = Image.Exif()
+                metadata.load(payload)
+                return metadata.get(274, 1)
+            stream.seek(size + 4, 1)
+            if kind == b"IEND":
+                return 1
+        raise ValueError("PNG chunk count limit")
+
+
+def photo_info(path: Path, max_pixels: int = 16_000_000) -> dict[str, int]:
+    """Return safe raw/oriented still-photo sizes without decoding pixels.
+
+    The caller must validate its catalog path and file signature before and
+    after this read. Unknown, animated GIF and oversized sources are excluded
+    from original-resolution viewing rather than removing the preview limit.
+    """
+    path = Path(path)
+    if (type(max_pixels) is not int or not 0 < max_pixels <= MAX_PIXELS or
+            path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"} or
+            path.is_symlink() or getattr(path, "is_junction", lambda: False)() or cloud_only(path)):
+        return {}
+    try:
+        # WebP's container reader retains compressed bytes even for a header
+        # query; bound that allocation as well as the decoded-pixel budget.
+        if path.stat().st_size > 64 * 1024 * 1024:
+            return {}
+        _prepare_decoders(False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path, formats=("JPEG", "PNG", "WEBP")) as image:
+                width, height = image.size
+                if (not 0 < width <= 16384 or not 0 < height <= 16384 or
+                        width * height > max_pixels):
+                    return {}
+                if image.format == "PNG":
+                    # PngImageFile.getexif() calls load() when EXIF follows
+                    # IDAT. Skip image chunks explicitly to stay header-only.
+                    orientation = _png_exif_orientation(path)
+                else:
+                    orientation = image.getexif().get(274, 1)
+                oriented = (height, width) if orientation in (5, 6, 7, 8) else (width, height)
+                return {"pixel_width": oriented[0], "pixel_height": oriented[1],
+                        "source_width": width, "source_height": height}
+    except (OSError, ValueError, TypeError, SyntaxError, struct.error,
+            Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return {}
+
+
+def photo_dimensions(path: Path, max_pixels: int = 16_000_000) -> tuple[int, int]:
+    """Return the safe display size; unknown or excluded inputs return zeros."""
+    details = photo_info(path, max_pixels)
+    return details.get("pixel_width", 0), details.get("pixel_height", 0)
 
 
 @cache

@@ -1,4 +1,4 @@
-# LuvBox 1.1.10 개발 안내
+# LuvBox 1.2.0 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 1.1.3 구조 검토는 [종합 검토](comprehensive-review-20261024.md)와 [보안 검토](security-review-20261024.md)를 참고하세요.
 
@@ -22,7 +22,7 @@ Python 위치를 지정하려면 `setup.ps1 -PythonPath 'C:\경로\python.exe'`�
 | --- | --- |
 | `entry.py`, `luvbox/qt_app.py`, `assets/qt/` | 실행 진입점, Qt 앱 제어와 QML 화면 |
 | `qt_accounts.py`, `qt_browser_setup.py`, `browser_discovery.py`, `login.py`, `browser_bridge.py` | 연결 승인·확장 설치 안내·DPAPI 계정 보관 |
-| `qt_download.py`, `download_service.py`, `core.py`, `review.py` | 저장 상태, 별도 worker와 IPC, 실제 다운로드와 저장 여부 확인 |
+| `qt_download.py`, `qt_saved_preview.py`, `download_service.py`, `core.py`, `review.py` | 저장 상태·선택적 첫 장면, 별도 worker와 IPC, 실제 다운로드와 저장 여부 확인 |
 | `qt_library.py`, `qt_gallery.py`, `qt_wheel.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력 |
 | `app_settings.py`, `settings.py`, `file_mutex.py`, `qt_schedule.py`, `scheduled.py` | 설정 보존, 프로세스 간 변경 보호와 기존 예약 관리 |
 | `history.py`, `storage.py`, `recovery.py`, `deletion.py`, `recycling.py` | 기록·정렬, 경로 승인·이전·사본·복구와 삭제 기록 |
@@ -31,6 +31,8 @@ Python 위치를 지정하려면 `setup.ps1 -PythonPath 'C:\경로\python.exe'`�
 | `selftest.py`, `qt_smoke.py`, `tools/check_*startup.py`, `tools/package_release.py` | 격리 검사와 소스·라이선스 배포 패키징 |
 
 Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트워크 작업은 작업 스레드나 별도 worker에서 처리하고, 신호·큐·JSON 메시지로 결과를 전달합니다. 이전 작업의 썸네일 결과는 generation으로 구분하며, 진행 이벤트는 제어 이벤트의 순서를 보존하면서 합칩니다. 종료 시 실행 중인 작업과 파일 핸들을 정리합니다.
+
+미리보기·저장 전 확인창은 부모 오버레이에서 24px 여백을 남기고 확장합니다. 헤더의 창 최대화·복원은 호스트 앱 창을 제어합니다. 갤러리 본문은 기본으로 접고 필요할 때 펼치며, 이미지 비율과 미디어 해제·저장 승인 순서는 유지합니다.
 
 ## 데이터와 인증 호환성
 
@@ -69,4 +71,4 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 실제 EXE의 Qt 창·갤러리·미리보기·설정·연결창·종료 검사와 오프라인 저장 시작 검사를 모두 통과해야 ZIP을 만듭니다. 직접 패키징도 현재 버전과 EXE SHA-256에 일치하는 두 검사 보고서를 요구합니다. EXE·`_internal`·동봉 소스·라이선스를 함께 유지합니다. Qt와 미디어 구성요소의 버전별 원본 자료는 [Qt 소스 안내](../tools/qt/README.md), [FFmpeg 안내](../tools/ffmpeg/README.md)를 따릅니다. 검사 실패를 피하려고 입력 체크섬·TLS 검증·패키징 허용 목록을 완화하지 않습니다.
 
-산출물은 `release/LuvBox-1.1.10/`, `release/LuvBox-1.1.10.zip`, `release/SHA256-1.1.10.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox-1.2.0/`, `release/LuvBox-1.2.0.zip`, `release/SHA256-1.2.0.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.

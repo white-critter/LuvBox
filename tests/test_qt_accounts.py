@@ -148,6 +148,22 @@ class AccountConnectionTests(unittest.TestCase):
         self.assertFalse(self.controller.busy)
         self.assertIn("선택", self.controller.error)
 
+    def test_shell_can_own_preferences_without_duplicate_account_writes(self):
+        controller = AccountController(settings=self.settings, persist_preferences=False)
+        try:
+            def save(_token):
+                self.state["connected"] = True
+            self.settings.update.side_effect = OSError("settings must be written by the shell")
+            with patch("luvbox.qt_accounts.login.save_auth_token", side_effect=save):
+                self.assertTrue(controller.connectToken("synthetic-token"))
+                self.wait(lambda: not controller.busy)
+            self.assertTrue(controller.connected)
+            self.assertEqual(controller.error, "")
+            self.settings.update.assert_not_called()
+        finally:
+            controller.shutdown()
+            self.wait(lambda: controller._shutdown_emitted)
+
     def test_selecting_same_account_cannot_clear_known_expiry(self):
         self.state.update(connected=True, identity={"user_id": "5", "handle": "old", "display_name": "Old"})
         self.controller._refresh()

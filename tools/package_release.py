@@ -32,6 +32,7 @@ SOURCE_FILES = (
     "tools/check_download_startup.py",
     "docs/security-review-20261024.md", "docs/comprehensive-review-20261024.md",
     "docs/login-ux-1.1.8.md",
+    "docs/review-1.2.0.md",
     "tools/qt/prepare_sources.py", "tools/qt/sources.json", "tools/qt/README.md",
     "assets/qt/licenses/GPL-2.0-only.txt", "assets/qt/licenses/GPL-3.0-only.txt",
     "assets/qt/licenses/LGPL-3.0-only.txt",

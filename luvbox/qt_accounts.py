@@ -46,9 +46,12 @@ class AccountController(QObject):
     shutdownFinished = Signal()
     _workerEvent = Signal(object)
 
-    def __init__(self, parent=None, *, settings=None, browser_setup=None):
+    def __init__(self, parent=None, *, settings=None, browser_setup=None, persist_preferences=True):
         super().__init__(parent)
         self._settings = settings if settings is not None else SettingsRepository()
+        # The product shell commits account + output folder together. Standalone
+        # consumers retain the previous preference-writing behavior by default.
+        self._persist_preferences = bool(persist_preferences)
         self._browser_setup = browser_setup
         self._accounts = []
         self._identity = {}
@@ -360,7 +363,8 @@ class AccountController(QObject):
             except Exception:
                 result["state"] = {"accounts": [], "identity": {}, "connected": False}
                 result["warning"] = "저장된 연결을 읽지 못했습니다. 다시 연결해 주세요."
-            if result["success"] and operation != "disconnect" and not result.get("warning"):
+            if (self._persist_preferences and result["success"] and operation != "disconnect"
+                    and not result.get("warning")):
                 preferences = {"auth_mode": "managed"}
                 if result["state"]["identity"]:
                     preferences["account"] = result["state"]["identity"]["handle"]

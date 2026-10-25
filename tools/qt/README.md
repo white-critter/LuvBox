@@ -1,6 +1,6 @@
 # Qt redistribution source inventory
 
-This inventory covers the Windows Qt Quick runtime bundled with LuvBox 1.1.10. It records upstream material and observed binary build information; it does not change LuvBox's GPL version 2 license or grant a different license to any dependency.
+This inventory covers the Windows Qt Quick runtime bundled with LuvBox 1.2.0. It records upstream material and observed binary build information; it does not change LuvBox's GPL version 2 license or grant a different license to any dependency.
 
 ## Preparation and ZIP locations
 

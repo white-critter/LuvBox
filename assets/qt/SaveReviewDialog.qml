@@ -1,21 +1,24 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 
 Dialog {
     id: dialog
     required property var app
     property bool _responded: false
     readonly property var item: app ? app.reviewItem : ({})
+    readonly property alias previewMedia: media
+    readonly property var hostWindow: parent ? parent.Window.window : null
     title: "이 사진을 저장할까요?"
     modal: true
     focus: true
     closePolicy: Popup.CloseOnEscape
-    width: Math.min(880, parent ? Math.max(240, parent.width - 32) : 880)
-    height: Math.min(720, parent ? Math.max(200, parent.height - 32) : 720)
+    width: parent ? Math.max(0, parent.width - 24) : 1040
+    height: parent ? Math.max(0, parent.height - 24) : 736
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
-    padding: 20
+    padding: 16
     background: Rectangle {
         color: "#141414"
         radius: 16
@@ -55,12 +58,31 @@ Dialog {
         spacing: 8
         Label {
             Layout.fillWidth: true
+            Layout.minimumWidth: 0
             Layout.leftMargin: 20
             Layout.topMargin: 12
             Layout.bottomMargin: 8
             text: dialog.title
             textFormat: Text.PlainText
             font.bold: true
+            elide: Text.ElideRight
+        }
+        PreviewZoomControls {
+            visible: dialog.width >= 900
+            preview: media
+        }
+        FlatButton {
+            objectName: "reviewMaximizeButton"
+            text: dialog.hostWindow && (dialog.hostWindow.visibility === Window.Maximized
+                || dialog.hostWindow.visibility === Window.FullScreen) ? "창 복원" : "창 최대화"
+            enabled: !!dialog.hostWindow
+            onClicked: {
+                if (dialog.hostWindow.visibility === Window.Maximized
+                        || dialog.hostWindow.visibility === Window.FullScreen)
+                    dialog.hostWindow.showNormal()
+                else
+                    dialog.hostWindow.showMaximized()
+            }
         }
         FlatButton {
             Layout.rightMargin: 12
@@ -73,13 +95,23 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 12
 
+        PreviewZoomControls {
+            visible: dialog.width < 900
+            preview: media
+        }
+
         MediaPreview {
             id: media
+            objectName: "reviewMedia"
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.minimumHeight: 80
             sourceUrl: dialog.item ? (dialog.item.url || "") : ""
             mediaType: dialog.item ? (dialog.item.media_type || "photo") : "photo"
+            sourcePixelWidth: dialog.item ? (dialog.item.pixel_width || 0) : 0
+            sourcePixelHeight: dialog.item ? (dialog.item.pixel_height || 0) : 0
+            sourceRawWidth: dialog.item ? (dialog.item.source_width || 0) : 0
+            sourceRawHeight: dialog.item ? (dialog.item.source_height || 0) : 0
             playing: dialog.visible && !dialog._responded
         }
 

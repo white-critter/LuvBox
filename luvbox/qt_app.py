@@ -1,6 +1,7 @@
 """Product Qt shell over the existing downloader, accounts and local library."""
 
 from dataclasses import replace
+import re
 from pathlib import Path
 from queue import Queue
 import threading
@@ -27,7 +28,7 @@ _CHOICES = {
     "gif_format": {"gif", "mp4"},
     "gif_size": {"original", "720", "480"},
 }
-_BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_each"}
+_BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_each", "detailed_progress"}
 _PUBLIC_PREFERENCES = {*_CHOICES, *_BOOLEANS, "max_video_mb"}
 _SETTINGS_ERROR = "설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요."
 _REPAIR_ERROR = ("기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
@@ -88,8 +89,10 @@ class ApplicationController(QObject):
         self._gallery_visible = False
         self._shutdown_parts = set()
         self._browser_setup = BrowserSetupController(self, settings=self._settings)
-        self._accounts = AccountController(self, settings=self._settings, browser_setup=self._browser_setup)
+        self._accounts = AccountController(self, settings=self._settings, browser_setup=self._browser_setup,
+                                           persist_preferences=False)
         self._download = DownloadController(self)
+        self._download.setDetailsEnabled(self._preferences["detailed_progress"])
         self._library = LibraryController(self)
         self._schedule = ScheduleController(self)
         self._accounts.changed.connect(self._state_changed)
@@ -176,7 +179,9 @@ class ApplicationController(QObject):
 
     @Property(bool, notify=changed)
     def canStart(self):
-        return not self.busy and self._accounts.connected and bool(self._account and self._output)
+        identity = self._accounts.identity
+        matches = not identity or self._account.lower() == identity["handle"].lower()
+        return not self.busy and self._accounts.connected and matches and bool(self._account and self._output)
 
     @Property(str, notify=changed)
     def status(self):
@@ -245,15 +250,25 @@ class ApplicationController(QObject):
                 if self._settings_versions.get(name) != revision:
                     continue
                 value = self._committed_preferences.get(name)
+                if name == "account" and self._accounts.identity:
+                    # A stored login changed successfully. Preferences cannot
+                    # roll its screen label back to a different active session.
+                    value = self._accounts.identity["handle"]
                 if name in self._committed_preferences:
                     self._preferences[name] = value
                 else:
                     self._preferences.pop(name, None)
                 if name == "confirm_each":
                     self._download.setReviewEnabled(bool(value))
+                if name == "detailed_progress":
+                    self._download.setDetailsEnabled(bool(value))
             for field, (name, value) in fields.items():
                 if self._settings_versions.get(name) == revision:
+                    if field == "_account" and self._accounts.identity:
+                        value = self._accounts.identity["handle"]
                     setattr(self, field, value)
+            if "account" in changes and self._accounts.identity:
+                self._message = "연결한 계정은 유지했습니다. 저장 위치를 확인하고 다시 시도해 주세요."
             self._load_library()
         self.preferencesChanged.emit()
         pending_download = self._pending_download
@@ -299,7 +314,7 @@ class ApplicationController(QObject):
 
     @Slot(str, "QVariant")
     def setPreference(self, name, value):
-        if self._closing or (self.busy and name != "confirm_each"):
+        if self._closing or (self.busy and name not in {"confirm_each", "detailed_progress"}):
             return
         if name in _CHOICES:
             if not isinstance(value, str) or value not in _CHOICES[name]:
@@ -316,6 +331,8 @@ class ApplicationController(QObject):
         self._persist({name: value})
         if name == "confirm_each":
             self._download.setReviewEnabled(value)
+        if name == "detailed_progress":
+            self._download.setDetailsEnabled(value)
         if name == "separate_accounts":
             self._load_library()
         self.preferencesChanged.emit()
@@ -333,7 +350,11 @@ class ApplicationController(QObject):
             locations = self._preferences.get("record_locations", {})
             if isinstance(locations, dict) and isinstance(locations.get(self._account), str):
                 self._output = locations[self._account]
-            self._persist({"account": self._account, "output_dir": self._output, "auth_mode": "managed"},
+            preferences = {"account": self._account, "output_dir": self._output, "auth_mode": "managed"}
+            browser_id = self._browser_setup.selectedBrowser
+            if browser_id in {"chrome", "edge", "firefox"}:
+                preferences["connection_browser"] = browser_id
+            self._persist(preferences,
                           rollback={"_account": ("account", previous_account),
                                     "_output": ("output_dir", previous_output)})
         self._load_library()
@@ -489,9 +510,18 @@ class ApplicationController(QObject):
                     if (not path.is_absolute() or path.is_symlink() or path.resolve() != path
                             or tuple(payload.get("signature", ())) != file_signature(path) or cloud_only(path)):
                         raise ValueError("저장 확인 중 파일이 바뀌었습니다.")
+                    from .preview import photo_info
+                    dimensions = photo_info(path) if payload.get("media_type") == "photo" else {}
+                    if (path.is_symlink() or path.resolve() != path or cloud_only(path)
+                            or tuple(payload.get("signature", ())) != file_signature(path)):
+                        raise ValueError("저장 확인 중 파일이 바뀌었습니다.")
                     result = {"id": str(payload["id"]), "url": QUrl.fromLocalFile(str(path)).toString(),
                               "job_id": payload.get("job_id"),
                               "media_type": str(payload.get("media_type") or "photo"),
+                              "pixel_width": dimensions.get("pixel_width", 0),
+                              "pixel_height": dimensions.get("pixel_height", 0),
+                              "source_width": dimensions.get("source_width", 0),
+                              "source_height": dimensions.get("source_height", 0),
                               "author": str(payload.get("author") or ""), "filename": path.name}
                 elif kind == "open":
                     path = payload() if callable(payload) else Path(payload)
@@ -613,6 +643,16 @@ class ApplicationController(QObject):
         from .storage import records_root
         if not self._closing:
             self._commands.put(("open", records_root))
+
+    @Slot()
+    def openSavedSource(self):
+        source = self._download.currentSavedItem.get("source_url", "")
+        if self._closing or not isinstance(source, str) or not re.fullmatch(
+                r"https://x\.com/(?:i/web|[A-Za-z0-9_]{1,15})/status/[0-9]{1,20}", source):
+            return
+        if not QDesktopServices.openUrl(QUrl(source)):
+            self._error = "원문을 열지 못했습니다. 브라우저 설정을 확인해 주세요."
+            self.changed.emit()
 
     @Slot()
     def requestClose(self):

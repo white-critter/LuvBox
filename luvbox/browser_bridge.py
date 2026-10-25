@@ -343,14 +343,16 @@ class BrowserBridge:
         # The fragment is a one-time pairing capability, not an X credential.
         # The extension immediately removes it from the current history entry.
         url = f"http://127.0.0.1:{self.port}/connect#luvbox={self._secret}"
+        failure = ("기본 브라우저를 열지 못했습니다. 기본 브라우저 설정을 확인해 주세요." if opener is None else
+                   "선택한 브라우저를 열지 못했습니다. 설치 상태를 확인하고 브라우저를 다시 선택해 주세요.")
         try:
             opened = (webbrowser.open if opener is None else opener)(url)
         except Exception:
             self.close()
-            raise BrowserBridgeError("기본 브라우저를 열지 못했습니다. 기본 브라우저 설정을 확인해 주세요.") from None
+            raise BrowserBridgeError(failure) from None
         if not opened:
             self.close()
-            raise BrowserBridgeError("기본 브라우저를 열지 못했습니다. 기본 브라우저 설정을 확인해 주세요.")
+            raise BrowserBridgeError(failure)
 
     def wait(self, *, cancel=None, on_progress=None) -> BrowserSession:
         """Wait for explicit consent, reporting authenticated fixed stages only.

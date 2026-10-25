@@ -1,11 +1,14 @@
 """Qt projection of the existing isolated downloader, without worker-side UI."""
 
 import time
+from pathlib import Path
+import re
 
-from PySide6.QtCore import QObject, Property, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, Property, QTimer, Qt, Signal, Slot
 
-from .core import JobOptions
+from .core import JobOptions, _review_path
 from .download_service import DownloadService
+from .qt_saved_preview import SavedPreviewLoader
 
 
 def _count(value):
@@ -23,8 +26,40 @@ def _note(value, limit=1000):
     return text[:limit]
 
 
+def _saved_text(value, limit, *, multiline=False):
+    if not isinstance(value, str):
+        return ""
+    return "".join(char for char in value[:limit]
+                   if (ord(char) >= 32 and not 127 <= ord(char) <= 159)
+                   or (multiline and char in "\n\t"))
+
+
+def _saved_item(event):
+    """Copy bounded post metadata, never the worker's cookie or raw payload."""
+    value = event.get("path")
+    if (not isinstance(value, str) or not 1 <= len(value) <= 32768
+            or any(ord(char) < 32 or ord(char) == 127 for char in value)):
+        return {}
+    path = str(_review_path(value))
+    if not Path(path).is_absolute():
+        return {}
+    author = event.get("author")
+    author = author if isinstance(author, str) and re.fullmatch(r"[A-Za-z0-9_]{1,15}", author) else ""
+    source = event.get("source_url")
+    source = source if isinstance(source, str) and re.fullmatch(r"https://x\.com/i/web/status/[0-9]{1,20}", source) else ""
+    media_type = event.get("media_type")
+    media_type = media_type if isinstance(media_type, str) and media_type in {"photo", "video", "animated_gif"} else "photo"
+    return {"path": path, "filename": Path(path).name, "author": author,
+            "display_name": _saved_text(event.get("display_name"), 200),
+            "body": _saved_text(event.get("body"), 5000, multiline=True),
+            "posted_at": _saved_text(event.get("posted_at"), 64),
+            "source_url": source, "media_type": media_type,
+            "preview_url": "", "preview_note": "", "preview_loading": False}
+
+
 class DownloadController(QObject):
     changed = Signal()
+    savedItemChanged = Signal()
     # Worker events stay Python objects: a review's file signature holds NTFS
     # file IDs above the signed 64-bit range that a QVariantMap cannot carry.
     reviewRequested = Signal(object)
@@ -32,6 +67,7 @@ class DownloadController(QObject):
     eventReceived = Signal(object)
     authenticationChanged = Signal(str)
     shutdownFinished = Signal()
+    _previewResult = Signal(object)
 
     def __init__(self, parent=None, *, service=None):
         super().__init__(parent)
@@ -51,6 +87,12 @@ class DownloadController(QObject):
         self._job_id = 0
         self._authentication_state = ""
         self._authentication_error = False
+        self._details_enabled = False
+        self._current_saved = {}
+        self._preview_generation = 0
+        self._previewResult.connect(self._accept_preview, Qt.ConnectionType.QueuedConnection)
+        self._preview_loader = SavedPreviewLoader(
+            lambda generation, result: self._previewResult.emit((generation, result)))
         self._timer = QTimer(self)
         self._timer.setInterval(40)
         self._timer.timeout.connect(self._pump)
@@ -100,6 +142,48 @@ class DownloadController(QObject):
         """The last save stopped on a damaged records database."""
         return self._repair_needed
 
+    @Property(bool, notify=changed)
+    def detailsEnabled(self):
+        return self._details_enabled
+
+    @Property("QVariantMap", notify=savedItemChanged)
+    def currentSavedItem(self):
+        return dict(self._current_saved)
+
+    @Slot(bool)
+    def setDetailsEnabled(self, enabled):
+        if self._closing or bool(enabled) == self._details_enabled:
+            return
+        self._details_enabled = bool(enabled)
+        self._invalidate_preview()
+        if self._details_enabled:
+            self._request_preview()
+        self.savedItemChanged.emit()
+        self.changed.emit()
+
+    def _invalidate_preview(self):
+        self._preview_generation += 1
+        self._preview_loader.cancel()
+        if self._current_saved:
+            self._current_saved.update(preview_url="", preview_note="", preview_loading=False)
+            self.savedItemChanged.emit()
+
+    def _request_preview(self):
+        if not self._details_enabled or not self._current_saved or self._closing:
+            return
+        self._current_saved["preview_loading"] = True
+        if not self._preview_loader.request(self._preview_generation, self._current_saved["path"]):
+            self._current_saved.update(preview_loading=False, preview_note="미리보기를 준비하지 못했습니다.")
+
+    @Slot(object)
+    def _accept_preview(self, event):
+        generation, result = event
+        if (self._closing or not self._details_enabled or not self._current_saved
+                or generation != self._preview_generation):
+            return
+        self._current_saved.update(result, preview_loading=False)
+        self.savedItemChanged.emit()
+
     def markRepaired(self):
         """A rebuilt records database replaces the damaged-records error."""
         if self._running or not self._repair_needed:
@@ -145,6 +229,9 @@ class DownloadController(QObject):
         self._notice = ""
         self._progress = -1.0
         self._status = "저장을 시작합니다"
+        self._invalidate_preview()
+        self._current_saved = {}
+        self.savedItemChanged.emit()
         self._timer.start()
         self.changed.emit()
         return True
@@ -178,6 +265,8 @@ class DownloadController(QObject):
         if self._shutdown_emitted:
             return
         self._closing = True
+        self._invalidate_preview()
+        self._preview_loader.close()
         self._service.close()
         self.stop()
         self.changed.emit()
@@ -190,10 +279,12 @@ class DownloadController(QObject):
         self.shutdown()
 
     def _finish_shutdown(self):
-        if not self._shutdown_emitted:
+        if not self._shutdown_emitted and not self._preview_loader.alive():
             self._shutdown_emitted = True
             self._timer.stop()
             self.shutdownFinished.emit()
+        elif not self._shutdown_emitted:
+            self._timer.start()
 
     @Slot()
     def _pump(self):
@@ -235,6 +326,13 @@ class DownloadController(QObject):
             self._progress = min(1.0, downloaded / total) if total else -1.0
         elif kind == "saved":
             self._saved += 1
+            if self._running and not self._closing and self._final is None:
+                item = _saved_item(event)
+                if item:
+                    self._invalidate_preview()
+                    self._current_saved = item
+                    self._request_preview()
+                    self.savedItemChanged.emit()
             if not self._stopping:
                 self._status = "저장 중입니다"
         elif kind == "skipped":

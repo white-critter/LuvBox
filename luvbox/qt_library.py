@@ -16,6 +16,7 @@ from PySide6.QtCore import QObject, Property, Qt, QTimer, QUrl, Signal, Slot
 from .history import HistoryStore
 from .preview import Thumbnail, thumbnail
 from .qt_gallery import GalleryModel, SafeThumbnailProvider
+from .recycling import file_signature
 from .storage import records_root, resolve_storage
 from .thumbcache import cloud_only
 
@@ -159,6 +160,21 @@ class LibraryRepository:
                 return None
             content = store._db.execute("SELECT content FROM tweets WHERE tweet_id=?", (row["tweet_id"],)).fetchone()
             path = self._path(store, row)
+            width = height = raw_width = raw_height = 0
+            if path is not None and row["media_type"] == "photo":
+                from .preview import photo_info
+
+                try:
+                    signature = file_signature(path)
+                    dimensions = photo_info(path)
+                    width, height = dimensions.get("pixel_width", 0), dimensions.get("pixel_height", 0)
+                    raw_width, raw_height = dimensions.get("source_width", 0), dimensions.get("source_height", 0)
+                    if file_signature(path) != signature or self._path(store, row) != path:
+                        path = None
+                        width = height = raw_width = raw_height = 0
+                except OSError:
+                    path = None
+                    width = height = raw_width = raw_height = 0
             source = f"https://x.com/i/web/status/{row['tweet_id']}"
             info = " · ".join(value for value in (row.get("filename") or "", _posted(row.get("posted_at"), time=True))
                               if value)
@@ -167,7 +183,9 @@ class LibraryRepository:
                     "source": source, "path": str(path) if path is not None else "", "missing": path is None,
                     "missing_note": "" if path is not None else absence_note(store.output_dir),
                     "preview": QUrl.fromLocalFile(str(path)).toString() if path is not None else "",
-                    "media_type": row["media_type"], "public_info": info}
+                    "media_type": row["media_type"], "public_info": info,
+                    "pixel_width": width, "pixel_height": height,
+                    "source_width": raw_width, "source_height": raw_height}
 
     def decode(self, path, size):
         # Only paths that read() checked against this request's catalog are
@@ -232,7 +250,9 @@ class LibraryController(QObject):
         self._order = "saved"
         self._author = ""
         self._selected = {}
+        self._selection_key = ""
         self._selection_serial = 0
+        self._navigation = None
         self._busy = False
         self._status = ""
         self._condition = Condition()
@@ -246,10 +266,26 @@ class LibraryController(QObject):
         self._delivered.connect(self._accept, Qt.ConnectionType.QueuedConnection)
         self._worker = Thread(target=self._work, name="qt-library-actions", daemon=True)
         self._worker.start()
+        self.model.changed.connect(self._model_changed)
 
     @Property(str, notify=changed)
     def selectedKey(self):
         return self._selected.get("key", "")
+
+    @Property(int, notify=changed)
+    def selectedIndex(self):
+        return self.model._positions.get(self._selection_key or self.selectedKey, -1)
+
+    @Property(bool, notify=changed)
+    def canPrevious(self):
+        return not (self._closed or self._busy) and self.selectedIndex > 0
+
+    @Property(bool, notify=changed)
+    def canNext(self):
+        index = self.selectedIndex
+        return (not (self._closed or self._busy) and index >= 0
+                and (index + 1 < self.model.count
+                     or (not self.model._exhausted and self.model.count < self.model.total)))
 
     @Property(str, notify=changed)
     def selectedAuthor(self):
@@ -278,6 +314,22 @@ class LibraryController(QObject):
     @Property(str, notify=changed)
     def selectedPublicInfo(self):
         return self._selected.get("public_info", "")
+
+    @Property(int, notify=changed)
+    def selectedPixelWidth(self):
+        return self._selected.get("pixel_width", 0)
+
+    @Property(int, notify=changed)
+    def selectedPixelHeight(self):
+        return self._selected.get("pixel_height", 0)
+
+    @Property(int, notify=changed)
+    def selectedRawWidth(self):
+        return self._selected.get("source_width", 0)
+
+    @Property(int, notify=changed)
+    def selectedRawHeight(self):
+        return self._selected.get("source_height", 0)
 
     @Property(bool, notify=changed)
     def selectedMissing(self):
@@ -317,6 +369,8 @@ class LibraryController(QObject):
         self._generation += 1
         self._selection_serial += 1
         self._selected = {}
+        self._selection_key = ""
+        self._navigation = None
         self._status = ""
         self._busy = False
         with self._condition:
@@ -350,7 +404,19 @@ class LibraryController(QObject):
     def selectItem(self, key):
         if key not in self.model._keys or self._closed:
             return
+        cancelled_navigation = self._navigation is not None
+        if cancelled_navigation:
+            self._navigation = None
+            self._busy = False
+        # Synchronizing the grid highlight with an open preview must not queue
+        # the same selection again or clear its media while it is loading.
+        if key == self._selection_key and (self._busy or self.selectedKey == key):
+            if cancelled_navigation:
+                self._status = ""
+                self.changed.emit()
+            return
         self._selection_serial += 1
+        self._selection_key = key
         self._selected = {}
         self._busy = True
         self._status = ""
@@ -358,6 +424,52 @@ class LibraryController(QObject):
             self._pending = deque(item for item in self._pending if item[0] != "select")
             self._pending.append(("select", self._generation, self._selection_serial, key))
             self._condition.notify()
+        self.changed.emit()
+
+    @Slot(result=bool)
+    def previousItem(self):
+        return self._navigate(-1)
+
+    @Slot(result=bool)
+    def nextItem(self):
+        return self._navigate(1)
+
+    def _navigate(self, direction):
+        if self._closed or self._busy:
+            return False
+        current = self.selectedIndex
+        target = current + direction
+        if current < 0 or target < 0:
+            return False
+        if target < self.model.count:
+            self.selectItem(self.model._rows[target]["key"])
+            return True
+        if (direction < 0 or self.model._exhausted or target >= self.model.total):
+            return False
+        # The next page belongs to the existing filtered/sorted model. Keep
+        # this photo visible while its asynchronous reader fetches the page.
+        self._navigation = (self._generation, self._selection_serial, self.selectedKey, target)
+        self._busy = True
+        self._status = "다음 사진을 불러오는 중…"
+        if not self.model.busy:
+            self.model.loadMore()
+        self.changed.emit()
+        return True
+
+    @Slot()
+    def _model_changed(self):
+        if self._closed:
+            return
+        pending = self._navigation
+        if pending is not None and not self.model.busy:
+            self._navigation = None
+            generation, serial, key, target = pending
+            if generation == self._generation and serial == self._selection_serial and key == self.selectedKey:
+                self._busy = False
+                if target < self.model.count:
+                    self.selectItem(self.model._rows[target]["key"])
+                    return
+                self._status = self.model.error or "마지막 사진입니다."
         self.changed.emit()
 
     def _action(self, action):
@@ -421,6 +533,7 @@ class LibraryController(QObject):
         with self._condition:
             self._closed = True
             self._pending.clear()
+            self._navigation = None
             self._condition.notify_all()
         self._repository.configure(None)
         self.provider.close()

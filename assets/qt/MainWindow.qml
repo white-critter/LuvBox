@@ -4,6 +4,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
+import QtQuick.Window
 
 ApplicationWindow {
     id: window
@@ -446,10 +447,21 @@ ApplicationWindow {
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
                             }
-                            Label {
-                                text: window.app ? "저장 " + window.app.download.savedCount.toLocaleString() +
-                                    "개 · 건너뜀 " + window.app.download.skippedCount.toLocaleString() + "개" : ""
-                                color: window.mutedColor
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: window.app ? "저장 " + window.app.download.savedCount.toLocaleString() +
+                                        "개 · 건너뜀 " + window.app.download.skippedCount.toLocaleString() + "개" : ""
+                                    color: window.mutedColor
+                                }
+                                FlatSwitch {
+                                    objectName: "savedDetailsToggle"
+                                    text: "자세히 보기"
+                                    checked: window.app ? window.app.preferences.detailed_progress : false
+                                    enabled: window.app && !window.app.closing
+                                    onToggled: if (window.app) window.app.setPreference("detailed_progress", checked)
+                                }
                             }
                             RowLayout {
                                 Layout.fillWidth: true
@@ -474,6 +486,12 @@ ApplicationWindow {
                                 }
                             }
                         }
+                    }
+                    SavedDetails {
+                        objectName: "savedDetailsPanel"
+                        Layout.fillWidth: true
+                        app: window.app
+                        visible: window.app && window.app.download.detailsEnabled
                     }
                     FlatButton { text: "갤러리 보기"; visible: !window.app; onClicked: window.currentScreen = 1 }
                 }
@@ -727,16 +745,31 @@ ApplicationWindow {
         }
     }
     Shortcut { sequence: "Ctrl+F"; enabled: window.currentScreen === 1; onActivated: search.forceActiveFocus() }
+    Shortcut {
+        sequence: "Left"
+        enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canPrevious
+        onActivated: window.app.library.previousItem()
+    }
+    Shortcut {
+        sequence: "Right"
+        enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canNext
+        onActivated: window.app.library.nextItem()
+    }
     Dialog {
         id: previewDialog
         objectName: "previewDialog"
         parent: Overlay.overlay
+        property bool detailsVisible: false
         title: "미리보기"
         anchors.centerIn: parent
-        width: Math.min(window.width - 48, 700)
-        height: Math.min(window.height - 48, 720)
+        width: Math.max(0, parent.width - 24)
+        height: Math.max(0, parent.height - 24)
+        padding: 16
         modal: true
-        onAboutToShow: window.stopWheel()
+        onAboutToShow: {
+            detailsVisible = false
+            window.stopWheel()
+        }
         onClosed: selectedMedia.release()
         background: Rectangle {
             color: "#141414"
@@ -744,17 +777,40 @@ ApplicationWindow {
             border.width: 1
             border.color: "#2a2a2a"
         }
-        header: Label {
-            text: previewDialog.title
-            leftPadding: 24
-            rightPadding: 24
-            topPadding: 20
-            bottomPadding: 4
-            font.pixelSize: 18
-            background: null
+        header: RowLayout {
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.topMargin: 12
+                Layout.bottomMargin: 4
+                text: previewDialog.title
+                font.pixelSize: 18
+            }
+            FlatButton {
+                objectName: "previewMaximizeButton"
+                Layout.rightMargin: 12
+                text: window.visibility === Window.Maximized || window.visibility === Window.FullScreen
+                    ? "창 복원" : "창 최대화"
+                onClicked: {
+                    if (window.visibility === Window.Maximized || window.visibility === Window.FullScreen)
+                        window.showNormal()
+                    else
+                        window.showMaximized()
+                }
+            }
         }
         footer: DialogButtonBox {
             background: null
+            FlatButton {
+                objectName: "previewDetailsButton"
+                visible: window.app && window.app.library.selectedBody.length > 0
+                text: previewDialog.detailsVisible ? "본문 접기" : "본문 보기"
+                checkable: true
+                checked: previewDialog.detailsVisible
+                DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
+                onClicked: previewDialog.detailsVisible = !previewDialog.detailsVisible
+            }
             FlatButton {
                 text: "닫기"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
@@ -763,6 +819,23 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 12
+            Flow {
+                Layout.fillWidth: true
+                spacing: 8
+                FlatButton {
+                    objectName: "previewPreviousButton"
+                    text: "이전"
+                    enabled: window.app && window.app.library.canPrevious
+                    onClicked: window.app.library.previousItem()
+                }
+                FlatButton {
+                    objectName: "previewNextButton"
+                    text: "다음"
+                    enabled: window.app && window.app.library.canNext
+                    onClicked: window.app.library.nextItem()
+                }
+                PreviewZoomControls { preview: selectedMedia }
+            }
             MediaPreview {
                 id: selectedMedia
                 objectName: "selectedMedia"
@@ -770,6 +843,10 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 sourceUrl: window.app ? window.app.library.selectedPreviewUrl : window.selectedThumb
                 mediaType: window.app ? window.app.library.selectedMediaType : "photo"
+                sourcePixelWidth: window.app ? window.app.library.selectedPixelWidth : 0
+                sourcePixelHeight: window.app ? window.app.library.selectedPixelHeight : 0
+                sourceRawWidth: window.app ? window.app.library.selectedRawWidth : 0
+                sourceRawHeight: window.app ? window.app.library.selectedRawHeight : 0
                 playing: previewDialog.visible
             }
             Label {
@@ -791,9 +868,11 @@ ApplicationWindow {
             }
             ScrollView {
                 id: bodyScroll
+                objectName: "previewBodyScroll"
                 Layout.fillWidth: true
-                Layout.preferredHeight: Math.min(140, Math.max(1, bodyText.implicitHeight))
-                visible: window.app && window.app.library.selectedBody.length > 0
+                Layout.preferredHeight: Math.min(140, previewDialog.availableHeight * 0.25,
+                                                Math.max(1, bodyText.implicitHeight))
+                visible: previewDialog.detailsVisible && window.app && window.app.library.selectedBody.length > 0
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                 ScrollBar.vertical.policy: bodyText.implicitHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                 TextArea {
@@ -868,6 +947,7 @@ ApplicationWindow {
 
     SaveReviewDialog {
         id: saveReviewDialog
+        objectName: "saveReviewDialog"
         parent: Overlay.overlay
         app: window.app
     }
@@ -961,6 +1041,18 @@ ApplicationWindow {
                   "· 사진·영상과 중복 방지 기록은 건드리지 않습니다."
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
+        }
+    }
+
+    Connections {
+        target: window.app ? window.app.library : null
+        function onChanged() {
+            const index = window.app.library.selectedIndex
+            if (index >= 0 && gallery.currentIndex !== index) {
+                gallery.currentIndex = index
+                if (previewDialog.visible)
+                    gallery.positionViewAtIndex(index, GridView.Contain)
+            }
         }
     }
 
