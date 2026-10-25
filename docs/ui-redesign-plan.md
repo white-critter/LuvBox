@@ -1,6 +1,6 @@
 # Qt 화면과 구현 방향
 
-LuvBox 1.1.9는 PySide6 + Qt Quick만 사용합니다. 저장·다운로드·기록·계정과 미디어 처리는 공용 Python 엔진을 사용합니다. 현재 검토·변경·측정 결과는 [검증 기록](verification.md), 1.1.3 구조 검토는 [종합 검토](comprehensive-review-20261024.md)에 기록합니다.
+LuvBox 1.1.10은 PySide6 + Qt Quick만 사용합니다. 저장·다운로드·기록·계정과 미디어 처리는 공용 Python 엔진을 사용합니다. 현재 검토·변경·측정 결과는 [검증 기록](verification.md), 1.1.3 구조 검토는 [종합 검토](comprehensive-review-20261024.md)에 기록합니다.
 
 ## 현재 구조
 

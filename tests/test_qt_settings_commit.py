@@ -117,6 +117,24 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertEqual(options.account, "another")
         self.controller.download.start.assert_called_once()
 
+    def test_failed_account_switch_restores_the_previous_account_and_folder(self):
+        previous_account, previous_output = self.controller.account, self.controller.outputFolder
+        other = str(self.folder / "other-account")
+        self.controller._preferences["record_locations"] = {"otheracct": other}
+        self.controller._committed_preferences["record_locations"] = {"otheracct": other}
+        self.settings.update.side_effect = self.blocked_update
+        self.controller._accounts._identity = {"handle": "otheracct", "user_id": "9", "display_name": "Other"}
+        self.controller._account_changed()
+        self.assertTrue(self.entered.wait(1))
+        self.assertEqual((self.controller.account, self.controller.outputFolder), ("otheracct", other))
+        self.release.set()
+        self.wait_for(lambda: not self.controller.busy)
+        self.assertEqual(self.controller.account, previous_account)
+        self.assertEqual(self.controller.outputFolder, previous_output)
+        self.assertEqual(self.controller._preferences["account"], previous_account)
+        self.assertEqual(self.controller._preferences["output_dir"], previous_output)
+        self.assertIn("설정을 저장하지 못했습니다", self.controller.error)
+
     def test_failed_account_edit_cancels_the_waiting_save_click(self):
         self.settings.update.side_effect = self.blocked_update
         self.controller.setAccount("another")

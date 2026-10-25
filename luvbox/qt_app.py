@@ -328,11 +328,14 @@ class ApplicationController(QObject):
             self._download.clearAuthenticationError()
         identity = self._accounts.identity
         if identity:
+            previous_account, previous_output = self._account, self._output
             self._account = identity["handle"]
             locations = self._preferences.get("record_locations", {})
             if isinstance(locations, dict) and isinstance(locations.get(self._account), str):
                 self._output = locations[self._account]
-            self._persist({"account": self._account, "output_dir": self._output, "auth_mode": "managed"})
+            self._persist({"account": self._account, "output_dir": self._output, "auth_mode": "managed"},
+                          rollback={"_account": ("account", previous_account),
+                                    "_output": ("output_dir", previous_output)})
         self._load_library()
         self._state_changed()
 
