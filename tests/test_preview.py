@@ -1,4 +1,5 @@
 from io import BytesIO
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -218,6 +219,7 @@ result.image.close()
                 patch("luvbox.preview.subprocess.run", side_effect=subprocess.TimeoutExpired([], 8)):
             self.assertIsNone(thumbnail(path).image)
 
+    @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_bundled_decoder_reads_real_local_video_without_network(self):
         from luvbox.media import ffmpeg_path
         executable = ffmpeg_path()

@@ -95,8 +95,13 @@ class DownloadService:
     def close(self):
         with self._lock:
             self._closed = True
-        self.stop()
-        return not self.running
+            # A terminal event describes the download result, but its worker
+            # can still be stuck in interpreter/tool cleanup. Closing the app
+            # must retain the same bounded termination path in that state.
+            if self._running:
+                self._stop.set()
+                self._review_id = None
+            return not self._running
 
     def drain(self, limit=200):
         limit = max(0, min(int(limit), 1000))

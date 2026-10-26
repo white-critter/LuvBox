@@ -92,6 +92,43 @@ class DownloadServiceTests(unittest.TestCase):
         events = self.service.drain()
         self.assertEqual([(event["job_id"], event["downloaded"]) for event in events], [(1, 10), (2, 20)])
 
+    def test_close_retires_a_worker_stuck_after_its_terminal_event(self):
+        self.service._job_id = 1
+        self.service._running = True
+        finished = json.dumps({"type": "finished", "status": "finished"}).encode() + b"\n"
+        workers = []
+        clock = [0.0]
+        close_results = []
+
+        def spawn(command, **kwargs):
+            worker = _Process(Path(command[-2]), finished, exit_after=10_000)
+            workers.append(worker)
+            return worker
+
+        def tick(_seconds):
+            if not close_results:
+                self.assertTrue(self.service._final)
+                close_results.append(self.service.close())
+            clock[0] += 10
+            if clock[0] > 100:
+                self.fail("closing must retire even a worker that already reported its result")
+
+        with patch.object(download_service.subprocess, "Popen", side_effect=spawn), \
+                patch.object(download_service.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(download_service.time, "sleep", side_effect=tick):
+            self.service._run(1, self.options)
+
+        self.assertEqual(close_results, [False])
+        self.assertFalse(self.service.running)
+        self.assertEqual(workers[0].terminated, 1)
+        self.assertEqual(workers[0].killed, 0)
+        self.assertLessEqual(clock[0], 60)
+        events = self.service.drain()
+        self.assertEqual([event["type"] for event in events], ["started", "finished", "process_exit"])
+        self.assertEqual(events[1]["status"], "finished")
+        self.assertEqual(events[-1]["code"], -15)
+        self.assertTrue(self.service.close())
+
     def test_thread_start_failure_rolls_back_and_allows_a_later_worker(self):
         secret = "arbitrary thread failure details"
         with patch.object(download_service.Thread, "start", side_effect=RuntimeError(secret)):

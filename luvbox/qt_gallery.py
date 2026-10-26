@@ -234,9 +234,21 @@ class SafeThumbnailProvider(QQuickImageProvider):
         return self._decode_for_request(key, path, width, height, size)
 
     def _decode_for_request(self, key, path, width, height, size):
+        token = (key, width, height)
         with self._lock:
-            if self._closed or key not in self._registry:
+            # A slow queued decode can outlive requestImage's cache wait.
+            # Join that work instead of decoding the same image/video again.
+            while token in self._inflight and not self._closed and self._registry.get(key) == path:
+                self._lock.wait()
+            if self._closed or self._registry.get(key) != path:
                 return self._output(QImage(), size)
+            # Retire the queued copy before taking ownership of the decode;
+            # otherwise a scheduler worker can start it at the same time.
+            if self._queued_size.get(key) == (width, height):
+                self._live.pop(key, None)
+                self._priority.pop(key, None)
+                self._queued_size.pop(key, None)
+            self._inflight.add(token)
             self._active += 1
         try:
             image, _hit = self._read(key, path, width, height, decode=True)
@@ -245,6 +257,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             return self._output(QImage(), size)
         finally:
             with self._lock:
+                self._inflight.discard(token)
                 self._active -= 1
                 self._lock.notify_all()
 
@@ -407,7 +420,8 @@ class SafeThumbnailProvider(QQuickImageProvider):
             current = path.stat()
         except OSError:
             return QImage(), False
-        if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != stamp:
+        if ((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != stamp
+                or path.is_symlink() or path.resolve() != path or cloud_only(path, status=current)):
             return QImage(), False
         with self._lock:
             self._record("decode_ms", decode_ms)

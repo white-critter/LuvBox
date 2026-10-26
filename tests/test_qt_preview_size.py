@@ -507,6 +507,7 @@ class PreviewSizeTests(unittest.TestCase):
         # must still leave substantially more image space than the old326px.
         self.assertGreater(report["gallery"]["1080x760"]["canvas"][1], 420)
 
+    @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_saved_details_and_preview_controls_work_in_the_real_window(self):
         for scale in ("1", "1.5"):
             with self.subTest(scale=scale):

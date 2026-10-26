@@ -3,6 +3,7 @@
 from contextlib import closing
 from dataclasses import replace
 from io import BytesIO
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -66,6 +67,7 @@ class AutomaticPreviewTests(unittest.TestCase):
         self.assertLessEqual(image.height, thumbcache.SIZE[1])
         image.close()
 
+    @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_new_downloads_keep_previews_in_every_folder_and_account_layout(self):
         for index, (mode, separate) in enumerate((mode, separate)
                                                for mode in ("author", "date", "flat")

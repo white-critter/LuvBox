@@ -41,6 +41,23 @@ class AccountConnectionTests(unittest.TestCase):
         self.controller.shutdown()
         self.wait(lambda: self.controller._shutdown_emitted)
 
+    def test_account_refresh_cannot_mix_snapshots_from_different_app_windows(self):
+        self.reader.stop()
+        identity = {"user_id": "123", "handle": "first_user", "display_name": "First"}
+        cookies = [{"name": "auth_token", "value": "synthetic-first-token", "domain": ".x.com",
+                    "path": "/", "expires": -1, "secure": True, "httpOnly": True}]
+        # An independent app window disconnects immediately after the first
+        # read. Three separate reads used to show its empty active identity
+        # alongside the previous snapshot's still-active account list.
+        first = {"version": 1, "identity": identity, "cookies": cookies,
+                 "accounts": [{"identity": identity, "cookies": cookies}]}
+        later = {"version": 1, "cookies": [], "accounts": []}
+        with patch("luvbox.login._read_payload", side_effect=[first, later, later]) as read:
+            state = AccountController._read_state()
+        self.assertEqual(state, {"accounts": [{**identity, "active": True}],
+                                 "identity": identity, "connected": True})
+        read.assert_called_once_with()
+
     def test_saved_token_does_not_claim_verified_login_or_close_the_dialog(self):
         completed = Mock()
         self.controller.connectionCompleted.connect(completed)

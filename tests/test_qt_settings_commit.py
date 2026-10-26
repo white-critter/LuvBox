@@ -70,6 +70,20 @@ class SettingsCommitTests(unittest.TestCase):
             raise TimeoutError("fixture was not released")
         raise OSError("private settings contents must not be displayed")
 
+    def test_invalid_saved_choice_types_do_not_block_startup_or_rewrite_the_file(self):
+        self.close_controller()
+        self.settings.load.return_value.update(
+            folder_mode=[], scan_mode={}, gif_format=True, gif_size=None,
+            custom={"preserved": True})
+        self.controller = ApplicationController()
+        self.wait_for(lambda: not self.controller.busy)
+        defaults = default_settings()
+        for name in ("folder_mode", "scan_mode", "gif_format", "gif_size"):
+            with self.subTest(name=name):
+                self.assertEqual(self.controller.preferences[name], defaults[name])
+        self.assertEqual(self.controller._preferences["custom"], {"preserved": True})
+        self.settings.update.assert_not_called()
+
     def test_failed_folder_change_restores_previous_folder_and_unlocks_controls(self):
         previous = self.controller.outputFolder
         self.settings.update.side_effect = self.blocked_update

@@ -238,6 +238,42 @@ class AccountSessionTests(unittest.TestCase):
         self.first = {"user_id": "123", "handle": "First_User", "display_name": "첫 번째 계정"}
         self.second = {"user_id": "456", "handle": "second_user", "display_name": "두 번째 계정"}
 
+    def test_public_state_tracks_selection_manual_login_and_disconnect_without_cookies(self):
+        disconnected = {"accounts": [], "identity": {}, "connected": False}
+        self.assertEqual(login.account_state(), disconnected)
+        login.save_authenticated_session(SECRET, self.first)
+        login.save_authenticated_session("second-token", self.second)
+        state = login.account_state()
+        self.assertTrue(state["connected"])
+        self.assertEqual(state["identity"], login.normalize_identity(self.second))
+        self.assertEqual([(row["user_id"], row["active"]) for row in state["accounts"]],
+                         [("123", False), ("456", True)])
+        self.assertNotIn("cookies", json.dumps(state))
+        self.assertNotIn(SECRET, json.dumps(state))
+        self.assertNotIn("second-token", json.dumps(state))
+        login.save_auth_token("manual-token")
+        state = login.account_state()
+        self.assertTrue(state["connected"])
+        self.assertEqual(state["identity"], {})
+        self.assertFalse(any(row["active"] for row in state["accounts"]))
+        login.clear_active_session()
+        state = login.account_state()
+        self.assertFalse(state["connected"])
+        self.assertEqual(len(state["accounts"]), 2)
+        login.clear_session()
+        self.assertEqual(login.account_state(), disconnected)
+
+    def test_public_state_reports_unreadable_store_instead_of_an_empty_account_list(self):
+        for error in (PermissionError(SECRET), ValueError(SECRET), UnicodeError(SECRET)):
+            with self.subTest(error=type(error).__name__), \
+                    patch("luvbox.login._read_payload", side_effect=error):
+                with self.assertRaises(ValueError) as caught:
+                    login.account_state()
+                self.assertNotIn(SECRET, str(caught.exception))
+        with patch("luvbox.login._read_payload", return_value={"version": 1, "accounts": {}}):
+            with self.assertRaises(ValueError):
+                login.account_state()
+
     def test_unreadable_existing_accounts_are_never_replaced_by_a_new_login(self):
         login.save_authenticated_session(SECRET, self.first)
         previous = self.session.read_bytes()

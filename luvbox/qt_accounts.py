@@ -178,14 +178,7 @@ class AccountController(QObject):
 
     @staticmethod
     def _read_state():
-        accounts = []
-        for account in login.list_accounts():
-            identity = login.normalize_identity(account)
-            accounts.append({**identity, "active": account.get("active") is True})
-        active = login.active_account()
-        return {"accounts": accounts,
-                "identity": login.normalize_identity(active) if active is not None else {},
-                "connected": login.has_session()}
+        return login.account_state()
 
     def _apply_state(self, state):
         self._accounts = state["accounts"]

@@ -10,6 +10,29 @@
 
 배포 검증은 ZIP CRC, 실행 파일·런타임·소스·라이선스, 체크섬과 개인정보 제외를 확인합니다. 공개 전 업로드 파일을 다시 받아 해시를 대조하고 한글·공백 경로에서 실행합니다. 세부 로그와 합성 화면은 `.test-output/`에 보관하며 배포 소스에 넣지 않습니다.
 
+## 2026-10-26 전체 검토 후 미배포 소스 검증
+
+Windows 앱의 실행·Qt 화면·인증·다운로드·저장/복구·미디어·빌드 경로를 나누어 검토했습니다. 제품 버전은 1.2.1이며 이번 작업은 소스 개선입니다. 아래 결과는 Linux x86_64, Python 3.13.5, PySide6 6.10.3, Pillow 13.0.0, SQLite 3.46.1에서 확인했습니다.
+
+- 전체 회귀 **1,005개 중 913개 통과·92개 생략**, 실패·오류 없음(73.272초). 생략은 Windows FFmpeg·DPAPI·경로/드라이브·mutex·Job·휴지통, 준비되지 않은 ExifTool/Perl, 선택적 Chromium과 opt-in 네이티브 검사입니다. Windows 실행을 Linux에서 통과한 것으로 대체하지 않습니다. 전용 실행 전제가 빠졌던 개별 검사에 OS 조건을 명시하고, 디렉터리 링크 정리 방식만 OS에 맞게 고쳤습니다.
+- 실제 제품 QML의 offscreen 창 시작·갤러리 썸네일·사진 미리보기·설정/확인창·연결창·정상 종료와 QML 오류 없음을 확인했습니다. 스크롤·밀도·휠·창 크기 변경 등 기존 QML 검증도 유지했습니다. 로컬 PulseAudio null sink를 준비해 오디오 서버 부재를 해결했으며 경고 검사나 assertion을 완화하지 않았습니다.
+- 격리된 오프라인 저장 시작 검사에서 실제 `TwitterLikesExtractor`의 첫 요청 준비를 확인했습니다. DNS·연결·전송을 차단하고 합성 쿠키만 사용했으며 실제 X 인증·다운로드를 실행하지 않았습니다.
+- 추가 실험으로 imageio 패키지의 Linux 네이티브 디코더를 테스트 중에만 지정해 생성 MP4/GIF의 변환·크기/프레임·중단·오류 시 원본 보존 **8개를 모두 통과**했습니다. 이 별도 실험은 Windows FFmpeg 번들·Job·EXE 검증이 아닙니다.
+- 새 회귀는 손상된 선택형 설정의 앱 시작, 완료 이벤트 뒤 멈춘 worker의 종료, 계정 상태의 단일 스냅샷, 느린 썸네일 중복 방지와 디코딩 뒤 링크 교체 거부, 큰 메타데이터 목록의 중복 개수 보존, 예약 로그 생성 실패를 확인합니다. 완전히 손상된 현재 기록은 검증된 scoped 백업으로 복구하며 원본·백업을 보존합니다. 백업의 행이 일부라도 제약 위반으로 누락되거나 백업이 손상/불완전하면 교체를 거부하고, 잠금·접근 오류에서는 백업 복원으로 전환하지 않습니다.
+- `pip check`, 고정 자산 검사(`check_build_inputs.py --assets-only`), Python 컴파일과 `git diff --check`를 통과했습니다. 전체 실행 전후 Python·QML·JS·PowerShell 소스 **155개 해시가 동일**했습니다. [성능 측정](performance.md)의 메타데이터 검증·스냅샷 병합도 생성 데이터로 확인했습니다.
+
+전체 실행 명령은 다음과 같습니다. PulseAudio 소켓은 이번 클라우드 검증에서만 준비한 임시 환경입니다.
+
+```bash
+PULSE_SERVER=unix:/workspace/.luvbox-cloud/pulse-review/native \
+QT_QPA_PLATFORM=offscreen QSG_RHI_BACKEND=software \
+.venv/bin/python -m unittest discover -s tests -v
+```
+
+로그·합성 화면·측정 결과는 `.test-output/review-final-tests.log`, `review-final-qt-smoke.json`/`.png`, `review-download-smoke.json`, `full-review/`, `storage-review/`에 보존했습니다. 전체 인터프리터 종료 시 SQLite 연결의 `ResourceWarning`과 PySide 관련 수집되지 않은 객체 경고가 남았으며 숨기지 않았습니다. 이를 장기 실행의 자원 누수 부재로 해석하지 않습니다.
+
+전체 빌드 입력 검사는 Windows ExifTool 번들이 준비되지 않아 실패했습니다. 실제 Windows DPAPI·예약·휴지통·번들 미디어 도구 및 새 Windows EXE/ZIP 빌드·공개 배포는 이번 환경에서 검증하지 않았습니다. 아래 과거 Windows 실행 결과를 이번 변경의 실행 검증으로 대체하지 않습니다.
+
 ## 2026-10-25 1.2.1 소스 검증 결과
 
 - 최종 Windows 전체 회귀 **990개 중 984개 통과·6개 생략**, 실패·오류 없음(285.102초). 생략은 심볼릭 링크 권한 4개, 선택적 Chromium/Playwright 통합 1개와 명시적 선택이 필요한 네이티브 휴지통 검사 1개입니다. 최종 전체 실행 중 제품·테스트·빌드 소스 148개의 해시가 유지됐습니다.

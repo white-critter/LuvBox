@@ -34,10 +34,12 @@ class RecyclingTests(unittest.TestCase):
         self.destination.with_name("$Ifixture.jpg").write_bytes(content)
         return recycling._Outcome(post_result=0, destination=str(self.destination))
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
     def test_signature_accepts_json_roundtrip_list(self):
         with patch.object(recycling, "_run_native", side_effect=lambda *_: self.recycled()):
             self.assertEqual(recycle_file(self.source, list(self.signature)), str(self.destination))
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
     def test_changed_file_is_rejected_before_native_operation(self):
         self.source.write_bytes(b"changed")
         with patch.object(recycling, "_run_native") as native:
@@ -132,6 +134,7 @@ class RecyclingTests(unittest.TestCase):
                 recycle_file(self.source)
         self.assertTrue(self.source.exists())
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
     def test_positive_shell_success_code_still_requires_verified_receipt(self):
         def success(*_):
             outcome = self.recycled()
@@ -141,6 +144,7 @@ class RecyclingTests(unittest.TestCase):
         with patch.object(recycling, "_run_native", side_effect=success):
             self.assertEqual(recycle_file(self.source), str(self.destination))
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
     def test_no_recycle_destination_is_uncertain_when_original_is_missing(self):
         def missing(*_):
             self.source.rename(self.base / "kept-for-review.jpg")
@@ -151,6 +155,7 @@ class RecyclingTests(unittest.TestCase):
                 recycle_file(self.source)
         self.assertTrue(caught.exception.uncertain)
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
     def test_error_after_original_disappears_is_always_uncertain(self):
         def error(*_):
             self.source.rename(self.base / "kept-for-review.jpg")
@@ -167,6 +172,7 @@ class RecyclingTests(unittest.TestCase):
                 recycle_file(self.source)
         self.assertFalse(caught.exception.uncertain)
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
     def test_wrong_receipt_path_never_counts_as_success(self):
         with patch.object(recycling, "_run_native", side_effect=lambda *_: self.recycled(original=self.base / "other.jpg")), \
                 patch.object(recycling.time, "sleep"):
@@ -227,6 +233,7 @@ class RecyclingTests(unittest.TestCase):
             output.write(b"\0" * (28 + 32768 * 2))
         self.assertFalse(verify_receipt(self.source, self.destination, self.signature))
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
     def test_missing_receipt_is_retried_before_giving_up(self):
         with patch.object(recycling, "_run_native", side_effect=lambda *_: self.recycled()), \
                 patch.object(recycling, "verify_receipt", side_effect=[False, True]) as verify, \

@@ -20,6 +20,7 @@ from luvbox.history import HistoryStore
 from luvbox.storage import migrate_records, resolve_storage
 
 
+@unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
 class GifConversionTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
