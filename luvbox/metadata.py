@@ -20,6 +20,8 @@ from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
+from .file_access import is_read_locked
+
 
 SUPPORTED_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4"})
 TIMEOUT_SECONDS = 20
@@ -88,6 +90,10 @@ class _MediaChanged(ValueError):
 
 class _MediaBusy(OSError):
     """A verified copy cannot replace a file still held by another program."""
+
+
+class _TagReadError(ValueError):
+    """The tool could not read the original; native probing may identify a lock."""
 
 
 def _sharing_violation(error: OSError, target: Path) -> bool:
@@ -232,6 +238,33 @@ def _replace_verified(temporary: Path, target: Path, original, deadline: float) 
             remaining = expires - time.monotonic()
             if remaining <= 0:
                 raise _MediaBusy("media busy") from None
+            time.sleep(min(_REPLACE_RETRY_SECONDS, remaining))
+
+
+def _retry_original_io(target: Path, original, operation, deadline: float, cancelled=None):
+    """Retry only proven sharing locks while retaining the original identity."""
+    expires = min(deadline, time.monotonic() + _REPLACE_WAIT_SECONDS)
+    retrying = False
+    while True:
+        _original_unchanged(target, original)
+        if time.monotonic() >= deadline:
+            raise TimeoutError("metadata timeout")
+        if retrying and cancelled is not None and cancelled():
+            raise _MediaBusy("media busy")
+        try:
+            return operation()
+        except Exception as exc:
+            locked = (isinstance(exc, OSError) and getattr(exc, "winerror", None) in {32, 33})
+            if isinstance(exc, _TagReadError):
+                # ExifTool's error text is private and cannot reliably tell a
+                # temporary Windows read lock from a malformed file.
+                locked = is_read_locked(target)
+            if not locked:
+                raise
+            remaining = expires - time.monotonic()
+            if remaining <= 0 or (cancelled is not None and cancelled()):
+                raise _MediaBusy("media busy") from None
+            retrying = True
             time.sleep(min(_REPLACE_RETRY_SECONDS, remaining))
 
 
@@ -580,7 +613,7 @@ def _read_tags(path: Path, deadline: float) -> dict:
                    "-XMP-dc:Creator", "-XMP-dc:Relation", "-XMP-xmp:Identifier",
                    "-QuickTime:Comment", str(path)], deadline)
     if result.returncode != 0:
-        raise ValueError("metadata read failed")
+        raise _TagReadError("metadata read failed")
     rows = json.loads(result.stdout)
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         raise ValueError("metadata read failed")
@@ -699,8 +732,12 @@ def read_source(path: Path | str) -> str:
 
 
 def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: str = "",
-                 *, text: str | None = None) -> dict[str, str]:
-    """Write separate post fields transactionally; None leaves descriptions intact."""
+                 *, text: str | None = None, cancelled=None) -> dict[str, str]:
+    """Write separate post fields transactionally; None leaves descriptions intact.
+
+    The optional cancellation predicate only skips new IO retries. The caller
+    still finalizes its already saved media through the normal result path.
+    """
     url = f"https://x.com/i/web/status/{tweet_id}" if isinstance(tweet_id, str) and _ID.fullmatch(tweet_id) else ""
     status = "failed"
     reason = "invalid"
@@ -741,12 +778,13 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             # temporary which neither the writer nor cleanup could change.
             raise PermissionError("read-only media")
         deadline = time.monotonic() + TIMEOUT_SECONDS
-        previous_tags = _read_tags(target, deadline)
+        previous_tags = _retry_original_io(
+            target, original, lambda: _read_tags(target, deadline), deadline, cancelled)
         reason = "copy"
         fd, name = tempfile.mkstemp(prefix=".luvbox-source-", suffix=target.suffix, dir=target.parent)
         os.close(fd)
         temporary = Path(name)
-        _copy_for_metadata(target, temporary)
+        _retry_original_io(target, original, lambda: _copy_for_metadata(target, temporary), deadline, cancelled)
         identifiers = _values(previous_tags.get("XMP-xmp:Identifier"))
         description_markers = []
         update_description = False

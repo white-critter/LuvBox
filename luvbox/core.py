@@ -881,7 +881,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             try:
                 content = kwdict.get("content")
                 result = embed_source(media_path, str(kwdict["tweet_id"]), author=author, author_id=author_id,
-                                      text=content if isinstance(content, str) else None)
+                                      text=content if isinstance(content, str) else None,
+                                      cancelled=lambda: flag is not None and flag.exists())
                 text_status = result.get("text_status", "unknown")
                 if text_status not in {"embedded", "preserved", "not_requested", "error", "unknown"}:
                     text_status = "error"

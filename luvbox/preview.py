@@ -1,6 +1,7 @@
 """Small local media previews. Decoding never contacts X or writes media."""
 
 from dataclasses import dataclass
+import errno
 from functools import cache
 from io import BytesIO
 from pathlib import Path
@@ -12,6 +13,7 @@ import zlib
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .thumbcache import cloud_only
+from .file_access import is_read_locked
 
 
 PREVIEW_SIZE = (220, 168)
@@ -114,6 +116,7 @@ def _prepare_decoders(video: bool) -> None:
 class Thumbnail:
     image: Image.Image | None
     note: str
+    retryable: bool = False
 
 
 def oriented_thumbnail(original: Image.Image, size) -> Image.Image:
@@ -149,12 +152,18 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
         return Thumbnail(None, "파일이 클라우드에만 있습니다. 탐색기에서 내려받은 뒤 다시 확인해 주세요.")
     if not path.is_file():
         return Thumbnail(None, "파일이 이동되었거나 삭제되었습니다.")
+    source = None
     try:
         if kind == ".mp4":
             from .media import ffmpeg_path
             executable = ffmpeg_path()
             if executable is None:
                 return Thumbnail(None, "동영상 미리보기 도구가 없습니다. 파일 열기로 확인해 주세요.")
+            # FFmpeg reports a sharing violation only as a generic exit code.
+            # A bounded local read preserves Windows' precise lock error so
+            # the optional saved card can retry without guessing from stderr.
+            with path.open("rb", buffering=0) as check:
+                check.read(1)
             result = subprocess.run(
                 [str(executable), "-nostdin", "-v", "error", "-protocol_whitelist", "file,pipe",
                  "-threads", "1", "-f", "mov", "-i", str(path.resolve()), "-an", "-sn", "-dn", "-frames:v", "1",
@@ -167,7 +176,9 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
             source = BytesIO(result.stdout)
             note = "동영상 · 첫 프레임"
         elif kind in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
-            source = path
+            # Own the stream even when Pillow fails during its initial read,
+            # before it can return an image context manager to close it.
+            source = path.open("rb")
             note = "GIF · 첫 프레임" if kind == ".gif" else "사진 미리보기"
         else:
             return Thumbnail(None, "미리보기를 지원하지 않는 파일입니다.")
@@ -182,5 +193,11 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
                 image = oriented_thumbnail(original, size)
         return Thumbnail(image, note)
     except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError,
-            Image.DecompressionBombWarning, subprocess.SubprocessError):
-        return Thumbnail(None, "미리보기를 읽지 못했습니다. 파일 열기로 확인해 주세요.")
+            Image.DecompressionBombWarning, subprocess.SubprocessError) as exc:
+        retryable = isinstance(exc, OSError) and (
+            getattr(exc, "winerror", None) in {32, 33}
+            or (exc.errno == errno.EACCES and is_read_locked(path)))
+        return Thumbnail(None, "미리보기를 읽지 못했습니다. 파일 열기로 확인해 주세요.", retryable)
+    finally:
+        if source is not None:
+            source.close()

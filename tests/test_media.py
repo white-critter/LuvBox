@@ -20,6 +20,7 @@ from gallery_dl.extractor.twitter import TwitterExtractor
 from tests import test_core
 from luvbox.core import JobOptions, run_worker
 from luvbox.history import HistoryError, HistoryStore
+from luvbox.metadata import embed_source as _real_embed_source
 
 
 MIB = 1024 * 1024
@@ -832,7 +833,11 @@ class MediaTests(unittest.TestCase):
         rows = [("100", 1, "photo", "alice", None, 123456789)]
         code, events = self.worker(rows)
         self.assertEqual(code, 0)
-        self.assertEqual(self.embed_source.call_args.kwargs, {"author": "alice", "author_id": "123456789", "text": None})
+        arguments = dict(self.embed_source.call_args.kwargs)
+        cancelled = arguments.pop("cancelled")
+        self.assertTrue(callable(cancelled))
+        self.assertFalse(cancelled())
+        self.assertEqual(arguments, {"author": "alice", "author_id": "123456789", "text": None})
         saved = next(event for event in events if event["type"] == "saved")
         self.assertEqual((saved["author"], saved["author_id"], saved["author_metadata_status"]), ("alice", "123456789", "embedded"))
         row = self.history_rows()[0]
@@ -920,7 +925,11 @@ class MediaTests(unittest.TestCase):
         options = replace(self.options, folder_mode="flat")
         rows = [("100", 1, "photo", "")]
         self.worker(rows, options=options)
-        self.assertEqual(self.embed_source.call_args.kwargs, {"author": "", "author_id": "", "text": None})
+        arguments = dict(self.embed_source.call_args.kwargs)
+        cancelled = arguments.pop("cancelled")
+        self.assertTrue(callable(cancelled))
+        self.assertFalse(cancelled())
+        self.assertEqual(arguments, {"author": "", "author_id": "", "text": None})
         row = self.history_rows()[0]
         self.assertEqual((row["author"], row["author_id"], row["author_metadata_status"]), ("", "", "unknown"))
         self.embed_source.reset_mock()
@@ -988,6 +997,40 @@ class MediaTests(unittest.TestCase):
         self.assertIn("다른 프로그램이 파일을 사용 중", warnings[0])
         self.assertEqual(self.archive_keys(), {"twitter100_1"})
         self.assertEqual(self.history_rows()[0]["metadata_status"], "failed")
+
+    def test_stop_during_initial_metadata_lock_finishes_the_saved_record_without_a_worker_error(self):
+        from luvbox import metadata
+
+        flag = self.base / "stop.flag"
+        copies = []
+
+        def busy_and_cancel(source, _temporary):
+            copies.append(Path(source).read_bytes())
+            flag.touch()
+            error = PermissionError(13, test_core.SECRET)
+            error.winerror = 32
+            raise error
+
+        self.embed_source.side_effect = _real_embed_source
+        with patch.object(metadata, "_read_tags", return_value={}), \
+                patch.object(metadata, "_copy_for_metadata", side_effect=busy_and_cancel) as copy:
+            code, events = self.worker([("100", 1, "photo", "alice", None, None, "synthetic body"),
+                                        ("101", 1, "photo", "alice")],
+                                       stop_file=flag)
+        self.assertEqual((code, events[-1]["status"], events[-1]["saved"], events[-1]["metadata_failed"]),
+                         (0, "stopped", 1, 1))
+        self.assertEqual(copy.call_count, 1)
+        saved = next(event for event in events if event["type"] == "saved")
+        self.assertEqual((saved["metadata_status"], saved["author_metadata_status"], saved["text_metadata_status"]),
+                         ("failed", "error", "error"))
+        path = Path(saved["path"])
+        self.assertEqual(path.read_bytes(), copies[0])
+        self.assertEqual(list(path.parent.glob(".luvbox-source-*")), [])
+        self.assertEqual(self.archive_keys(), {"twitter100_1"})
+        self.assertEqual([(row["tweet_id"], row["status"], row["metadata_status"])
+                          for row in self.history_rows()], [("100", "saved", "failed")])
+        warnings = [event["message"] for event in events if event["type"] == "log" and event.get("level") == "warning"]
+        self.assertTrue(any("다른 프로그램이 파일을 사용 중" in message for message in warnings))
 
     def test_helper_unavailable_checked_once_and_never_invoked_for_each_file(self):
         with patch("luvbox.metadata.available", return_value=False) as available:

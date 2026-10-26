@@ -1,4 +1,4 @@
-# LuvBox 1.2.1 Windows 실행 순서
+# LuvBox 1.2.2 Windows 실행 순서
 
 Windows 10·11 64비트, Python 3.12 이상과 PowerShell을 사용합니다. 앱은 PySide6 + Qt Quick으로 실행합니다. [개발 안내](development.md), [보안 검토](security-review.md), [검증 기록](verification.md)이 현재 동작과 검사 범위의 기준입니다.
 
@@ -47,7 +47,7 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 연결 화면에서는 Chrome·Edge·Firefox를 선택하고 같은 브라우저의 일반 프로필에 확장을 설치합니다. 관리 화면 주소 복사·X 열기·실제 연결이 같은 선택을 사용합니다. 확장 단계 표시를 갱신하려면 연결창을 한 번 연 뒤 확장 관리에서 새로고침해 확장을 1.1.0으로 바꿉니다. 이전 1.0.0의 최종 계정 전달은 호환되지만 중간 단계는 없습니다. 설치 도움말은 기본으로 접으며 8초 무응답 안내는 미설치 확정이 아닙니다. [연결 안내](browser-login.md)에 승인·재연결·검증 상태와 전용 로그인 창 실험의 범위를 기록합니다.
 
-1.2.1 미리보기 확인: 갤러리 사진과 저장 전 확인창이 앱 창을 넓게 사용하는지 확인합니다. **창 최대화 / 창 복원**은 앱 전체 크기를 바꾸며, 갤러리 **본문 보기 / 본문 접기**는 사진 아래 게시물 본문을 펼치고 접습니다. 작은 창에서도 닫기·저장·건너뛰기 동작이 보여야 합니다.
+1.2.2 미리보기 확인: 갤러리 사진과 저장 전 확인창이 앱 창을 넓게 사용하는지 확인합니다. **창 최대화 / 창 복원**은 앱 전체 크기를 바꾸며, 갤러리 **본문 보기 / 본문 접기**는 사진 아래 게시물 본문을 펼치고 접습니다. 작은 창에서도 닫기·저장·건너뛰기 동작이 보여야 합니다.
 
 ## EXE·ZIP 빌드
 
@@ -64,10 +64,10 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 산출물:
 
-- `release/LuvBox-1.2.1/LuvBox-1.2.1.exe`
+- `release/LuvBox-1.2.2/LuvBox-1.2.2.exe`
 - 같은 폴더의 `_internal/`
-- `release/LuvBox-1.2.1.zip`
-- `release/SHA256-1.2.1.txt`
+- `release/LuvBox-1.2.2.zip`
+- `release/SHA256-1.2.2.txt`
 
 ZIP의 EXE·소스·라이선스와 체크섬을 확인하고 새 경로에 풀어 실행합니다. EXE만 옮기지 않습니다. ZIP의 소스에는 사용자 설정·세션·쿠키·미디어·기록 DB가 없어야 합니다. Qt/PySide6와 재생 구성요소의 소스·고지는 [Qt 배포 자료](../tools/qt/README.md)를 함께 보관합니다.
 

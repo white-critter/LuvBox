@@ -466,6 +466,45 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                 if any(thread == get_ident() for _path, thread in decoded):
                     raise AssertionError("A saved first frame decoded on the Qt UI thread")
                 report["checks"].append("saved-card-static-gif-video-first-frames-off-thread")
+
+                # A failed optional preview keeps the post visible and can be
+                # retried through an actual mouse event, even in a small window.
+                retry = find("savedPreviewRetry")
+                post_fields = ("filename", "author", "display_name", "body", "posted_at", "source_url")
+                post = {name: download.currentSavedItem[name] for name in post_fields}
+                for width, height in ((680, 480), (1080, 760)):
+                    window.resize(width, height)
+                    download._accept_preview((download._preview_generation,
+                                              {"preview_url": "", "preview_note": "파일을 잠시 읽지 못했습니다."}))
+                    wait(lambda: retry.property("visible") and not thumb.property("source").toString(),
+                         "failed saved preview retry action")
+                    if saved_body.property("text") != body or {
+                            name: download.currentSavedItem[name] for name in post_fields} != post:
+                        raise AssertionError("A failed preview removed the saved post information")
+                    if scroll is not None:
+                        scroll.setProperty("contentY", max(0, scroll.property("contentHeight") - scroll.height()))
+                    settle()
+                    bounds(retry, "saved preview retry action")
+                    capture(f"saved-retry-failed-{width}")
+                    count = len(decoded)
+                    point = retry.mapToScene(QPointF(retry.width() / 2, retry.height() / 2)).toPoint()
+                    QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+                    wait(lambda: len(decoded) == count + 1 and not download.currentSavedItem["preview_loading"]
+                         and thumb.property("paintedWidth") > 0 and not retry.property("visible"),
+                         "saved preview retry through the product button")
+                    if saved_body.property("text") != body or {
+                            name: download.currentSavedItem[name] for name in post_fields} != post:
+                        raise AssertionError("Retrying a preview changed the saved post information")
+                    capture(f"saved-retry-ready-{width}")
+                count = len(decoded)
+                toggle.setProperty("checked", False)
+                invoke(toggle, "toggled")
+                wait(lambda: not download.detailsEnabled and not controller._pending_settings, "details hidden after retry")
+                invoke(download, "retrySavedPreview")
+                settle(.15)
+                if len(decoded) != count or panel.property("visible") or retry.property("visible"):
+                    raise AssertionError("A hidden saved card could request another preview")
+                report["checks"].append("saved-card-retry-mouse-click-post-preserved-and-hidden-idle")
                 service.pending.extend([{"type": "finished", "job_id": 7, "status": "finished", "saved": 3},
                                         {"type": "process_exit", "job_id": 7, "code": 0}])
                 download._pump()
@@ -519,7 +558,7 @@ class PreviewSizeTests(unittest.TestCase):
                                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 report = json.loads(result.stdout)
-                self.assertEqual(len(report["checks"]), 10)
+                self.assertEqual(len(report["checks"]), 11)
                 self.assertEqual(report["qml_errors"], [])
 
 

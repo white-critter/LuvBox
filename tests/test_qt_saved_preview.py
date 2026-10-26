@@ -19,7 +19,8 @@ from PySide6.QtCore import QCoreApplication
 from luvbox.core import _saved_post_details
 from luvbox.preview import Thumbnail
 from luvbox.qt_download import DownloadController, _saved_item
-from luvbox.qt_saved_preview import SavedPreviewLoader, decode_saved_preview
+from luvbox.qt_saved_preview import (
+    SavedPreviewLoader, _foreign_hard_link, _volume_hard_links, decode_saved_preview)
 
 try:
     from . import test_core as support
@@ -74,6 +75,60 @@ class SavedPreviewDecodeTests(unittest.TestCase):
             linked = path.with_name("linked.png")
             os.link(path, linked)
             self.assertEqual(decode_saved_preview(path, decoder=decoder)["preview_url"], "")
+
+    def test_google_drive_upload_link_is_still_previewed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "photo.png"
+            with Image.new("RGB", (40, 20), "red") as image:
+                image.save(path)
+            linked = path.with_name("linked.png")
+            os.link(path, linked)
+            own = os.path.splitdrive(os.path.abspath(path))[1]
+
+            def names(target):
+                self.assertEqual(os.path.abspath(target), os.path.abspath(path))
+                return [own, os.path.join(os.path.dirname(own), ".tmp.driveupload", "59810")]
+
+            with patch("luvbox.qt_saved_preview._volume_hard_links", side_effect=names):
+                result = decode_saved_preview(path)
+            self.assertTrue(result["preview_url"].startswith("data:image/png;base64,"))
+            self.assertIn("사진", result["preview_note"])
+
+    def test_other_hard_link_beside_drive_upload_is_not_decoded(self):
+        decoder = lambda *_args: self.fail("unsafe file reached decoder")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "photo.png"
+            with Image.new("RGB", (40, 20), "red") as image:
+                image.save(path)
+            os.link(path, path.with_name("linked.png"))
+            own = os.path.splitdrive(os.path.abspath(path))[1]
+            names = [own, r"\Google Drive\.tmp.driveupload\59810", r"\outside\other.png"]
+            with patch("luvbox.qt_saved_preview._volume_hard_links", return_value=names):
+                result = decode_saved_preview(path, decoder=decoder)
+            self.assertEqual(result["preview_url"], "")
+            self.assertIn("바뀌어", result["preview_note"])
+            with patch("luvbox.qt_saved_preview._volume_hard_links", return_value=None):
+                self.assertEqual(decode_saved_preview(path, decoder=decoder)["preview_url"], "")
+
+    def test_volume_hard_links_list_each_real_name(self):
+        if os.name != "nt":
+            self.skipTest("Windows hard link names")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "photo.png"
+            path.write_bytes(b"png")
+            self.assertIsNone(_volume_hard_links(path.with_name("missing.png")))
+            alone = _volume_hard_links(path)
+            self.assertIsNotNone(alone)
+            linked = path.with_name("linked.png")
+            os.link(path, linked)
+            names = _volume_hard_links(path)
+            self.assertIsNotNone(names)
+            normalized = {os.path.normcase(name) for name in names}
+            self.assertEqual(normalized, {
+                os.path.normcase(os.path.splitdrive(os.path.abspath(path))[1]),
+                os.path.normcase(os.path.splitdrive(os.path.abspath(linked))[1])})
+            self.assertTrue(_foreign_hard_link(path, path.lstat()))
+            self.assertFalse(_foreign_hard_link(path.with_name("missing-status.png"), type("S", (), {"st_nlink": 1})()))
 
     def test_file_changed_during_decode_is_discarded_and_image_is_closed(self):
         with tempfile.TemporaryDirectory() as folder:

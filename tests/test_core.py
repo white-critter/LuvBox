@@ -210,7 +210,9 @@ class CoreTests(unittest.TestCase):
     def test_new_download_passes_post_text_separately_to_metadata(self):
         code, events = self.worker([("801", 1, "photo", "artist", None, "123", "본문\n두 번째 줄")])
         self.assertEqual(code, 0)
-        self.assertEqual(self.embed_source.call_args.kwargs,
+        arguments = dict(self.embed_source.call_args.kwargs)
+        self.assertFalse(arguments.pop("cancelled")())
+        self.assertEqual(arguments,
                          {"author": "artist", "author_id": "123", "text": "본문\n두 번째 줄"})
 
     def test_download_events_keep_text_metadata_outcome_separate_from_source_status(self):

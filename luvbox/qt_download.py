@@ -175,6 +175,15 @@ class DownloadController(QObject):
         if not self._preview_loader.request(self._preview_generation, self._current_saved["path"]):
             self._current_saved.update(preview_loading=False, preview_note="미리보기를 준비하지 못했습니다.")
 
+    @Slot()
+    def retrySavedPreview(self):
+        if (self._closing or not self._details_enabled or not self._current_saved
+                or self._current_saved.get("preview_loading")):
+            return
+        self._invalidate_preview()
+        self._request_preview()
+        self.savedItemChanged.emit()
+
     @Slot(object)
     def _accept_preview(self, event):
         generation, result = event

@@ -1,4 +1,4 @@
-# LuvBox 1.2.1 개발 안내
+# LuvBox 1.2.2 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -73,7 +73,7 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 실제 EXE의 Qt 창·갤러리·미리보기·설정·연결창·종료 검사와 오프라인 저장 시작 검사를 모두 통과해야 ZIP을 만듭니다. 직접 패키징도 현재 버전과 EXE SHA-256에 일치하는 두 검사 보고서를 요구합니다. EXE·`_internal`·동봉 소스·라이선스를 함께 유지합니다. Qt와 미디어 구성요소의 버전별 원본 자료는 [Qt 소스 안내](../tools/qt/README.md), [FFmpeg 안내](../tools/ffmpeg/README.md)를 따릅니다. 검사 실패를 피하려고 입력 체크섬·TLS 검증·패키징 허용 목록을 완화하지 않습니다.
 
-산출물은 `release/LuvBox-1.2.1/`, `release/LuvBox-1.2.1.zip`, `release/SHA256-1.2.1.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox-1.2.2/`, `release/LuvBox-1.2.2.zip`, `release/SHA256-1.2.2.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 `tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 

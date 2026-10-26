@@ -97,6 +97,12 @@ Frame {
                     color: "#b9afb1"
                 }
                 FlatButton {
+                    objectName: "savedPreviewRetry"
+                    text: "미리보기 다시 불러오기"
+                    visible: details.hasItem && !details.item.preview_loading && !details.item.preview_url
+                    onClicked: if (details.download) details.download.retrySavedPreview()
+                }
+                FlatButton {
                     text: "원문 보기"
                     visible: !!details.item.source_url
                     onClicked: if (details.app) details.app.openSavedSource()
