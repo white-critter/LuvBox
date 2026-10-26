@@ -1,6 +1,7 @@
 """Offline checks for shared media, isolated ledgers, and safe upgrades."""
 
 import hashlib
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -36,6 +37,7 @@ class StorageTests(unittest.TestCase):
         self.assertFalse(direct.record_dir.exists())
         self.assertEqual(resolve_storage(self.root, "CON", True).media_dir.name, "_con")
 
+    @unittest.skipUnless(os.name == "nt", "Windows publication does not require hard links")
     def test_migration_is_sqlite_backup_and_never_changes_or_replaces_originals(self):
         paths = resolve_storage(self.root, "alice")
         paths.legacy_dir.mkdir()

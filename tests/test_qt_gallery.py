@@ -400,6 +400,62 @@ class SafeThumbnailProviderTests(unittest.TestCase):
         self.assertEqual((stats["active"], stats["cache_count"], stats["registered"]), (0, 0, 0))
         self.assertTrue(self.request(provider=provider).isNull())
 
+    def test_slow_scheduled_decode_is_shared_with_a_waiting_image_request(self):
+        entered, duplicate, release = Event(), Event(), Event()
+        self.addCleanup(release.set)
+        calls = []
+
+        def decoder(path, dimensions):
+            calls.append(path)
+            (entered if len(calls) == 1 else duplicate).set()
+            release.wait(4)
+            return thumbnail(path, dimensions)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(lambda: provider.join_workers(2))
+        self.addCleanup(provider.close)
+        provider.register("photo", self.path)
+        provider.schedule(["photo"], 220, 168)
+        self.assertTrue(entered.wait(1))
+        results = []
+        request = Thread(target=lambda: results.append(self.request(provider=provider)))
+        request.start()
+        try:
+            # requestImage used to launch a duplicate after its one-second
+            # cache wait, exceeding the configured decode worker count.
+            self.assertFalse(duplicate.wait(1.2))
+            self.assertEqual(provider.snapshot()["active"], 1)
+        finally:
+            release.set()
+            request.join(2)
+        self.assertFalse(request.is_alive())
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(provider.snapshot()["decoded"], 1)
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0].isNull())
+
+    def test_file_redirected_during_decode_is_not_returned_or_cached(self):
+        original = self.path.with_name("original.png")
+        supported = self.folder / "link-probe.png"
+        try:
+            supported.symlink_to(self.path)
+        except OSError:
+            self.skipTest("Cannot create private symbolic-link fixture")
+        supported.unlink()
+
+        def decoder(path, dimensions):
+            result = thumbnail(path, dimensions)
+            path.rename(original)
+            path.symlink_to(original)
+            return result
+
+        provider = SafeThumbnailProvider(decoder=decoder)
+        self.addCleanup(provider.close)
+        provider.register("photo", self.path)
+        self.assertTrue(self.request(provider=provider).isNull())
+        self.assertEqual(provider.snapshot()["cache_count"], 0)
+
     def test_registry_reset_discards_decode_from_the_previous_library(self):
         entered, release = Event(), Event()
         self.addCleanup(release.set)

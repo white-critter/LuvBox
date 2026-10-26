@@ -263,7 +263,7 @@ class ReleaseManifestTests(unittest.TestCase):
                 _winapi.CreateJunction(str(self.root), str(alias))
             except (ImportError, OSError):
                 self.skipTest("directory links are not available")
-        self.addCleanup(os.rmdir, alias)
+        self.addCleanup(os.rmdir if os.name == "nt" else Path.unlink, alias)
         entries = [(name, source.replace(str(self.root), str(alias), 1), kind)
                    for name, source, kind in self.entries]
         self.write_toc(entries)

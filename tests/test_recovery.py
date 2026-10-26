@@ -228,6 +228,75 @@ class RecoveryTests(unittest.TestCase):
                 # Both cases may run within the same second as the kept folder name.
                 shutil.rmtree(result["kept"])
 
+    def test_unreadable_current_catalog_recovers_from_the_scoped_backup(self):
+        backup = recovery.backup_catalog(self.account, "myaccount")
+        saved_backup = backup.read_bytes()
+        damaged = b"unreadable current catalog"
+        self.live.write_bytes(damaged)
+        with self.assertRaises(CatalogDamaged):
+            HistoryStore(self.account)
+
+        result = recovery.repair_history(self.account, "myaccount")
+
+        self.assertEqual(result["counts"]["media"], 600)
+        self.assertEqual((Path(result["kept"]) / recovery.HISTORY_NAME).read_bytes(), damaged)
+        self.assertEqual(backup.read_bytes(), saved_backup)
+        with closing(HistoryStore(self.account)) as store:
+            self.assertEqual({row["tweet_id"]: row["saved_at"] for row in store.records(limit=1000)}, self.saved)
+        self.assertEqual(recovery._integrity(self.live), "ok")
+
+    def test_unreadable_current_catalog_requires_a_verified_fallback(self):
+        backup = recovery.backup_catalog(self.account, "myaccount")
+        damaged = b"unreadable current catalog"
+        self.live.write_bytes(damaged)
+        for fallback in ("damaged", "incomplete", "missing"):
+            with self.subTest(fallback=fallback):
+                backup.unlink(missing_ok=True)
+                if fallback == "damaged":
+                    backup.write_bytes(b"incomplete backup")
+                elif fallback == "incomplete":
+                    with closing(sqlite3.connect(backup)) as connection:
+                        connection.execute("CREATE TABLE media(tweet_id TEXT)")
+                        connection.commit()
+                with self.assertRaises((recovery.RecoveryError, sqlite3.Error)):
+                    recovery.repair_history(self.account, "myaccount")
+                self.assertEqual(self.live.read_bytes(), damaged)
+                self.assertFalse(list(self.account.glob("*.repaired-*")))
+                # Both attempts can occur in one second; keep the preserved
+                # evidence separate so the second attempt reaches recovery.
+                for kept in recovery.backup_directory().glob("myaccount-*-damaged"):
+                    self.assertEqual((kept / recovery.HISTORY_NAME).read_bytes(), damaged)
+                    shutil.rmtree(kept)
+
+    def test_unreadable_current_catalog_rejects_incomplete_backup_media(self):
+        backup = recovery.backup_catalog(self.account, "myaccount")
+        damaged = b"unreadable current catalog"
+        for include_valid_row in (False, True):
+            with self.subTest(include_valid_row=include_valid_row):
+                self.live.write_bytes(damaged)
+                backup.unlink()
+                with closing(sqlite3.connect(backup)) as connection:
+                    # An intact SQLite file can still have an incomplete
+                    # catalog schema that admits rows the real catalog cannot.
+                    connection.execute("CREATE TABLE media(folder_mode,tweet_id,num,media_type,path,"
+                                       "status,record_source,updated_at)")
+                    connection.execute("INSERT INTO media VALUES (NULL,'100',1,'photo','','saved','saved','stamp')")
+                    if include_valid_row:
+                        connection.execute("INSERT INTO media VALUES ('flat','200',1,'photo','','saved','saved','stamp')")
+                    connection.commit()
+                saved_backup = backup.read_bytes()
+                self.assertEqual(recovery._integrity(backup), "ok")
+
+                with self.assertRaises(recovery.RecoveryError):
+                    recovery.repair_history(self.account, "myaccount")
+
+                self.assertEqual(self.live.read_bytes(), damaged)
+                self.assertEqual(backup.read_bytes(), saved_backup)
+                self.assertFalse(list(self.account.glob("*.repaired-*")))
+                for kept in recovery.backup_directory().glob("myaccount-*-damaged"):
+                    self.assertEqual((kept / recovery.HISTORY_NAME).read_bytes(), damaged)
+                    shutil.rmtree(kept)
+
     def test_unreadable_old_name_archive_is_not_offered_a_catalog_repair_that_cannot_fix_it(self):
         from luvbox.storage import _OLD_DATABASES
 
@@ -317,6 +386,31 @@ class RecoverySchemaTests(unittest.TestCase):
                 path.write_bytes(b"offline")
                 store.record_media("flat", {"tweet_id": tweet, "num": 1, "type": "photo"}, path)
             return store.path
+
+    def test_read_failure_does_not_replace_current_catalog_with_a_backup(self):
+        current = self.catalog("current", ["100"])
+        fallback = self.catalog("fallback", ["200"])
+        rebuilt = self.root / "rebuilt.sqlite3"
+        for error in (OSError("offline access failure"), sqlite3.OperationalError("database is locked")):
+            with self.subTest(error=type(error).__name__), \
+                    patch.object(recovery, "salvage", side_effect=error) as salvage:
+                with self.assertRaises(type(error)):
+                    recovery.rebuild_history(current, rebuilt, fallback=fallback)
+                salvage.assert_called_once_with(current)
+                self.assertFalse(rebuilt.exists())
+
+    def test_genuinely_empty_scoped_backup_remains_usable(self):
+        current = self.root / "damaged.sqlite3"
+        current.write_bytes(b"unreadable current catalog")
+        fallback = self.catalog("empty-fallback", [])
+        saved = current.read_bytes(), fallback.read_bytes()
+        rebuilt = self.root / "rebuilt.sqlite3"
+
+        result = recovery.rebuild_history(current, rebuilt, fallback=fallback)
+
+        self.assertEqual(result["counts"]["media"], 0)
+        self.assertEqual(recovery._integrity(rebuilt), "ok")
+        self.assertEqual((current.read_bytes(), fallback.read_bytes()), saved)
 
     def test_older_backup_rows_use_defaults_and_current_duplicates_win(self):
         current = self.catalog("current", ["100"])

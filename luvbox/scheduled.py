@@ -334,12 +334,19 @@ def run_saved(*, full: bool = False) -> int:
         _notify_failure({"finished_at": datetime.now(_KOREA).isoformat(timespec="seconds"),
                          "message": f"{exc}\n\n앱을 열어 데이터 폴더를 정리해 주세요.", "log": ""})
         return 1
-    directory.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(_KOREA).strftime("%Y%m%d-%H%M%S")
-    path = directory / f"scheduled-{stamp}.log"
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(_KOREA).strftime("%Y%m%d-%H%M%S")
+        path = directory / f"scheduled-{stamp}.log"
+        stream = path.open("a", encoding="utf-8")
+    except OSError:
+        _notify_failure({"finished_at": datetime.now(_KOREA).isoformat(timespec="seconds"),
+                         "message": "자동 저장 기록을 만들지 못했습니다. 앱 데이터 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요.",
+                         "log": ""})
+        return 1
     # Even identical failures within one clock tick need separate acknowledgments.
     outcome = {"run_id": uuid.uuid4().hex, "status": "error", "saved": 0, "message": ""}
-    with path.open("a", encoding="utf-8") as log:
+    with stream as log:
         def write(text: str) -> None:
             log.write(datetime.now(_KOREA).strftime("%H:%M:%S") + "  " + text + "\n")
             log.flush()

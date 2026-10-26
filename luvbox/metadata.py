@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -852,7 +853,10 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             raise ValueError("metadata verification failed")
         for tag, expected in required_tags.items():
             actual = _values(tags.get(tag))
-            if any(actual.count(value) < expected.count(value) for value in expected):
+            # Existing third-party lists can contain many values, including
+            # duplicates. Check their multiplicities once instead of scanning
+            # both entire lists again for every value.
+            if not Counter(actual) >= Counter(expected):
                 raise ValueError("metadata verification failed")
         if has_author:
             for tag, removed in removed_tags.items():

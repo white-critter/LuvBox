@@ -175,6 +175,33 @@ class MetadataTransactionTests(unittest.TestCase):
         self.assertEqual((result["status"], result["author_status"], result["author"], result["author_id"]),
                          ("embedded", "unknown", "", ""))
 
+    def test_large_third_party_lists_preserve_duplicate_multiplicities(self):
+        creators = [f"Original creator {index}" for index in range(10000)] + ["Repeated creator"] * 3
+        previous = {"XMP-dc:Creator": creators}
+        verified = {"XMP-dc:Source": URL,
+                    "XMP-dc:Description": "",
+                    "XMP-dc:Creator": [*creators, "@writer"],
+                    "XMP-dc:Relation": ["https://x.com/writer"],
+                    "XMP-xmp:Identifier": ["luvbox:x-author:writer",
+                                           "luvbox:owned-author:v1:creator:writer",
+                                           "luvbox:owned-author:v1:profile:writer"]}
+        # This list fits within the existing decoded-output budget. A valid
+        # readback may reorder values, but losing one duplicate must still
+        # refuse replacement of the original.
+        for lost_duplicate in (False, True):
+            actual = list(reversed(verified["XMP-dc:Creator"]))
+            if lost_duplicate:
+                actual.remove("Repeated creator")
+            with self.subTest(lost_duplicate=lost_duplicate), \
+                    patch.object(metadata, "available", return_value=True), \
+                    patch.object(metadata, "_read_tags", side_effect=[previous, {**verified, "XMP-dc:Creator": actual}]), \
+                    patch.object(metadata, "_run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+                result = metadata.embed_source(self.path, "100", "writer")
+            self.assertEqual(result["status"], "failed" if lost_duplicate else "embedded")
+            if lost_duplicate:
+                self.assertEqual(result["reason"], "verification")
+            self.assert_original()
+
     def test_unsupported_bmp_has_explicit_status_without_tool_call(self):
         gif = self.root / "100_1.bmp"
         gif.write_bytes(b"BM")

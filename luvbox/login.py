@@ -289,6 +289,28 @@ def _active_identity(payload: dict) -> dict | None:
         return None
 
 
+def account_state() -> dict:
+    """Read public account and connection state from one encrypted snapshot.
+
+    Another app window can atomically replace the store between reads. Keeping
+    the list, active identity and connection flag together also decrypts the
+    session only once, and never returns cookie values to the UI.
+    """
+    with _SESSION_LOCK:
+        try:
+            payload = _read_payload()
+            active = _active_identity(payload)
+            active_id = active["user_id"] if active else None
+            accounts = [dict(row["identity"], active=row["identity"]["user_id"] == active_id)
+                        for row in _account_records(payload)]
+            return {"accounts": accounts, "identity": active or {},
+                    "connected": _has_auth(_x_cookies(payload.get("cookies")))}
+        except FileNotFoundError:
+            return {"accounts": [], "identity": {}, "connected": False}
+        except (OSError, ValueError, UnicodeError, TypeError):
+            raise ValueError(_SESSION_HELP) from None
+
+
 def active_account() -> dict | None:
     """Return verified active identity, or None for legacy/manual sessions."""
     with _SESSION_LOCK:

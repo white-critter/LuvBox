@@ -51,7 +51,8 @@ class ApplicationController(QObject):
         self._preferences = self._settings.load()
         defaults = default_settings()
         for name, choices in _CHOICES.items():
-            if self._preferences.get(name) not in choices:
+            value = self._preferences.get(name)
+            if not isinstance(value, str) or value not in choices:
                 self._preferences[name] = defaults[name]
         for name in _BOOLEANS:
             if type(self._preferences.get(name)) is not bool:

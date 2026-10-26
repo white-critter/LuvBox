@@ -107,6 +107,28 @@ class ScheduledRunTests(unittest.TestCase):
         self.run_saved({})
         self.assertEqual(len(list(logs.glob("scheduled-*.log"))), 30)
 
+    def test_unavailable_log_directory_reports_failure_without_starting_a_save(self):
+        logs = self.root / "logs"
+        logs.write_bytes(b"existing file")
+        with patch("luvbox.core.run_worker") as worker:
+            self.assertEqual(scheduled.run_saved(), 1)
+        worker.assert_not_called()
+        self.notify.assert_called_once()
+        notice = self.notify.call_args.args[0]
+        self.assertIn("자동 저장 기록을 만들지 못했습니다", notice["message"])
+        self.assertEqual(notice["log"], "")
+        self.assertEqual(logs.read_bytes(), b"existing file")
+
+    def test_locked_log_reports_a_fixed_failure_without_exposing_the_io_error(self):
+        with patch.object(Path, "open", side_effect=PermissionError("private path")), \
+                patch("luvbox.core.run_worker") as worker:
+            self.assertEqual(scheduled.run_saved(), 1)
+        worker.assert_not_called()
+        self.notify.assert_called_once()
+        notice = self.notify.call_args.args[0]
+        self.assertIn("자동 저장 기록을 만들지 못했습니다", notice["message"])
+        self.assertNotIn("private path", notice["message"])
+
     def test_scheduled_outcome_is_kept_and_only_real_failures_alert(self):
         self.assertEqual(self.run_saved(self.settings)[0], 0)
         last = scheduled.last_run()

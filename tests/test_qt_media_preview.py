@@ -275,6 +275,7 @@ class MediaPreviewQmlTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return json.loads(result.stdout)
 
+    @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_photos_animated_gifs_and_mp4_previews_decode_and_release(self):
         report = self.run_scene("--scene")
         self.assertEqual(len(report["checks"]), 5)

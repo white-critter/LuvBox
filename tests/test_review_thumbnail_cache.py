@@ -1,5 +1,6 @@
 """Declined local .part media retain a bounded preview after removal."""
 
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -60,6 +61,7 @@ class ReviewThumbnailCacheTests(unittest.TestCase):
         red, _, blue, _ = kept.getpixel((10, 10))
         self.assertGreater(red, blue + 100)
 
+    @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_video_and_unconverted_gif_mp4_parts_keep_a_frame(self):
         executable = ffmpeg_path()
         if executable is None:

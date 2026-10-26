@@ -22,6 +22,7 @@ import json
 import shutil
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -666,9 +667,12 @@ def _prepare_table(target: sqlite3.Connection, source: sqlite3.Connection, table
                            (" DEFAULT " + default if default is not None else ""))
 
 
-def _rows(db: sqlite3.Connection, table: str) -> list[dict]:
+def _rows(db: sqlite3.Connection, table: str) -> Iterator[dict]:
+    """Stream incoming rows instead of retaining a second complete catalog."""
     columns = _columns(db, table)
-    return [dict(zip(columns, row)) for row in db.execute('SELECT * FROM "' + table + '"')]
+    with closing(db.execute('SELECT * FROM "' + table + '"')) as rows:
+        for row in rows:
+            yield dict(zip(columns, row))
 
 
 def _insert(db: sqlite3.Connection, table: str, row: dict) -> int | None:

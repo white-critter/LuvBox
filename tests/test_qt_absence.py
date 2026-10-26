@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,7 @@ from luvbox.qt_library import absence_note
 
 
 class AbsenceNoteTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows drive-letter paths")
     def test_missing_drive_is_distinct_from_a_deleted_file(self):
         present = Path("C:/LuvBox")
         self.assertIn("지우거나 옮긴", absence_note(present))

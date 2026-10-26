@@ -80,6 +80,7 @@ class MovedFolderTests(StateTestCase):
         self.saved(1)
         self.assertFalse(saved_media_missing(self.paths))
 
+    @unittest.skipUnless(os.name == "nt", "Windows drive-letter paths")
     def test_disconnected_drive_is_named(self):
         letter = free_drive()
         if letter is None:

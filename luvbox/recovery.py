@@ -212,19 +212,39 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
     earlier backup (``fallback``) are added. Each file record keeps its most
     recent version (highest rowid). ``destination`` must not exist yet.
     ``skip_unreadable`` rebuilds from the backup alone when nothing at all can
-    be read from ``damaged``.
+    be read from ``damaged``. Without that option, a completely unreadable
+    damaged catalog can still recover from a verified fallback catalog;
+    an unavailable or incomplete fallback never permits an empty rebuild.
     """
     from .history import HistoryStore
 
     damaged, destination = Path(damaged), Path(destination)
     if destination.exists():
         raise RecoveryError("destination exists")
+    fallback_media_count = None
     try:
         sources = [salvage(damaged)]
-    except (RecoveryError, sqlite3.Error, OSError):
-        if not skip_unreadable:
-            raise
-        sources = [{}]
+    except (RecoveryError, sqlite3.Error, OSError) as error:
+        if skip_unreadable:
+            sources = [{}]
+        else:
+            # A current-name catalog can lose its header/schema too. Do not
+            # ignore a usable scoped backup merely because page salvage cannot
+            # start, but never turn a lock/access error into a rollback.
+            damaged_source = isinstance(error, RecoveryError) or (
+                isinstance(error, sqlite3.DatabaseError) and
+                (getattr(error, "sqlite_errorcode", 0) or 0) & 0xFF in {11, 26})
+            if (not damaged_source or fallback is None or not Path(fallback).is_file()
+                    or _integrity(Path(fallback)) != "ok"):
+                raise
+            recovered = salvage(Path(fallback))
+            required = {"folder_mode", "tweet_id", "num", "media_type", "path",
+                        "status", "record_source", "updated_at"}
+            if not required.issubset(recovered.get("media", {}).get("columns", ())):
+                raise
+            sources = [recovered]
+            fallback_media_count = len(recovered["media"]["rows"])
+            fallback = None
     if fallback is not None and Path(fallback).is_file():
         try:
             sources.append(salvage(Path(fallback)))
@@ -284,6 +304,12 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
                                      ") VALUES (" + ",".join("?" for _ in columns) + ")")
                         connection.executemany(statement, ([row[name] for name in columns] for row in batch))
                     counts[table] = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] - before
+                if fallback_media_count is not None and counts["media"] != fallback_media_count:
+                    # The fallback is the only readable source. Its rows must
+                    # all survive the real schema's constraints; IGNORE must
+                    # not turn a malformed backup into an apparently healthy
+                    # empty/partial replacement for the preserved catalog.
+                    raise RecoveryError("백업의 저장 기록을 온전히 복원하지 못했습니다. 원본 기록은 보존했습니다.")
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         finally:
             connection.close()

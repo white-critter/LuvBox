@@ -44,6 +44,7 @@ class SavedPreviewDecodeTests(unittest.TestCase):
                 self.assertGreater(image.convert("RGB").getpixel((10, 10))[0], 200)
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), before)
 
+    @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_mp4_preview_is_one_bounded_png_not_video_playback(self):
         from luvbox.media import ffmpeg_path
         with tempfile.TemporaryDirectory() as folder:
