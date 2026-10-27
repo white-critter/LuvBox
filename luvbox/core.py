@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import io
 import json
 import logging
 import os
@@ -293,12 +294,29 @@ def _normal_account(value: str) -> str:
     return account.lower()
 
 
+# A browser export for one account is a few kilobytes. The cap stops a
+# multi-gigabyte path from being loaded before Netscape validation runs.
+_MAX_COOKIE_BYTES = 1024 * 1024
+
+
+def _read_cookie_text(path: Path) -> str:
+    """Read a cookies file up to a fixed size. Never returns a partial file."""
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(_MAX_COOKIE_BYTES + 1)
+    except OSError:
+        raise ValueError("쿠키 파일을 읽을 수 없습니다. UTF-8 cookies.txt 파일을 선택해 주세요.") from None
+    if len(raw) > _MAX_COOKIE_BYTES:
+        raise ValueError("쿠키 파일이 너무 큽니다. 1MB 이하의 Netscape cookies.txt를 선택해 주세요.")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeError:
+        raise ValueError("쿠키 파일을 읽을 수 없습니다. UTF-8 cookies.txt 파일을 선택해 주세요.") from None
+
+
 def _validate_cookie_file(path: Path) -> None:
     """Inspect Netscape syntax and auth presence without exposing secret values."""
-    try:
-        data = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeError):
-        raise ValueError("쿠키 파일을 읽을 수 없습니다. UTF-8 cookies.txt 파일을 선택해 주세요.") from None
+    data = _read_cookie_text(path)
     lines = data.splitlines()
     if not any(line.startswith(("# Netscape HTTP Cookie File", "# HTTP Cookie File"))
                for line in lines):
@@ -1021,7 +1039,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 elif normalized.auth_mode == "file":
                     # Read in place, accept a UTF-8 BOM, and load only X cookies.
                     # No copied cookie jar or updates are ever written.
-                    with open(normalized.cookies_file, encoding="utf-8-sig") as fp:
+                    # The same size cap as validation applies if the file grew.
+                    with io.StringIO(_read_cookie_text(Path(normalized.cookies_file))) as fp:
                         for cookie in util.cookiestxt_load(fp):
                             if cookie.domain.lstrip(".").lower() == "x.com":
                                 self.extractor.cookies.set_cookie(cookie)

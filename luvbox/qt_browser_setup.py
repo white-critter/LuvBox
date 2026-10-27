@@ -161,10 +161,6 @@ class BrowserSetupController(QObject):
         self._start("x")
 
     @Slot()
-    def installExtension(self):
-        self._start("install")
-
-    @Slot()
     def prepareExtension(self):
         if not self._extension_path:
             if self._busy:

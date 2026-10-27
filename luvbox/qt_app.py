@@ -594,6 +594,9 @@ class ApplicationController(QObject):
             self._message = (f"기록 복구를 마쳤습니다 · 파일 기록 {counts.get('media', 0):,}개, "
                              f"실행 기록 {counts.get('runs', 0):,}개를 살렸습니다. "
                              f"손상된 원본은 {value.get('kept', '')}에 보관했습니다.")
+            warnings = [item for item in value.get("warnings") or [] if isinstance(item, str) and item]
+            if warnings:
+                self._message += " " + " ".join(warnings)
             self._library.refresh()
         elif kind == "review":
             if (self._download.running and not self._download.stopping

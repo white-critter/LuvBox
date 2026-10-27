@@ -39,7 +39,10 @@ _RECORDER_PENDING = 32
 _RECORDER_RETRY_SECONDS = 1.0
 
 # Identities already stored, per cache file: the gallery need not ask again.
-_known: dict[str, set] = {}
+# Bound the set so a long session does not retain every identity it has seen.
+# Evicted keys are asked of the database again; stored previews are not lost.
+_KNOWN_LIMIT = 8192
+_known: dict[str, OrderedDict] = {}
 _known_files: dict[str, tuple] = {}
 _prune_writes: dict[str, int] = {}
 _known_lock = threading.Lock()
@@ -266,7 +269,12 @@ def _note(path: Path, keys) -> None:
                 _known.pop(name, None)
                 _prune_writes.pop(name, None)
                 _known_files[name] = stamp
-            _known.setdefault(name, set()).update(keys)
+            bucket = _known.setdefault(name, OrderedDict())
+            for key in keys:
+                bucket[key] = None
+                bucket.move_to_end(key)
+            while len(bucket) > _KNOWN_LIMIT:
+                bucket.popitem(last=False)
 
 
 def known(account: str, key) -> bool:
@@ -279,7 +287,11 @@ def known(account: str, key) -> bool:
             _known_files.pop(name, None)
             _prune_writes.pop(name, None)
             return False
-        return key in _known.get(name, ())
+        bucket = _known.get(name)
+        if not bucket or key not in bucket:
+            return False
+        bucket.move_to_end(key)
+        return True
 
 
 def remember(account: str, key, image) -> None:

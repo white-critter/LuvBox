@@ -16,7 +16,7 @@ from gallery_dl import config, exception
 from gallery_dl.extractor.common import Extractor
 from gallery_dl.extractor.message import Message
 
-from luvbox.core import JobOptions, run_worker
+from luvbox.core import JobOptions, _MAX_COOKIE_BYTES, run_worker
 from luvbox.storage import resolve_storage
 
 
@@ -315,6 +315,17 @@ class CoreTests(unittest.TestCase):
             with self.subTest(data=data[:20]), self.assertRaises(ValueError) as raised:
                 self.options.validate()
             self.assertNotIn(SECRET, str(raised.exception))
+
+    def test_oversized_cookie_file_is_rejected_without_parsing_its_body(self):
+        marker = "oversized-cookie-body-must-not-appear"
+        self.cookie_file.write_bytes(
+            b"# Netscape HTTP Cookie File\n" + marker.encode("ascii") + b"x" * _MAX_COOKIE_BYTES)
+        with self.assertRaises(ValueError) as raised:
+            self.options.validate()
+        message = str(raised.exception)
+        self.assertIn("너무 큽니다", message)
+        self.assertNotIn(marker, message)
+        self.assertNotIn(SECRET, message)
 
     def test_rejects_expired_auth(self):
         self.write_cookies(expiry=str(int(time.time()) - 20))

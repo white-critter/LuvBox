@@ -40,6 +40,10 @@ _ARCHIVES = {"author": ".luvbox-archive.sqlite3",
 # Rows per write transaction while importing; small enough that a concurrent
 # download's single-row write never waits near SQLite's busy timeout.
 _WRITE_BATCH = 200
+# Legacy catalogs can have an empty source link on every row. Fill them in
+# short commits so opening the catalog does not hold the write lock for one
+# table-wide update.
+_SOURCE_URL_BATCH = 500
 _RUN_FIELDS = {"saved", "skipped", "size_skipped", "visited", "last_tweet_id",
                "last_posted_at", "message"}
 _COUNTERS = {"saved", "skipped", "size_skipped", "visited"}
@@ -323,6 +327,7 @@ class HistoryStore:
                     self._db.execute("CREATE INDEX IF NOT EXISTS media_type ON media(media_type)")
                     self._db.execute("CREATE INDEX IF NOT EXISTS media_path ON media(path)")
             columns = {row["name"] for row in self._db.execute("PRAGMA table_info(media)")}
+            source_url_pending = False
             with self._db:
                 if "source_url" not in columns:
                     self._db.execute("ALTER TABLE media ADD COLUMN source_url TEXT NOT NULL DEFAULT ''")
@@ -341,11 +346,12 @@ class HistoryStore:
                 # replacement would otherwise discard the new indexes.
                 for statement in _MEDIA_READ_INDEX_SQL:
                     self._db.execute(statement)
-                # Write only when an old row needs it. An UPDATE always waits
-                # for the write lock, so every open (even a file opened from
-                # the library while a save writes) used to wait up to 5 s.
-                if self._db.execute("SELECT 1 FROM media WHERE source_url='' LIMIT 1").fetchone():
-                    self._db.execute("UPDATE media SET source_url='https://x.com/i/web/status/' || tweet_id WHERE source_url=''")
+                # Probe with the partial index. The fill itself runs after this
+                # transaction so a large catalog is not rewritten under one lock.
+                source_url_pending = self._db.execute(
+                    "SELECT 1 FROM media WHERE source_url='' LIMIT 1").fetchone() is not None
+            if source_url_pending:
+                self._backfill_source_urls()
             run_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}
             with self._db:
                 # Runs from earlier versions keep 'full' with no signature, so
@@ -375,6 +381,26 @@ class HistoryStore:
         prepare_storage(paths, protected=protected, create_media=create_media)
         return cls(paths.record_dir, media_dir=paths.media_dir, output_dir=paths.output_dir,
                    legacy_dir=paths.legacy_dir)
+
+    def _backfill_source_urls(self) -> None:
+        """Fill empty source links a few hundred rows at a time.
+
+        Each batch commits before the next, so a gallery read or a save can
+        use the catalog between batches. A crash leaves the remaining empty
+        rows for the next open.
+        """
+        while True:
+            with self._db:
+                pending = self._db.execute(
+                    "SELECT rowid FROM media WHERE source_url='' LIMIT ?",
+                    (_SOURCE_URL_BATCH,)).fetchall()
+                if not pending:
+                    return
+                marks = ",".join("?" for _ in pending)
+                self._db.execute(
+                    "UPDATE media SET source_url='https://x.com/i/web/status/' || tweet_id "
+                    f"WHERE rowid IN ({marks}) AND source_url=''",
+                    tuple(row[0] for row in pending))
 
     def _read_rows(self, statement: str, parameters=()) -> list[dict]:
         """Materialize a list while owning its cursor, including decode failures."""
@@ -1000,7 +1026,10 @@ class HistoryStore:
                                    filename=filename, media_type=media_type,
                                    author=filename_author or (parent if mode == "author" else ""),
                                    source="file_scan")
-            previous_identity = self.media_record(mode, {"tweet_id": match[1], "num": number, "type": media_type})
+            # known is the catalog as of the start of this scan. Writes wait
+            # until the batches below, so this is the row a per-file query
+            # would have returned, without one round trip per file.
+            previous_identity = known.get((mode, match[1], number, media_type))
             old_path = previous_identity.get("path", "") if previous_identity else ""
             keep_old = (old_path and not self.is_download_path(old_path) and
                         self.is_media_path(old_path) and Path(old_path).is_file())

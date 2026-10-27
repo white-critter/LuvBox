@@ -60,6 +60,32 @@ class HistoryTests(unittest.TestCase):
         path.write_bytes(content)
         return path
 
+    def test_file_scan_uses_the_loaded_catalog_instead_of_per_file_queries(self):
+        for index in range(30):
+            self.file(f"{1000 + index}_1.jpg")
+        with patch.object(self.store, "media_record", side_effect=AssertionError("per-file catalog lookup")):
+            result = self.store.import_legacy(refresh=True)
+        self.assertEqual(result["records"], 30)
+        kept = self.store.media_record("flat", {"tweet_id": "1000", "num": 1, "type": "photo"})
+        self.assertEqual(kept["filename"], "1000_1.jpg")
+
+    def test_source_url_backfill_commits_in_short_batches(self):
+        for index in range(5):
+            self.file(f"{1100 + index}_1.jpg")
+        self.store.import_legacy(refresh=True)
+        self.store._db.execute("UPDATE media SET source_url=''")
+        self.store._db.commit()
+        updates = []
+        self.store._db.set_trace_callback(
+            lambda sql: updates.append(sql) if sql.startswith("UPDATE media SET source_url") else None)
+        with patch("luvbox.history._SOURCE_URL_BATCH", 2):
+            self.store._backfill_source_urls()
+        self.store._db.set_trace_callback(None)
+        self.assertEqual(len(updates), 3)
+        self.assertIsNone(self.store._db.execute("SELECT 1 FROM media WHERE source_url=''").fetchone())
+        self.assertEqual(self.store._db.execute(
+            "SELECT COUNT(*) FROM media WHERE source_url LIKE 'https://x.com/i/web/status/%'").fetchone()[0], 5)
+
     def test_file_scan_rejects_non_ascii_handle_prefixes(self):
         names = ("İd_900_1.jpg", "ıd_901_1.jpg", "ſam_902_1.jpg", "Kate_903_1.jpg", "valid_904_1.JPG")
         paths = [self.file(name) for name in names]

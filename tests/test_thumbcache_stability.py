@@ -97,6 +97,15 @@ image.close()
         self.assertLessEqual(total, size * 2)
         self.assertIn(("107", 1, "photo"), keys)
 
+    def test_known_identity_cache_drops_the_oldest_and_keeps_the_file(self):
+        with patch.object(thumbcache, "_KNOWN_LIMIT", 2):
+            for index in range(3):
+                thumbcache.remember("offline", (str(100 + index), 1, "photo"), self.image)
+        self.assertFalse(thumbcache.known("offline", ("100", 1, "photo")))
+        self.assertTrue(thumbcache.known("offline", ("102", 1, "photo")))
+        with closing(thumbcache.Cache("offline", create=False)) as cache:
+            self.assertEqual(cache.stored([("100", 1, "photo")]), {("100", 1, "photo")})
+
     def test_deleted_cache_is_rebuilt_for_a_known_identity(self):
         thumbcache.remember("offline", self.key, self.image)
         self.assertTrue(thumbcache.known("offline", self.key))

@@ -387,6 +387,17 @@ class RecoverySchemaTests(unittest.TestCase):
                 store.record_media("flat", {"tweet_id": tweet, "num": 1, "type": "photo"}, path)
             return store.path
 
+    def test_unreadable_fallback_is_reported_without_dropping_current_rows(self):
+        current = self.catalog("current-readable", ["100"])
+        fallback = self.root / "broken-fallback.sqlite3"
+        fallback.write_bytes(b"not a database")
+        rebuilt = self.root / "rebuilt-with-warning.sqlite3"
+        result = recovery.rebuild_history(current, rebuilt, fallback=fallback)
+        self.assertEqual(result["counts"]["media"], 1)
+        self.assertTrue(any("백업" in item for item in result["warnings"]))
+        with closing(sqlite3.connect(rebuilt)) as connection:
+            self.assertEqual(connection.execute("SELECT tweet_id FROM media").fetchall(), [("100",)])
+
     def test_read_failure_does_not_replace_current_catalog_with_a_backup(self):
         current = self.catalog("current", ["100"])
         fallback = self.catalog("fallback", ["200"])

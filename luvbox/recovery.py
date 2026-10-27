@@ -9,8 +9,8 @@ https://www.sqlite.org/fileformat2.html
 
 from __future__ import annotations
 
-import os
 import hashlib
+import os
 import shutil
 import sqlite3
 import struct
@@ -83,21 +83,47 @@ def _record(payload: bytes) -> list:
 
 
 class _Pages:
+    """Read one database page at a time so a large damaged file is not copied into memory."""
+
     def __init__(self, path: Path):
-        self.data = Path(path).read_bytes()
-        if len(self.data) < 100 or not self.data.startswith(b"SQLite format 3\x00"):
-            raise RecoveryError("not a SQLite database")
-        size = int.from_bytes(self.data[16:18], "big")
-        self.size = 65536 if size == 1 else size
-        self.usable = self.size - self.data[20]
-        if int.from_bytes(self.data[56:60], "big") not in (0, 1):
-            raise RecoveryError("only UTF-8 databases are supported")
-        self.count = len(self.data) // self.size
+        self._file = None
+        try:
+            self._file = open(path, "rb")
+            header = self._file.read(100)
+            if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
+                raise RecoveryError("not a SQLite database")
+            size = int.from_bytes(header[16:18], "big")
+            self.size = 65536 if size == 1 else size
+            if self.size < 512:
+                raise RecoveryError("not a SQLite database")
+            self.usable = self.size - header[20]
+            if int.from_bytes(header[56:60], "big") not in (0, 1):
+                raise RecoveryError("only UTF-8 databases are supported")
+            self._file.seek(0, os.SEEK_END)
+            self.count = self._file.tell() // self.size
+        except RecoveryError:
+            self.close()
+            raise
+        except OSError as error:
+            self.close()
+            raise RecoveryError("not a SQLite database") from error
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        handle, self._file = self._file, None
+        if handle is not None:
+            handle.close()
 
     def page(self, number: int) -> bytes:
-        if not 1 <= number <= self.count:
+        if self._file is None or not 1 <= number <= self.count:
             raise ValueError("page out of range")
-        return self.data[(number - 1) * self.size:number * self.size]
+        self._file.seek((number - 1) * self.size)
+        data = self._file.read(self.size)
+        if len(data) != self.size:
+            raise ValueError("page out of range")
+        return data
 
     def payload(self, page: bytes, offset: int, size: int) -> bytes:
         """A table-leaf cell's payload, following overflow pages."""
@@ -165,6 +191,7 @@ def salvage(path: Path | str) -> dict:
     """
     path = Path(path)
     connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+    pages = None
     try:
         schema = connection.execute(
             "SELECT name,rootpage FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
@@ -179,7 +206,8 @@ def salvage(path: Path | str) -> dict:
                         for row in connection.execute(f'SELECT rowid,* FROM "{name}"')]
                 method = "sql"
             except sqlite3.DatabaseError:
-                pages = pages or _Pages(path)
+                if pages is None:
+                    pages = _Pages(path)
                 rows = []
                 for rowid, values in pages.rows(root):
                     if len(values) > len(columns):
@@ -194,6 +222,8 @@ def salvage(path: Path | str) -> dict:
             result[name] = {"columns": columns, "rows": rows, "method": method}
         return result
     finally:
+        if pages is not None:
+            pages.close()
         connection.close()
 
 
@@ -223,6 +253,7 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
     if destination.exists():
         raise RecoveryError("destination exists")
     fallback_media_count = None
+    warnings = []
     try:
         sources = [salvage(damaged)]
     except (RecoveryError, sqlite3.Error, OSError) as error:
@@ -250,7 +281,10 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
         try:
             sources.append(salvage(Path(fallback)))
         except (RecoveryError, sqlite3.Error, OSError):
-            pass
+            # Keep rows already read from the damaged catalog. Say that the
+            # backup was left out so a successful repair does not hide that.
+            warnings.append("이전 백업 기록은 읽지 못해 복구 결과에 포함하지 않았습니다. "
+                            "손상된 원본은 그대로 보관했습니다.")
     workspace = destination.parent / (destination.name + ".build")
     workspace.mkdir()
     try:
@@ -317,7 +351,10 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
         if _integrity(built) != "ok":
             raise RecoveryError("rebuilt database failed its integrity check")
         built.replace(destination)
-        return {"counts": counts, "methods": {name: table["method"] for name, table in sources[0].items()}}
+        result = {"counts": counts, "methods": {name: table["method"] for name, table in sources[0].items()}}
+        if warnings:
+            result["warnings"] = warnings
+        return result
     finally:
         for leftover in sorted(workspace.glob("*"), reverse=True):
             leftover.unlink(missing_ok=True)

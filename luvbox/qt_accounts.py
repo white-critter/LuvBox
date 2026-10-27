@@ -62,7 +62,6 @@ class AccountController(QObject):
         self._status = ""
         self._error = ""
         self._pairing_code = ""
-        self._pairing_url = ""
         self._approval_pending = False
         self._thread = None
         self._finished_event = None
@@ -125,10 +124,6 @@ class AccountController(QObject):
     @Property(str, notify=changed)
     def pairingCode(self):
         return self._pairing_code
-
-    @Property(str, notify=changed)
-    def pairingUrl(self):
-        return self._pairing_url
 
     @Property(bool, notify=changed)
     def approvalPending(self):
@@ -217,7 +212,6 @@ class AccountController(QObject):
         self._pending_identity = {}
         self._approval_pending = False
         self._pairing_code = ""
-        self._pairing_url = ""
         self._connection_stage = "opening_browser" if operation == "browser" else "idle"
         self._extension_ready = self._setup_needed = False
         self._remaining = 0
@@ -270,7 +264,6 @@ class AccountController(QObject):
         self._approval_pending = False
         self._pending_identity = {}
         self._pairing_code = ""
-        self._pairing_url = ""
         self._connection_stage = "cancelling"
         self._remaining = 0
         self._status = "연결을 취소하는 중…"
@@ -377,7 +370,6 @@ class AccountController(QObject):
         if kind == "pairing":
             if self.browserConnecting and not self._closing and not self._cancel.is_set():
                 self._pairing_code = event["code"]
-                self._pairing_url = event["url"]
                 self._connection_stage = "extension_wait"
                 self._status = "선택한 브라우저에서 연결 확장의 응답을 기다리는 중…"
                 self._extension_wait_started = time.monotonic()
@@ -414,7 +406,6 @@ class AccountController(QObject):
         self._pending_identity = {}
         self._approval_pending = False
         self._pairing_code = ""
-        self._pairing_url = ""
         self._connection_stage = "idle"
         self._remaining = 0
         self._deadline = 0.0
@@ -484,7 +475,6 @@ class AccountController(QObject):
         self._approval_pending = False
         self._pending_identity = {}
         self._pairing_code = ""
-        self._pairing_url = ""
         self.changed.emit()
         if self._thread is None:
             self._finish_shutdown()

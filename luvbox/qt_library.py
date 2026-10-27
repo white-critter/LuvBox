@@ -300,10 +300,6 @@ class LibraryController(QObject):
         return self._selected.get("source", "")
 
     @Property(str, notify=changed)
-    def selectedPath(self):
-        return self._selected.get("path", "")
-
-    @Property(str, notify=changed)
     def selectedPreviewUrl(self):
         return self._selected.get("preview", "")
 
