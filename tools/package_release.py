@@ -19,6 +19,7 @@ from luvbox import __version__  # noqa: E402
 from tools.check_build_inputs import require_inputs  # noqa: E402
 from tools.qt.prepare_sources import release_files as qt_source_files
 from tools.check_download_startup import validate_report as validate_download_report
+from tools.check_qt_startup import validate_report as validate_qt_report
 from tools.build_snapshot import require_snapshot
 
 SOURCE_FILES = (
@@ -209,13 +210,9 @@ def _require_startup_report(executable: Path) -> None:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise ValueError("Run the frozen Qt startup check before packaging") from None
-    if (not isinstance(report, dict) or report.get("ok") is not True
-            or report.get("frozen") is not True or report.get("version") != __version__):
-        raise ValueError("The frozen Qt startup report did not pass for this version")
     with executable.open("rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
-    if report.get("executable_sha256") != digest:
-        raise ValueError("The executable changed after its Qt startup check")
+    validate_qt_report(report, digest)
     try:
         download_report = json.loads((ROOT / "build" / f"download-startup-{__version__}.json")
                                      .read_text(encoding="utf-8"))

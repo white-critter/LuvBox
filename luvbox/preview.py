@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import errno
 from functools import cache
 from io import BytesIO
+import os
 from pathlib import Path
 import subprocess
 import warnings
@@ -18,7 +19,39 @@ from .file_access import is_read_locked
 
 PREVIEW_SIZE = (220, 168)
 MAX_PIXELS = 60_000_000
+MAX_RASTER_BYTES = 64 * 1024 * 1024
 PHOTO_FORMATS = ("JPEG", "PNG", "WEBP", "GIF")
+
+
+class _BoundedRasterReader:
+    """Keep container readers' read-all operations within the preview budget."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def read(self, size=-1):
+        remaining = MAX_RASTER_BYTES - self._stream.tell()
+        if remaining < 0:
+            raise ValueError("raster preview byte limit")
+        # Inspect one extra byte to reject a file that grew after fstat(),
+        # without allowing Pillow's WebP reader to allocate the whole file.
+        data = self._stream.read(min(size, remaining + 1) if size >= 0 else remaining + 1)
+        if len(data) > remaining:
+            raise ValueError("raster preview byte limit")
+        return data
+
+    def seek(self, offset, whence=0):
+        return self._stream.seek(offset, whence)
+
+    def tell(self):
+        return self._stream.tell()
+
+    def close(self):
+        self._stream.close()
+
+    @property
+    def closed(self):
+        return self._stream.closed
 
 
 def _png_exif_orientation(path: Path) -> int:
@@ -65,14 +98,14 @@ def photo_info(path: Path, max_pixels: int = 16_000_000) -> dict[str, int]:
             path.is_symlink() or getattr(path, "is_junction", lambda: False)() or cloud_only(path)):
         return {}
     try:
-        # WebP's container reader retains compressed bytes even for a header
-        # query; bound that allocation as well as the decoded-pixel budget.
-        if path.stat().st_size > 64 * 1024 * 1024:
-            return {}
         _prepare_decoders(False)
-        with warnings.catch_warnings():
+        with path.open("rb") as source, warnings.catch_warnings():
+            # WebP retains compressed bytes even for a header query. Check
+            # the opened file and also bound reads if it grows afterwards.
+            if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
+                return {}
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(path, formats=("JPEG", "PNG", "WEBP")) as image:
+            with Image.open(_BoundedRasterReader(source), formats=("JPEG", "PNG", "WEBP")) as image:
                 width, height = image.size
                 if (not 0 < width <= 16384 or not 0 < height <= 16384 or
                         width * height > max_pixels):
@@ -180,6 +213,8 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
             # Own the stream even when Pillow fails during its initial read,
             # before it can return an image context manager to close it.
             source = path.open("rb")
+            if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
+                return Thumbnail(None, "큰 이미지입니다. 파일 열기로 확인해 주세요.")
             note = "GIF · 첫 프레임" if kind == ".gif" else "사진 미리보기"
         else:
             return Thumbnail(None, "미리보기를 지원하지 않는 파일입니다.")
@@ -188,7 +223,8 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             # Inspect only our supported raster formats. A renamed EPS file
             # must never dispatch to Pillow's external Ghostscript renderer.
-            with Image.open(source, formats=("BMP",) if kind == ".mp4" else PHOTO_FORMATS) as original:
+            raster = source if kind == ".mp4" else _BoundedRasterReader(source)
+            with Image.open(raster, formats=("BMP",) if kind == ".mp4" else PHOTO_FORMATS) as original:
                 if original.width * original.height > MAX_PIXELS:
                     return Thumbnail(None, "큰 이미지입니다. 파일 열기로 확인해 주세요.")
                 image = oriented_thumbnail(original, size)

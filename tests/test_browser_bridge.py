@@ -228,6 +228,35 @@ class BrowserBridgeTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 1.0)
             response.close()
 
+    def test_trickled_headers_and_body_cannot_hold_up_the_next_request(self):
+        headers = (f"POST /session HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n"
+                   f"Origin: {ORIGIN}\r\nContent-Type: application/json\r\n"
+                   "Content-Length: 8192\r\n\r\n[").encode()
+        for initial in (b"G", headers):
+            with self.subTest(reading="headers" if initial == b"G" else "body"), \
+                    socket.create_connection(("127.0.0.1", self.port), timeout=2) as connection:
+                stopped = threading.Event()
+                connection.sendall(initial)
+
+                def trickle():
+                    while not stopped.wait(0.1):
+                        try:
+                            connection.sendall(b"a")
+                        except OSError:
+                            break
+
+                sender = threading.Thread(target=trickle)
+                sender.start()
+                try:
+                    started = time.monotonic()
+                    self.assertEqual(self.request("GET", "/connect", payload=None)[0], 200)
+                    self.assertLess(time.monotonic() - started, 1.5)
+                    self.assertIsNone(self.bridge._result)
+                finally:
+                    stopped.set()
+                    sender.join(timeout=1)
+        self.assertEqual(self.request()[0], 200)
+
     def test_dns_rebinding_other_paths_and_query_capabilities_are_rejected(self):
         self.assertEqual(self.request(headers={"Host": f"evil.example:{self.port}"})[0], 400)
         self.assertEqual(self.request(headers={"Host": f"localhost:{self.port}"})[0], 400)

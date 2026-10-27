@@ -91,6 +91,36 @@ class SharedOutputStorageTests(unittest.TestCase):
         return {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in directory.iterdir()
                 if path.name.endswith(".sqlite3") or path.name == "snapshot.json"}
 
+    def test_snapshot_merge_keeps_latest_post_text_in_both_directions(self):
+        from luvbox import storage
+
+        for paths in (self.a, self.b):
+            self.record(paths, 100)
+            self.record(paths, 200)
+        old = "2026-10-01T00:00:00+09:00"
+        new = "2026-10-02T00:00:00+09:00"
+        for paths, rows in (
+                (self.a, [("100", "old body", "#old", old), ("200", "local newer", "#local", new)]),
+                (self.b, [("100", "updated body", "#updated", new), ("200", "old remote", "#old", old)])):
+            with closing(sqlite3.connect(paths.record_dir / ".luvbox-history.sqlite3")) as db, db:
+                db.executemany("INSERT INTO tweets(tweet_id,content,hashtags,updated_at) VALUES (?,?,?,?)", rows)
+        source_before = self.digest(self.b.record_dir)
+        for _ in range(2):
+            storage._merge_database(".luvbox-history.sqlite3",
+                                    self.a.record_dir / ".luvbox-history.sqlite3",
+                                    self.b.record_dir / ".luvbox-history.sqlite3")
+        self.assertEqual(self.digest(self.b.record_dir), source_before)
+        storage._merge_database(".luvbox-history.sqlite3",
+                                self.b.record_dir / ".luvbox-history.sqlite3",
+                                self.a.record_dir / ".luvbox-history.sqlite3")
+        for paths in (self.a, self.b):
+            with closing(HistoryStore.for_storage(paths)) as store:
+                self.assertEqual([(row["tweet_id"], row["content"], row["hashtags"])
+                                  for row in store.records(order="posted_oldest")],
+                                 [("100", "updated body", "#updated"), ("200", "local newer", "#local")])
+                self.assertEqual(store.record_page(query="updated body")["total"], 1)
+                self.assertEqual(store.record_page(query="old body")["total"], 0)
+
     def test_snapshot_union_preserves_pending_quick_scans_without_importing_cleared_run_ids(self):
         from luvbox import storage
 

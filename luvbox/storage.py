@@ -821,7 +821,11 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
     if "tweets" in source_tables:
         _prepare_table(target, source, "tweets")
         for row in _rows(source, "tweets"):
-            target.execute("INSERT OR IGNORE INTO tweets(tweet_id,content,hashtags,updated_at) VALUES (?,?,?,?)",
+            # The same post can be refreshed on either PC. Preserve newer
+            # text and hashtags together; a stale snapshot must not undo it.
+            target.execute("INSERT INTO tweets(tweet_id,content,hashtags,updated_at) VALUES (?,?,?,?) "
+                           "ON CONFLICT(tweet_id) DO UPDATE SET content=excluded.content,hashtags=excluded.hashtags,"
+                           "updated_at=excluded.updated_at WHERE excluded.updated_at>tweets.updated_at",
                            (row["tweet_id"], row["content"], row["hashtags"], row["updated_at"]))
     if "missing_choices" in source_tables:
         # Keep or download again: the later choice wins across PCs.

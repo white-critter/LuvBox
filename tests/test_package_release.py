@@ -143,6 +143,17 @@ class StartupReportPackagingTests(unittest.TestCase):
         report = {
             "ok": True,
             "frozen": True,
+            "isolated": True,
+            "window_visible": True,
+            "window_exposed": True,
+            "gallery_thumbnail_ready": True,
+            "photo_preview_ready": True,
+            "settings_and_confirmation": True,
+            "connection_dialog": True,
+            "shutdown_ready": True,
+            "temporary_data_removed": True,
+            "platform": "windows",
+            "qml_errors": [],
             "version": package_release.__version__,
             "executable_sha256": hashlib.sha256(self.executable.read_bytes()).hexdigest(),
         }
@@ -184,6 +195,30 @@ class StartupReportPackagingTests(unittest.TestCase):
     def test_successful_startup_report_for_exact_executable_allows_packaging(self):
         self.write_report()
         package_release._require_startup_report(self.executable)
+
+    def test_direct_packaging_rejects_incomplete_or_failed_qt_checks(self):
+        changes = [{name: False} for name in (
+            "isolated", "window_visible", "window_exposed", "gallery_thumbnail_ready",
+            "photo_preview_ready", "settings_and_confirmation", "connection_dialog",
+            "shutdown_ready", "temporary_data_removed",
+        )]
+        changes += [{"qml_errors": ["missing dependency"]}, {"qml_errors": None},
+                    {"error": "startup failed"}]
+        if os.name == "nt":
+            changes.append({"platform": "offscreen"})
+        for change in changes:
+            with self.subTest(change=change):
+                self.write_report(**change)
+                with self.assertRaisesRegex(ValueError, "did not pass"):
+                    package_release._require_startup_report(self.executable)
+
+    def test_direct_packaging_rejects_a_legacy_summary_without_lifecycle_results(self):
+        self.write_report()
+        report = json.loads(self.report_path.read_text(encoding="utf-8"))
+        report = {name: report[name] for name in ("ok", "frozen", "version", "executable_sha256")}
+        self.report_path.write_text(json.dumps(report), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "did not pass"):
+            package_release._require_startup_report(self.executable)
 
     def test_qt_success_cannot_bypass_missing_download_startup_check(self):
         self.write_report()

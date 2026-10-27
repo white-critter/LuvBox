@@ -16,6 +16,7 @@ import base64
 import hashlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import hmac
+import io
 import json
 from pathlib import Path
 import re
@@ -28,6 +29,7 @@ import webbrowser
 
 
 _MAX_PAYLOAD = 8192
+_REQUEST_TIMEOUT = 0.75
 _MAX_PROGRESS = 128
 _PROGRESS_STAGES = frozenset({"extension_ready", "checking_account", "login_required",
                               "account_changed", "account_error", "awaiting_approval"})
@@ -144,6 +146,25 @@ def _decrypt_progress(payload: object, secret: str, port: int) -> tuple[int, str
     return progress["sequence"], progress["stage"]
 
 
+class _DeadlineReader(io.RawIOBase):
+    """Bound the whole request read, including clients that keep sending bytes."""
+
+    def __init__(self, connection: socket.socket, deadline: float):
+        self._connection = connection
+        self._deadline = deadline
+
+    def readable(self):
+        return True
+
+    def readinto(self, buffer):
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("browser pairing request expired")
+        current = self._connection.gettimeout()
+        self._connection.settimeout(min(remaining, current) if current is not None else remaining)
+        return self._connection.recv_into(buffer)
+
+
 class BrowserBridge:
     """A bounded pairing attempt; call start before open_browser or wait.
 
@@ -204,7 +225,16 @@ class BrowserBridge:
 
         class Handler(BaseHTTPRequestHandler):
             # HTTP/1.0 plus Connection: close gives each request a bounded life.
-            timeout = 0.75
+            timeout = _REQUEST_TIMEOUT
+
+            def setup(self):
+                super().setup()
+                self.rfile.close()
+                # A socket timeout alone resets on every recv. An untrusted
+                # client could otherwise drip headers/body forever and prevent
+                # this single listener from serving consent or shutting down.
+                deadline = min(time.monotonic() + _REQUEST_TIMEOUT, bridge._deadline)
+                self.rfile = io.BufferedReader(_DeadlineReader(self.connection, deadline))
 
             def log_message(self, *_args):
                 pass

@@ -58,7 +58,8 @@ class FrozenStartupCheckTests(unittest.TestCase):
     def test_source_incomplete_or_error_reports_are_rejected(self):
         valid = self.complete_report()
         changes = [{name: False} for name, value in valid.items() if value is True]
-        changes += [{"version": "0.0.0"}, {"qml_errors": ["missing QML dependency"]}]
+        changes += [{"version": "0.0.0"}, {"qml_errors": ["missing QML dependency"]},
+                    {"qml_errors": None}, {"error": "startup failed"}]
         if os.name == "nt":
             changes.append({"platform": "offscreen"})
         for change in changes:
@@ -68,6 +69,13 @@ class FrozenStartupCheckTests(unittest.TestCase):
                     with self.assertRaisesRegex(RuntimeError, "startup failed"):
                         check_qt_startup.check(self.executable, self.destination)
                 self.assertNotIn("executable_sha256", json.loads(self.destination.read_text(encoding="utf-8")))
+
+    def test_nonobject_reports_are_rejected_cleanly(self):
+        for report in ([], None, True, "invalid"):
+            with self.subTest(report=report):
+                with patch.object(check_qt_startup.subprocess, "run", side_effect=self.child_result(report)):
+                    with self.assertRaisesRegex(RuntimeError, "startup failed"):
+                        check_qt_startup.check(self.executable, self.destination)
 
     def test_nonzero_exit_is_rejected_even_with_complete_report(self):
         with patch.object(check_qt_startup.subprocess, "run", side_effect=self.child_result(self.complete_report(), 1)):
