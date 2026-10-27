@@ -1614,7 +1614,16 @@ class HistoryStore:
 
     @_safe
     def close(self) -> None:
-        self._db.close()
+        db = self._db
+        if db is not None:
+            self._db = None
+            db.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
 
 
 class LikeOrder:

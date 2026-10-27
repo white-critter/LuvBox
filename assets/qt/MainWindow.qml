@@ -252,8 +252,8 @@ ApplicationWindow {
             FlatButton { text: "저장"; tone: "nav"; checkable: true; checked: window.currentScreen === 0; onClicked: window.currentScreen = 0 }
             FlatButton { text: "갤러리"; tone: "nav"; checkable: true; checked: window.currentScreen === 1; onClicked: window.currentScreen = 1 }
             Item { Layout.fillWidth: true }
-            Label { text: app ? app.version : ""; color: window.mutedColor; visible: window.width > 760 }
-            FlatButton { text: "설정"; visible: !!app; enabled: app && !app.busy; onClicked: preferencesDialog.open() }
+            Label { text: window.app ? window.app.version : ""; color: window.mutedColor; visible: window.width > 760 }
+            FlatButton { text: "설정"; visible: !!window.app; enabled: window.app && !window.app.busy; onClicked: preferencesDialog.open() }
         }
     }
 

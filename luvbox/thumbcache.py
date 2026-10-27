@@ -200,7 +200,10 @@ class Cache:
             return None
         row = self._db.execute("SELECT image FROM previews WHERE tweet_id=? AND num=? AND media_type=?",
                                identity(*key)).fetchone()
-        return bytes(row[0]) if row else None
+        if not row:
+            return None
+        blob = row[0]
+        return blob if isinstance(blob, bytes) else bytes(blob)
 
     def put(self, key, image) -> None:
         if self._db is None:

@@ -171,8 +171,9 @@ def salvage(path: Path | str) -> dict:
         result = {}
         pages = None
         for name, root in schema:
-            columns = [row[1] for row in connection.execute(f'PRAGMA table_info("{name}")')]
-            primary = [row[1] for row in connection.execute(f'PRAGMA table_info("{name}")') if row[5] == 1 and row[2].upper() == "INTEGER"]
+            table_info = connection.execute(f'PRAGMA table_info("{name}")').fetchall()
+            columns = [row[1] for row in table_info]
+            primary = [row[1] for row in table_info if row[5] == 1 and row[2].upper() == "INTEGER"]
             try:
                 rows = [(row[0], dict(zip(columns, row[1:])))
                         for row in connection.execute(f'SELECT rowid,* FROM "{name}"')]

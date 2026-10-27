@@ -134,7 +134,8 @@ def oriented_thumbnail(original: Image.Image, size) -> Image.Image:
     try:
         return image.convert("RGBA")
     finally:
-        image.close()
+        if image is not original:
+            image.close()
 
 
 def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Thumbnail:
