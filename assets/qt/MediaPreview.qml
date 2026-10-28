@@ -8,6 +8,7 @@ Item {
     property url sourceUrl: ""
     property string mediaType: "photo"
     property bool playing: true
+    property bool muted: true
     property int sourcePixelWidth: 0
     property int sourcePixelHeight: 0
     property int sourceRawWidth: 0
@@ -114,6 +115,7 @@ Item {
 
     function release() {
         _released = true
+        muted = true
         fit()
         player.stop()
         player.source = ""
@@ -129,11 +131,13 @@ Item {
     }
 
     onSourceUrlChanged: {
+        muted = true
         fit()
         _released = !playing
         updatePlayer()
     }
     onMediaTypeChanged: {
+        muted = true
         fit()
         updatePlayer()
     }
@@ -197,7 +201,7 @@ Item {
 
     AudioOutput {
         id: audioOutput
-        muted: true
+        muted: preview.muted
     }
 
     MediaPlayer {
@@ -261,5 +265,16 @@ Item {
                 preview.zoomAt(preview.zoomFactor * Math.pow(1.2, amount), wheel.x, wheel.y)
             wheel.accepted = true
         }
+    }
+
+    FlatButton {
+        objectName: "previewAudioToggle"
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: 8
+        visible: preview.mediaType === "video" && preview.videoSource && preview.ready && player.hasAudio
+        text: preview.muted ? "소리 켜기" : "소리 끄기"
+        Accessible.name: text
+        onClicked: preview.muted = !preview.muted
     }
 }

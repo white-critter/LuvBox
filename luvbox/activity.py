@@ -156,16 +156,20 @@ def outcome_page(page=0, page_size=100, *, account="", origin="all") -> dict:
         raise ValueError("invalid activity page")
     try:
         path = activity_path()
-        _plain(path)
-        rows = []
-        if path.is_file():
-            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as database:
-                database.row_factory = sqlite3.Row
-                database.execute("PRAGMA query_only=ON")
-                database.execute("BEGIN")
-                rows = [dict(row) for row in database.execute("SELECT * FROM outcomes ORDER BY rowid DESC LIMIT ?",
-                                                            (MAX_OUTCOMES,))]
-        previous = _legacy_row()
+        # A newly created SQLite file becomes visible before its first schema
+        # is ready. Use the writer's lock so readers see either no ledger or a
+        # complete one, including when another app process creates it.
+        with _WRITE_LOCK, file_mutex(path):
+            _plain(path)
+            rows = []
+            if path.is_file():
+                with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as database:
+                    database.row_factory = sqlite3.Row
+                    database.execute("PRAGMA query_only=ON")
+                    database.execute("BEGIN")
+                    rows = [dict(row) for row in database.execute("SELECT * FROM outcomes ORDER BY rowid DESC LIMIT ?",
+                                                                (MAX_OUTCOMES,))]
+            previous = _legacy_row()
         if previous is not None and all(row["run_id"] != previous["run_id"] for row in rows):
             if rows and previous["finished_at"] >= rows[0]["finished_at"]:
                 rows.insert(0, previous)

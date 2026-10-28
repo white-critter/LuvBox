@@ -18,13 +18,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def check_preview_scene():
     sys.path.insert(0, str(ROOT))
     from PIL import Image
-    from PySide6.QtCore import QCoreApplication, QEvent, QObject, QUrl, qInstallMessageHandler
+    from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPointF, Qt, QUrl, qInstallMessageHandler
     from PySide6.QtGui import QGuiApplication
     from PySide6.QtMultimedia import QMediaPlayer
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
+    from PySide6.QtTest import QTest
     from shiboken6 import delete
     from luvbox.media import ffmpeg_path
+    from imageio_ffmpeg import get_ffmpeg_exe
 
     QQuickStyle.setStyle("Basic")
     application = QGuiApplication([])
@@ -59,12 +61,21 @@ def check_preview_scene():
             photo = directory / "photo.png"
             gif = directory / "animation.gif"
             video = directory / "clip.mp4"
+            video_audio = directory / "clip-with-sound.mp4"
             with Image.new("RGB", (48, 32), (20, 210, 40)) as picture:
                 picture.save(photo)
             with Image.new("RGB", (48, 32), "red") as first, Image.new("RGB", (48, 32), "blue") as second:
                 first.save(gif, save_all=True, append_images=[second], duration=[120, 120], loop=0)
             subprocess.run([str(ffmpeg_path()), "-nostdin", "-v", "error", "-f", "lavfi", "-i",
                             "testsrc2=size=64x48:rate=8", "-t", "0.5", "-an", "-c:v", "mpeg4", str(video)],
+                           check=True, capture_output=True, timeout=20,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            # The bundled converter intentionally does not encode audio. Use
+            # the development fixture encoder to exercise a real audio track.
+            subprocess.run([get_ffmpeg_exe(), "-nostdin", "-v", "error", "-f", "lavfi", "-i",
+                           "testsrc2=size=64x48:rate=8", "-f", "lavfi", "-i",
+                           "sine=frequency=440:sample_rate=8000", "-t", "0.5", "-c:v", "mpeg4",
+                           "-c:a", "aac", "-af", "volume=0.005", str(video_audio)],
                            check=True, capture_output=True, timeout=20,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             engine = QQmlApplicationEngine()
@@ -81,8 +92,11 @@ ApplicationWindow {
             window = engine.rootObjects()[0]
             preview = window.findChild(QObject, "fixturePreview")
             player = preview.findChild(QMediaPlayer)
+            audio_toggle = preview.findChild(QObject, "previewAudioToggle")
             if player is None or player.audioOutput() is None:
                 raise AssertionError("Product media player or muted audio output is missing")
+            if audio_toggle is None:
+                raise AssertionError("Video sound control is missing")
             valid_frames = []
             sink = player.videoSink()
             if sink is None:
@@ -98,6 +112,8 @@ ApplicationWindow {
                 wait_for(lambda: preview.property("ready"), path.suffix + " ready")
 
             show(photo, "photo")
+            if audio_toggle.property("visible"):
+                raise AssertionError("Sound control is visible for a photo")
             settle()
             frame = window.grabWindow()
             if frame.isNull() or frame.pixelColor(frame.width() // 2, frame.height() // 2).green() < 180:
@@ -112,15 +128,36 @@ ApplicationWindow {
             wait_for(lambda: animation.property("currentFrame") == 1, "GIF advances")
             checks.append("gif-advances")
 
-            for media_type in ("video", "animated_gif"):
+            for media_type, path in (("video", video_audio), ("video", video), ("animated_gif", video)):
                 baseline = len(valid_frames)
-                show(video, media_type)
+                show(path, media_type)
                 if not preview.property("videoSource") or not player.audioOutput().isMuted():
                     raise AssertionError("The MP4 preview is not using muted video playback")
                 if player.loops() != QMediaPlayer.Infinite:
                     raise AssertionError("The short preview is not configured to loop")
+                if path == video_audio:
+                    wait_for(lambda: player.hasAudio(), "video audio track")
+                    if not audio_toggle.property("visible") or audio_toggle.property("text") != "소리 켜기":
+                        raise AssertionError("Muted video did not offer a sound control")
+                    point = audio_toggle.mapToScene(QPointF(audio_toggle.width() / 2, audio_toggle.height() / 2))
+                    QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point.toPoint())
+                    settle()
+                    if player.audioOutput().isMuted() or audio_toggle.property("text") != "소리 끄기":
+                        raise AssertionError("Video sound control did not unmute playback")
+                    QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point.toPoint())
+                    settle()
+                    if not player.audioOutput().isMuted() or audio_toggle.property("text") != "소리 켜기":
+                        raise AssertionError("Video sound control did not mute playback")
+                    # Leave it unmuted and confirm that releasing the preview
+                    # for the next item resets sound to the safe default.
+                    QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point.toPoint())
+                    settle()
+                    if player.audioOutput().isMuted():
+                        raise AssertionError("Video sound control did not unmute again")
+                elif audio_toggle.property("visible") or not player.audioOutput().isMuted():
+                    raise AssertionError("Changing media did not restore silent playback without an audio control")
                 wait_for(lambda: len(valid_frames) >= baseline + 6, media_type + " decoded looping frames")
-                checks.append(media_type + "-decoded-muted-loop")
+                checks.append(media_type + ("-decoded-sound-toggle" if path == video_audio else "-decoded-muted-loop"))
 
             preview.setProperty("playing", False)
             wait_for(lambda: player.source().isEmpty()
@@ -129,7 +166,7 @@ ApplicationWindow {
             if not preview.property("activeSource").isEmpty():
                 raise AssertionError("A hidden preview retained its active media source")
             settle()
-            for path in (photo, gif, video):
+            for path in (photo, gif, video, video_audio):
                 parked = path.with_name("released-" + path.name)
                 path.rename(parked)
                 parked.rename(path)
@@ -278,8 +315,10 @@ class MediaPreviewQmlTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_photos_animated_gifs_and_mp4_previews_decode_and_release(self):
         report = self.run_scene("--scene")
-        self.assertEqual(len(report["checks"]), 5)
-        self.assertGreaterEqual(report["valid_video_frames"], 12)
+        self.assertEqual(set(report["checks"]), {"photo-rendered", "gif-advances", "video-decoded-sound-toggle",
+                                                 "video-decoded-muted-loop", "animated_gif-decoded-muted-loop",
+                                                 "released-files-renamable"})
+        self.assertGreaterEqual(report["valid_video_frames"], 18)
 
     def test_save_decision_reaches_the_worker_after_the_preview_releases_its_file(self):
         report = self.run_scene("--review-scene")

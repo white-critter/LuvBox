@@ -165,7 +165,7 @@ class BrowserSetupController(QObject):
         if not self._extension_path:
             if self._busy:
                 self._prepare_pending = True
-            else:
+            elif self._selected_browser:
                 self._start("prepare")
 
     @staticmethod

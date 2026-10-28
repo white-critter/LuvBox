@@ -99,7 +99,9 @@ Dialog {
 
             Label {
                 Layout.fillWidth: true
-                text: "사용 중인 브라우저의 X 계정을 연결합니다. 이미 연결했다면 다시 설치할 필요가 없습니다."
+                text: dialog.methodIndex === 0
+                    ? "사용 중인 브라우저의 X 계정을 연결합니다. 이미 연결했다면 다시 설치할 필요가 없습니다."
+                    : "브라우저에서 확인한 토큰을 직접 입력해 이 PC에 보관합니다."
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
             }
@@ -126,9 +128,22 @@ Dialog {
                         return -1
                     }
                     enabled: !dialog.setupUnavailable && !dialog.accounts.busy
-                    displayText: currentIndex < 0 ? "브라우저를 확인하는 중…" : currentText
+                    displayText: currentIndex >= 0 ? currentText
+                        : !dialog.browserSetup || dialog.browserSetup.busy ? "브라우저를 확인하는 중…" : "지원하는 브라우저 없음"
                     Accessible.name: "X 계정을 연결할 브라우저"
                     onActivated: dialog.browserSetup.setBrowser(currentValue)
+                }
+                Label {
+                    objectName: "noBrowserMessage"
+                    Layout.fillWidth: true
+                    visible: dialog.browserSetup && !dialog.browserSetup.busy
+                        && !dialog.browserSetup.selectedBrowser.length
+                    text: dialog.browserSetup && dialog.browserSetup.error
+                        ? dialog.browserSetup.error
+                        : "지원하는 브라우저를 찾지 못했습니다. Chrome·Edge·Firefox를 설치한 뒤 앱을 다시 열어 주세요."
+                    color: "#ff8791"
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
                 }
                 Label {
                     Layout.fillWidth: true
@@ -363,8 +378,10 @@ Dialog {
 
             Label {
                 Layout.fillWidth: true
-                visible: dialog.browserSetup && (dialog.browserSetup.error.length > 0
-                    || (setupToggle.checked && dialog.browserSetup.status.length > 0))
+                visible: dialog.methodIndex === 0 && dialog.browserSetup
+                    && dialog.browserSetup.selectedBrowser.length > 0
+                    && (dialog.browserSetup.error.length > 0
+                        || (setupToggle.checked && dialog.browserSetup.status.length > 0))
                 text: dialog.browserSetup ? (dialog.browserSetup.error || dialog.browserSetup.status) : ""
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText

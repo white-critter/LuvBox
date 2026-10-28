@@ -41,14 +41,30 @@ Dialog {
         border.width: 1
         border.color: "#2a2a2a"
     }
-    header: Label {
-        text: dialog.title
-        leftPadding: 24
-        rightPadding: 24
-        topPadding: 20
-        bottomPadding: 4
-        font.pixelSize: 18
-        background: null
+    header: Column {
+        width: dialog.width
+        Label {
+            width: parent.width
+            text: dialog.title
+            leftPadding: 24
+            rightPadding: 24
+            topPadding: 20
+            bottomPadding: 4
+            font.pixelSize: 18
+        }
+        Label {
+            objectName: "preferencesError"
+            width: parent.width
+            visible: dialog.app && dialog.app.error.length > 0
+            text: dialog.app ? dialog.app.error : ""
+            leftPadding: 24
+            rightPadding: 24
+            topPadding: 8
+            color: "#ff8791"
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            Accessible.role: Accessible.StaticText
+        }
     }
 
     function pref(key, fallback) {
@@ -133,6 +149,7 @@ Dialog {
                     font.pixelSize: 17
                     textFormat: Text.PlainText
                 }
+                Label { text: "저장 형식"; textFormat: Text.PlainText }
                 FlatCombo {
                     Layout.fillWidth: true
                     model: dialog.gifFormats
@@ -141,6 +158,11 @@ Dialog {
                     currentIndex: dialog.optionIndex(dialog.gifFormats, dialog.pref("gif_format", "gif"))
                     Accessible.name: "움직이는 사진 형식"
                     onActivated: index => dialog.setOption("gif_format", dialog.gifFormats, index)
+                }
+                Label {
+                    text: "GIF 크기"
+                    textFormat: Text.PlainText
+                    enabled: dialog.pref("gif_format", "gif") === "gif"
                 }
                 FlatCombo {
                     Layout.fillWidth: true
@@ -155,6 +177,7 @@ Dialog {
 
                 ToolButton {
                     id: advancedToggle
+                    objectName: "advancedSettingsToggle"
                     Layout.topMargin: 12
                     Layout.fillWidth: true
                     implicitHeight: 40
@@ -191,6 +214,8 @@ Dialog {
                     }
                     Label { text: "동영상·GIF 크기 제한 (MB)"; textFormat: Text.PlainText }
                     FlatField {
+                        id: videoLimit
+                        objectName: "videoLimitField"
                         Layout.fillWidth: true
                         text: String(dialog.pref("max_video_mb", 200))
                         validator: IntValidator { bottom: 0; top: 1000000 }
@@ -200,6 +225,10 @@ Dialog {
                         onEditingFinished: {
                             if (acceptableInput && text.trim().length > 0)
                                 dialog.app.setPreference("max_video_mb", Number(text))
+                        }
+                        onActiveFocusChanged: {
+                            if (!activeFocus && (!acceptableInput || text.trim().length === 0))
+                                text = Qt.binding(function() { return String(dialog.pref("max_video_mb", 200)) })
                         }
                     }
                     Label {

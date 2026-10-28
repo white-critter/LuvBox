@@ -340,6 +340,7 @@ ApplicationWindow {
                             }
                             FlatField {
                                 id: accountInput
+                                objectName: "saveAccountInput"
                                 Layout.fillWidth: true
                                 visible: window.app && !window.app.accounts.identity.handle
                                 enabled: window.app && !window.app.busy
@@ -355,10 +356,15 @@ ApplicationWindow {
                             RowLayout {
                                 Layout.fillWidth: true
                                 Label {
+                                    id: outputFolderLabel
                                     Layout.fillWidth: true
                                     text: window.app ? window.app.outputFolder : ""
                                     textFormat: Text.PlainText
                                     elide: Text.ElideMiddle
+                                    HoverHandler { id: outputFolderHover }
+                                    ToolTip.text: outputFolderLabel.text
+                                    ToolTip.delay: 500
+                                    ToolTip.visible: outputFolderHover.hovered && outputFolderLabel.truncated
                                 }
                                 FlatButton { text: "폴더 선택"; enabled: window.app && !window.app.busy; onClicked: window.chooseSaveFolder() }
                                 FlatButton { text: "열기"; onClicked: if (window.app) window.app.openOutputFolder() }
@@ -474,9 +480,31 @@ ApplicationWindow {
                                     onToggled: if (window.app) window.app.setPreference("detailed_progress", checked)
                                 }
                             }
+                            Label {
+                                objectName: "saveReadinessHint"
+                                Layout.fillWidth: true
+                                text: {
+                                    if (!window.app || window.app.busy)
+                                        return ""
+                                    if (!window.app.accounts.connected)
+                                        return "저장하려면 먼저 X 계정을 연결해 주세요."
+                                    if (!window.app.outputFolder.length)
+                                        return "저장할 폴더를 선택해 주세요."
+                                    if (!window.app.accounts.identity.handle && !accountInput.acceptableInput)
+                                        return "저장할 X 아이디를 입력해 주세요."
+                                    if (window.app.accounts.identity.handle && !window.app.canStart)
+                                        return "연결된 X 계정을 선택해 주세요."
+                                    return ""
+                                }
+                                visible: text.length > 0
+                                color: window.mutedColor
+                                textFormat: Text.PlainText
+                                wrapMode: Text.WordWrap
+                            }
                             RowLayout {
                                 Layout.fillWidth: true
                                 FlatButton {
+                                    objectName: "saveStartButton"
                                     text: window.app && window.app.accounts.authenticationState === "reconnect_required"
                                         ? "X 계정 다시 연결" : "저장 시작"
                                     tone: "primary"
@@ -1094,9 +1122,10 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 color: window.mutedColor
             }
-            RowLayout {
+            Flow {
                 visible: !!window.app
                 Layout.fillWidth: true
+                spacing: 8
                 FlatButton { text: "파일 열기"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.openSelected() }
                 FlatButton { text: "폴더"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.revealSelected() }
                 FlatButton {
@@ -1110,7 +1139,6 @@ ApplicationWindow {
                         window.app.management.prepareDelete([key])
                     }
                 }
-                Item { Layout.fillWidth: true }
                 FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
             }
         }

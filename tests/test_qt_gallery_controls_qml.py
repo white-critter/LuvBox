@@ -101,6 +101,23 @@ def scene():
         engine.load(ROOT / "assets/qt/MainWindow.qml")
         assert engine.rootObjects(), messages
         window = engine.rootObjects()[0]
+        wait(lambda: not controller.busy, "save screen ready")
+        hint = find("saveReadinessHint")
+        assert hint.property("visible") and "X 계정" in hint.property("text")
+        assert not find("saveStartButton").property("enabled")
+        # A saved token without a verified handle still needs a typed account.
+        controller.accounts._connected = True
+        controller.accounts.changed.emit()
+        account_input = find("saveAccountInput")
+        account_input.setProperty("text", "")
+        settle()
+        assert hint.property("visible") and "아이디" in hint.property("text")
+        assert not find("saveStartButton").property("enabled")
+        account_input.setProperty("text", "offline")
+        settle()
+        assert not hint.property("visible") and find("saveStartButton").property("enabled")
+        controller.accounts._connected = False
+        controller.accounts.changed.emit()
         window.setProperty("currentScreen", 1)
         wait(lambda: not controller.library.model.busy and controller.library.model.total == 5, "initial gallery")
         for width, height in ((680, 480), (1080, 760)):

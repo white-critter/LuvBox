@@ -76,7 +76,7 @@ class DownloadController(QObject):
         self._stopping = False
         self._closing = False
         self._shutdown_emitted = False
-        self._status = "저장할 준비가 됐습니다"
+        self._status = "저장 대기 중"
         self._saved = 0
         self._skipped = 0
         self._error = ""
@@ -199,7 +199,7 @@ class DownloadController(QObject):
             return
         self._repair_needed = False
         self._error = ""
-        self._status = "저장할 준비가 됐습니다"
+        self._status = "저장 대기 중"
         self.changed.emit()
 
     @Slot()
@@ -209,7 +209,7 @@ class DownloadController(QObject):
             return
         self._authentication_error = False
         self._error = ""
-        self._status = "저장할 준비가 됐습니다"
+        self._status = "저장 대기 중"
         self._final = None
         self.changed.emit()
 

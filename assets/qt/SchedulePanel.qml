@@ -10,6 +10,7 @@ ColumnLayout {
     property string action: ""
     property string requestedTime: ""
     property bool timeEdited: false
+    readonly property bool validTime: /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(timeField.text.trim())
     spacing: 14
 
     function stamp(value) {
@@ -90,6 +91,15 @@ ColumnLayout {
         wrapMode: Text.WordWrap
         opacity: 0.72
     }
+    Label {
+        objectName: "scheduleTimeHelp"
+        Layout.fillWidth: true
+        visible: panel.timeEdited && !panel.validTime
+        text: "실행 시각은 09:00처럼 24시간 형식으로 입력해 주세요."
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        color: "#ff8791"
+    }
     Flow {
         Layout.fillWidth: true
         spacing: 8
@@ -97,7 +107,7 @@ ColumnLayout {
             objectName: "scheduleSaveButton"
             text: panel.schedule && panel.schedule.registered ? "예약 저장" : "예약 만들기"
             tone: "primary"
-            enabled: !!(panel.app && panel.app.canStart && panel.schedule && panel.schedule.known
+            enabled: !!(panel.validTime && panel.app && panel.app.canStart && panel.schedule && panel.schedule.known
                 && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running)
             onClicked: {
                 panel.action = panel.schedule.registered ? "update" : "create"

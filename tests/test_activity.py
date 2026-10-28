@@ -1,10 +1,12 @@
 """Terminal outcomes include pre-worker failures without changing old records."""
 
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -107,6 +109,34 @@ class ActivityTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=4) as pool:
             list(pool.map(lambda number: self.append(f"run-{number}"), range(20)))
         self.assertEqual(activity.outcome_page()["total"], 20)
+
+    def test_reader_waits_for_first_ledger_initialization(self):
+        created = threading.Event()
+        resume = threading.Event()
+        real_connect = activity.sqlite3.connect
+
+        def paused_connect(*args, **kwargs):
+            database = real_connect(*args, **kwargs)
+            if not kwargs.get("uri"):
+                created.set()
+                if not resume.wait(5):
+                    database.close()
+                    raise TimeoutError("writer was not released")
+            return database
+
+        with patch.object(activity.sqlite3, "connect", side_effect=paused_connect):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                writer = pool.submit(self.append)
+                try:
+                    self.assertTrue(created.wait(5))
+                    self.assertTrue(self.path.exists())
+                    reader = pool.submit(activity.outcome_page)
+                    with self.assertRaises(FutureTimeout):
+                        reader.result(timeout=0.1)
+                finally:
+                    resume.set()
+                writer.result(timeout=5)
+                self.assertEqual(reader.result(timeout=5)["total"], 1)
 
     def test_linked_or_damaged_ledger_is_preserved_and_rejected(self):
         other = self.root / "other.sqlite3"

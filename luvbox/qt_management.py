@@ -174,6 +174,12 @@ class ManagementController(QObject):
         self._selected = {key for key, row in self._tokens.items() if row.get("availability") == "missing"}
         self.changed.emit()
 
+    @Slot()
+    def clearSelection(self):
+        if self._reading or self._mutating or not self._selected: return
+        self._selected.clear()
+        self.changed.emit()
+
     def _chosen(self):
         return [self._tokens[key] for key in self._selected if key in self._tokens
                 and self._tokens[key].get("availability") == "missing"]

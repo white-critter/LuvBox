@@ -6,6 +6,15 @@ ColumnLayout {
     id: panel
     property var app: null
     readonly property var manager: app ? app.management : null
+    readonly property int selectableCount: {
+        if (!manager || manager.section !== "missing") return 0
+        var count = 0
+        var rows = manager.rows
+        for (var i = 0; i < rows.length; ++i)
+            if (rows[i].selectable) ++count
+        return count
+    }
+    readonly property bool pageSelected: selectableCount > 0 && manager.selectedCount === selectableCount
     readonly property var sections: [
         {key: "schedule", label: "자동 저장"}, {key: "missing", label: "사라진 파일"},
         {key: "deletions", label: "삭제 이력"}, {key: "statistics", label: "통계"},
@@ -59,8 +68,11 @@ ColumnLayout {
         RowLayout {
             Layout.fillWidth: true
             Label {
+                objectName: "managementCount"
                 Layout.fillWidth: true
                 text: panel.manager ? (panel.manager.total.toLocaleString() + "건" +
+                     (panel.manager.section === "missing" && panel.manager.selectedCount > 0
+                         ? " · 선택 " + panel.manager.selectedCount.toLocaleString() + "건" : "") +
                      (panel.manager.checkedAt ? " · 확인 " + panel.manager.checkedAt : "")) : ""
                 color: "#b9afb1"
                 elide: Text.ElideRight
@@ -79,7 +91,12 @@ ColumnLayout {
                 Accessible.name: "사라진 파일 상태"
                 onActivated: panel.manager.setMissingMode(["all", "missing", "ignored", "unavailable"][currentIndex])
             }
-            FlatButton { text: "현재 목록 선택"; enabled: panel.manager && !panel.manager.busy && !panel.manager.mutating; onClicked: panel.manager.selectPage() }
+            FlatButton {
+                objectName: "missingSelectPage"
+                text: panel.pageSelected ? "선택 해제" : "현재 목록 선택"
+                enabled: panel.manager && !panel.manager.busy && !panel.manager.mutating && panel.selectableCount > 0
+                onClicked: panel.pageSelected ? panel.manager.clearSelection() : panel.manager.selectPage()
+            }
             FlatButton {
                 text: "선택 다시 받기"
                 enabled: panel.app && panel.app.canStart && panel.app.accounts &&
@@ -99,6 +116,7 @@ ColumnLayout {
             }
         }
         Label {
+            id: retryHelp
             objectName: "retryConnectionHelp"
             Layout.fillWidth: true
             visible: !!(panel.manager && panel.manager.section === "missing" && panel.manager.selectedCount > 0 &&
@@ -116,7 +134,7 @@ ColumnLayout {
         }
         Label {
             Layout.fillWidth: true
-            visible: panel.manager && panel.manager.section === "missing"
+            visible: panel.manager && panel.manager.section === "missing" && !retryHelp.visible
             text: "확인 불가는 드라이브·권한·클라우드 상태를 먼저 확인하세요. 선택 작업은 파일 없음이 확인된 항목에 적용합니다."
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
@@ -208,7 +226,7 @@ ColumnLayout {
                     FlatButton { text: "로그"; visible: modelData.hasLog; onClicked: panel.manager.openLog(modelData.token) }
                 }
             }
-            Label { anchors.centerIn: parent; visible: records.count === 0 && panel.manager && !panel.manager.busy; text: "표시할 기록이 없습니다."; color: "#b9afb1" }
+            Label { anchors.centerIn: parent; visible: records.count === 0 && panel.manager && !panel.manager.busy && !panel.manager.error.length; text: "표시할 기록이 없습니다."; color: "#b9afb1" }
         }
         RowLayout {
             Layout.fillWidth: true

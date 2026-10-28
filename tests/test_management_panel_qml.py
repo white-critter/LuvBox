@@ -196,6 +196,16 @@ def scene():
             assert all(row["selectable"] for row in controller.management.rows)
             click(button("현재 목록 선택"))
             assert controller.management.selectedCount == 2
+            assert "선택 2건" in find("managementCount").property("text")
+            assert find("missingSelectPage").property("text") == "선택 해제"
+            click(find("missingSelectPage"))
+            assert controller.management.selectedCount == 0
+            assert "선택 2건" not in find("managementCount").property("text")
+            controller.management.toggleRow(controller.management.rows[0]["token"])
+            assert controller.management.selectedCount == 1
+            assert find("missingSelectPage").property("text") == "현재 목록 선택"
+            click(find("missingSelectPage"))
+            assert controller.management.selectedCount == 2
             controller._accounts._connected = False
             controller._accounts.changed.emit()
             wait(lambda: not button("선택 다시 받기").property("enabled"), "retry requires account")

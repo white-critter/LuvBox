@@ -19,7 +19,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def check_scene(screenshot_directory=None):
+def check_scene(screenshot_directory=None, no_browser=False):
     sys.path.insert(0, str(ROOT))
     from PySide6.QtCore import (QCoreApplication, QEvent, QMetaObject, QObject,
                                 Property, QUrl, QtMsgType, qInstallMessageHandler)
@@ -165,9 +165,10 @@ def check_scene(screenshot_directory=None):
         with tempfile.TemporaryDirectory(prefix="luvbox-connection-qml-") as temporary, ExitStack() as stack:
             # Every storage/session/browser boundary is isolated. Real Qt
             # controllers, worker signals, timers and product QML remain active.
-            stack.enter_context(patch("luvbox.qt_browser_setup.available_browsers", return_value=[
+            choices = [] if no_browser else [
                 {"id": "chrome", "label": "Google Chrome"}, {"id": "edge", "label": "Microsoft Edge"},
-                {"id": "firefox", "label": "Mozilla Firefox"}]))
+                {"id": "firefox", "label": "Mozilla Firefox"}]
+            stack.enter_context(patch("luvbox.qt_browser_setup.available_browsers", return_value=choices))
             stack.enter_context(patch("luvbox.qt_browser_setup.app_directory", return_value=Path(temporary)))
             stack.enter_context(patch("luvbox.qt_accounts.BrowserBridge", SyntheticBridge))
             stack.enter_context(patch("luvbox.qt_accounts.open_browser_url", side_effect=open_browser))
@@ -205,7 +206,27 @@ ApplicationWindow {
             if not engine.rootObjects():
                 raise AssertionError("product connection dialog failed to load: " + str(messages))
             window = engine.rootObjects()[0]
-            wait_for(lambda: not setup.busy and setup.selectedBrowser == "chrome", "browser discovery")
+            wait_for(lambda: not setup.busy, "browser discovery")
+            if no_browser:
+                if setup.selectedBrowser or "찾지 못했습니다" not in setup.status:
+                    raise AssertionError("no-browser discovery did not report its result")
+                invoke(window, "openConnection")
+                dialog = window.findChild(QObject, "fixtureConnection")
+                combo = dialog.findChild(QQuickItem, "connectionBrowser")
+                connect = dialog.findChild(QQuickItem, "connectBrowserButton")
+                notice = dialog.findChild(QQuickItem, "noBrowserMessage")
+                settle(.2)
+                if (setup.busy or setup.error or "찾지 못했습니다" not in setup.status
+                        or combo.property("displayText") != "지원하는 브라우저 없음"
+                        or not notice.property("visible") or connect.property("enabled")):
+                    raise AssertionError("no-browser state was hidden or overwritten")
+                qml_errors = [message for message in messages if any(
+                    marker in message for marker in (".qml", "QQml", "ReferenceError", "TypeError", "Binding loop"))]
+                if qml_errors:
+                    raise AssertionError("QML warnings/errors: " + str(qml_errors))
+                return {"checks": ["no-browser-visible"], "qml_errors": qml_errors}
+            if setup.selectedBrowser != "chrome":
+                raise AssertionError("expected synthetic browser selection")
             invoke(window, "openConnection")
             dialog = window.findChild(QObject, "fixtureConnection")
             combo = dialog.findChild(QQuickItem, "connectionBrowser")
@@ -336,6 +357,15 @@ ApplicationWindow {
 
 @unittest.skipUnless(find_spec("PySide6") is not None, "Qt dependencies are not installed")
 class ConnectionQmlTests(unittest.TestCase):
+    def test_no_browser_is_reported_without_false_preparation_error(self):
+        environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
+                           PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scene", "--no-browser"],
+                                cwd=ROOT, env=environment, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["checks"], ["no-browser-visible"])
+
     def test_product_connection_flow_and_small_window_recovery(self):
         environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
                            PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
@@ -353,6 +383,6 @@ class ConnectionQmlTests(unittest.TestCase):
 if __name__ == "__main__":
     if "--scene" in sys.argv:
         screenshots = sys.argv[sys.argv.index("--screenshots") + 1] if "--screenshots" in sys.argv else None
-        print(json.dumps(check_scene(screenshots), ensure_ascii=False))
+        print(json.dumps(check_scene(screenshots, no_browser="--no-browser" in sys.argv), ensure_ascii=False))
     else:
         unittest.main()

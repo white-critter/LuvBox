@@ -237,7 +237,7 @@ class QtEvidenceTests(unittest.TestCase):
         self.assertNotEqual(controller.error, "")
         controller.clearAuthenticationError()
         self.assertEqual(controller.error, "")
-        self.assertEqual(controller.status, "저장할 준비가 됐습니다")
+        self.assertEqual(controller.status, "저장 대기 중")
         self.assertIsNone(controller._final)
 
     def test_reconnect_does_not_clear_running_or_unrelated_failure(self):
