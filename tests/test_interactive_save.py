@@ -35,7 +35,7 @@ class Review:
 class InteractiveSaveTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     runs = test_core.CoreTests.runs
 
     def worker(self, rows=(), *, options=None, review=None, before_row=None, stop_file=None, extractor=None):

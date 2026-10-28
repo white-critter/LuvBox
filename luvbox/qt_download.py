@@ -247,7 +247,7 @@ class DownloadController(QObject):
 
     @Slot()
     def stop(self):
-        if not self._running or self._stopping or self._final is not None:
+        if not self._running or self._stopping:
             return
         self._stopping = True
         self._status = "중단하는 중입니다"
@@ -377,11 +377,18 @@ class DownloadController(QObject):
         elif kind == "process_exit":
             self._running = False
             self.reviewDismissed.emit()
-            if self._final == "finished" and event.get("code") == 0:
+            clean_exit = (type(event.get("code")) is int and event["code"] == 0
+                          and event.get("forced") is not True)
+            if self._final == "finished" and clean_exit:
                 self._status = "저장했습니다"
                 self._progress = 1.0
-            elif self._final == "stopped" or (self._final is None and self._stopping):
+            elif self._final == "stopped" and clean_exit:
                 self._status = "중단했습니다. 저장한 파일은 유지됩니다"
+                self._progress = -1.0
+            elif event.get("forced") is True:
+                self._error = self._error or ("중단 요청에 응답하지 않아 작업을 강제로 종료했습니다. "
+                                             "저장한 파일은 유지되며 다음 저장 때 기록을 다시 확인합니다.")
+                self._status = self._error
                 self._progress = -1.0
             else:
                 self._error = self._error or "저장 작업이 정상적으로 끝나지 않았습니다. 저장한 파일은 유지됩니다."

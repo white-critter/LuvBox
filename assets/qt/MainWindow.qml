@@ -26,7 +26,7 @@ ApplicationWindow {
     readonly property color noticeColor: "#e6bd79"
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
-        folderDialog.visible
+        folderDialog.visible || deleteConfirmation.visible
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
     color: "#101010"
     palette.window: color
@@ -63,6 +63,8 @@ ApplicationWindow {
             app.galleryVisible(currentScreen === 1)
         if (currentScreen === 1)
             Qt.callLater(updateFocus)
+        if (app && currentScreen === 2)
+            app.management.refresh()
     }
     property int densityChoice: 1
     readonly property int tileWidth: [168, 240, 320][densityChoice]
@@ -251,6 +253,7 @@ ApplicationWindow {
             Label { text: "LuvBox"; font.pixelSize: 18; Layout.rightMargin: 16 }
             FlatButton { text: "저장"; tone: "nav"; checkable: true; checked: window.currentScreen === 0; onClicked: window.currentScreen = 0 }
             FlatButton { text: "갤러리"; tone: "nav"; checkable: true; checked: window.currentScreen === 1; onClicked: window.currentScreen = 1 }
+            FlatButton { text: "관리"; objectName: "managementNavigation"; visible: !!window.app; tone: "nav"; checkable: true; checked: window.currentScreen === 2; onClicked: window.currentScreen = 2 }
             Item { Layout.fillWidth: true }
             Label { text: window.app ? window.app.version : ""; color: window.mutedColor; visible: window.width > 760 }
             FlatButton { text: "설정"; visible: !!window.app; enabled: window.app && !window.app.busy; onClicked: preferencesDialog.open() }
@@ -430,14 +433,22 @@ ApplicationWindow {
                                     easing.type: Easing.InOutQuad
                                 }
                             }
-                            Label {
+                            RowLayout {
                                 Layout.fillWidth: true
-                                visible: window.app && window.app.schedule.known && window.app.schedule.registered &&
-                                    window.app.schedule.enabled && !window.app.schedule.current
-                                text: "이전 버전의 자동 저장 예약이 있습니다. 설정 → 고급에서 변경하거나 해제하세요."
-                                color: window.noticeColor
-                                textFormat: Text.PlainText
-                                wrapMode: Text.WordWrap
+                                objectName: "saveScheduleSummary"
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: window.app ? "자동 저장 · " + window.app.schedule.summary : ""
+                                    color: window.app && window.app.schedule.registered && !window.app.schedule.current
+                                        ? window.noticeColor : window.mutedColor
+                                    textFormat: Text.PlainText
+                                    wrapMode: Text.WordWrap
+                                }
+                                FlatButton {
+                                    text: "예약 관리"
+                                    visible: !!window.app
+                                    onClicked: window.currentScreen = 2
+                                }
                             }
                             Label {
                                 text: window.app ? window.app.download.notice : ""
@@ -498,7 +509,7 @@ ApplicationWindow {
             }
 
             ColumnLayout {
-                spacing: 14
+                spacing: 10
                 RowLayout {
                     spacing: 12
                     Layout.fillWidth: true
@@ -545,7 +556,7 @@ ApplicationWindow {
                         Accessible.name: "미디어 종류"
                         onActivated: window.app.library.setFilters(
                             ["all", "photo", "video", "animated_gif"][currentIndex],
-                            ["saved", "posted", "posted_oldest", "liked"][orderChoice.currentIndex], "")
+                            ["saved", "posted", "posted_oldest", "liked"][orderChoice.currentIndex], window.app.library.filterAuthor)
                     }
                     FlatCombo {
                         id: orderChoice
@@ -555,7 +566,7 @@ ApplicationWindow {
                         Accessible.name: "사진 정렬"
                         onActivated: window.app.library.setFilters(
                             ["all", "photo", "video", "animated_gif"][mediaFilter.currentIndex],
-                            ["saved", "posted", "posted_oldest", "liked"][currentIndex], "")
+                            ["saved", "posted", "posted_oldest", "liked"][currentIndex], window.app.library.filterAuthor)
                     }
                     FlatButton {
                         visible: !!window.app
@@ -566,6 +577,153 @@ ApplicationWindow {
                         text: "미리보기"
                         visible: gallery.currentIndex >= 0
                         onClicked: previewDialog.open()
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: !!window.app
+                    spacing: 8
+                    FlatButton {
+                        id: filterToggle
+                        objectName: "galleryFilterToggle"
+                        text: checked ? "필터 닫기" : "작성자·날짜 필터"
+                        checkable: true
+                        onClicked: {
+                            if (checked && window.app) {
+                                authorFilter.text = window.app.library.filterAuthor
+                                dateFieldChoice.currentIndex = window.app.library.dateField === "saved" ? 1 : 0
+                                dateFromFilter.text = window.app.library.dateFrom
+                                dateToFilter.text = window.app.library.dateTo
+                            }
+                        }
+                    }
+                    FlatButton {
+                        objectName: "galleryFilterReset"
+                        text: "필터 초기화"
+                        onClicked: {
+                            searchDelay.stop()
+                            search.text = ""
+                            authorFilter.text = dateFromFilter.text = dateToFilter.text = ""
+                            mediaFilter.currentIndex = orderChoice.currentIndex = dateFieldChoice.currentIndex = 0
+                            window.app.library.resetFilters()
+                        }
+                    }
+                    Item { Layout.fillWidth: true }
+                    FlatButton {
+                        objectName: "gallerySelectionToggle"
+                        text: window.app && window.app.library.selectionMode ? "선택 끝내기" : "여러 개 선택"
+                        enabled: window.app && !window.app.busy
+                        onClicked: window.app.library.setSelectionMode(!window.app.library.selectionMode)
+                    }
+                }
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    visible: !!window.app && filterToggle.checked
+                    spacing: 6
+                    RowLayout {
+                        Layout.fillWidth: true
+                        FlatField {
+                            id: authorFilter
+                            objectName: "galleryAuthorFilter"
+                            Layout.fillWidth: true
+                            placeholderText: "작성자 ID (정확히 일치)"
+                            Accessible.name: "정확한 작성자 ID"
+                            selectByMouse: true
+                            maximumLength: 16
+                        }
+                        FlatCombo {
+                            id: dateFieldChoice
+                            objectName: "galleryDateField"
+                            model: ["게시일", "저장일"]
+                            implicitWidth: 112
+                            Accessible.name: "날짜 필터 기준"
+                        }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        FlatField {
+                            id: dateFromFilter
+                            objectName: "galleryDateFrom"
+                            Layout.fillWidth: true
+                            placeholderText: "시작 YYYY-MM-DD"
+                            Accessible.name: "시작 날짜 YYYY-MM-DD"
+                            selectByMouse: true
+                            maximumLength: 10
+                        }
+                        Label { text: "~" }
+                        FlatField {
+                            id: dateToFilter
+                            objectName: "galleryDateTo"
+                            Layout.fillWidth: true
+                            placeholderText: "종료 YYYY-MM-DD"
+                            Accessible.name: "종료 날짜 YYYY-MM-DD"
+                            selectByMouse: true
+                            maximumLength: 10
+                        }
+                        FlatButton {
+                            objectName: "galleryFilterApply"
+                            text: "적용"
+                            onClicked: {
+                                if (window.app.library.setAdvancedFilters(authorFilter.text,
+                                        dateFieldChoice.currentIndex === 1 ? "saved" : "posted",
+                                        dateFromFilter.text, dateToFilter.text))
+                                    filterToggle.checked = false
+                            }
+                        }
+                    }
+                }
+                Label {
+                    objectName: "galleryActiveFilters"
+                    Layout.fillWidth: true
+                    text: window.app ? window.app.library.filterSummary : ""
+                    visible: text.length > 0
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    color: window.mutedColor
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: window.app && !window.app.library.busy ? window.app.library.status : ""
+                    visible: text.length > 0
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    color: window.noticeColor
+                }
+                Label {
+                    objectName: "galleryManagementMessage"
+                    Layout.fillWidth: true
+                    text: window.app ? (window.app.management.error || window.app.management.status) : ""
+                    visible: text.length > 0
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    color: window.app && window.app.management.error ? window.errorColor : window.mutedColor
+                }
+                RowLayout {
+                    objectName: "gallerySelectionBar"
+                    Layout.fillWidth: true
+                    visible: window.app && window.app.library.selectionMode
+                    spacing: 8
+                    Label {
+                        Layout.fillWidth: true
+                        text: window.app ? window.app.library.selectedCount.toLocaleString() + "개 선택" : ""
+                    }
+                    FlatButton {
+                        objectName: "gallerySelectLoaded"
+                        text: "불러온 항목 선택"
+                        enabled: window.app && !window.app.busy
+                        onClicked: window.app.library.selectLoaded()
+                    }
+                    FlatButton {
+                        objectName: "gallerySelectionClear"
+                        text: "선택 해제"
+                        onClicked: window.app.library.clearSelection()
+                    }
+                    FlatButton {
+                        objectName: "galleryRecycleSelected"
+                        text: "휴지통으로"
+                        enabled: window.app && !window.app.busy && window.app.library.selectedCount > 0
+                        onClicked: window.app.management.prepareDelete(window.app.library.selectedKeys)
                     }
                 }
 
@@ -642,11 +800,15 @@ ApplicationWindow {
                     }
                     Keys.onReturnPressed: {
                         window.stopWheel()
-                        if (currentIndex >= 0)
+                        if (window.app && window.app.library.selectionMode && currentItem)
+                            window.app.library.toggleSelection(currentItem.key)
+                        else if (currentIndex >= 0)
                             previewDialog.open()
                     }
                     Keys.onEscapePressed: {
                         window.stopWheel()
+                        if (window.app && window.app.library.selectionMode)
+                            window.app.library.setSelectionMode(false)
                         currentIndex = -1
                     }
 
@@ -659,6 +821,7 @@ ApplicationWindow {
                         required property string thumbUrl
                         required property bool thumbReady
                         property bool activeTile: true
+                        readonly property bool batchSelected: window.app && window.app.library.selectedKeys.indexOf(tile.key) >= 0
                         readonly property bool imageReady: photo.status === Image.Ready
                         width: gallery.cellWidth
                         height: gallery.cellHeight
@@ -674,8 +837,8 @@ ApplicationWindow {
                             anchors.fill: parent
                             anchors.margins: 6
                             radius: 10
-                            color: gallery.currentIndex === tile.index ? "#241416" : window.cardColor
-                            border.width: gallery.currentIndex === tile.index ? 1 : 0
+                            color: tile.batchSelected || gallery.currentIndex === tile.index ? "#241416" : window.cardColor
+                            border.width: tile.batchSelected || gallery.currentIndex === tile.index ? 1 : 0
                             border.color: window.accentColor
                             Image {
                                 id: photo
@@ -705,26 +868,47 @@ ApplicationWindow {
                             MouseArea {
                                 anchors.fill: parent
                                 onPressed: window.stopWheel()
-                                onClicked: {
+                                onClicked: mouse => {
                                     gallery.currentIndex = tile.index
                                     gallery.forceActiveFocus()
+                                    if (window.app && (window.app.library.selectionMode || (mouse.modifiers & Qt.ControlModifier)))
+                                        window.app.library.toggleSelection(tile.key)
                                 }
-                                onDoubleClicked: previewDialog.open()
+                                onDoubleClicked: if (!window.app || !window.app.library.selectionMode) previewDialog.open()
+                            }
+                            CheckBox {
+                                objectName: "galleryItemSelection"
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                z: 2
+                                visible: window.app && window.app.library.selectionMode
+                                enabled: window.app && window.app.library.canSelect(tile.key)
+                                checked: tile.batchSelected
+                                Accessible.name: "사진 선택: " + tile.caption
+                                onClicked: window.app.library.toggleSelection(tile.key)
                             }
                         }
                         Accessible.role: Accessible.ListItem
                         Accessible.name: caption
-                        Accessible.selected: gallery.currentIndex === index
-                        Accessible.onPressAction: gallery.currentIndex = index
+                        Accessible.selected: batchSelected || gallery.currentIndex === index
+                        Accessible.onPressAction: {
+                            gallery.currentIndex = index
+                            if (window.app && window.app.library.selectionMode)
+                                window.app.library.toggleSelection(key)
+                        }
                     }
 
                     Label {
                         anchors.centerIn: parent
                         visible: gallery.count === 0 && !window.galleryModel.busy
-                        text: search.text.length ? "검색 결과가 없습니다." : "사진이 없습니다."
+                        text: search.text.length || (window.app && (window.app.library.filterSummary.length > 0
+                            || mediaFilter.currentIndex > 0)) ? "필터에 맞는 사진이 없습니다." : "사진이 없습니다."
                         color: window.mutedColor
                     }
                 }
+            }
+            ManagementPanel {
+                app: window.app
             }
         }
     }
@@ -915,6 +1099,17 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 FlatButton { text: "파일 열기"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.openSelected() }
                 FlatButton { text: "폴더"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.revealSelected() }
+                FlatButton {
+                    objectName: "previewRecycle"
+                    text: "휴지통으로"
+                    enabled: window.app && !window.app.busy && !window.app.library.selectedMissing
+                    onClicked: {
+                        const key = window.app.library.selectedKey
+                        selectedMedia.release()
+                        previewDialog.close()
+                        window.app.management.prepareDelete([key])
+                    }
+                }
                 Item { Layout.fillWidth: true }
                 FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
             }
@@ -928,6 +1123,24 @@ ApplicationWindow {
         // Qt's own folder dialog stays on the drive it opened on, so a folder
         // on D: made C: unreachable. The Windows dialog lists every drive.
         onAccepted: if (window.app) window.app.setOutputFolder(selectedFolder.toString())
+    }
+
+    DeleteConfirmation {
+        id: deleteConfirmation
+        parent: Overlay.overlay
+        app: window.app
+    }
+
+    Connections {
+        target: window.app ? window.app.management : null
+        function onDeleteConfirmationRequested() {
+            selectedMedia.release()
+            previewDialog.close()
+            Qt.callLater(function() {
+                if (window.app && !window.app.closing && window.app.management.deleteConfirmationPending)
+                    deleteConfirmation.open()
+            })
+        }
     }
 
     function chooseSaveFolder() {
@@ -1075,9 +1288,11 @@ ApplicationWindow {
                 storageDialog.close()
                 repairDialog.close()
                 folderDialog.close()
+                deleteConfirmation.close()
             }
         }
         function onLoginRequested() { connectionDialog.open() }
+        function onRetryStarted() { window.currentScreen = 0 }
         function onStorageConfirmationRequested() { storageDialog.open() }
         function onReviewReady() { saveReviewDialog.open() }
         function onReviewCleared() { saveReviewDialog.close() }

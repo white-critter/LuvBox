@@ -156,7 +156,7 @@ class FakeTweetExtractor(Extractor):
 class RetryWorkerTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     worker = test_core.CoreTests.worker
     runs = test_core.CoreTests.runs
 
@@ -265,8 +265,8 @@ class RetryWorkerTests(unittest.TestCase):
         for targets in (["x_1"], ["1_0"], ["1_card_1"], "1_1", ["1_1"] * 0 + ["1"]):
             with self.subTest(targets=targets), self.assertRaises(ValueError):
                 self.flat(targets=targets).validate()
-        normalized = self.flat(targets=["5_1", "5_1", "6_video_2"], photo_limit=20).validate()
-        self.assertEqual((normalized.targets, normalized.photo_limit), (("5_1", "6_video_2"), 0))
+        normalized = self.flat(targets=["5_1", "5_1", "6_video_2"]).validate()
+        self.assertEqual(normalized.targets, ("5_1", "6_video_2"))
         with patch("luvbox.core.RETRY_LIMIT", 1), self.assertRaises(ValueError):
             self.flat(targets=["5_1", "6_1"]).validate()
         self.assertEqual(JobOptions("me", str(self.output)).targets, ())

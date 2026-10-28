@@ -351,7 +351,7 @@ class AccountController(QObject):
                 result["warning"] = "저장된 연결을 읽지 못했습니다. 다시 연결해 주세요."
             if (self._persist_preferences and result["success"] and operation != "disconnect"
                     and not result.get("warning")):
-                preferences = {"auth_mode": "managed"}
+                preferences = {}
                 if result["state"]["identity"]:
                     preferences["account"] = result["state"]["identity"]["handle"]
                 if operation == "browser":

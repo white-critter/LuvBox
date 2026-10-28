@@ -21,7 +21,7 @@ from tests import test_core
 class AutomaticPreviewTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
 
     def payload(self, media_type):
         if media_type == "photo":
@@ -111,10 +111,10 @@ class AutomaticPreviewTests(unittest.TestCase):
         self.assertTrue(Path(next(event["path"] for event in events if event["type"] == "saved")).is_file())
         self.kept("100")
 
-    def test_stopping_or_reaching_a_limit_flushes_a_temporarily_busy_cache(self):
+    def test_completed_or_stopped_run_flushes_a_temporarily_busy_cache(self):
         original = thumbcache.Cache.put
-        for index, limited in enumerate((False, True)):
-            with self.subTest(limited=limited):
+        for index, stop_early in enumerate((False, True)):
+            with self.subTest(stop_early=stop_early):
                 calls = 0
 
                 def busy_once(cache, key, image):
@@ -126,17 +126,18 @@ class AutomaticPreviewTests(unittest.TestCase):
 
                 tweet = str(100 + index * 10)
                 flag = self.base / "stop.flag"
-                rows = [(tweet, 1, "photo", "alice"), (str(int(tweet) + 1), 1, "photo", "alice")]
+                rows = [(tweet, 1, "photo", "alice")]
+                if stop_early:
+                    rows.append((str(int(tweet) + 1), 1, "photo", "alice"))
 
                 def before(_extractor, row):
-                    if row[0] != tweet and not limited:
+                    if row[0] != tweet:
                         flag.touch()
 
                 with patch.object(thumbcache.Cache, "put", busy_once):
-                    code, events = self.download(rows, options=replace(self.options, photo_limit=1 if limited else 0),
-                                                 before_row=before, stop_file=str(flag))
+                    code, events = self.download(rows, before_row=before, stop_file=str(flag))
                 self.assertEqual((code, events[-1]["saved"]), (0, 1))
-                self.assertEqual(events[-1]["status"], "finished" if limited else "stopped")
+                self.assertEqual(events[-1]["status"], "stopped" if stop_early else "finished")
                 self.assertGreaterEqual(calls, 2)
                 self.kept(tweet)
                 flag.unlink(missing_ok=True)

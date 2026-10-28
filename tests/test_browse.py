@@ -47,9 +47,6 @@ class BrowseCatalogTests(unittest.TestCase):
         self.store.record_tweets([("100", "수정된 글", [])])
         self.assertEqual(self.ids(query="고양이 사진"), [])
         self.assertEqual(self.ids(query="수정된"), ["100"])
-        exported = Path(self.temp.name) / "records.csv"
-        self.store.export_records(exported)
-        self.assertIn("수정된 글", exported.read_text(encoding="utf-8-sig"))
 
     def test_exact_author_filter_ignores_letter_case_but_not_partial_names(self):
         self.media("100", "Alice")
@@ -101,7 +98,7 @@ class BrowseCatalogTests(unittest.TestCase):
 class TweetTextWorkerTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
 
     def test_worker_keeps_the_text_of_every_walked_tweet(self):
         class TextExtractor(test_core.FakeLikesExtractor):

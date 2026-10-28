@@ -6,9 +6,6 @@ Dialog {
     id: dialog
     objectName: "preferencesDialog"
     property var app: null
-    property string scheduleAction: ""
-    onOpened: if (app) app.schedule.refresh()
-    onClosed: scheduleConfirmation.close()
     readonly property var folderModes: [
         {label: "한 폴더에 저장", value: "flat"},
         {label: "작성자별 폴더", value: "author"},
@@ -214,59 +211,6 @@ Dialog {
                         text: "기록 폴더 열기"
                         onClicked: dialog.app.openRecordsFolder()
                     }
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        visible: dialog.app && (!dialog.app.schedule.known || dialog.app.schedule.registered ||
-                            dialog.app.schedule.error.length > 0 || dialog.app.schedule.status.length > 0)
-                        spacing: 8
-                        Label { text: "기존 자동 저장"; font.bold: true; textFormat: Text.PlainText }
-                        Label {
-                            Layout.fillWidth: true
-                            text: dialog.app ? dialog.app.schedule.summary : ""
-                            textFormat: Text.PlainText
-                            wrapMode: Text.WordWrap
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: dialog.app && dialog.app.schedule.registered && !dialog.app.schedule.current
-                            text: "이전 버전의 예약입니다. 이 버전으로 변경하거나 해제할 수 있습니다."
-                            textFormat: Text.PlainText
-                            wrapMode: Text.WordWrap
-                        }
-                        RowLayout {
-                            Layout.fillWidth: true
-                            FlatButton {
-                                text: "다시 확인"
-                                enabled: dialog.app && !dialog.app.schedule.busy
-                                onClicked: dialog.app.schedule.refresh()
-                            }
-                            FlatButton {
-                                text: "현재 버전으로 변경"
-                                visible: dialog.app && dialog.app.schedule.registered && dialog.app.schedule.enabled && !dialog.app.schedule.current
-                                enabled: dialog.app && !dialog.app.schedule.busy && !dialog.app.schedule.locked && !dialog.app.schedule.running
-                                onClicked: {
-                                    dialog.scheduleAction = "update"
-                                    scheduleConfirmation.open()
-                                }
-                            }
-                            FlatButton {
-                                text: "예약 해제"
-                                visible: dialog.app && dialog.app.schedule.registered
-                                enabled: dialog.app && !dialog.app.schedule.busy && !dialog.app.schedule.locked
-                                onClicked: {
-                                    dialog.scheduleAction = "remove"
-                                    scheduleConfirmation.open()
-                                }
-                            }
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            text: dialog.app ? (dialog.app.schedule.error || dialog.app.schedule.status) : ""
-                            visible: text.length > 0
-                            textFormat: Text.PlainText
-                            wrapMode: Text.WordWrap
-                        }
-                    }
                 }
             }
             Label {
@@ -288,44 +232,4 @@ Dialog {
         onRejected: dialog.close()
     }
 
-    Dialog {
-        id: scheduleConfirmation
-        objectName: "scheduleConfirmation"
-        parent: Overlay.overlay
-        modal: true
-        anchors.centerIn: parent
-        width: Math.min(440, parent ? parent.width - 32 : 440)
-        implicitHeight: 220
-        height: Math.min(implicitHeight, parent ? Math.max(180, parent.height - 32) : implicitHeight)
-        title: dialog.scheduleAction === "remove" ? "자동 저장 예약을 해제할까요?" : "현재 버전으로 변경할까요?"
-        closePolicy: Popup.CloseOnEscape
-        onOpened: scheduleCancel.forceActiveFocus()
-        contentItem: Label {
-            text: dialog.scheduleAction === "remove"
-                ? "다음 자동 저장부터 실행하지 않습니다. 이미 시작한 저장과 받은 파일은 그대로 둡니다."
-                : "기존 예약 시간을 유지하고 실행 프로그램만 현재 버전으로 바꿉니다."
-            textFormat: Text.PlainText
-            wrapMode: Text.WordWrap
-        }
-        onAccepted: {
-            if (dialog.scheduleAction === "remove")
-                dialog.app.schedule.remove()
-            else
-                dialog.app.schedule.useCurrentVersion()
-        }
-        footer: DialogButtonBox {
-            FlatButton {
-                text: dialog.scheduleAction === "remove" ? "예약 해제" : "현재 버전으로 변경"
-                tone: "primary"
-                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
-            }
-            FlatButton {
-                id: scheduleCancel
-                text: "취소"
-                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-            }
-            onAccepted: scheduleConfirmation.accept()
-            onRejected: scheduleConfirmation.reject()
-        }
-    }
 }

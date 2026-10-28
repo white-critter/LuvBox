@@ -78,7 +78,7 @@ class ResponseEvidenceTests(unittest.TestCase):
         self.assertEqual(_response_authentication_state(response(401), "https://video.twimg.com/clip.mp4"), "")
 
     def test_media_log_message_cannot_revoke_the_x_account(self):
-        handler = _GalleryLogHandler(lambda event: None, "managed")
+        handler = _GalleryLogHandler(lambda event: None)
         handler.emit(logging.LogRecord("download", logging.ERROR, __file__, 1,
                                       "AuthenticationError: media access denied", (), None))
         self.assertEqual(handler.auth_state, "")
@@ -89,7 +89,7 @@ class ResponseEvidenceTests(unittest.TestCase):
                         "AuthorizationError: Account temporarily locked", "HttpError: 403 Forbidden",
                         "Rate limit exceeded", "SSL certificate error"):
             with self.subTest(message=message):
-                handler = _GalleryLogHandler(lambda event: None, "managed")
+                handler = _GalleryLogHandler(lambda event: None)
                 handler.emit(logging.LogRecord("twitter", logging.ERROR, __file__, 1, message, (), None))
                 self.assertEqual(handler.auth_state, "")
 
@@ -105,7 +105,7 @@ class WorkerEvidenceTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.addCleanup(self.fixture.tearDown)
-        self.options = replace(self.fixture.options, auth_mode="managed", cookies_file="")
+        self.options = self.fixture.options
         token = patch("luvbox.login.load_session_cookies", return_value=[{
             "name": "auth_token", "value": support.SECRET, "domain": ".x.com", "path": "/",
             "expires": -1, "secure": True, "httpOnly": True}])

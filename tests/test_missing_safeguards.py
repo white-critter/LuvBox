@@ -91,7 +91,7 @@ class MovedFolderTests(StateTestCase):
     def test_scheduled_save_skips_a_moved_folder(self):
         from luvbox.scheduled import _options_from_settings
         self.saved(1)
-        settings = {"auth_mode": "managed", "account": "offline", "output_dir": str(self.paths.output_dir)}
+        settings = {"account": "offline", "output_dir": str(self.paths.output_dir)}
         _options_from_settings(settings, False)
         self.paths.media_dir.rename(self.base / "Likes-moved")
         with self.assertRaises(ValueError) as raised:
@@ -195,7 +195,7 @@ class RealPhotoDownloader(core_support.FakeHttpDownloader):
 
 
 class WorkerPreviewTests(unittest.TestCase):
-    write_cookies = core_support.CoreTests.write_cookies
+    set_session = core_support.CoreTests.set_session
 
     def setUp(self):
         core_support.CoreTests.setUp(self)

@@ -18,7 +18,7 @@ from luvbox.storage import resolve_storage, saved_media_missing
 
 
 class SharedOutputTests(unittest.TestCase):
-    write_cookies = core_support.CoreTests.write_cookies
+    set_session = core_support.CoreTests.set_session
 
     def setUp(self):
         core_support.CoreTests.setUp(self)
@@ -28,7 +28,7 @@ class SharedOutputTests(unittest.TestCase):
         core_support.CoreTests.tearDown(self)
 
     def job(self, account, mode="date", separate=False):
-        return JobOptions(account, str(self.output), "file", str(self.cookie_file), folder_mode=mode,
+        return JobOptions(account, str(self.output), folder_mode=mode,
                           include_videos=False, include_gifs=False, separate_accounts=separate)
 
     def save(self, options, rows, day):

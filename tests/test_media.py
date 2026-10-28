@@ -68,7 +68,7 @@ class MediaTests(unittest.TestCase):
         self.gif_convert = conversion_patch.start()
         self.addCleanup(conversion_patch.stop)
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     worker = test_core.CoreTests.worker
 
     def all_media(self, **changes):
@@ -319,15 +319,15 @@ class MediaTests(unittest.TestCase):
         self.assertFalse((folder / "100_video_1.mp4").exists())
         self.assertEqual(self.archive_keys(), set())
 
-    def test_cap_accepts_exact_size_and_media_limit_run_is_marked_limited(self):
+    def test_cap_accepts_exact_size_and_finishes_with_the_saved_video(self):
         chunks = [MP4_HEADER, b"a" * (MIB - len(MP4_HEADER))]
-        code, events, _ = self.http_worker([("100", 1, "video", "alice"), ("101", 1, "photo", "alice")],
+        code, events, _ = self.http_worker([("100", 1, "video", "alice")],
                                           [self.response(chunks, size=MIB)],
-                                          options=self.all_media(max_video_mb=1, photo_limit=1))
+                                          options=self.all_media(max_video_mb=1))
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
         self.assertEqual(events[-1]["size_skipped"], 0)
-        self.assertEqual(self.history_rows("runs")[-1]["status"], "limited")
+        self.assertEqual(self.history_rows("runs")[-1]["status"], "finished")
         self.assertEqual(len(self.history_rows()), 1)
 
     def test_cancel_during_video_stream_preserves_partial_and_does_not_archive(self):

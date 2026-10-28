@@ -2,7 +2,7 @@
 
 `LuvBox-<version>.exe --run-saved` checks only new likes (quick scan) and falls back
 to a complete scan by itself when the previous run did not finish. It uses the
-encrypted token connection only; a cookies.txt path is never stored. Output
+encrypted managed connection. Output
 goes to a log file because a windowed executable has no console.
 
 The app registers the daily task itself (Windows' ScheduledTasks module), so
@@ -93,12 +93,28 @@ def _powershell(script: str, **values: str) -> str:
     return result.stdout.decode("utf-8", errors="replace").strip()
 
 
-_STATUS_SCRIPT = r"""
+_TASK_LOOKUP_SCRIPT = r"""
+function Get-LuvBoxTask([string]$candidate) {
+    try {
+        Get-ScheduledTask -TaskName $candidate -ErrorAction Stop
+    } catch {
+        # A missing task is normal. A scheduler/permission failure is not:
+        # treating it as absent could overwrite an existing task on retry.
+        if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound -and
+                $_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound_TaskName,*') {
+            return $null
+        }
+        throw
+    }
+}
+"""
+
+_STATUS_SCRIPT = _TASK_LOOKUP_SCRIPT + r"""
 $name = $env:XLS_TASK
-$task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+$task = Get-LuvBoxTask $name
 if (-not $task) {
     foreach ($candidate in ($env:XLS_LEGACY -split '\|')) {
-        if ($candidate) { $task = Get-ScheduledTask -TaskName $candidate -ErrorAction SilentlyContinue }
+        if ($candidate) { $task = Get-LuvBoxTask $candidate }
         if ($task) { $name = $candidate; break }
     }
 }
@@ -122,7 +138,11 @@ function Stamp($value) { if ($value -and $value.Year -gt 2000) { $value.ToString
 } | ConvertTo-Json -Compress
 """
 
-_REGISTER_SCRIPT = r"""
+_REGISTER_SCRIPT = _TASK_LOOKUP_SCRIPT + r"""
+$legacyTasks = @()
+foreach ($old in ($env:XLS_LEGACY -split '\|')) {
+    if ($old -and (Get-LuvBoxTask $old)) { $legacyTasks += $old }
+}
 $action = New-ScheduledTaskAction -Execute $env:XLS_PROGRAM -Argument $env:XLS_ARGUMENTS
 # Start tomorrow if today's time has passed: with StartWhenAvailable, a start
 # in the past would otherwise count as missed and run at once.
@@ -134,18 +154,18 @@ $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatt
 Register-ScheduledTask -TaskName $env:XLS_TASK -Action $action -Trigger $trigger -Settings $settings `
     -Description $env:XLS_DESCRIPTION -Force | Out-Null
 # One daily task: remove the one registered under the app's former name.
-foreach ($old in ($env:XLS_LEGACY -split '\|')) {
-    if ($old -and (Get-ScheduledTask -TaskName $old -ErrorAction SilentlyContinue)) {
-        Unregister-ScheduledTask -TaskName $old -Confirm:$false
-    }
+foreach ($old in $legacyTasks) {
+    Unregister-ScheduledTask -TaskName $old -Confirm:$false
 }
 """
 
-_UNREGISTER_SCRIPT = r"""
+_UNREGISTER_SCRIPT = _TASK_LOOKUP_SCRIPT + r"""
+$found = @()
 foreach ($name in @($env:XLS_TASK) + ($env:XLS_LEGACY -split '\|')) {
-    if ($name -and (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue)) {
-        Unregister-ScheduledTask -TaskName $name -Confirm:$false
-    }
+    if ($name -and (Get-LuvBoxTask $name)) { $found += $name }
+}
+foreach ($name in $found) {
+    Unregister-ScheduledTask -TaskName $name -Confirm:$false
 }
 """
 
@@ -163,6 +183,7 @@ def task_status() -> dict:
     found = re.search(r"T(\d\d):(\d\d)", start)
     registered = str(data.get("program") or "")
     return {"registered": True, "program": registered,
+            "name": str(data.get("name") or TASK_NAME), "arguments": str(data.get("arguments") or ""),
             "current": os.path.normcase(registered) == os.path.normcase(program) and
                        str(data.get("arguments") or "") == arguments and
                        str(data.get("name") or TASK_NAME) == TASK_NAME,
@@ -242,8 +263,6 @@ def _write_last_run_json(path: Path, data: dict) -> None:
 def _options_from_settings(settings: dict, full: bool):
     from .core import JobOptions, _normal_account
 
-    if settings.get("auth_mode", "managed") != "managed":
-        raise ValueError("예약 실행은 브라우저 로그인 연결에서만 쓸 수 있습니다. 앱의 ‘로그인 연결’에서 연결해 주세요.")
     account, output = settings.get("account"), settings.get("output_dir")
     if not isinstance(account, str) or not account.strip() or not isinstance(output, str) or not output.strip():
         raise ValueError("저장된 설정이 없습니다. 앱에서 한 번 저장을 실행한 뒤 예약 실행을 사용해 주세요.")
@@ -266,7 +285,7 @@ def _options_from_settings(settings: dict, full: bool):
     size = settings.get("max_video_mb", 200)
     folder_mode = settings.get("folder_mode", "flat")
     return JobOptions(
-        account=account, output_dir=output, auth_mode="managed",
+        account=account, output_dir=output,
         folder_mode=folder_mode if isinstance(folder_mode, str) else "",
         scan_mode="full" if full else "quick",
         include_videos=settings.get("include_videos", True) is not False,
@@ -324,32 +343,62 @@ def _notify_failure(outcome: dict) -> None:
         pass
 
 
+def _remember_outcome(outcome: dict) -> None:
+    """Keep a paged history as well as the compatible last-run notification."""
+    from .activity import ActivityError, record_outcome
+
+    try:
+        record_outcome(outcome, origin="scheduled", account=outcome.get("account", ""),
+                       output_dir=outcome.get("output_dir", ""), started_at=outcome.get("started_at", ""))
+    except ActivityError:
+        # A successful save remains successful, but the last-result view can
+        # still tell the person the independent history could not be written.
+        outcome["history_error"] = "실행 기록을 보관하지 못했습니다. 앱 데이터 폴더의 권한과 디스크 여유 공간을 확인해 주세요."
+    try:
+        _write_last_run(outcome)
+    except (OSError, ValueError):
+        pass
+
+
 def run_saved(*, full: bool = False) -> int:
     """Run once and return the worker's exit code; 1 when nothing could start."""
+    outcome = {"run_id": uuid.uuid4().hex, "started_at": datetime.now(_KOREA).isoformat(timespec="seconds"),
+               "status": "error", "saved": 0, "skipped": 0, "size_skipped": 0, "visited": 0,
+               "message": "", "account": "", "output_dir": "", "log": "", "seen": False}
+
+    def cannot_start(message):
+        outcome.update(finished_at=datetime.now(_KOREA).isoformat(timespec="seconds"), message=message,
+                       code=1, failed=True, busy=False)
+        _remember_outcome(outcome)
+        _notify_failure(outcome)
+        return 1
+
     try:
         directory = log_directory()
     except AppDataError as exc:
         # Nothing can be logged without the data folder; say why right away
         # instead of ending in an unhandled error.
-        _notify_failure({"finished_at": datetime.now(_KOREA).isoformat(timespec="seconds"),
-                         "message": f"{exc}\n\n앱을 열어 데이터 폴더를 정리해 주세요.", "log": ""})
-        return 1
+        return cannot_start(f"{exc}\n\n앱을 열어 데이터 폴더를 정리해 주세요.")
     try:
         directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(_KOREA).strftime("%Y%m%d-%H%M%S")
         path = directory / f"scheduled-{stamp}.log"
         stream = path.open("a", encoding="utf-8")
     except OSError:
-        _notify_failure({"finished_at": datetime.now(_KOREA).isoformat(timespec="seconds"),
-                         "message": "자동 저장 기록을 만들지 못했습니다. 앱 데이터 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요.",
-                         "log": ""})
-        return 1
-    # Even identical failures within one clock tick need separate acknowledgments.
-    outcome = {"run_id": uuid.uuid4().hex, "status": "error", "saved": 0, "message": ""}
-    with stream as log:
+        return cannot_start("자동 저장 기록을 만들지 못했습니다. 앱 데이터 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요.")
+    outcome["log"] = str(path)
+    log_failed = False
+    code = 1
+    try:
         def write(text: str) -> None:
-            log.write(datetime.now(_KOREA).strftime("%H:%M:%S") + "  " + text + "\n")
-            log.flush()
+            nonlocal log_failed
+            if log_failed:
+                return
+            try:
+                stream.write(datetime.now(_KOREA).strftime("%H:%M:%S") + "  " + text + "\n")
+                stream.flush()
+            except (OSError, UnicodeError):
+                log_failed = True
 
         def emit(event: dict) -> None:
             # Events are already secret-free; progress and per-file skips are
@@ -363,7 +412,9 @@ def run_saved(*, full: bool = False) -> int:
                 write("용량 초과로 건너뜀 · " + str(event.get("filename", "")))
             elif kind == "finished":
                 outcome.update(status=str(event.get("status") or "error"), saved=int(event.get("saved") or 0),
-                               message=str(event.get("message", "")))
+                               skipped=int(event.get("skipped") or 0), size_skipped=int(event.get("size_skipped") or 0),
+                               visited=int(event.get("visited") or 0), message=str(event.get("message", "")),
+                               retry_at=str(event.get("retry_at") or ""), history_run_id=event.get("history_run_id"))
                 write(f"종료 · {event.get('status')} · 저장 {event.get('saved', 0)}개 · 기존 {event.get('skipped', 0)}개 · "
                       f"용량 초과 {event.get('size_skipped', 0)}개")
                 write(str(event.get("message", "")))
@@ -372,29 +423,51 @@ def run_saved(*, full: bool = False) -> int:
 
         write("예약 실행 시작 · " + ("전체 목록 다시 확인" if full else "새 Like만 빠르게 확인"))
         try:
-            options = _options_from_settings(load_settings(), full)
+            if log_failed:
+                raise OSError("log write failed")
+            settings = load_settings()
+            outcome.update(account=settings.get("account", "") if isinstance(settings.get("account"), str) else "",
+                           output_dir=settings.get("output_dir", "") if isinstance(settings.get("output_dir"), str) else "")
+            options = _options_from_settings(settings, full)
         except ValueError as exc:
             # Only this app's fixed validation messages reach this handler.
             write(str(exc))
             outcome["message"] = str(exc)
             code = 1
         except OSError:
-            outcome["message"] = "저장된 설정의 폴더 경로를 확인하지 못했습니다. 앱에서 저장 폴더를 확인해 주세요."
+            outcome["message"] = ("자동 저장 기록을 만들지 못했습니다. 앱 데이터 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요."
+                                  if log_failed else "저장된 설정의 폴더 경로를 확인하지 못했습니다. 앱에서 저장 폴더를 확인해 주세요.")
             write(outcome["message"])
             code = 1
         else:
             from .core import run_worker
 
-            code = run_worker(options, emit)
-    _prune_logs(directory)
-    busy = _busy(outcome["message"])
-    failed = (code != 0 or outcome["status"] == "error") and not busy
-    outcome.update(finished_at=datetime.now(_KOREA).isoformat(timespec="seconds"), code=code,
-                   failed=failed, busy=busy, log=str(path), seen=False)
+            outcome.update(account=options.account, output_dir=options.output_dir)
+            try:
+                code = run_worker(options, emit)
+            except Exception:
+                code = 1
+                outcome.update(status="error", message="자동 저장을 마치지 못했습니다. 앱에서 연결 상태와 저장 폴더를 확인해 주세요.")
+    finally:
+        try:
+            stream.close()
+        except (OSError, UnicodeError):
+            log_failed = True
     try:
-        _write_last_run(outcome)
+        _prune_logs(directory)
     except OSError:
         pass
+    busy = _busy(outcome["message"])
+    if log_failed:
+        if code == 0 and outcome["status"] == "finished":
+            outcome["status"] = "partial"
+        if "자동 저장 기록을 만들지 못했습니다" not in outcome["message"]:
+            outcome["message"] = (outcome["message"] + " 자동 저장 로그를 끝까지 기록하지 못했습니다. "
+                                  "앱 데이터 폴더의 권한과 디스크 여유 공간을 확인해 주세요.").strip()
+    failed = ((code != 0 or outcome["status"] == "error") and not busy) or log_failed
+    outcome.update(finished_at=datetime.now(_KOREA).isoformat(timespec="seconds"), code=code,
+                   failed=failed, busy=busy, log=str(path), seen=False)
+    _remember_outcome(outcome)
     if failed:
         _notify_failure(outcome)
     return code

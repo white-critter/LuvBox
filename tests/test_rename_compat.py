@@ -181,7 +181,7 @@ class AppDataMigrationTests(unittest.TestCase):
 class UnattendedTransferTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     worker = test_core.CoreTests.worker
 
     def test_unattended_final_collision_preserves_both_files_and_can_resume_locally(self):

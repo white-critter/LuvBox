@@ -13,12 +13,13 @@ from tests import test_core, test_missing_files
 from tests.test_core import FakeHttpDownloader, SECRET
 from luvbox.core import run_worker
 from luvbox.history import HistoryStore
+from luvbox.recycling import file_signature
 
 
 class RetryRecoveryTests(unittest.TestCase):
     setUp = test_missing_files.RetryWorkerTests.setUp
     tearDown = test_missing_files.RetryWorkerTests.tearDown
-    write_cookies = test_missing_files.RetryWorkerTests.write_cookies
+    set_session = test_missing_files.RetryWorkerTests.set_session
     worker = test_missing_files.RetryWorkerTests.worker
     flat = test_missing_files.RetryWorkerTests.flat
     entries = test_missing_files.RetryWorkerTests.entries
@@ -78,6 +79,28 @@ class RetryRecoveryTests(unittest.TestCase):
                 code, events = self.worker(options=self.flat(), error=exception.AuthRequired(message=reason))
                 self.assertNotEqual(code, 0)
                 self.assertEqual(events[-1]["status"], "error")
+
+    def test_retry_reconciles_but_does_not_download_a_pending_recycle(self):
+        self.saved_then_deleted()
+        path = self.output / "alice_100_1.jpg"
+        path.write_bytes(b"synthetic file before interrupted recycle")
+        location = test_core.resolve_storage(self.output, "myaccount")
+        with closing(HistoryStore.for_storage(location)) as store:
+            row = store.media_record("flat", {"tweet_id": "100", "num": 1, "type": "photo"})
+            store.begin_deletion("pending-test", row, True, file_signature(path))
+        staged = self.base / "recycled-fixture.jpg"
+        path.rename(staged)
+        before_archive = self.entries()
+        code, events = self.retry(["100_1"], {"100": [(1, "photo")]})
+        self.assertEqual((code, events[-1]["status"]), (1, "error"))
+        self.assertIn("휴지통 이동이 중단", events[-1]["message"])
+        self.assertEqual(test_missing_files.FakeTweetExtractor.requested, [])
+        self.assertEqual(staged.read_bytes(), b"synthetic file before interrupted recycle")
+        self.assertFalse(path.exists())
+        self.assertEqual(self.entries(), before_archive)
+        with closing(HistoryStore.for_storage(location)) as store:
+            self.assertEqual(store.ignored_media(), {("100", 1, "photo")})
+            self.assertEqual(store.deletion_page()["rows"][0]["status"], "interrupted")
 
     def hide_deleted_files(self):
         self.saved_then_deleted()

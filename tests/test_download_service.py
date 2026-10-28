@@ -154,6 +154,65 @@ class DownloadServiceTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in self.service.drain()],
                          ["started", "finished", "process_exit"])
 
+    def test_stop_can_retire_a_worker_after_its_terminal_event(self):
+        finished = json.dumps({"type": "finished", "status": "finished"}).encode() + b"\n"
+        clock = [0.0]
+        workers = []
+
+        def spawn(command, **kwargs):
+            worker = _Process(Path(command[-2]), finished, exit_after=10_000)
+            workers.append(worker)
+            return worker
+
+        def tick(_seconds):
+            self.service.stop()
+            clock[0] += 10
+            if clock[0] > 100:
+                self.fail("stop must also retire worker cleanup after its result")
+
+        self.service._job_id = 1
+        self.service._running = True
+        with patch.object(download_service.subprocess, "Popen", side_effect=spawn), \
+                patch.object(download_service.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(download_service.time, "sleep", side_effect=tick):
+            self.service._run(1, self.options)
+        events = self.service.drain()
+        self.assertEqual(workers[0].terminated, 1)
+        self.assertTrue(events[-1]["forced"])
+        self.assertTrue(events[-1]["stop_requested"])
+
+    def test_unresponsive_terminate_escalates_to_kill_with_an_interrupted_result(self):
+        clock = [0.0]
+        workers = []
+
+        class StubbornProcess(_Process):
+            def terminate(self):
+                self.terminated += 1
+
+        def spawn(command, **kwargs):
+            worker = StubbornProcess(Path(command[-2]), exit_after=10_000)
+            workers.append(worker)
+            return worker
+
+        def tick(_seconds):
+            self.service.stop()
+            clock[0] += 10
+            if clock[0] > 100:
+                self.fail("unresponsive termination must reach kill")
+
+        self.service._job_id = 1
+        self.service._running = True
+        with patch.object(download_service.subprocess, "Popen", side_effect=spawn), \
+                patch.object(download_service.time, "monotonic", side_effect=lambda: clock[0]), \
+                patch.object(download_service.time, "sleep", side_effect=tick):
+            self.service._run(1, self.options)
+        events = self.service.drain()
+        self.assertFalse(self.service.running)
+        self.assertEqual((workers[0].terminated, workers[0].killed), (1, 1))
+        self.assertEqual(events[-1]["code"], -9)
+        self.assertTrue(events[-1]["forced"])
+        self.assertTrue(events[-1]["stop_requested"])
+
     def test_chunked_utf8_and_final_eof_flush_preserve_every_event(self):
         first = json.dumps({"type": "log", "message": "진행 정보"}, ensure_ascii=False).encode()
         split = first.index("진".encode()) + 1

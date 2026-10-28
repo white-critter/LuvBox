@@ -16,7 +16,7 @@ from gallery_dl import config, exception
 from gallery_dl.extractor.common import Extractor
 from gallery_dl.extractor.message import Message
 
-from luvbox.core import JobOptions, _MAX_COOKIE_BYTES, run_worker
+from luvbox.core import JobOptions, run_worker
 from luvbox.storage import resolve_storage
 
 
@@ -85,9 +85,12 @@ class CoreTests(unittest.TestCase):
         self.output = self.base / "photos"
         # Live records are on this PC (patched app data), not in the output.
         self.record_dir = resolve_storage(self.output, "myaccount").record_dir
-        self.cookie_file = self.base / "cookies.txt"
-        self.write_cookies()
-        self.options = JobOptions("@MyAccount", str(self.output), "file", str(self.cookie_file),
+        self.set_session()
+        self.session_patch = patch("luvbox.login.load_session_cookies",
+                                   side_effect=lambda **_: [dict(item) for item in self.session_cookies])
+        self.session_patch.start()
+        self.addCleanup(self.session_patch.stop)
+        self.options = JobOptions("@MyAccount", str(self.output),
                                   folder_mode="author", include_videos=False, include_gifs=False, separate_accounts=True)
         self.metadata_available = patch("luvbox.metadata.available", return_value=True)
         self.metadata_available.start()
@@ -102,10 +105,9 @@ class CoreTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def write_cookies(self, domain=".x.com", expiry="0", name="auth_token", value=SECRET):
-        self.cookie_file.write_text(
-            f"# Netscape HTTP Cookie File\n#HttpOnly_{domain}\tTRUE\t/\tTRUE\t{expiry}\t{name}\t{value}\n",
-            encoding="utf-8")
+    def set_session(self, domain=".x.com", value=SECRET):
+        self.session_cookies = [{"name": "auth_token", "value": value, "domain": domain,
+                                 "path": "/", "expires": -1, "secure": True, "httpOnly": True}]
 
     def worker(self, rows=(), *, options=None, error=None, before_row=None, stop_file=None):
         events = []
@@ -308,36 +310,11 @@ class CoreTests(unittest.TestCase):
             with self.subTest(account=account), self.assertRaises(ValueError):
                 JobOptions(account, str(self.output)).validate()
 
-    def test_requires_netscape_authenticated_x_cookie_file(self):
-        for data in ("{}", "# Netscape HTTP Cookie File\n", "# Netscape HTTP Cookie File\n" + SECRET,
-                     f"# Netscape HTTP Cookie File\n.example.com\tTRUE\t/\tTRUE\t0\tauth_token\t{SECRET}\n"):
-            self.cookie_file.write_text(data, encoding="utf-8")
-            with self.subTest(data=data[:20]), self.assertRaises(ValueError) as raised:
-                self.options.validate()
-            self.assertNotIn(SECRET, str(raised.exception))
-
-    def test_oversized_cookie_file_is_rejected_without_parsing_its_body(self):
-        marker = "oversized-cookie-body-must-not-appear"
-        self.cookie_file.write_bytes(
-            b"# Netscape HTTP Cookie File\n" + marker.encode("ascii") + b"x" * _MAX_COOKIE_BYTES)
-        with self.assertRaises(ValueError) as raised:
-            self.options.validate()
-        message = str(raised.exception)
-        self.assertIn("너무 큽니다", message)
-        self.assertNotIn(marker, message)
-        self.assertNotIn(SECRET, message)
-
-    def test_rejects_expired_auth(self):
-        self.write_cookies(expiry=str(int(time.time()) - 20))
-        with self.assertRaisesRegex(ValueError, "만료"):
-            self.options.validate()
-
-    def test_rejects_invalid_limit_and_output_file(self):
-        for limit in (-1, 2.5, True, "20"):
-            with self.subTest(limit=limit), self.assertRaises(ValueError):
-                JobOptions("me", str(self.output), photo_limit=limit).validate()
+    def test_rejects_an_output_file(self):
+        output_file = self.base / "existing.txt"
+        output_file.write_text("preserve existing file", encoding="utf-8")
         with self.assertRaises(ValueError):
-            JobOptions("me", str(self.cookie_file)).validate()
+            JobOptions("me", str(output_file)).validate()
 
     def test_missing_folder_confirmation_is_a_boolean_per_run_option(self):
         self.assertFalse(self.options.validate().allow_recreate_media)
@@ -351,7 +328,7 @@ class CoreTests(unittest.TestCase):
     def test_folder_removed_after_validation_stops_worker_before_auth_or_requests(self):
         options = replace(self.options, folder_mode="flat", separate_accounts=False)
         self.assertEqual(self.worker([("100", 1, "photo", "alice")], options=options)[0], 0)
-        selected = replace(options, auth_mode="managed", cookies_file="").validate()
+        selected = options.validate()
         before_runs = self.runs()
         moved = self.base / "renamed-photos"
         self.output.rename(moved)
@@ -391,7 +368,7 @@ class CoreTests(unittest.TestCase):
         normalized = replace(self.options, folder_mode=" DATE ", scan_mode=" QUICK ").validate()
         self.assertEqual((normalized.folder_mode, normalized.scan_mode), ("date", "quick"))
         self.assertEqual(JobOptions("me", str(self.output)).scan_mode, "full")
-        for removed in ("sync_mode", "date_from", "date_to"):
+        for removed in ("sync_mode", "date_from", "date_to", "auth_mode", "cookies_file", "photo_limit"):
             with self.subTest(removed=removed), self.assertRaises(TypeError):
                 JobOptions("me", str(self.output), **{removed: ""})
 
@@ -414,7 +391,11 @@ class CoreTests(unittest.TestCase):
         rows = [("10", 1, "photo", "alice", datetime(2010, 1, 1)),
                 ("99999", 1, "photo", "bob", datetime(2026, 10, 4)),
                 ("500", 1, "photo", "alice", datetime(2020, 4, 1))]
-        result, events = self.worker(rows, options=replace(self.options, photo_limit=1))
+        flag = self.base / "stop.flag"
+        result, events = self.worker(rows, stop_file=flag,
+                                     before_row=lambda _extractor, row: row[0] == "10" or flag.touch())
+        self.assertEqual(events[-1]["status"], "stopped")
+        flag.unlink()
         self.assertEqual(result, 0)
         self.assertEqual(events[-1]["saved"], 1)
         self.assertIn("/10_1?", FakeHttpDownloader.downloaded[0])
@@ -691,9 +672,12 @@ class CoreTests(unittest.TestCase):
         with patch("luvbox.core.QUICK_STOP_AFTER", 2):
             # A short test run stops after one new file: newer likes below it
             # would otherwise sit behind the saved streak forever.
-            code, events = self.worker(rows, options=replace(quick, photo_limit=1))
+            flag = self.base / "stop.flag"
+            code, events = self.worker(rows, options=quick, stop_file=flag,
+                                       before_row=lambda _extractor, row: row[0] == "200" or flag.touch())
+            flag.unlink()
             self.assertEqual((code, events[-1]["saved"]), (0, 1))
-            self.assertEqual(self.runs()[-1]["status"], "limited")
+            self.assertEqual(self.runs()[-1]["status"], "stopped")
             code, events = self.worker(rows, options=quick)
             self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["skipped"]), ("full", 2, 6))
             FakeHttpDownloader.failure = True
@@ -793,11 +777,14 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["skipped"], 1)
         self.assertEqual(sync_path.read_bytes(), b"old invalid sync database")
 
-    def test_limit_counts_new_downloads_and_archive_contains_last_saved_photo(self):
+    def test_user_stop_preserves_new_downloads_and_last_saved_archive(self):
         rows = [("100", 1, "photo", "alice"), ("101", 1, "photo", "alice"), ("102", 1, "photo", "alice")]
         self.worker(rows[:1])
-        limited = replace(self.options, photo_limit=1)
-        code, events = self.worker(rows, options=limited)
+        flag = self.base / "stop.flag"
+        code, events = self.worker(rows, stop_file=flag,
+                                   before_row=lambda _extractor, row: row[0] != "102" or flag.touch())
+        self.assertEqual(events[-1]["status"], "stopped")
+        flag.unlink()
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
         self.assertEqual(events[-1]["skipped"], 1)
@@ -850,19 +837,19 @@ class CoreTests(unittest.TestCase):
         for raw in ("AuthRequired: authenticated cookies needed",
                     "Invalid login credentials", "'401 Unauthorized'", "cookie expired"):
             with self.subTest(raw=raw):
-                self.assertIn("‘X 연결’", _safe_diagnostic(raw, "managed"))
+                self.assertIn("‘X 연결’", _safe_diagnostic(raw))
         for raw in ("1849: Missing 'author' data", "Failed to download 1429_1.jpg",
                     "Failed to download 1840412345_1.jpg"):
             with self.subTest(raw=raw):
-                message = _safe_diagnostic(raw, "managed")
+                message = _safe_diagnostic(raw)
                 self.assertNotIn("인증 토큰", message)
                 self.assertNotIn("요청 한도", message)
                 self.assertNotIn("찾지 못했습니다", message)
-        self.assertIn("요청 한도", _safe_diagnostic("HTTP 429 Too Many Requests", "managed"))
-        self.assertIn("접근 권한", _safe_diagnostic("403 Forbidden", "managed"))
-        self.assertNotIn("만료", _safe_diagnostic("403 Forbidden", "managed"))
-        self.assertIn("추가 인증", _safe_diagnostic("AuthorizationError: Account temporarily locked", "managed"))
-        self.assertNotIn("만료", _safe_diagnostic("AuthorizationError: Account temporarily locked", "managed"))
+        self.assertIn("요청 한도", _safe_diagnostic("HTTP 429 Too Many Requests"))
+        self.assertIn("접근 권한", _safe_diagnostic("403 Forbidden"))
+        self.assertNotIn("만료", _safe_diagnostic("403 Forbidden"))
+        self.assertIn("추가 인증", _safe_diagnostic("AuthorizationError: Account temporarily locked"))
+        self.assertNotIn("만료", _safe_diagnostic("AuthorizationError: Account temporarily locked"))
 
     def test_gallery_hook_change_stops_before_any_request(self):
         from gallery_dl.extractor.twitter import TwitterExtractor
@@ -888,33 +875,23 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["status"], "error")
         self.assertIn("요청 한도", events[-1]["message"])
 
-    def test_cookie_file_is_not_modified(self):
-        original = self.cookie_file.read_bytes()
+    def test_connection_is_loaded_in_memory_without_library_cookie_file_access(self):
         with patch("gallery_dl.cookies.load_cookies") as library_load:
             code, events = self.worker([("100", 1, "photo", "alice")])
         library_load.assert_not_called()
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-        self.assertEqual(self.cookie_file.read_bytes(), original)
+        self.assertEqual((code, events[-1]["saved"]), (0, 1))
+        self.assertEqual(self.session_cookies[0]["value"], SECRET)
 
     def test_host_only_x_cookie_is_supported(self):
-        self.write_cookies(domain="x.com")
-        code, events = self.worker([("100", 1, "photo", "alice")])
-        self.assertEqual(code, 0)
-        self.assertEqual(events[-1]["saved"], 1)
-
-    def test_utf8_bom_cookie_file_is_supported(self):
-        text = self.cookie_file.read_text(encoding="utf-8")
-        self.cookie_file.write_text(text, encoding="utf-8-sig")
+        self.set_session(domain="x.com")
         code, events = self.worker([("100", 1, "photo", "alice")])
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
 
     def test_managed_session_validation_does_not_read_secrets(self):
         with patch("luvbox.login.load_session_cookies") as load:
-            normalized = replace(self.options, auth_mode="managed").validate()
-        self.assertEqual(normalized.auth_mode, "managed")
-        self.assertEqual(normalized.cookies_file, "")
+            normalized = self.options.validate()
+        self.assertEqual(normalized.account, "myaccount")
         load.assert_not_called()
 
     def test_managed_session_loads_only_x_cookies_in_memory(self):
@@ -934,7 +911,7 @@ class CoreTests(unittest.TestCase):
         with patch("luvbox.login.load_session_cookies", return_value=cookies) as load, \
                 patch("gallery_dl.cookies.load_cookies") as library_load:
             code, events = self.worker([("100", 1, "photo", "alice")],
-                                       options=replace(self.options, auth_mode="managed"),
+                                       options=self.options,
                                        before_row=before_row)
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["saved"], 1)
@@ -948,12 +925,13 @@ class CoreTests(unittest.TestCase):
 
     def test_missing_managed_session_gives_reconnect_help_without_secret_diagnostics(self):
         with patch("luvbox.login.load_session_cookies", side_effect=ValueError(SECRET)):
-            code, events = self.worker(options=replace(self.options, auth_mode="managed"))
+            code, events = self.worker(options=self.options)
         self.assertNotEqual(code, 0)
         self.assertEqual(events[-1]["status"], "error")
         self.assertIn("‘X 연결’", events[-1]["message"])
 
     def test_managed_job_uses_target_account_session_without_switching_active_account(self):
+        self.session_patch.stop()
         from luvbox import login
 
         def inspect(extractor, _row):
@@ -965,19 +943,20 @@ class CoreTests(unittest.TestCase):
             login.save_authenticated_session("other-account-token", {"user_id": "456", "handle": "other_account"})
             previous = login.session_path().read_bytes()
             code, events = self.worker([("100", 1, "photo", "alice")],
-                                       options=replace(self.options, auth_mode="managed"), before_row=inspect)
+                                       options=self.options, before_row=inspect)
             self.assertEqual(code, 0)
             self.assertEqual(events[-1]["saved"], 1)
             self.assertEqual(login.active_account()["user_id"], "456")
             self.assertEqual(login.session_path().read_bytes(), previous)
 
     def test_managed_job_rejects_another_accounts_login_before_downloading(self):
+        self.session_patch.stop()
         from luvbox import login
 
         with patch("luvbox.login.session_path", return_value=self.base / "session.bin"), \
                 patch("luvbox.login._dpapi", side_effect=lambda data, **_: bytes(value ^ 0xA5 for value in data)):
             login.save_authenticated_session(SECRET, {"user_id": "456", "handle": "other_account"})
-            code, events = self.worker([("100", 1, "photo", "alice")], options=replace(self.options, auth_mode="managed"))
+            code, events = self.worker([("100", 1, "photo", "alice")], options=self.options)
             self.assertNotEqual(code, 0)
             self.assertEqual(events[-1]["status"], "error")
             self.assertEqual(FakeHttpDownloader.downloaded, [])
@@ -987,7 +966,7 @@ class CoreTests(unittest.TestCase):
         flag = self.base / "stop.flag"
         flag.touch()
         with patch("luvbox.login.load_session_cookies") as load:
-            code, events = self.worker(options=replace(self.options, auth_mode="managed"), stop_file=flag)
+            code, events = self.worker(options=self.options, stop_file=flag)
         load.assert_not_called()
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["status"], "stopped")
@@ -1041,35 +1020,6 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(seen["media-retries"], 0)
         self.assertIs(seen["reverse"], False)
 
-    def test_only_token_connection_and_cookie_file_authentication_are_supported(self):
-        self.assertEqual(JobOptions("me", str(self.output)).auth_mode, "managed")
-        for mode in ("managed", " MANAGED ", "file", " FILE "):
-            with self.subTest(mode=mode):
-                normalized = replace(self.options, auth_mode=mode).validate()
-                self.assertIn(normalized.auth_mode, {"file", "managed"})
-        for mode in ("chrome", "edge", "firefox", "", "unknown", None, True, SECRET):
-            with self.subTest(mode=mode), \
-                    patch("luvbox.login.load_session_cookies") as session_load, \
-                    patch("gallery_dl.cookies.load_cookies") as library_load, \
-                    patch("gallery_dl.extractor.find") as find:
-                events = []
-                code = run_worker(replace(self.options, auth_mode=mode), events.append)
-                self.assertNotEqual(code, 0)
-                self.assertEqual(events[-1]["status"], "error")
-                self.assertNotIn(SECRET, json.dumps(events))
-                self.assertIn("브라우저 로그인", events[-1]["message"])
-                self.assertIn("cookies.txt", events[-1]["message"])
-                session_load.assert_not_called()
-                library_load.assert_not_called()
-                find.assert_not_called()
-
-    def test_cookie_file_auth_failure_gives_new_cookie_file_guidance(self):
-        code, events = self.worker(error=exception.AuthRequired("authenticated cookies " + SECRET))
-        self.assertNotEqual(code, 0)
-        self.assertEqual(events[-1]["status"], "error")
-        self.assertIn("cookies.txt", events[-1]["message"])
-        self.assertIn("다시 로그인", events[-1]["message"])
-
     def test_failed_download_reports_error_and_no_archive_success(self):
         FakeHttpDownloader.failure = True
         code, events = self.worker([("100", 1, "photo", "alice")])
@@ -1090,7 +1040,7 @@ class CoreTests(unittest.TestCase):
     def test_unwritable_output_has_actionable_error_before_auth(self):
         with patch("luvbox.core.tempfile.TemporaryFile", side_effect=PermissionError), \
                 patch("luvbox.login.load_session_cookies") as load:
-            code, events = self.worker(options=JobOptions("me", str(self.output), "managed"))
+            code, events = self.worker(options=JobOptions("me", str(self.output)))
         load.assert_not_called()
         self.assertNotEqual(code, 0)
         self.assertEqual(events[-1]["status"], "error")
@@ -1244,7 +1194,7 @@ class CoreTests(unittest.TestCase):
         guard.acquire()
         try:
             with patch("luvbox.login.load_session_cookies") as load:
-                result, events = self.worker(options=replace(self.options, auth_mode="managed"))
+                result, events = self.worker(options=self.options)
             load.assert_not_called()
             self.assertNotEqual(result, 0)
             self.assertIn("다른 저장 작업", events[-1]["message"])

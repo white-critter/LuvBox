@@ -7,7 +7,6 @@ read-only inputs. Legacy file modification times are never called save times.
 from __future__ import annotations
 
 import bisect
-import csv
 import functools
 import json
 import math
@@ -15,14 +14,12 @@ import os
 import re
 import sqlite3
 import stat
-import tempfile
 import uuid
 from collections import Counter
 from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .file_mutex import replace_file
 from .storage import (_RECORD_FOLDERS, StoragePaths, _DamagedDatabase, migrate_legacy_databases,
                       prepare_storage, records_root)
 
@@ -47,11 +44,6 @@ _SOURCE_URL_BATCH = 500
 _RUN_FIELDS = {"saved", "skipped", "size_skipped", "visited", "last_tweet_id",
                "last_posted_at", "message"}
 _COUNTERS = {"saved", "skipped", "size_skipped", "visited"}
-_CSV_FIELDS = ("folder_mode", "tweet_id", "num", "media_type", "author", "author_id", "filename",
-               "posted_at", "posted_source", "saved_at", "path", "filesize", "status", "record_source",
-               "source_url", "metadata_status", "author_metadata_status")
-_CSV_LIKE_FIELDS = ("liked_after", "liked_before")
-_CSV_TWEET_FIELDS = ("content", "hashtags")
 _TWEET_TEXT_LIMIT = 5000
 # Catalog rows joined with what is known per tweet (Like order and text).
 _JOINED = ("media LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
@@ -229,12 +221,6 @@ def archive_key(tweet_id: str, number: int, media_type: str) -> str:
     return f"{tweet_id}_{number}" if media_type == "photo" else f"{tweet_id}_{media_type}_{number}"
 
 
-def _csv_cell(value):
-    if value is None:
-        return ""
-    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
-        return "'" + value
-    return value
 
 
 class HistoryStore:
@@ -1556,31 +1542,6 @@ class HistoryStore:
             rows = reader(page_size, page * page_size)
         return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
-    @_safe
-    def export_records(self, destination: Path | str) -> int:
-        exported = 0
-        destination = Path(destination)
-        temporary = None
-        try:
-            # Stage beside the destination so publishing stays atomic, even
-            # when decoding a later row or writing the CSV fails midway.
-            with tempfile.NamedTemporaryFile("w", newline="", encoding="utf-8-sig", delete=False,
-                                             prefix=".luvbox-export-", suffix=".csv", dir=destination.parent) as file:
-                temporary = Path(file.name)
-                writer = csv.writer(file)
-                writer.writerow(_CSV_FIELDS + _CSV_LIKE_FIELDS + _CSV_TWEET_FIELDS)
-                columns = ",".join(["media." + name for name in _CSV_FIELDS] + ["likes." + name for name in _CSV_LIKE_FIELDS] +
-                                   ["tweets." + name for name in _CSV_TWEET_FIELDS])
-                with closing(self._db.execute("SELECT " + columns + " FROM " + _JOINED +
-                                              " ORDER BY media.tweet_id,media.num")) as rows:
-                    for row in rows:
-                        writer.writerow([_csv_cell(value) for value in row])
-                        exported += 1
-            replace_file(temporary, destination)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
-        return exported
 
     @_safe
     def like_order(self, run_id: int) -> "LikeOrder":

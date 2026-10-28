@@ -110,7 +110,7 @@ class AccountConnectionTests(unittest.TestCase):
             store.assert_called_once()
         self.assertEqual(self.controller.authenticationState, "browser_confirmed")
         self.assertEqual(self.controller.identity["handle"], "example")
-        self.settings.update.assert_called_once_with({"auth_mode": "managed", "account": "example",
+        self.settings.update.assert_called_once_with({"account": "example",
                                                      "connection_browser": "firefox"})
 
     def test_cancel_before_approval_preserves_old_session(self):

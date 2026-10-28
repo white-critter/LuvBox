@@ -18,6 +18,8 @@ from .review import CONTROL_NAME, ReviewControl
 
 _READ_BYTES = 64 * 1024
 _MAX_EVENT_BYTES = 256 * 1024
+_STOP_GRACE_SECONDS = 35
+_KILL_GRACE_SECONDS = 5
 _PROTOCOL_ERROR = "저장 작업의 진행 정보를 읽지 못해 중단했습니다. 앱을 다시 시작한 뒤 다시 시도해 주세요."
 _START_ERROR = "저장 작업을 시작하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
 
@@ -87,7 +89,7 @@ class DownloadService:
 
     def stop(self):
         with self._lock:
-            if not self._running or self._final:
+            if not self._running:
                 return
             self._stop.set()
             self._review_id = None
@@ -173,6 +175,7 @@ class DownloadService:
     def _run(self, job_id, options):
         process = None
         return_code = 1
+        forced = False
         try:
             options = options.validate()
             with ExitStack() as resources:
@@ -222,10 +225,12 @@ class DownloadService:
                             if stop_at is None:
                                 stop.touch(exist_ok=True)
                                 stop_at = now
-                            elif now - stop_at > 35 and terminated_at is None:
+                            elif now - stop_at > _STOP_GRACE_SECONDS and terminated_at is None:
+                                forced = True
                                 process.terminate()
                                 terminated_at = now
-                            elif terminated_at is not None and now - terminated_at > 5:
+                            elif terminated_at is not None and now - terminated_at > _KILL_GRACE_SECONDS:
+                                forced = True
                                 process.kill()
                         time.sleep(.1)
                 process.wait()
@@ -242,7 +247,8 @@ class DownloadService:
                 self._process = None
                 self._running = False
                 self._review_id = None
-            self._emit(job_id, {"type": "process_exit", "code": return_code})
+            self._emit(job_id, {"type": "process_exit", "code": return_code,
+                                "forced": forced, "stop_requested": self._stop.is_set()})
 
     @staticmethod
     def _finish_process(process):

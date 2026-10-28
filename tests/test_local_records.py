@@ -297,7 +297,7 @@ class LocalRecordTests(unittest.TestCase):
 class LocalRecordWorkerTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     worker = test_core.CoreTests.worker
 
     def test_each_save_publishes_a_snapshot_into_the_media_folder(self):

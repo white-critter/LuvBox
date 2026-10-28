@@ -17,7 +17,7 @@ from luvbox.storage import migrate_records, resolve_storage
 class ExternalMissingRetryTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     worker = test_core.CoreTests.worker
 
     def migrated_file(self, *, remove_original):

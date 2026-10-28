@@ -108,6 +108,53 @@ class DownloadStatusTests(unittest.TestCase):
         self.assertNotIn("secret", controller.error)
         self.assertNotIn("token", controller.error)
 
+    def test_stop_waits_for_worker_exit_and_preserves_the_completed_count(self):
+        controller, service = self.controller()
+        controller.stop()
+        controller.stop()
+        self.assertTrue(controller.running)
+        self.assertTrue(controller.stopping)
+        self.assertEqual(service.stopped, 1)
+        service.pending.append({"type": "finished", "status": "stopped", "job_id": 7, "saved": 2})
+        controller._pump()
+        self.assertTrue(controller.running)
+        self.assertEqual(controller.savedCount, 2)
+        service.pending.append({"type": "process_exit", "job_id": 7, "code": 0, "forced": False})
+        controller._pump()
+        self.assertFalse(controller.running)
+        self.assertFalse(controller.stopping)
+        self.assertEqual(controller.error, "")
+        self.assertIn("중단했습니다", controller.status)
+
+    def test_forced_or_unconfirmed_exit_is_not_reported_as_a_clean_stop(self):
+        for terminal, code, forced in ((None, -9, True), ("stopped", -9, True),
+                                       ("finished", 0, True), (None, 0, False),
+                                       ("stopped", 1, False), ("stopped", False, False)):
+            with self.subTest(terminal=terminal, code=code, forced=forced):
+                controller, service = self.controller()
+                controller.stop()
+                if terminal is not None:
+                    service.pending.append({"type": "finished", "status": terminal, "job_id": 7})
+                service.pending.append({"type": "process_exit", "job_id": 7, "code": code, "forced": forced})
+                controller._pump()
+                self.assertFalse(controller.running)
+                self.assertNotEqual(controller.error, "")
+                if forced:
+                    self.assertIn("강제로 종료", controller.error)
+                self.assertNotIn("중단했습니다.", controller.status)
+
+    def test_stop_can_retire_cleanup_that_stalls_after_the_terminal_result(self):
+        controller, service = self.controller()
+        service.pending.append({"type": "finished", "status": "finished", "job_id": 7, "saved": 1})
+        controller._pump()
+        controller.stop()
+        self.assertEqual(service.stopped, 1)
+        self.assertTrue(controller.stopping)
+        service.pending.append({"type": "process_exit", "job_id": 7, "code": -15, "forced": True})
+        controller._pump()
+        self.assertIn("강제로 종료", controller.error)
+        self.assertEqual(controller.savedCount, 1)
+
 
 @unittest.skipUnless(_QT_AVAILABLE, "optional Qt dependencies are not installed")
 class ReviewFailureTests(unittest.TestCase):

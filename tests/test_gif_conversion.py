@@ -199,7 +199,7 @@ class GifConversionTests(unittest.TestCase):
 class GifWorkerTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     worker = test_core.CoreTests.worker
 
     def options_all(self, **changes):

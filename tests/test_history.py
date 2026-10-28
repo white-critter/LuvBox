@@ -1,6 +1,5 @@
 """Offline catalog tests with synthetic local archives and media files."""
 
-import csv
 import json
 import os
 import sqlite3
@@ -335,7 +334,7 @@ class HistoryTests(unittest.TestCase):
         self.store.record_media("flat", self.metadata(kind="video", ident="102"), self.file("102_video_1.mp4"))
         self.assertEqual(self.store.summary()["mp4_gifs"], 1)
 
-    def test_source_metadata_status_and_csv_do_not_change_original_save_time(self):
+    def test_source_metadata_status_does_not_change_original_save_time(self):
         path = self.file("100_1.jpg")
         data = self.metadata()
         self.store.record_media("flat", data, path)
@@ -350,14 +349,8 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.store.media_record("flat", data)["metadata_status"], "embedded")
         self.store.import_legacy(refresh=True)
         self.assertEqual(self.store.records()[0]["metadata_status"], "embedded")
-        csv_path = Path(self.temp.name) / "sources.csv"
-        self.store.export_records(csv_path)
-        with csv_path.open(encoding="utf-8-sig", newline="") as file:
-            row = next(csv.DictReader(file))
-        self.assertEqual(row["source_url"], "https://x.com/i/web/status/100")
-        self.assertNotIn(SECRET, csv_path.read_text(encoding="utf-8-sig"))
 
-    def test_tweet_author_numeric_id_and_status_survive_refresh_and_csv(self):
+    def test_tweet_author_numeric_id_and_status_survive_refresh(self):
         data = self.metadata()
         data["author"]["id"] = 123456789
         data["user"] = {"name": "liking_account", "id": 999}
@@ -369,13 +362,6 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.store.summary()["embedded_authors"], 1)
         self.store.import_legacy(refresh=True)
         self.assertEqual(self.store.records()[0]["author_metadata_status"], "embedded")
-        output = Path(self.temp.name) / "authors.csv"
-        self.store.export_records(output)
-        with output.open(encoding="utf-8-sig", newline="") as file:
-            row = next(csv.DictReader(file))
-        self.assertEqual(row["author_id"], "123456789")
-        self.assertEqual(row["author_metadata_status"], "embedded")
-        self.assertNotIn("liking_account", output.read_text(encoding="utf-8-sig"))
 
     def test_author_is_unknown_without_tweet_author_even_when_liking_user_exists(self):
         data = self.metadata()
@@ -741,7 +727,7 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(self.store._db.execute("PRAGMA synchronous").fetchone()[0], 2)
         self.assertEqual(other._db.execute("PRAGMA synchronous").fetchone()[0], 2)
 
-    def test_filter_search_pagination_and_formula_safe_csv_export(self):
+    def test_filter_search_pagination(self):
         for number, kind, author in ((1, "photo", "=danger"), (2, "video", "bob_50%"),
                                      (3, "animated_gif", "@danger")):
             self.store.record_media("flat", self.metadata(number, kind, author=author), self.file(f"100_{number}.mp4"))
@@ -749,49 +735,8 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(len(self.store.records(query="bob_50%")), 1)
         self.assertEqual(len(self.store.records(query="100_2")), 1)
         self.assertEqual(len(self.store.records(limit=1, offset=1)), 1)
-        destination = Path(self.temp.name) / "history.csv"
-        self.assertEqual(self.store.export_records(destination), 3)
-        with destination.open(encoding="utf-8-sig", newline="") as file:
-            rows = list(csv.DictReader(file))
-        self.assertIn("'=danger", [row["author"] for row in rows])
-        self.assertIn("'@danger", [row["author"] for row in rows])
-        self.assertNotIn(SECRET, destination.read_text(encoding="utf-8-sig"))
 
-    def test_existing_csv_survives_a_later_undecodable_row_without_leaving_a_stage(self):
-        for tweet in ("100", "200"):
-            self.store.record_media("flat", self.metadata(ident=tweet), self.file(f"{tweet}_1.jpg"))
-        with self.store._db:
-            self.store._db.execute("UPDATE media SET filename=CAST(X'FF' AS TEXT) WHERE tweet_id='200'")
-        destination = Path(self.temp.name) / "history.csv"
-        destination.write_bytes(b"previous complete report")
-        with self.assertRaises(HistoryError):
-            self.store.export_records(destination)
-        self.assertEqual(destination.read_bytes(), b"previous complete report")
-        self.assertEqual(list(destination.parent.glob(".luvbox-export-*")), [])
 
-    def test_existing_csv_survives_write_and_publication_failures(self):
-        self.store.record_media("flat", self.metadata(), self.file("100_1.jpg"))
-        destination = Path(self.temp.name) / "history.csv"
-        destination.write_bytes(b"previous complete report")
-        writer_factory = csv.writer
-
-        class FailingWriter:
-            def __init__(self, file):
-                self.writer = writer_factory(file)
-                self.count = 0
-
-            def writerow(self, row):
-                self.count += 1
-                if self.count == 2:
-                    raise OSError("offline disk-full fixture")
-                return self.writer.writerow(row)
-
-        for failure in (patch("luvbox.history.csv.writer", FailingWriter),
-                        patch("luvbox.history.os.replace", side_effect=PermissionError("offline locked report"))):
-            with failure, self.assertRaises(HistoryError):
-                self.store.export_records(destination)
-            self.assertEqual(destination.read_bytes(), b"previous complete report")
-            self.assertEqual(list(destination.parent.glob(".luvbox-export-*")), [])
 
     def test_list_and_sample_decode_failures_release_cursors_while_errors_are_retained(self):
         readers = (lambda store: store.records(), lambda store: store.missing_media(verify_files=False))

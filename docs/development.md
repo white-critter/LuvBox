@@ -1,4 +1,4 @@
-# LuvBox 1.2.5 개발 안내
+# LuvBox 1.3.0 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -24,8 +24,8 @@ Python 위치를 지정하려면 `setup.ps1 -PythonPath 'C:\경로\python.exe'`�
 | `qt_accounts.py`, `qt_browser_setup.py`, `browser_discovery.py`, `login.py`, `browser_bridge.py` | 연결 승인·확장 설치 안내·DPAPI 계정 보관 |
 | `qt_download.py`, `qt_saved_preview.py`, `download_service.py`, `core.py`, `review.py` | 저장 상태·선택적 첫 장면, 별도 worker와 IPC, 실제 다운로드와 저장 여부 확인 |
 | `qt_library.py`, `qt_gallery.py`, `qt_wheel.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력 |
-| `app_settings.py`, `settings.py`, `file_mutex.py`, `qt_schedule.py`, `scheduled.py` | 설정 보존, 프로세스 간 변경 보호와 기존 예약 관리 |
-| `history.py`, `storage.py`, `recovery.py`, `deletion.py`, `recycling.py` | 기록·정렬, 경로 승인·이전·사본·복구와 삭제 기록 |
+| `app_settings.py`, `settings.py`, `file_mutex.py`, `qt_schedule.py`, `scheduled.py`, `activity.py` | 설정·일일 예약·수동/자동 실행 결과와 프로세스 간 변경 보호 |
+| `history.py`, `storage.py`, `recovery.py`, `deletion.py`, `recycling.py`, `management_store.py`, `qt_management.py` | 기록·갤러리 필터·관리 화면의 백그라운드 스냅샷, 경로 승인·이전·사본·복구와 휴지통 이동 |
 | `preview.py`, `thumbcache.py`, `media.py` | 로컬 미리보기·캐시와 GIF 변환 |
 | `metadata.py`, `process_limits.py`, `protection.py` | 출처·작성자 기록, 외부 도구 제한과 X 요청 보호 |
 | `selftest.py`, `qt_smoke.py`, `tools/check_*startup.py`, `tools/package_release.py` | 격리 검사와 소스·라이선스 배포 패키징 |
@@ -73,8 +73,8 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 실제 EXE의 Qt 창·갤러리·미리보기·설정·연결창·종료 검사와 오프라인 저장 시작 검사를 모두 통과해야 ZIP을 만듭니다. 직접 패키징도 현재 버전과 EXE SHA-256에 일치하는 두 검사 보고서를 요구합니다. EXE·`_internal`·동봉 소스·라이선스를 함께 유지합니다. Qt와 미디어 구성요소의 버전별 원본 자료는 [Qt 소스 안내](../tools/qt/README.md), [FFmpeg 안내](../tools/ffmpeg/README.md)를 따릅니다. 검사 실패를 피하려고 입력 체크섬·TLS 검증·패키징 허용 목록을 완화하지 않습니다.
 
-산출물은 `release/LuvBox-1.2.5/`, `release/LuvBox-1.2.5.zip`, `release/SHA256-1.2.5.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox-1.3.0/`, `release/LuvBox-1.3.0.zip`, `release/SHA256-1.3.0.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 `tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 
-Qt 휴지통·복구 UI, 새 예약 생성 UI와 확장 스토어 등록은 별도 기능 범위입니다. 기존 예약은 상태 확인·해제·동일 시각의 현재 버전 연결을 지원합니다. 확장 없는 WebEngine 로그인은 합성 실험 단계이며 제품 런타임에 포함하지 않습니다. 날짜별 검토 보고서는 현재 안내에 통합하고 원문은 Git 태그·기록에 보존합니다.
+관리 화면은 단일 일일 예약 생성·시간 변경·해제, 휴지통 이동·삭제 이력, 사라진 파일·통계·실행 이력과 갤러리의 작성자·날짜 필터를 제공합니다. Windows 휴지통에서 원본을 직접 복원하는 UI와 확장 스토어 등록은 별도 기능 범위입니다. 확장 없는 WebEngine 로그인은 합성 실험 단계이며 제품 런타임에 포함하지 않습니다. 날짜별 검토 보고서는 현재 안내에 통합하고 원문은 Git 태그·기록에 보존합니다.

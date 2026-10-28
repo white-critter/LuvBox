@@ -170,7 +170,7 @@ class StorageTests(unittest.TestCase):
 class StorageWorkerTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     worker = test_core.CoreTests.worker
 
     def direct(self, **changes):
@@ -285,7 +285,7 @@ class StorageWorkerTests(unittest.TestCase):
         guard.acquire()
         try:
             with patch("luvbox.login.load_session_cookies") as login:
-                code, events = self.worker(options=self.direct(auth_mode="managed", account="otheraccount"))
+                code, events = self.worker(options=self.direct(account="otheraccount"))
             login.assert_not_called()
             self.assertNotEqual(code, 0)
             self.assertIn("다른 작업", events[-1]["message"])

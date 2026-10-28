@@ -1,7 +1,7 @@
 """Gallery catalog reads check each folder once and decode without reopening the catalog."""
 
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import tempfile
 import unittest
@@ -101,6 +101,94 @@ class LibraryRepositoryTests(unittest.TestCase):
             result.image.close()
             self.repository.configure(None)
             self.assertIsNone(self.repository.decode(path, (32, 24)).image)
+
+    def test_exact_author_and_inclusive_dates_apply_to_every_page(self):
+        korea = timezone(timedelta(hours=9))
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            for ident, author, day in (("200", "alice", 1), ("201", "alice2", 1),
+                                       ("202", "alice", 2), ("203", "ALICE", 1)):
+                path = self.paths.media_dir / f"{ident}_1.jpg"
+                Image.new("RGB", (8, 8)).save(path, "JPEG")
+                store.record_media("flat", {"tweet_id": ident, "num": 1, "type": "photo",
+                                            "author": {"name": author},
+                                            "date": datetime(2026, 10, day, 23, 59, tzinfo=korea)}, path)
+        self.repository.configure(_Request(2, "offline", str(self.paths.output_dir), False,
+                                           author="alice", date_from="2026-10-01", date_to="2026-10-01"))
+        first_total, first = self.repository.read("2", 0, 1)
+        second_total, second = self.repository.read("2", 1, 1)
+        self.assertEqual((first_total, second_total), (2, 2))
+        self.assertEqual({row["key"].split("_")[2] for row in first + second}, {"200", "203"})
+        self.assertNotEqual(first[0]["key"], second[0]["key"])
+
+    def test_saved_date_filter_uses_saved_time_independently_of_posted_time(self):
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            store._db.execute("UPDATE media SET saved_at='2026-10-05T12:00:00+09:00' WHERE tweet_id='100'")
+            store._db.commit()
+        self.repository.configure(_Request(2, "offline", str(self.paths.output_dir), False,
+                                           date_field="saved", date_from="2026-10-05", date_to="2026-10-05"))
+        total, rows = self.repository.read("2", 0, 100)
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["key"].split("_")[2], "100")
+
+    def test_deletion_manifest_requires_displayed_keys_and_preserves_native_signature(self):
+        key = "g1_flat_100_1_photo"
+        with self.assertRaisesRegex(ValueError, "다시 선택"):
+            self.repository.deletion_manifest([key])
+        self.repository.read("1", 0, 100)
+        result = self.repository.deletion_manifest([key, key])
+        self.assertEqual(result["location"], self.paths)
+        self.assertEqual(result["generation"], 1)
+        self.assertEqual(len(result["rows"]), 1)
+        row = result["rows"][0]
+        info = self.files[0].stat()
+        self.assertEqual(row["_delete_signature"], (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+        self.assertTrue(all(type(part) is int for part in row["_delete_signature"]))
+        self.assertEqual(row["path"], str(self.files[0]))
+
+    def test_recycle_selection_excludes_missing_and_unserved_items(self):
+        self.files[0].unlink()
+        _, rows = self.repository.read("1", 0, 100)
+        keys = [row["key"] for row in rows]
+        selectable, unavailable, overflow = self.repository.selectable_keys(keys + ["g1_flat_999_1_photo"])
+        self.assertEqual(unavailable, 2)
+        self.assertFalse(overflow)
+        self.assertEqual(len(selectable), 5)
+        self.assertNotIn("g1_flat_100_1_photo", selectable)
+        self.assertNotIn("g1_flat_999_1_photo", selectable)
+        result = self.repository.deletion_manifest(selectable)
+        self.assertEqual(len(result["rows"]), 5)
+
+    def test_deletion_manifest_rejects_file_changes_after_display_and_context_changes(self):
+        self.repository.read("1", 0, 100)
+        with self.files[0].open("ab") as stream:
+            stream.write(b"changed after selection")
+        with self.assertRaisesRegex(ValueError, "파일이 바뀌"):
+            self.repository.deletion_manifest(["g1_flat_100_1_photo"])
+        self.repository.configure(_Request(2, "offline", str(self.paths.output_dir), False))
+        with self.assertRaisesRegex(ValueError, "다시 선택"):
+            self.repository.deletion_manifest(["g1_flat_101_1_photo"])
+
+    def test_deletion_manifest_rechecks_context_after_file_inspection(self):
+        from luvbox.recycling import file_signature
+
+        self.repository.read("1", 0, 100)
+        def changed_context(path):
+            result = file_signature(path)
+            self.repository.configure(_Request(2, "offline", str(self.paths.output_dir), False))
+            return result
+        with patch("luvbox.qt_library.file_signature", side_effect=changed_context):
+            with self.assertRaisesRegex(ValueError, "다시 선택"):
+                self.repository.deletion_manifest(["g1_flat_100_1_photo"])
+
+    def test_deletion_manifest_does_not_redirect_a_selected_identity_to_a_new_path(self):
+        self.repository.read("1", 0, 100)
+        replacement = self.paths.media_dir / "replacement_100_1.jpg"
+        Image.new("RGB", (8, 8)).save(replacement, "JPEG")
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            store._db.execute("UPDATE media SET path=? WHERE tweet_id='100'", (str(replacement),))
+            store._db.commit()
+        with self.assertRaisesRegex(ValueError, "새로 고침"):
+            self.repository.deletion_manifest(["g1_flat_100_1_photo"])
 
 
 if __name__ == "__main__":

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import copy
 import inspect
-import io
 import json
 import logging
 import os
@@ -49,7 +48,6 @@ _ACCOUNT = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
 _ROUTES = {"i", "home", "explore", "search", "settings", "notifications",
            "messages", "compose", "intent", "login", "logout", "signup",
            "hashtag", "account", "privacy", "tos", "oauth"}
-_AUTH_MODES = {"file", "managed"}
 _FOLDER_MODES = {"author", "date", "flat"}
 _SCAN_MODES = {"full", "quick"}
 # Missing files chosen for downloading again, per run. Each tweet costs one
@@ -246,7 +244,6 @@ _GALLERY_HOOKS = (
 )
 _GALLERY_NAMES = (
     ("gallery_dl.extractor.common", ("CACHE_COOKIES", "CACHE_MEMORY")),
-    ("gallery_dl.util", ("cookiestxt_load",)),
     ("gallery_dl.exception", ("ControlException", "StopExtraction", "AbortExtraction", "AuthRequired")),
 )
 
@@ -294,69 +291,10 @@ def _normal_account(value: str) -> str:
     return account.lower()
 
 
-# A browser export for one account is a few kilobytes. The cap stops a
-# multi-gigabyte path from being loaded before Netscape validation runs.
-_MAX_COOKIE_BYTES = 1024 * 1024
-
-
-def _read_cookie_text(path: Path) -> str:
-    """Read a cookies file up to a fixed size. Never returns a partial file."""
-    try:
-        with open(path, "rb") as handle:
-            raw = handle.read(_MAX_COOKIE_BYTES + 1)
-    except OSError:
-        raise ValueError("쿠키 파일을 읽을 수 없습니다. UTF-8 cookies.txt 파일을 선택해 주세요.") from None
-    if len(raw) > _MAX_COOKIE_BYTES:
-        raise ValueError("쿠키 파일이 너무 큽니다. 1MB 이하의 Netscape cookies.txt를 선택해 주세요.")
-    try:
-        return raw.decode("utf-8-sig")
-    except UnicodeError:
-        raise ValueError("쿠키 파일을 읽을 수 없습니다. UTF-8 cookies.txt 파일을 선택해 주세요.") from None
-
-
-def _validate_cookie_file(path: Path) -> None:
-    """Inspect Netscape syntax and auth presence without exposing secret values."""
-    data = _read_cookie_text(path)
-    lines = data.splitlines()
-    if not any(line.startswith(("# Netscape HTTP Cookie File", "# HTTP Cookie File"))
-               for line in lines):
-        raise ValueError("Netscape cookies.txt 형식의 쿠키 파일을 선택해 주세요.")
-    has_auth = False
-    expired_auth = False
-    for line in lines:
-        if line.startswith("#HttpOnly_"):
-            line = line[10:]
-        elif not line.strip() or line.startswith("#"):
-            continue
-        fields = line.split("\t")
-        if len(fields) != 7:
-            raise ValueError("쿠키 파일 형식이 올바르지 않습니다. Netscape 형식으로 다시 내보내 주세요.")
-        domain, include_subdomains, cookie_path, secure, expires, name, value = fields
-        try:
-            expires_at = int(expires or "0")
-        except ValueError:
-            raise ValueError("쿠키 파일의 만료 시간이 올바르지 않습니다. 다시 내보내 주세요.") from None
-        if (not domain or not cookie_path.startswith("/") or expires_at < 0 or
-                include_subdomains not in {"TRUE", "FALSE"} or secure not in {"TRUE", "FALSE"}):
-            raise ValueError("쿠키 파일 형식이 올바르지 않습니다. Netscape 형식으로 다시 내보내 주세요.")
-        if domain.lstrip(".").lower() == "x.com" and name == "auth_token" and value:
-            if not expires_at or expires_at > time.time():
-                has_auth = True
-            else:
-                expired_auth = True
-    if not has_auth:
-        if expired_auth:
-            raise ValueError("X 로그인 쿠키가 만료되었습니다. X에 다시 로그인하고 쿠키를 내보내 주세요.")
-        raise ValueError("쿠키 파일에 X 로그인 쿠키가 없습니다. 본인 계정으로 x.com에 로그인한 뒤 다시 내보내 주세요.")
-
-
 @dataclass(frozen=True)
 class JobOptions:
     account: str
     output_dir: str
-    auth_mode: str = "managed"
-    cookies_file: str = ""
-    photo_limit: int = 0
     folder_mode: str = "flat"
     scan_mode: str = "full"
     include_videos: bool = True
@@ -381,9 +319,6 @@ class JobOptions:
 
     def validate(self) -> "JobOptions":
         account = _normal_account(self.account)
-        if not isinstance(self.auth_mode, str) or self.auth_mode.strip().lower() not in _AUTH_MODES:
-            raise ValueError("로그인 방법을 ‘브라우저 로그인’이나 ‘cookies.txt 파일’ 중에서 다시 골라 주세요.")
-        auth_mode = self.auth_mode.strip().lower()
         if not isinstance(self.folder_mode, str) or self.folder_mode.strip().lower() not in _FOLDER_MODES:
             raise ValueError("저장 방식은 작성자별, 날짜별, 구분 없이 중 하나를 선택해 주세요.")
         folder_mode = self.folder_mode.strip().lower()
@@ -403,8 +338,6 @@ class JobOptions:
             raise ValueError("움직이는 GIF 저장 형식과 GIF 크기를 다시 선택해 주세요.")
         if isinstance(self.max_video_mb, bool) or not isinstance(self.max_video_mb, int) or self.max_video_mb < 0:
             raise ValueError("동영상·GIF 크기 한도는 0 이상의 정수 MB로 입력해 주세요. 0은 제한 없음입니다.")
-        if isinstance(self.photo_limit, bool) or not isinstance(self.photo_limit, int) or self.photo_limit < 0:
-            raise ValueError("파일 저장 한도는 0 이상의 정수여야 합니다.")
         if not isinstance(self.targets, (list, tuple)):
             raise ValueError("다시 받을 파일 목록을 확인해 주세요.")
         targets = tuple(dict.fromkeys(self.targets))
@@ -419,26 +352,8 @@ class JobOptions:
                 raise ValueError("저장 경로가 파일입니다. 폴더를 선택해 주세요.")
         except (OSError, RuntimeError):
             raise ValueError("저장 폴더 경로를 확인해 주세요.") from None
-        cookie_path = ""
-        if auth_mode == "file":
-            if not self.cookies_file.strip():
-                raise ValueError("X 로그인 쿠키가 있는 cookies.txt 파일을 선택해 주세요.")
-            try:
-                path = Path(self.cookies_file).expanduser().resolve()
-            except (OSError, RuntimeError):
-                raise ValueError("쿠키 파일 경로를 확인해 주세요.") from None
-            _validate_cookie_file(path)
-            cookie_path = str(path)
         return replace(self, account=account, output_dir=str(output),
-                       auth_mode=auth_mode, cookies_file=cookie_path,
-                       folder_mode=folder_mode, scan_mode=scan_mode, targets=targets,
-                       photo_limit=0 if targets else self.photo_limit)
-
-
-def _auth_help(mode: str) -> str:
-    if mode == "managed":
-        return "X 연결이 만료됐습니다. ‘X 연결’에서 브라우저를 다시 연결하거나 새 토큰을 입력해 주세요."
-    return "X에 다시 로그인한 뒤 새 cookies.txt를 내보내 선택해 주세요."
+                       folder_mode=folder_mode, scan_mode=scan_mode, targets=targets)
 
 
 # Match whole terms: a plain substring test would read gallery-dl's
@@ -468,7 +383,7 @@ def _skipped_post_notice(message: str) -> str:
     return next((notice for pattern, notice in _SKIPPED_POST_NOTICES if pattern.search(text)), "")
 
 
-def _safe_diagnostic(message: str, mode: str) -> str:
+def _safe_diagnostic(message: str) -> str:
     """Map library diagnostics to fixed messages; never forward arbitrary secrets."""
     text = message.lower()
     if "history store unavailable" in text:
@@ -482,7 +397,7 @@ def _safe_diagnostic(message: str, mode: str) -> str:
     if text.startswith(("authorizationerror:", "authrequired: protected tweet", "authrequired: nsfw tweet")):
         return "X가 접근을 거부했습니다. X에서 계정 상태·추가 인증과 게시물 접근 권한을 확인해 주세요."
     if _AUTH_TERMS.search(text):
-        return _auth_help(mode)
+        return "X 연결이 만료됐습니다. ‘X 연결’에서 브라우저를 다시 연결하거나 새 토큰을 입력해 주세요."
     if re.search(r"\b403\b", text):
         # A denied post, challenge or proxy is not proof of an expired login.
         return "X가 접근을 거부했습니다. X에서 계정 상태·추가 인증과 게시물 접근 권한을 확인해 주세요."
@@ -560,10 +475,9 @@ _FATAL_TERMS = ("history store unavailable", "unsafe", "download archive unavail
 
 
 class _GalleryLogHandler(logging.Handler):
-    def __init__(self, emit: EventSink, mode: str):
+    def __init__(self, emit: EventSink):
         super().__init__(logging.INFO)
         self._emit = emit
-        self.mode = mode
         self.last_error = ""
         self._error_priority = 0
         self._last_message = ""
@@ -605,7 +519,7 @@ class _GalleryLogHandler(logging.Handler):
             if _RATE_TERMS.search(text):
                 self.rate_limited = True
             level = "error" if record.levelno >= logging.ERROR else "warning"
-            message = _safe_diagnostic(raw, self.mode)
+            message = _safe_diagnostic(raw)
             priority = (3 if _RATE_TERMS.search(text) or _STORAGE_TERMS.search(text) or _AUTH_TERMS.search(text)
                         or any(term in text for term in _FATAL_TERMS)
                         else 1 if record.levelno >= logging.ERROR else 0)
@@ -716,7 +630,7 @@ def _configure_gallery(options: JobOptions, archive_path: Path, account_folder: 
         "unique": True, "size": ["orig", "4096x4096", "large", "medium", "small"], "fallback": True,
         "ratelimit": "abort", "locked": "abort",
         "sleep-request": API_INTERVAL, "timeout": 10.0, "retries": 0, "retries-api": 0,
-        "cookies": options.cookies_file if options.auth_mode == "file" else None,
+        "cookies": None,
     }
     for key, value in values.items():
         config.set(("extractor", "twitter"), key, value)
@@ -735,7 +649,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     A successful traversal covers the list X exposes to this authenticated
     session; it is not evidence that every historical like was available.
     """
-    from gallery_dl import config, exception, job, output, util
+    from gallery_dl import config, exception, job, output
     from gallery_dl.extractor import common
     from requests.exceptions import RequestException
     from .metadata import available, embed_source, failure_message, persistent
@@ -785,7 +699,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     flag = Path(stop_file) if stop_file is not None else None
     root_logger = logging.getLogger()
     previous_handlers, previous_level = root_logger.handlers[:], root_logger.level
-    handler = _GalleryLogHandler(emit, options.auth_mode)
+    handler = _GalleryLogHandler(emit)
     root_logger.handlers = [handler]
     root_logger.setLevel(logging.INFO)
     logger_states = []
@@ -805,7 +719,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
     def authentication_changed(state):
         nonlocal auth_state
-        if normalized.auth_mode != "managed" or state == auth_state:
+        if state == auth_state:
             return
         # A later redirect cannot undo a credential rejection in the same run.
         if auth_state == "reconnect_required" and state == "verified":
@@ -1010,42 +924,32 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
             def protected_session():
                 initialize_session()
-                if normalized.auth_mode == "managed":
-                    _observe_authentication(self.extractor.session, authentication_response)
+                _observe_authentication(self.extractor.session, authentication_response)
                 guard.protect_session(self.extractor.session)
 
             self.extractor._init_session = protected_session
             def normalize_cookies():
-                if normalized.auth_mode == "managed":
-                    from requests.cookies import create_cookie
-                    from .login import load_session_cookies
+                from requests.cookies import create_cookie
+                from .login import load_session_cookies
 
-                    try:
-                        session_cookies = load_session_cookies(account=normalized.account)
-                    except (ValueError, OSError):
-                        raise exception.AuthRequired("managed authenticated session") from None
-                    for item in session_cookies:
-                        if item.get("domain", "").lstrip(".").lower() != "x.com":
-                            continue
-                        expiry = item.get("expires")
-                        cookie = create_cookie(
-                            name=item["name"], value=item["value"],
-                            domain=item["domain"], path=item.get("path") or "/",
-                            expires=int(expiry) if expiry and expiry > 0 else None,
-                            secure=bool(item.get("secure", False)),
-                            rest={"HttpOnly": bool(item.get("httpOnly", False))},
-                        )
-                        self.extractor.cookies.set_cookie(cookie)
-                elif normalized.auth_mode == "file":
-                    # Read in place, accept a UTF-8 BOM, and load only X cookies.
-                    # No copied cookie jar or updates are ever written.
-                    # The same size cap as validation applies if the file grew.
-                    with io.StringIO(_read_cookie_text(Path(normalized.cookies_file))) as fp:
-                        for cookie in util.cookiestxt_load(fp):
-                            if cookie.domain.lstrip(".").lower() == "x.com":
-                                self.extractor.cookies.set_cookie(cookie)
-                # Some Netscape exporters use the host-only x.com domain.
-                # gallery-dl's X API looks up .x.com, so normalize in memory.
+                try:
+                    session_cookies = load_session_cookies(account=normalized.account)
+                except (ValueError, OSError):
+                    raise exception.AuthRequired("managed authenticated session") from None
+                for item in session_cookies:
+                    if item.get("domain", "").lstrip(".").lower() != "x.com":
+                        continue
+                    expiry = item.get("expires")
+                    cookie = create_cookie(
+                        name=item["name"], value=item["value"],
+                        domain=item["domain"], path=item.get("path") or "/",
+                        expires=int(expiry) if expiry and expiry > 0 else None,
+                        secure=bool(item.get("secure", False)),
+                        rest={"HttpOnly": bool(item.get("httpOnly", False))},
+                    )
+                    self.extractor.cookies.set_cookie(cookie)
+                # Browser sessions can use the host-only x.com domain. The
+                # downloader API looks up .x.com, so normalize in memory.
                 jar = self.extractor.cookies
                 for cookie in list(jar):
                     if cookie.domain.lower() == "x.com":
@@ -1316,11 +1220,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     self.gif_temporary.unlink(missing_ok=True)
                     self.gif_temporary = None
             history_update(saved=saved, skipped=skipped, size_skipped=size_skipped, force=bool(self.last_output and self.last_output[0] == "saved"))
-            # Archive insertion happens after out.success; stop only once the
-            # completed file has been recorded, so reruns remain consistent.
-            if normalized.photo_limit and saved >= normalized.photo_limit:
-                stop_reason = "limit"
-                raise exception.StopExtraction()
             if quick_scan and self.last_output:
                 # Size-limited and failed files are neither saved nor known,
                 # so they neither extend nor break the already-saved streak.
@@ -1719,7 +1618,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         normalized = options.validate()
         if normalized.confirm_each and review is None:
             raise ValueError("파일마다 저장 여부 확인은 프로그램에서 직접 저장을 시작할 때 사용할 수 있습니다.")
-        handler.mode = normalized.auth_mode
         check_gallery_hooks()
         check_stop()
         guard = AccountGuard(normalized.account, sleep=sleep)
@@ -1749,7 +1647,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         history.recover_interrupted_runs()
         # Account/output locks protect reconciliation. Never infer a successful
         # recycle from absence, and never retry an interrupted file deletion.
+        selected_pending = set()
+        if normalized.targets:
+            selected = {_key_identity(key) for key in normalized.targets}
+            selected_pending = {(row["tweet_id"], row["num"], row["media_type"])
+                                for row in history.pending_deletions()} & selected
         history.reconcile_deletions()
+        if selected_pending:
+            raise ValueError("선택한 파일의 휴지통 이동이 중단됐습니다. 삭제 이력과 파일 상태를 확인한 뒤 다시 선택해 주세요.")
         targets = frozenset(normalized.targets)
         ignored = history.ignored_media()
         if not targets:
@@ -1848,9 +1753,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             status = "finished"
             message = _retry_message(saved, sum(value == "existing" for value in recovered.values()),
                                      unavailable_tweets, absent_files, size_skipped)
-        elif stop_reason == "limit":
-            status = "finished"
-            message = f"시험 저장 {saved}개를 마쳤습니다. 시험 저장을 끄고 다시 실행하면 이어서 저장합니다."
         elif stop_reason == "caught-up":
             status = "finished"
             message = (f"새 Like 확인을 마쳤습니다. {saved:,}개를 저장했고, 이미 저장한 파일이 "
@@ -1880,7 +1782,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         if active_job is None:
             message = str(exc)
         else:
-            message = _safe_diagnostic(str(exc), normalized.auth_mode)
+            message = _safe_diagnostic(str(exc))
         exit_code = 1
     except PermissionError:
         message = "저장 폴더에 쓸 수 없습니다. 문서 또는 사진 폴더 안의 다른 폴더를 선택해 주세요."
@@ -1895,10 +1797,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     except HistoryError:
         status, exit_code, message = "error", 1, _HISTORY_ERROR
     except OSError as exc:
-        message = _safe_diagnostic(str(exc), normalized.auth_mode)
+        message = _safe_diagnostic(str(exc))
         exit_code = 1
     except Exception as exc:
-        message = _safe_diagnostic(str(exc), normalized.auth_mode)
+        message = _safe_diagnostic(str(exc))
         if isinstance(exc, (exception.AuthenticationError, exception.AuthRequired)):
             authentication_changed("reconnect_required")
             error_kind = "authentication"
@@ -1926,8 +1828,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         remaining |= review_declined_ids
                         if review_unknown or remaining != review_pending:
                             history.set_review_pending(remaining)
-                    run_status = "limited" if stop_reason == "limit" and status == "finished" else status
-                    history.finish_run(run_id, run_status, saved=saved, skipped=skipped, size_skipped=size_skipped,
+                    history.finish_run(run_id, status, saved=saved, skipped=skipped, size_skipped=size_skipped,
                                        visited=len(visited_ids), last_tweet_id=last_tweet_id,
                                        last_posted_at=last_posted_at, message=message)
             except HistoryError:
@@ -1986,6 +1887,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     if handler.auth_state:
         authentication_changed(handler.auth_state)
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,
+          "history_run_id": run_id,
           "size_skipped": size_skipped, "review_skipped": review_skipped, "review_never": review_never,
           "metadata_failed": metadata_failed, "author_deferred": author_deferred,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,

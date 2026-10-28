@@ -17,7 +17,7 @@ from luvbox.storage import resolve_storage
 class ExternalDeleteDownloadTests(unittest.TestCase):
     # Import helper modules rather than TestCase class aliases: discovery must
     # collect only these new tests, not another copy of the entire core suite.
-    write_cookies = core_support.CoreTests.write_cookies
+    set_session = core_support.CoreTests.set_session
     worker = core_support.CoreTests.worker
 
     def setUp(self):

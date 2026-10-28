@@ -136,10 +136,6 @@ class LikeOrderTests(unittest.TestCase):
                 self.store.record_page(period=period)
         with self.assertRaises(HistoryError):
             self.store.records(order="random")
-        exported = Path(self.temp.name) / "records.csv"
-        self.store.export_records(exported)
-        header, *rows = exported.read_text(encoding="utf-8-sig").splitlines()
-        self.assertTrue(header.endswith("liked_after,liked_before,content,hashtags"))
 
     def test_record_relocation_carries_like_order(self):
         self.walk(["2", "1"])
@@ -155,7 +151,7 @@ class LikeOrderTests(unittest.TestCase):
 class LikeOrderWorkerTests(unittest.TestCase):
     setUp = test_core.CoreTests.setUp
     tearDown = test_core.CoreTests.tearDown
-    write_cookies = test_core.CoreTests.write_cookies
+    set_session = test_core.CoreTests.set_session
     worker = test_core.CoreTests.worker
     runs = test_core.CoreTests.runs
 

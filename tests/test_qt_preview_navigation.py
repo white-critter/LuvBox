@@ -63,6 +63,11 @@ class PagedRepository:
                 raise TimeoutError("disposable page fixture was not released")
         return len(rows), rows[offset:offset + limit]
 
+    def selectable_keys(self, keys):
+        keys = list(keys)
+        selectable = [key for key in keys if key.split("_")[2] not in self.missing]
+        return selectable[:2000], len(keys) - len(selectable), len(selectable) > 2000
+
     def selected(self, key, generation):
         request = self.current(generation)
         if request is None:

@@ -3,6 +3,7 @@
 from collections import deque
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import date, timedelta
 import os
 from pathlib import Path
 import re
@@ -28,6 +29,7 @@ _MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4"}
 _DRIVE_MISSING = "파일을 열 수 없습니다. 저장 드라이브를 연결해 주세요."
 _FILE_MISSING = "이 파일을 찾지 못했습니다. 저장 폴더 밖에서 지우거나 옮긴 파일일 수 있습니다."
 _POSTED = re.compile(r"(\d{4}-\d\d-\d\d)T(\d\d:\d\d)")
+MAX_SELECTION = 2000
 
 
 def _posted(value, *, time=False):
@@ -74,6 +76,9 @@ class _Request:
     media_type: str = "all"
     order: str = "saved"
     author: str = ""
+    date_field: str = "posted"
+    date_from: str = ""
+    date_to: str = ""
 
     def location(self):
         return resolve_storage(self.output_dir, self.account, self.separate_accounts)
@@ -83,11 +88,13 @@ class LibraryRepository:
     def __init__(self):
         self._condition = Condition()
         self._request = None
+        self._served = {}
         self.provider = None
 
     def configure(self, request):
         with self._condition:
             self._request = request
+            self._served.clear()
 
     def current(self, generation=None):
         with self._condition:
@@ -105,13 +112,24 @@ class LibraryRepository:
                 # and resolved path) before and after decoding it.
                 store._folder_cache = {}
                 page = store.record_page(offset // limit, limit, request.media_type, request.query,
-                                         order=request.order, author=request.author, include_deleted=False)
+                                         order=request.order, author=request.author, include_deleted=False,
+                                         period=(request.date_field, request.date_from, request.date_to)
+                                         if request.date_from or request.date_to else None)
                 rows = []
+                served = {}
                 for row in page["rows"]:
                     key = f"g{request.generation}_{row['folder_mode']}_{row['tweet_id']}_{row['num']}_{row['media_type']}"
                     if not _KEY.fullmatch(key):
                         raise ValueError("invalid media identity")
                     path = self._path(store, row)
+                    stamp = None
+                    if path is not None:
+                        try:
+                            info = path.stat()
+                            stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+                        except OSError:
+                            pass
+                    served[key] = (str(path) if path is not None else "", stamp)
                     with self._condition:
                         if self._request is not request:
                             return 0, []
@@ -127,6 +145,11 @@ class LibraryRepository:
                     rows.append({"key": key, "caption": caption})
                 if page["page"] * limit != offset:
                     return page["total"], []
+                with self._condition:
+                    if self._request is not request:
+                        return 0, []
+                    for key, item in served.items():
+                        self._served.setdefault(key, item)
                 return page["total"], rows
         except FileNotFoundError:
             return 0, []
@@ -196,6 +219,55 @@ class LibraryRepository:
             return Thumbnail(None, "")
         return thumbnail(path, size)
 
+    def deletion_manifest(self, keys):
+        """Capture displayed catalog identities without accepting paths from QML."""
+        if (not isinstance(keys, (list, tuple)) or not 1 <= len(keys) <= MAX_SELECTION
+                or any(not isinstance(key, str) for key in keys)):
+            raise ValueError("휴지통으로 보낼 사진을 1~2,000개 선택해 주세요.")
+        keys = list(dict.fromkeys(keys))
+        with self._condition:
+            request = self._request
+            if request is None or any(key not in self._served for key in keys):
+                raise ValueError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
+            displayed = {key: self._served[key] for key in keys}
+        rows = []
+        with closing(_ReadOnlyHistory(request.location())) as store:
+            store._folder_cache = {}
+            for key in keys:
+                row = self._row(store, key, request)
+                path = self._path(store, row) if row is not None else None
+                previous_path, previous_signature = displayed[key]
+                if path is None or str(path) != previous_path or previous_signature is None:
+                    raise ValueError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
+                signature = file_signature(path)
+                if signature != previous_signature:
+                    raise ValueError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                rows.append(dict(row, _delete_signature=signature))
+        with self._condition:
+            if self._request is not request:
+                raise ValueError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
+        return {"location": request.location(), "rows": rows, "generation": request.generation}
+
+    def selectable_keys(self, keys):
+        """Use the displayed file snapshot to exclude missing items from selection.
+
+        Deletion still rechecks the file and its original signature before
+        confirmation. This lookup performs no disk access on the UI thread.
+        """
+        with self._condition:
+            selectable = []
+            unavailable = 0
+            overflow = False
+            for key in keys:
+                item = self._served.get(key)
+                if item is None or not item[0] or item[1] is None:
+                    unavailable += 1
+                elif len(selectable) < MAX_SELECTION:
+                    selectable.append(key)
+                else:
+                    overflow = True
+            return selectable, unavailable, overflow
+
     def action(self, key, generation, action):
         selection = self.selected(key, generation)
         if selection is None or self.current(generation) is None:
@@ -232,6 +304,7 @@ class _LibraryThumbnailProvider(SafeThumbnailProvider):
 
 class LibraryController(QObject):
     changed = Signal()
+    selectionChanged = Signal()
     shutdownFinished = Signal()
     _delivered = Signal(object)
 
@@ -249,6 +322,11 @@ class LibraryController(QObject):
         self._media_type = "all"
         self._order = "saved"
         self._author = ""
+        self._date_field = "posted"
+        self._date_from = self._date_to = ""
+        self._selection_mode = False
+        self._selection_keys = set()
+        self._selected_keys_order = []
         self._selected = {}
         self._selection_key = ""
         self._selection_serial = 0
@@ -271,6 +349,46 @@ class LibraryController(QObject):
     @Property(str, notify=changed)
     def selectedKey(self):
         return self._selected.get("key", "")
+
+    @Property(bool, notify=selectionChanged)
+    def selectionMode(self):
+        return self._selection_mode
+
+    @Property("QVariantList", notify=selectionChanged)
+    def selectedKeys(self):
+        return self._selected_keys_order.copy()
+
+    @Property(int, notify=selectionChanged)
+    def selectedCount(self):
+        return len(self._selection_keys)
+
+    @Property(str, notify=changed)
+    def filterAuthor(self):
+        return self._author
+
+    @Property(str, notify=changed)
+    def dateField(self):
+        return self._date_field
+
+    @Property(str, notify=changed)
+    def dateFrom(self):
+        return self._date_from
+
+    @Property(str, notify=changed)
+    def dateTo(self):
+        return self._date_to
+
+    @Property(str, notify=changed)
+    def filterSummary(self):
+        parts = []
+        if self._query:
+            parts.append("검색: " + self._query)
+        if self._author:
+            parts.append("작성자 @" + self._author)
+        if self._date_from or self._date_to:
+            parts.append(("게시일 " if self._date_field == "posted" else "저장일 ")
+                         + (self._date_from or "처음") + " ~ " + (self._date_to or "끝"))
+        return " · ".join(parts)
 
     @Property(int, notify=changed)
     def selectedIndex(self):
@@ -367,6 +485,7 @@ class LibraryController(QObject):
         self._selected = {}
         self._selection_key = ""
         self._navigation = None
+        self.clearSelection()
         self._status = ""
         self._busy = False
         with self._condition:
@@ -374,7 +493,8 @@ class LibraryController(QObject):
         request = None
         if self._account and self._output_dir:
             request = _Request(self._generation, self._account, self._output_dir, self._separate_accounts,
-                               self._query, self._media_type, self._order, self._author)
+                               self._query, self._media_type, self._order, self._author,
+                               self._date_field, self._date_from, self._date_to)
         self._repository.configure(request)
         self.provider.clear_registry()
         self.model.search(str(self._generation))
@@ -389,12 +509,119 @@ class LibraryController(QObject):
 
     @Slot(str, str, str)
     def setFilters(self, media_type, order, author):
-        if media_type not in _KINDS or order not in _ORDERS or (author and not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author)):
+        author = author.strip().lstrip("@").lower() if isinstance(author, str) else None
+        if (media_type not in _KINDS or order not in _ORDERS or author is None
+                or (author and not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author))):
             self._status = "필터를 확인해 주세요."
             self.changed.emit()
             return
         self._media_type, self._order, self._author = media_type, order, author
         self.refresh()
+
+    @Slot(str, str, str, str, result=bool)
+    def setAdvancedFilters(self, author, date_field, first, last):
+        if self._closed:
+            return False
+        author = author.strip().lstrip("@").lower()
+        first, last = first.strip(), last.strip()
+        try:
+            if date_field not in {"posted", "saved"} or (author and not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author)):
+                raise ValueError
+            for value in (first, last):
+                if value and (not re.fullmatch(r"\d{4}-\d\d-\d\d", value) or date.fromisoformat(value).isoformat() != value):
+                    raise ValueError
+            if first and last and first > last:
+                raise ValueError
+            if last:
+                date.fromisoformat(last) + timedelta(days=1)
+        except (ValueError, OverflowError):
+            self._status = "작성자 ID와 날짜(YYYY-MM-DD), 시작·종료 순서를 확인해 주세요."
+            self.changed.emit()
+            return False
+        self._author, self._date_field, self._date_from, self._date_to = author, date_field, first, last
+        self.refresh()
+        return True
+
+    @Slot()
+    def resetFilters(self):
+        self._query = self._author = self._date_from = self._date_to = ""
+        self._date_field = "posted"
+        self._media_type, self._order = "all", "saved"
+        self.refresh()
+
+    @Slot(bool)
+    def setSelectionMode(self, enabled):
+        if self._closed or self._selection_mode == enabled:
+            return
+        self._selection_mode = enabled
+        if not enabled:
+            self._selection_keys.clear()
+            if self._status:
+                self._status = ""
+                self.changed.emit()
+        self._batch_selection_changed()
+
+    @Slot(str)
+    def toggleSelection(self, key):
+        if self._closed or key not in self.model._keys:
+            return
+        if key in self._selection_keys:
+            self._selection_keys.remove(key)
+        elif not self.canSelect(key):
+            self._status = "파일이 없거나 확인할 수 없는 항목은 휴지통으로 이동할 수 없습니다."
+            self.changed.emit()
+            return
+        elif len(self._selection_keys) < MAX_SELECTION:
+            self._selection_keys.add(key)
+        else:
+            self._status = "한 번에 최대 2,000개를 선택할 수 있습니다."
+            self.changed.emit()
+            return
+        if self._status:
+            self._status = ""
+            self.changed.emit()
+        self._selection_mode = True
+        self._batch_selection_changed()
+
+    @Slot()
+    def selectLoaded(self):
+        if self._closed:
+            return
+        selectable, unavailable, overflow = self._repository.selectable_keys(row["key"] for row in self.model._rows)
+        self._selection_keys = set(selectable)
+        self._selection_mode = True
+        self._batch_selection_changed()
+        if overflow or unavailable:
+            self._status = (f"확인된 파일 {len(self._selection_keys):,}개를 선택했습니다. " +
+                            (f"파일 없음·확인 불가 {unavailable:,}개는 제외했습니다. " if unavailable else "") +
+                            ("한 번에 최대 2,000개를 선택할 수 있습니다." if overflow else "")).strip()
+        else:
+            self._status = ""
+        self.changed.emit()
+
+    @Slot(str, result=bool)
+    def canSelect(self, key):
+        if self._closed or key not in self.model._keys:
+            return False
+        selectable, _, _ = self._repository.selectable_keys((key,))
+        return bool(selectable)
+
+    @Slot()
+    def clearSelection(self):
+        if self._selection_keys:
+            self._selection_keys.clear()
+            self._batch_selection_changed()
+            if self._status:
+                self._status = ""
+                self.changed.emit()
+
+    def _batch_selection_changed(self):
+        self._selected_keys_order = sorted(self._selection_keys, key=lambda key: self.model._positions.get(key, -1))
+        self.selectionChanged.emit()
+
+    def deletionManifest(self, keys):
+        # Called on the management worker; filesystem checks never run in QML.
+        return self._repository.deletion_manifest(keys)
 
     @Slot(str)
     def selectItem(self, key):

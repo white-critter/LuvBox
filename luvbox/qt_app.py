@@ -1,10 +1,12 @@
 """Product Qt shell over the existing downloader, accounts and local library."""
 
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import re
 from pathlib import Path
 from queue import Queue
 import threading
+import uuid
 
 from PySide6.QtCore import QObject, Property, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPalette
@@ -18,6 +20,7 @@ from .qt_browser_setup import BrowserSetupController
 from .qt_download import DownloadController
 from .qt_library import LibraryController
 from .qt_schedule import ScheduleController
+from .qt_management import ManagementController
 from .qt_wheel import WheelInputFilter
 
 
@@ -42,6 +45,7 @@ class ApplicationController(QObject):
     storageConfirmationRequested = Signal()
     reviewReady = Signal()
     reviewCleared = Signal()
+    retryStarted = Signal()
     shutdownFinished = Signal()
     _completed = Signal(str, bool, object)
 
@@ -89,17 +93,24 @@ class ApplicationController(QObject):
         self._gallery_dirty = False
         self._gallery_visible = False
         self._shutdown_parts = set()
+        self._io_shutdown_queued = False
+        self._activity_info = None
+        self._activity_terminal = {}
         self._browser_setup = BrowserSetupController(self, settings=self._settings)
         self._accounts = AccountController(self, settings=self._settings, browser_setup=self._browser_setup,
                                            persist_preferences=False)
         self._download = DownloadController(self)
         self._download.setDetailsEnabled(self._preferences["detailed_progress"])
         self._library = LibraryController(self)
+        self._management = ManagementController(self._library, self)
         self._schedule = ScheduleController(self)
         self._accounts.changed.connect(self._state_changed)
         self._accounts.accountChanged.connect(self._account_changed)
         self._download.changed.connect(self._state_changed)
         self._schedule.changed.connect(self._state_changed)
+        self._management.changed.connect(self._state_changed)
+        self._management.retryRequested.connect(self.retryMissing)
+        self._management.libraryChanged.connect(self._managed_library_changed)
         self._download.eventReceived.connect(self._download_event)
         self._download.authenticationChanged.connect(self._accounts.updateAuthentication)
         self._download.reviewRequested.connect(self._prepare_review)
@@ -109,6 +120,7 @@ class ApplicationController(QObject):
         self._library.shutdownFinished.connect(lambda: self._part_closed("library"))
         self._browser_setup.shutdownFinished.connect(lambda: self._part_closed("browser_setup"))
         self._schedule.shutdownFinished.connect(lambda: self._part_closed("schedule"))
+        self._management.shutdownFinished.connect(lambda: self._part_closed("management"))
         self._completed.connect(self._accept, Qt.ConnectionType.QueuedConnection)
         self._commands = Queue()
         self._io_thread = threading.Thread(target=self._work, name="qt-app-storage", daemon=True)
@@ -148,6 +160,10 @@ class ApplicationController(QObject):
     def schedule(self):
         return self._schedule
 
+    @Property(QObject, constant=True)
+    def management(self):
+        return self._management
+
     @Property("QVariantMap", notify=preferencesChanged)
     def preferences(self):
         return {name: self._preferences[name] for name in _PUBLIC_PREFERENCES}
@@ -168,7 +184,7 @@ class ApplicationController(QObject):
     def busy(self):
         return bool(self._closing or self._preparing or self._repairing or self._pending_start is not None
                     or self._pending_settings or self._accounts.busy or self._download.running
-                    or self._schedule.mutating)
+                    or self._schedule.mutating or self._management.mutating)
 
     @Property(bool, notify=changed)
     def closing(self):
@@ -198,6 +214,8 @@ class ApplicationController(QObject):
             return self._accounts.status
         if self._schedule.mutating:
             return self._schedule.status
+        if self._management.mutating:
+            return self._management.status
         return self._message or self._download.status
 
     @Property(str, notify=changed)
@@ -219,12 +237,15 @@ class ApplicationController(QObject):
     def _state_changed(self):
         locked = (self._closing or self._preparing or self._repairing or self._pending_start is not None
                   or bool(self._pending_settings) or self._download.running)
-        account_locked = locked or self._schedule.mutating
+        account_locked = locked or self._schedule.mutating or self._management.mutating
         if self._accounts.locked != account_locked:
             self._accounts.setLocked(account_locked)
-        schedule_locked = locked or self._accounts.busy
+        schedule_locked = locked or self._accounts.busy or self._management.mutating
         if self._schedule.locked != schedule_locked:
             self._schedule.setLocked(schedule_locked)
+        management_locked = locked or self._accounts.busy or self._schedule.mutating
+        if self._management.locked != management_locked and not self._closing:
+            self._management.setLocked(management_locked)
         self.changed.emit()
 
     def _persist(self, changes, *, rollback=None):
@@ -281,6 +302,10 @@ class ApplicationController(QObject):
                     # A damaged catalog is reported for this save's records,
                     # even if the folder or account changes afterwards.
                     self._repair_target = (options.account, options.output_dir, options.separate_accounts)
+                else:
+                    self._record_manual_outcome({"status": "error", "message": "저장 작업을 시작하지 못했습니다."})
+            elif not success:
+                self._record_manual_outcome({"status": "error", "message": _SETTINGS_ERROR})
         if success and not self._pending_settings and self._save_after_settings:
             self._save_after_settings = False
             self.startSave()
@@ -351,7 +376,7 @@ class ApplicationController(QObject):
             locations = self._preferences.get("record_locations", {})
             if isinstance(locations, dict) and isinstance(locations.get(self._account), str):
                 self._output = locations[self._account]
-            preferences = {"account": self._account, "output_dir": self._output, "auth_mode": "managed"}
+            preferences = {"account": self._account, "output_dir": self._output}
             browser_id = self._browser_setup.selectedBrowser
             if browser_id in {"chrome", "edge", "firefox"}:
                 preferences["connection_browser"] = browser_id
@@ -367,6 +392,7 @@ class ApplicationController(QObject):
         except ValueError:
             account = ""
         self._library.setLibrary(account, self._output, self._preferences["separate_accounts"])
+        self._management.setLibrary(account, self._output, self._preferences["separate_accounts"])
 
     @Slot(bool)
     def galleryVisible(self, visible):
@@ -380,6 +406,12 @@ class ApplicationController(QObject):
             return
         self._gallery_dirty = False
         self._library.refresh()
+        self._management.refresh()
+        self.changed.emit()
+
+    def _managed_library_changed(self):
+        self._gallery_dirty = False
+        self._library.refresh()
         self.changed.emit()
 
     @Slot()
@@ -389,7 +421,7 @@ class ApplicationController(QObject):
             # call. Continue that click after the queued settings commit.
             if self._pending_settings and not (self._closing or self._preparing
                     or self._pending_start is not None or self._accounts.busy
-                    or self._download.running or self._schedule.mutating):
+                    or self._download.running or self._schedule.mutating or self._management.mutating):
                 self._save_after_settings = True
             return
         if not self._accounts.connected or self._accounts.authenticationState == "reconnect_required":
@@ -401,10 +433,26 @@ class ApplicationController(QObject):
             self.changed.emit()
             return
         snapshot = {**self._preferences, "account": self._account, "output_dir": self._output}
+        self._begin_manual_outcome()
         self._preparing = True
         self._message = self._error = ""
         self._commands.put(("prepare", (snapshot, frozenset())))
         self._state_changed()
+
+    @Slot(object)
+    def retryMissing(self, targets):
+        if not self.canStart or self._accounts.authenticationState == "reconnect_required":
+            self._error = "계정을 연결하고 다른 작업이 끝난 뒤 다시 시도해 주세요."
+            self.changed.emit()
+            return
+        snapshot = {**self._preferences, "account": self._account, "output_dir": self._output,
+                    "targets": tuple(targets)}
+        self._begin_manual_outcome()
+        self._preparing = True
+        self._message = self._error = ""
+        self._commands.put(("prepare", (snapshot, frozenset())))
+        self._state_changed()
+        self.retryStarted.emit()
 
     @Slot(bool)
     def confirmStorage(self, approved):
@@ -418,6 +466,7 @@ class ApplicationController(QObject):
             self._commands.put(("prepare", (snapshot, consents | {choice})))
         else:
             self._message = "저장 폴더를 유지했습니다"
+            self._record_manual_outcome({"status": "cancelled", "message": self._message})
         self._state_changed()
 
     @Slot()
@@ -464,7 +513,8 @@ class ApplicationController(QObject):
 
         options = JobOptions(**{name: snapshot[name] for name in (
             "account", "output_dir", "folder_mode", "scan_mode", "include_videos", "include_gifs",
-            "max_video_mb", "separate_accounts", "gif_format", "gif_size", "confirm_each")}).validate()
+            "max_video_mb", "separate_accounts", "gif_format", "gif_size", "confirm_each")},
+            targets=tuple(snapshot.get("targets", ()))).validate()
         destination = resolve_storage(options.output_dir, options.account, options.separate_accounts)
         locations = snapshot.get("record_locations", {})
         previous = locations.get(options.account) if isinstance(locations, dict) else None
@@ -495,6 +545,11 @@ class ApplicationController(QObject):
                     revision, changes = payload
                     self._settings.update(changes)
                     result = {"revision": revision}
+                elif kind == "activity":
+                    from .activity import record_outcome
+                    record_outcome(payload["outcome"], origin="manual", account=payload["account"],
+                                   output_dir=payload["output_dir"], started_at=payload["started_at"])
+                    result = {}
                 elif kind == "prepare":
                     if self._closing:
                         continue
@@ -559,6 +614,7 @@ class ApplicationController(QObject):
                 self._error = str(value)
             if kind == "prepare":
                 self._preparing = False
+                self._record_manual_outcome({"status": "error", "message": str(value)})
             if kind == "repair":
                 self._repairing = False
             if kind == "review":
@@ -567,6 +623,8 @@ class ApplicationController(QObject):
             return
         if kind == "settings":
             self._settings_finished(value["revision"], True)
+        elif kind == "activity":
+            self._management.refresh()
         elif kind == "prepare":
             self._preparing = False
             if "choice" in value:
@@ -577,12 +635,14 @@ class ApplicationController(QObject):
                 self.storageConfirmationRequested.emit()
                 return
             options = value["options"]
+            if self._activity_info is not None:
+                self._activity_info.update(account=options.account, output_dir=options.output_dir)
             locations = self._preferences.get("record_locations", {})
             locations = dict(locations) if isinstance(locations, dict) else {}
             locations[options.account] = options.output_dir
             self._account, self._output = options.account, options.output_dir
             revision = self._persist({"account": options.account, "output_dir": options.output_dir,
-                                      "record_locations": locations, "auth_mode": "managed"})
+                                      "record_locations": locations})
             self._message = self._error = ""
             self._pending_download = (revision, options)
             self._load_library()
@@ -613,8 +673,32 @@ class ApplicationController(QObject):
         if event.get("type") == "saved":
             self._gallery_dirty = True
             self.changed.emit()
-        elif event.get("type") == "process_exit" and not self._gallery_visible and not self._closing:
-            self.refreshGallery()
+        elif event.get("type") == "finished":
+            self._activity_terminal = dict(event)
+        elif event.get("type") == "process_exit":
+            outcome = dict(self._activity_terminal)
+            status = outcome.get("status", "error")
+            if event.get("forced"):
+                status = "interrupted"
+                outcome["message"] = "응답하지 않는 작업을 강제로 종료했습니다. 다음 저장에서 기록을 다시 확인합니다."
+            elif event.get("code") != 0:
+                status = "error"
+            outcome.update(status=status, code=event.get("code"), saved=self._download.savedCount,
+                           skipped=self._download.skippedCount)
+            self._record_manual_outcome(outcome)
+            self._management.refresh()
+            if not self._gallery_visible and not self._closing:
+                self.refreshGallery()
+
+    def _begin_manual_outcome(self):
+        self._activity_info = dict(run_id=uuid.uuid4().hex, account=self._account, output_dir=self._output,
+                                   started_at=datetime.now(timezone(timedelta(hours=9))).isoformat())
+        self._activity_terminal = {}
+
+    def _record_manual_outcome(self, outcome):
+        info, self._activity_info = self._activity_info, None
+        if info is not None:
+            self._commands.put(("activity", {**info, "outcome": {**outcome, "run_id": info["run_id"]}}))
 
     def _prepare_review(self, candidate):
         self._commands.put(("review", dict(candidate)))
@@ -668,12 +752,14 @@ class ApplicationController(QObject):
         self._save_after_settings = False
         self._accounts.setLocked(True)
         self._dismiss_review()
-        self._commands.put(("quit", None))
+        if not self._download.running:
+            self._record_manual_outcome({"status": "cancelled", "message": "앱을 닫아 저장 준비를 취소했습니다."})
         self._accounts.shutdown()
         self._download.shutdown()
         self._library.shutdown()
         self._browser_setup.shutdown()
         self._schedule.shutdown()
+        self._management.shutdown()
         self._close_timer.start()
         self.changed.emit()
 
@@ -681,7 +767,11 @@ class ApplicationController(QObject):
         self._shutdown_parts.add(name)
 
     def _finish_close(self):
-        if self._shutdown_parts >= {"accounts", "download", "library", "browser_setup", "schedule"} and not self._io_thread.is_alive():
+        if self._shutdown_parts >= {"accounts", "download", "library", "browser_setup", "schedule", "management"}:
+            if not self._io_shutdown_queued:
+                self._io_shutdown_queued = True
+                self._commands.put(("quit", None))
+        if self._io_shutdown_queued and not self._io_thread.is_alive():
             self._close_timer.stop()
             self._shutdown_ready = True
             self.changed.emit()

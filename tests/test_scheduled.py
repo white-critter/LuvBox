@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -22,11 +23,12 @@ class ScheduledRunTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.output = self.root / "사진 저장"
-        self.settings = {"account": "Offline_Test", "output_dir": str(self.output), "auth_mode": "managed",
+        self.settings = {"account": "Offline_Test", "output_dir": str(self.output),
                          "folder_mode": "date", "include_videos": False, "include_gifs": True,
                          "max_video_mb": 50, "separate_accounts": True, "scan_mode": "full"}
         for target, value in (("luvbox.scheduled.log_directory", self.root / "logs"),
-                              ("luvbox.scheduled.last_run_path", self.root / "last-scheduled.json")):
+                              ("luvbox.scheduled.last_run_path", self.root / "last-scheduled.json"),
+                              ("luvbox.activity.activity_path", self.root / "activity.sqlite3")):
             patcher = patch(target, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -57,7 +59,7 @@ class ScheduledRunTests(unittest.TestCase):
         code, calls, log = self.run_saved(self.settings)
         self.assertEqual(code, 0)
         options = calls[0]
-        self.assertEqual((options.account, options.auth_mode, options.scan_mode), ("offline_test", "managed", "quick"))
+        self.assertEqual((options.account, options.scan_mode), ("offline_test", "quick"))
         self.assertEqual((options.folder_mode, options.include_videos, options.include_gifs, options.max_video_mb,
                           options.separate_accounts), ("date", False, True, 50, True))
         self.assertEqual(options.output_dir, str(self.output.resolve()))
@@ -74,7 +76,6 @@ class ScheduledRunTests(unittest.TestCase):
     def test_runs_that_cannot_start_safely_are_refused_and_logged(self):
         cases = (
             ({}, "저장된 설정이 없습니다"),
-            (dict(self.settings, auth_mode="file"), "브라우저 로그인 연결"),
             (dict(self.settings, record_locations={"offline_test": str(self.root / "다른 폴더")}), "저장 폴더 변경이 끝나지"),
             (dict(self.settings, max_video_mb="200"), "0 이상의 정수"),
             (dict(self.settings, gif_format=["gif"]), "GIF 저장 형식"),
@@ -90,6 +91,43 @@ class ScheduledRunTests(unittest.TestCase):
     def test_matching_record_location_is_accepted(self):
         settings = dict(self.settings, record_locations={"offline_test": str(self.output)})
         self.assertEqual(self.run_saved(settings)[0], 0)
+
+    def test_each_terminal_outcome_is_kept_in_structured_history(self):
+        from luvbox.activity import outcome_page
+
+        self.assertEqual(self.run_saved(self.settings)[0], 0)
+        self.assertEqual(self.run_saved({})[0], 1)
+        rows = outcome_page()["rows"]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["status"] for row in rows], ["error", "finished"])
+        self.assertEqual((rows[1]["origin"], rows[1]["account"], rows[1]["saved"], rows[1]["skipped"]),
+                         ("scheduled", "offline_test", 1, 1))
+        self.assertIn("저장된 설정이 없습니다", rows[0]["message"])
+        self.assertTrue(all(row["started_at"] and row["finished_at"] for row in rows))
+
+    def test_scheduled_outcome_retains_catalog_run_id_for_deduplication(self):
+        from luvbox.activity import outcome_page
+
+        def worker(options, emit):
+            emit({"type": "finished", "status": "finished", "saved": 1, "history_run_id": 42})
+            return 0
+
+        with patch("luvbox.scheduled.load_settings", return_value=self.settings), \
+                patch("luvbox.core.run_worker", side_effect=worker):
+            self.assertEqual(scheduled.run_saved(), 0)
+        self.assertEqual(outcome_page()["rows"][0]["history_run_id"], 42)
+        self.assertEqual(scheduled.last_run()["history_run_id"], 42)
+
+    def test_worker_crash_is_logged_as_fixed_failure(self):
+        from luvbox.activity import outcome_page
+
+        with patch("luvbox.scheduled.load_settings", return_value=self.settings), \
+                patch("luvbox.core.run_worker", side_effect=RuntimeError("secret-token")):
+            self.assertEqual(scheduled.run_saved(), 1)
+        row = outcome_page()["rows"][0]
+        self.assertEqual(row["status"], "error")
+        self.assertNotIn("secret-token", row["message"])
+        self.notify.assert_called_once()
 
     def test_saved_preferences_never_restore_missing_folder_confirmation(self):
         with patch("luvbox.protection.state_directory", return_value=self.root / "state"), \
@@ -118,6 +156,8 @@ class ScheduledRunTests(unittest.TestCase):
         self.assertIn("자동 저장 기록을 만들지 못했습니다", notice["message"])
         self.assertEqual(notice["log"], "")
         self.assertEqual(logs.read_bytes(), b"existing file")
+        from luvbox.activity import outcome_page
+        self.assertIn("자동 저장 기록을 만들지 못했습니다", outcome_page()["rows"][0]["message"])
 
     def test_locked_log_reports_a_fixed_failure_without_exposing_the_io_error(self):
         with patch.object(Path, "open", side_effect=PermissionError("private path")), \
@@ -128,6 +168,57 @@ class ScheduledRunTests(unittest.TestCase):
         notice = self.notify.call_args.args[0]
         self.assertIn("자동 저장 기록을 만들지 못했습니다", notice["message"])
         self.assertNotIn("private path", notice["message"])
+
+    def test_log_write_failure_before_start_is_recorded_without_starting_worker(self):
+        from luvbox.activity import outcome_page
+
+        original_open = Path.open
+        class FaultyLog:
+            def write(self, text): raise OSError("private details")
+            def flush(self): pass
+            def close(self): pass
+        def open_fixture(path, *args, **kwargs):
+            if path.name.startswith("scheduled-") and args and args[0] == "a":
+                return FaultyLog()
+            return original_open(path, *args, **kwargs)
+        with patch.object(Path, "open", autospec=True, side_effect=open_fixture), \
+                patch("luvbox.core.run_worker") as worker:
+            self.assertEqual(scheduled.run_saved(), 1)
+        worker.assert_not_called()
+        row = outcome_page()["rows"][0]
+        self.assertEqual(row["status"], "error")
+        self.assertIn("자동 저장 기록을 만들지 못했습니다", row["message"])
+        self.assertNotIn("private details", row["message"])
+        self.notify.assert_called_once()
+
+    def test_log_write_failure_during_run_preserves_result_and_warns(self):
+        from luvbox.activity import outcome_page
+
+        original_open = Path.open
+        class FaultyLog:
+            def __init__(self): self.calls = 0
+            def write(self, text):
+                self.calls += 1
+                if self.calls > 1: raise OSError("private details")
+            def flush(self): pass
+            def close(self): pass
+        def open_fixture(path, *args, **kwargs):
+            if path.name.startswith("scheduled-") and args and args[0] == "a":
+                return FaultyLog()
+            return original_open(path, *args, **kwargs)
+        def worker(options, emit):
+            emit({"type": "saved", "path": str(self.output / "100_1.jpg")})
+            emit({"type": "finished", "status": "finished", "saved": 1, "history_run_id": 42})
+            return 0
+        with patch.object(Path, "open", autospec=True, side_effect=open_fixture), \
+                patch("luvbox.scheduled.load_settings", return_value=self.settings), \
+                patch("luvbox.core.run_worker", side_effect=worker):
+            self.assertEqual(scheduled.run_saved(), 0)
+        row = outcome_page()["rows"][0]
+        self.assertEqual((row["status"], row["saved"], row["history_run_id"]), ("partial", 1, 42))
+        self.assertIn("로그를 끝까지 기록하지 못했습니다", row["message"])
+        self.assertNotIn("private details", row["message"])
+        self.notify.assert_called_once()
 
     def test_scheduled_outcome_is_kept_and_only_real_failures_alert(self):
         self.assertEqual(self.run_saved(self.settings)[0], 0)
@@ -348,6 +439,35 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertEqual((status["current"], status["catch_up"]), (False, False))
         with self.powershell(b"not json"), self.assertRaises(scheduled.ScheduleError):
             scheduled.task_status()
+
+    @unittest.skipUnless(os.name == "nt", "Windows PowerShell scheduler wrapper")
+    def test_scheduler_permission_error_is_never_treated_as_missing_task(self):
+        fake = r'''
+function Get-ScheduledTask {
+    [CmdletBinding()]
+    param([string]$TaskName)
+    if ($env:XLS_FIXTURE -eq 'missing') {
+        $errorRecord = [System.Management.Automation.ErrorRecord]::new(
+            [System.Exception]::new('missing'), 'CmdletizationQuery_NotFound_TaskName',
+            [System.Management.Automation.ErrorCategory]::ObjectNotFound, $TaskName)
+    } else {
+        $errorRecord = [System.Management.Automation.ErrorRecord]::new(
+            [System.UnauthorizedAccessException]::new('denied'), 'AccessDenied',
+            [System.Management.Automation.ErrorCategory]::PermissionDenied, $TaskName)
+    }
+    $PSCmdlet.ThrowTerminatingError($errorRecord)
+}
+'''
+        response = scheduled._powershell(fake + scheduled._STATUS_SCRIPT, task="fixture", legacy="", fixture="missing")
+        self.assertEqual(json.loads(response), {"registered": False})
+        with self.assertRaises(scheduled.ScheduleError):
+            scheduled._powershell(fake + scheduled._STATUS_SCRIPT, task="fixture", legacy="", fixture="denied")
+
+    def test_scheduler_checks_all_known_task_names_before_changing_any(self):
+        register = scheduled._REGISTER_SCRIPT
+        self.assertLess(register.index("Get-LuvBoxTask $old"), register.index("Register-ScheduledTask -TaskName"))
+        unregister = scheduled._UNREGISTER_SCRIPT
+        self.assertLess(unregister.index("Get-LuvBoxTask $name"), unregister.index("Unregister-ScheduledTask -TaskName"))
 
     def test_task_under_the_former_app_name_is_found_and_replaced(self):
         data = {"registered": True, "name": "XlikeSaver 자동 저장", "program": self.PROGRAM,

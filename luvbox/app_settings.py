@@ -18,7 +18,7 @@ _SAVE_ERROR = "설정을 저장하지 못했습니다. 저장 권한을 확인�
 def default_settings() -> dict:
     return {
         "account": "", "output_dir": str(Path.home() / "Pictures" / "LuvBox"),
-        "auth_mode": "managed", "folder_mode": "flat", "scan_mode": "quick",
+        "folder_mode": "flat", "scan_mode": "quick",
         "include_videos": True, "include_gifs": True, "max_video_mb": 200,
         "separate_accounts": False, "gif_format": "gif", "gif_size": "original",
         "detailed_progress": False, "confirm_each": False,
