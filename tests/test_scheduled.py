@@ -427,8 +427,8 @@ class TaskSchedulerTests(unittest.TestCase):
     def test_status_reports_whether_this_version_is_registered(self):
         with self.powershell(b'{"registered": false}'):
             self.assertEqual(scheduled.task_status(), {"registered": False})
-        data = {"registered": True, "program": self.PROGRAM, "arguments": "--run-saved",
-                "start": "2026-10-06T07:30:00+09:00", "enabled": True, "catch_up": True, "on_battery": True,
+        data = {"registered": True, "name": scheduled.TASK_NAME, "program": self.PROGRAM, "arguments": "--run-saved",
+                "start": "2026-10-06T07:30:00+09:00", "enabled": True, "running": False, "catch_up": True, "on_battery": True,
                 "last_run": "", "next_run": "2026-10-07T07:30:00"}
         with self.powershell(json.dumps(data, ensure_ascii=False).encode("utf-8")):
             status = scheduled.task_status()
@@ -439,6 +439,14 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertEqual((status["current"], status["catch_up"]), (False, False))
         with self.powershell(b"not json"), self.assertRaises(scheduled.ScheduleError):
             scheduled.task_status()
+
+    def test_incomplete_status_is_not_mistaken_for_missing_task(self):
+        for output in (b'', b'{}', b'null', b'[]', b'{"registered": null}',
+                       b'{"registered": 0}', b'{"registered": "false"}',
+                       b'{"registered": true}', b'{"registered": true, "running": false}'):
+            with self.subTest(output=output), self.powershell(output):
+                with self.assertRaises(scheduled.ScheduleError):
+                    scheduled.task_status()
 
     @unittest.skipUnless(os.name == "nt", "Windows PowerShell scheduler wrapper")
     def test_scheduler_permission_error_is_never_treated_as_missing_task(self):
@@ -472,7 +480,7 @@ function Get-ScheduledTask {
     def test_task_under_the_former_app_name_is_found_and_replaced(self):
         data = {"registered": True, "name": "XlikeSaver 자동 저장", "program": self.PROGRAM,
                 "arguments": "--run-saved", "start": "2026-10-06T07:30:00+09:00", "enabled": True,
-                "catch_up": True, "on_battery": True, "last_run": "", "next_run": ""}
+                "running": False, "catch_up": True, "on_battery": True, "last_run": "", "next_run": ""}
         with self.powershell(json.dumps(data, ensure_ascii=False).encode("utf-8")) as run:
             status = scheduled.task_status()
         self.assertTrue(status["registered"])

@@ -102,6 +102,23 @@ class ManagementControllerTests(unittest.TestCase):
         self.assertFalse(self.management.error, self.management.error)
         self.assertEqual(self.ignored(), set())
 
+    def test_run_history_without_selected_account_requires_all_accounts_opt_in(self):
+        self.management.setLibrary('', str(self.output), False)
+        history = {'rows': [{'run_id': '1', 'account': 'alice', 'origin': 'manual',
+                             'status': 'finished'}], 'total': 1, 'page': 0, 'pages': 1}
+        with patch('luvbox.activity.outcome_page', return_value=history) as read_history:
+            self.management.setSection('runs')
+            self.wait(lambda: not self.management.busy)
+            self.assertEqual(self.management.total, 0)
+            self.assertEqual(self.management.rows, [])
+            read_history.assert_not_called()
+
+            self.management.setAllAccounts(True)
+            self.wait(lambda: not self.management.busy)
+            self.assertEqual(self.management.total, 1)
+            self.assertEqual(len(self.management.rows), 1)
+            read_history.assert_called_once_with(0, 100, account='')
+
     def test_file_restored_after_selection_cannot_be_marked_as_missing(self):
         token = self.missing_page()
         self.management.toggleRow(token)

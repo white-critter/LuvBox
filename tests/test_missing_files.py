@@ -233,6 +233,32 @@ class RetryWorkerTests(unittest.TestCase):
         self.assertIn("twitter200_1", self.entries())
         self.assertFalse((self.output / "200_1.jpg").exists())
 
+    def test_retry_keeps_archive_entries_even_during_download_and_constructor_failure(self):
+        self.saved_then_deleted()
+        before = self.entries()
+        observed = []
+        original = FakeHttpDownloader.download
+
+        def download(downloader, url, pathfmt):
+            observed.append(self.entries())
+            return original(downloader, url, pathfmt)
+
+        with patch.object(FakeHttpDownloader, "download", download):
+            code, events = self.retry(["100_1"], {"100": [(1, "photo")]})
+        self.assertEqual((code, events[-1]["status"]), (0, "finished"))
+        self.assertEqual(observed, [before])
+        self.assertEqual(self.entries(), before)
+
+        def unavailable_extractor(url):
+            self.assertEqual(self.entries(), before)
+            raise RuntimeError("extractor initialization failed")
+
+        with patch("gallery_dl.extractor.find", side_effect=unavailable_extractor):
+            events = []
+            code = run_worker(self.flat(targets=("200_1",)), events.append)
+        self.assertEqual((code, events[-1]["status"]), (1, "error"))
+        self.assertEqual(self.entries(), before)
+
     def test_rate_limit_ends_the_run_and_restores_the_archive(self):
         self.saved_then_deleted()
         code, events = self.retry(["100_1", "200_1"], {}, error=exception.AbortExtraction("429 rate limit"))

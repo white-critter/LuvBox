@@ -212,12 +212,39 @@ result.image.close()
         self.assertIn("scale=220:168:force_original_aspect_ratio=decrease", args)
         self.assertEqual(args[args.index("-vcodec") + 1], "bmp")
         self.assertEqual(run.call_args.kwargs["timeout"], 8)
+        self.assertEqual(run.call_args.kwargs["stdout"], subprocess.PIPE)
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
         self.assertEqual(run.call_args.kwargs["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
         with patch("luvbox.media.ffmpeg_path", return_value=None):
             self.assertIn("도구", thumbnail(path).note)
         with patch("luvbox.media.ffmpeg_path", return_value=Path("bundled.exe")), \
                 patch("luvbox.preview.subprocess.run", side_effect=subprocess.TimeoutExpired([], 8)):
             self.assertIsNone(thumbnail(path).image)
+
+    def test_video_preview_discards_large_decoder_error_stream(self):
+        path = self.root / "video.mp4"
+        path.write_bytes(b"offline-video")
+        frame = self.root / "frame.bmp"
+        with Image.new("RGB", (40, 20), "green") as image:
+            image.save(frame)
+        real_run = subprocess.run
+
+        def noisy_decoder(_command, **options):
+            # Run an actual subprocess that emits more than a pipe buffer;
+            # previews must complete without retaining these unused errors.
+            script = ("import pathlib,sys; "
+                      "sys.stderr.buffer.write(b'x' * (8 * 1024 * 1024)); "
+                      "sys.stdout.buffer.write(pathlib.Path(sys.argv[1]).read_bytes())")
+            completed = real_run([sys.executable, "-c", script, str(frame)], **options)
+            self.assertIsNone(completed.stderr)
+            return completed
+
+        with patch("luvbox.media.ffmpeg_path", return_value=Path("bundled.exe")), \
+                patch("luvbox.preview.subprocess.run", side_effect=noisy_decoder):
+            result = thumbnail(path)
+        self.assertIsNotNone(result.image)
+        self.assertEqual(result.image.size, (40, 20))
+        result.image.close()
 
     @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_bundled_decoder_reads_real_local_video_without_network(self):

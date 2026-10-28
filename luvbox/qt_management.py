@@ -285,7 +285,7 @@ class ManagementController(QObject):
                             elif section == "statistics": result = cache.statistics(page)
                             else: result = cache.run_page(page, all_accounts)
                             result["checked_at"] = cache.checked_at
-                        elif section == "runs":
+                        elif section == "runs" and (all_accounts or context[0]):
                             from .activity import outcome_page
                             result = outcome_page(page, PAGE_SIZE, account="" if all_accounts else context[0])
                         else: result = dict(rows=[], total=0, page=0, pages=0)

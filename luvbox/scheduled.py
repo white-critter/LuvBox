@@ -173,11 +173,19 @@ foreach ($name in $found) {
 def task_status() -> dict:
     """What is registered: program, daily time, and whether it is this app."""
     try:
-        data = json.loads(_powershell(_STATUS_SCRIPT, task=TASK_NAME, legacy="|".join(_LEGACY_TASKS)) or "{}")
+        data = json.loads(_powershell(_STATUS_SCRIPT, task=TASK_NAME, legacy="|".join(_LEGACY_TASKS)))
     except ValueError:
         raise ScheduleError(_SCHEDULE_HELP) from None
-    if not isinstance(data, dict) or not data.get("registered"):
+    # Only an explicit false from the scheduler means that no task exists.
+    # Incomplete output must not authorize replacement of an unknown task.
+    if not isinstance(data, dict) or type(data.get("registered")) is not bool:
+        raise ScheduleError(_SCHEDULE_HELP)
+    if not data["registered"]:
         return {"registered": False}
+    if (any(type(data.get(key)) is not bool for key in ("enabled", "running", "catch_up", "on_battery"))
+            or any(not isinstance(data.get(key), str) for key in
+                   ("name", "program", "arguments", "start", "last_run", "next_run"))):
+        raise ScheduleError(_SCHEDULE_HELP)
     program, arguments = launch_parts()
     start = str(data.get("start") or "")
     found = re.search(r"T(\d\d):(\d\d)", start)

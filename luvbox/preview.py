@@ -203,7 +203,10 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
                  "-threads", "1", "-f", "mov", "-i", str(path.resolve()), "-an", "-sn", "-dn", "-frames:v", "1",
                  "-vf", f"scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease",
                  "-f", "image2pipe", "-vcodec", "bmp", "pipe:1"],
-                capture_output=True, timeout=8,
+                # Error diagnostics are not displayed or parsed. A damaged
+                # video can produce repeated decoder errors, so do not retain
+                # an unbounded stderr stream in the app's memory.
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if result.returncode or not result.stdout:
                 return Thumbnail(None, "동영상 미리보기를 만들지 못했습니다. 파일 열기로 확인해 주세요.")

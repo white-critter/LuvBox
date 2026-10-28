@@ -16,7 +16,7 @@ import sqlite3
 import stat
 import tempfile
 import time
-from contextlib import closing, nullcontext
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from datetime import datetime as _Datetime
@@ -552,36 +552,6 @@ def _key_identity(key: str) -> tuple[str, int, str]:
     return match[1], int(match[3]), match[2] or "photo"
 
 
-def _entry_key(entry: str) -> str:
-    """An archive entry's key in the current spelling (no prefix, 'animated_gif')."""
-    key = entry.removeprefix("twitter")
-    return key.replace("_gif_", "_animated_gif_") if "_animated_gif_" not in key else key
-
-
-def _archive_entries(archive: Path, keys) -> list[str]:
-    """The archive's entries for these media, in every spelling it has used."""
-    candidates = []
-    for key in keys:
-        spellings = [key] + ([key.replace("_animated_gif_", "_gif_")] if "_animated_gif_" in key else [])
-        candidates.extend(prefix + spelling for spelling in spellings for prefix in ("twitter", ""))
-    if not archive.is_file() or not candidates:
-        return []
-    with closing(sqlite3.connect(archive, timeout=5)) as db:
-        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='archive'").fetchone():
-            return []
-        marks = ",".join("?" for _ in candidates)
-        return [row[0] for row in db.execute("SELECT entry FROM archive WHERE entry IN (" + marks + ")", candidates)]
-
-
-def _set_archive_entries(archive: Path, entries, *, present: bool) -> None:
-    if not entries:
-        return
-    with closing(sqlite3.connect(archive, timeout=5)) as db, db:
-        statement = ("INSERT OR IGNORE INTO archive(entry) VALUES (?)" if present
-                     else "DELETE FROM archive WHERE entry=?")
-        db.executemany(statement, [(entry,) for entry in entries])
-
-
 def _retry_message(saved: int, found: int, unavailable: int, absent: int, limited: int = 0) -> str:
     parts = [f"사라진 파일 다시 받기를 마쳤습니다 · 받은 파일 {saved:,}개"]
     if found:
@@ -974,6 +944,19 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             super().initialize(kwdict)
             if self.archive is None:
                 raise exception.AbortExtraction("download archive unavailable")
+            if targets:
+                # Only bypass the lookup for selected retry files. Never delete
+                # their archive entries: a forced exit could prevent restoring
+                # them and change how a later normal save treats those files.
+                check_archive = self.archive.check
+
+                def retry_check(item):
+                    # The original check also prepares gallery-dl's cache key
+                    # for archive.add, even when this retry ignores its result.
+                    found = check_archive(item)
+                    return False if item.get("_luvbox_archive_key") in targets else found
+
+                self.archive.check = retry_check
 
         def handle_url(self, url, kwdict):
             nonlocal stop_reason, saved, skipped, size_skipped, review_skipped, review_never, existing_streak
@@ -1703,16 +1686,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 exit_code = 0
                 for tweet_id, keys in _retry_groups(normalized.targets):
                     check_stop()
-                    # Release just this tweet's archive entries, so a stop or an
-                    # unavailable tweet leaves every other choice as it was.
-                    entries = _archive_entries(archive_path, keys)
-                    _set_archive_entries(archive_path, entries, present=False)
                     active_job = PhotoJob(f"https://x.com/i/web/status/{tweet_id}")
                     try:
                         active_job.run()
                     finally:
-                        _set_archive_entries(archive_path, [entry for entry in entries
-                                                            if _entry_key(entry) not in recovered], present=True)
                         session = getattr(active_job.extractor, "session", None)
                         if session is not None:
                             session.cookies.clear()
