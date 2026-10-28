@@ -6,6 +6,9 @@ Switch {
     implicitHeight: 36
     spacing: 12
     font.pixelSize: 14
+    HoverHandler {
+        cursorShape: control.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+    }
 
     indicator: Rectangle {
         implicitWidth: 44

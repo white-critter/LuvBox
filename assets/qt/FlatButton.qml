@@ -10,6 +10,9 @@ Button {
     rightPadding: 16
     font.bold: tone === "primary" || (tone === "nav" && checked)
     font.pixelSize: tone === "primary" ? 15 : 14
+    HoverHandler {
+        cursorShape: control.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+    }
     background: Rectangle {
         radius: 8
         color: {

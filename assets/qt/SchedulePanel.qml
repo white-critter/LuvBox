@@ -179,6 +179,22 @@ ColumnLayout {
         width: Math.min(460, parent ? parent.width - 32 : 460)
         implicitHeight: 260
         height: Math.min(implicitHeight, parent ? Math.max(180, parent.height - 32) : implicitHeight)
+        padding: 24
+        background: Rectangle {
+            color: "#141414"
+            radius: 16
+            border.width: 1
+            border.color: "#2a2a2a"
+        }
+        header: Label {
+            text: confirmation.title
+            leftPadding: 24
+            rightPadding: 24
+            topPadding: 20
+            bottomPadding: 4
+            font.pixelSize: 18
+            background: null
+        }
         title: panel.action === "remove" ? "자동 저장 예약을 해제할까요?"
             : panel.action === "migrate" ? "현재 버전으로 변경할까요?"
             : panel.action === "create" ? "자동 저장을 예약할까요?" : "예약을 저장할까요?"
@@ -203,6 +219,7 @@ ColumnLayout {
                 panel.timeEdited = false
         }
         footer: DialogButtonBox {
+            background: null
             FlatButton {
                 text: panel.action === "remove" ? "예약 해제" : "확인"
                 tone: "primary"

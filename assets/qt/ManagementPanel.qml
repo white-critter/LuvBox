@@ -204,10 +204,17 @@ ColumnLayout {
             spacing: 6
             ScrollBar.vertical: ScrollBar { policy: records.contentHeight > records.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
             delegate: Frame {
+                id: rowFrame
                 required property var modelData
                 width: records.width
                 padding: 12
-                background: Rectangle { color: "#191919"; radius: 10 }
+                background: Rectangle {
+                    color: rowHover.hovered ? "#222222" : "#191919"
+                    radius: 10
+                    border.width: 1
+                    border.color: rowHover.hovered ? "#333333" : "transparent"
+                }
+                HoverHandler { id: rowHover }
                 RowLayout {
                     width: parent.width
                     CheckBox {
@@ -215,6 +222,7 @@ ColumnLayout {
                         enabled: modelData.selectable && !panel.manager.busy && !panel.manager.mutating
                         checked: panel.manager && panel.manager.selectedKeys.indexOf(modelData.token) >= 0
                         Accessible.name: modelData.title + " 선택"
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
                         onClicked: panel.manager.toggleRow(modelData.token)
                     }
                     ColumnLayout {

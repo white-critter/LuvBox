@@ -10,6 +10,9 @@ ComboBox {
     hoverEnabled: true
     // Measures the widest choice, so the list fits its labels and no more.
     implicitContentWidthPolicy: ComboBox.WidestText
+    HoverHandler {
+        cursorShape: control.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+    }
 
     background: Rectangle {
         radius: 10
@@ -27,10 +30,15 @@ ComboBox {
     }
 
     indicator: Canvas {
+        id: canvasIndicator
         width: 10
         height: 6
         x: control.width - width - 14
         y: (control.height - height) / 2
+        Connections {
+            target: control
+            function onEnabledChanged() { canvasIndicator.requestPaint() }
+        }
         onPaint: {
             const ctx = getContext("2d")
             ctx.reset()
@@ -38,7 +46,7 @@ ComboBox {
             ctx.lineTo(width, 1)
             ctx.lineTo(width / 2, height)
             ctx.closePath()
-            ctx.fillStyle = "#b9afb1"
+            ctx.fillStyle = control.enabled ? "#b9afb1" : "#555555"
             ctx.fill()
         }
     }
@@ -59,6 +67,9 @@ ComboBox {
         font.pixelSize: 14
         leftPadding: 12
         rightPadding: 12
+        HoverHandler {
+            cursorShape: Qt.PointingHandCursor
+        }
         contentItem: Text {
             text: row.text
             font: row.font

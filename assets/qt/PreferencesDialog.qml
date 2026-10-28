@@ -184,6 +184,16 @@ Dialog {
                     text: checked ? "고급 ▾" : "고급 ▸"
                     checkable: true
                     Accessible.name: "고급 설정"
+                    HoverHandler {
+                        cursorShape: Qt.PointingHandCursor
+                    }
+                    contentItem: Text {
+                        text: advancedToggle.text
+                        font.pixelSize: 14
+                        color: "#f4f1f1"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
                     background: Rectangle {
                         radius: 10
                         color: advancedToggle.hovered || advancedToggle.checked ? "#242424" : "#1c1c1c"

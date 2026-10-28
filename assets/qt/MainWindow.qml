@@ -358,7 +358,10 @@ ApplicationWindow {
                                 Label {
                                     id: outputFolderLabel
                                     Layout.fillWidth: true
-                                    text: window.app ? window.app.outputFolder : ""
+                                    text: window.app && window.app.outputFolder.length > 0
+                                        ? window.app.outputFolder : "저장할 폴더를 선택해 주세요"
+                                    color: window.app && window.app.outputFolder.length > 0
+                                        ? window.textColor : window.mutedColor
                                     textFormat: Text.PlainText
                                     elide: Text.ElideMiddle
                                     HoverHandler { id: outputFolderHover }
@@ -367,7 +370,7 @@ ApplicationWindow {
                                     ToolTip.visible: outputFolderHover.hovered && outputFolderLabel.truncated
                                 }
                                 FlatButton { text: "폴더 선택"; enabled: window.app && !window.app.busy; onClicked: window.chooseSaveFolder() }
-                                FlatButton { text: "열기"; onClicked: if (window.app) window.app.openOutputFolder() }
+                                FlatButton { text: "열기"; enabled: !!(window.app && window.app.outputFolder.length > 0); onClicked: if (window.app) window.app.openOutputFolder() }
                             }
                         }
                     }
@@ -453,7 +456,11 @@ ApplicationWindow {
                                 FlatButton {
                                     text: "예약 관리"
                                     visible: !!window.app
-                                    onClicked: window.currentScreen = 2
+                                    onClicked: {
+                                        if (window.app)
+                                            window.app.management.setSection("schedule")
+                                        window.currentScreen = 2
+                                    }
                                 }
                             }
                             Label {
@@ -553,6 +560,14 @@ ApplicationWindow {
                             window.stopWheel()
                             searchDelay.restart()
                         }
+                        onAccepted: {
+                            window.stopWheel()
+                            searchDelay.stop()
+                            if (window.app)
+                                window.app.library.search(text)
+                            else
+                                window.galleryModel.search(text)
+                        }
                     }
                     FlatCombo {
                         objectName: "thumbSizeChoice"
@@ -646,9 +661,16 @@ ApplicationWindow {
                     }
                 }
                 ColumnLayout {
+                    id: filterBox
                     Layout.fillWidth: true
                     visible: !!window.app && filterToggle.checked
                     spacing: 6
+                    function applyAdvancedFilter() {
+                        if (window.app && window.app.library.setAdvancedFilters(authorFilter.text,
+                                dateFieldChoice.currentIndex === 1 ? "saved" : "posted",
+                                dateFromFilter.text, dateToFilter.text))
+                            filterToggle.checked = false
+                    }
                     RowLayout {
                         Layout.fillWidth: true
                         FlatField {
@@ -659,6 +681,7 @@ ApplicationWindow {
                             Accessible.name: "정확한 작성자 ID"
                             selectByMouse: true
                             maximumLength: 16
+                            onAccepted: filterBox.applyAdvancedFilter()
                         }
                         FlatCombo {
                             id: dateFieldChoice
@@ -678,6 +701,7 @@ ApplicationWindow {
                             Accessible.name: "시작 날짜 YYYY-MM-DD"
                             selectByMouse: true
                             maximumLength: 10
+                            onAccepted: filterBox.applyAdvancedFilter()
                         }
                         Label { text: "~" }
                         FlatField {
@@ -688,16 +712,12 @@ ApplicationWindow {
                             Accessible.name: "종료 날짜 YYYY-MM-DD"
                             selectByMouse: true
                             maximumLength: 10
+                            onAccepted: filterBox.applyAdvancedFilter()
                         }
                         FlatButton {
                             objectName: "galleryFilterApply"
                             text: "적용"
-                            onClicked: {
-                                if (window.app.library.setAdvancedFilters(authorFilter.text,
-                                        dateFieldChoice.currentIndex === 1 ? "saved" : "posted",
-                                        dateFromFilter.text, dateToFilter.text))
-                                    filterToggle.checked = false
-                            }
+                            onClicked: filterBox.applyAdvancedFilter()
                         }
                     }
                 }
@@ -865,7 +885,8 @@ ApplicationWindow {
                             anchors.fill: parent
                             anchors.margins: 6
                             radius: 10
-                            color: tile.batchSelected || gallery.currentIndex === tile.index ? "#241416" : window.cardColor
+                            color: tile.batchSelected || gallery.currentIndex === tile.index ? "#241416"
+                                : (tileMouse.containsMouse ? "#212121" : window.cardColor)
                             border.width: tile.batchSelected || gallery.currentIndex === tile.index ? 1 : 0
                             border.color: window.accentColor
                             Image {
@@ -894,7 +915,10 @@ ApplicationWindow {
                                 color: window.mutedColor
                             }
                             MouseArea {
+                                id: tileMouse
                                 anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
                                 onPressed: window.stopWheel()
                                 onClicked: mouse => {
                                     gallery.currentIndex = tile.index
@@ -985,6 +1009,31 @@ ApplicationWindow {
             sequence: "Right"
             enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canNext
             onActivated: window.app.library.nextItem()
+        }
+        Shortcut {
+            sequence: "+"
+            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canZoomIn
+            onActivated: selectedMedia.zoomIn()
+        }
+        Shortcut {
+            sequence: "="
+            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canZoomIn
+            onActivated: selectedMedia.zoomIn()
+        }
+        Shortcut {
+            sequence: "-"
+            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canZoomOut
+            onActivated: selectedMedia.zoomOut()
+        }
+        Shortcut {
+            sequence: "0"
+            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.ready
+            onActivated: selectedMedia.fit()
+        }
+        Shortcut {
+            sequence: "1"
+            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canActualSize
+            onActivated: selectedMedia.actualSize()
         }
         onAboutToShow: {
             detailsVisible = false
@@ -1103,6 +1152,10 @@ ApplicationWindow {
                     readOnly: true
                     wrapMode: TextEdit.Wrap
                     selectByMouse: true
+                    color: "#f4f1f1"
+                    selectionColor: window.accentColor
+                    selectedTextColor: "white"
+                    font.pixelSize: 13
                     background: null
                 }
             }

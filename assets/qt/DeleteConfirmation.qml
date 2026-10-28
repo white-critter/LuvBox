@@ -15,6 +15,22 @@ Dialog {
     height: Math.min(360, parent ? Math.max(200, parent.height - 32) : 360)
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
+    padding: 24
+    background: Rectangle {
+        color: "#141414"
+        radius: 16
+        border.width: 1
+        border.color: "#2a2a2a"
+    }
+    header: Label {
+        text: dialog.title
+        leftPadding: 24
+        rightPadding: 24
+        topPadding: 20
+        bottomPadding: 4
+        font.pixelSize: 18
+        background: null
+    }
     onOpened: { keepDeleted.checked = false; cancelButton.forceActiveFocus() }
     onRejected: if (app) app.management.cancelDelete()
     onAccepted: {
@@ -27,6 +43,8 @@ Dialog {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
             Label {
                 width: parent.width
                 text: dialog.app ? dialog.app.management.deleteSummary : ""
@@ -42,6 +60,7 @@ Dialog {
         }
     }
     footer: DialogButtonBox {
+        background: null
         FlatButton {
             objectName: "confirmRecycle"
             text: "휴지통으로 이동"

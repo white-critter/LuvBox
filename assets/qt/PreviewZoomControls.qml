@@ -8,16 +8,27 @@ Row {
     FlatButton {
         text: "−"
         Accessible.name: "미리보기 축소"
+        implicitWidth: 36
+        leftPadding: 0
+        rightPadding: 0
         enabled: controls.preview.canZoomOut
         onClicked: controls.preview.zoomOut()
     }
     Label {
         text: Math.round(controls.preview.zoomPercent) + "%"
-        topPadding: 10
+        width: 54
+        height: 36
+        verticalAlignment: Text.AlignVCenter
+        horizontalAlignment: Text.AlignHCenter
+        color: "#f4f1f1"
+        font.pixelSize: 13
     }
     FlatButton {
         text: "+"
         Accessible.name: "미리보기 확대"
+        implicitWidth: 36
+        leftPadding: 0
+        rightPadding: 0
         enabled: controls.preview.canZoomIn
         onClicked: controls.preview.zoomIn()
     }

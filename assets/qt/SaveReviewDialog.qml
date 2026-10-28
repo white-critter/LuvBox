@@ -65,6 +65,7 @@ Dialog {
             text: dialog.title
             textFormat: Text.PlainText
             font.bold: true
+            font.pixelSize: 18
             elide: Text.ElideRight
         }
         PreviewZoomControls {
@@ -158,10 +159,12 @@ Dialog {
                     }
                     MenuItem {
                         text: "이 사진 다시 받지 않기"
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
                         onTriggered: dialog.submit("never")
                     }
                     MenuItem {
                         text: "이후 모두 자동 저장"
+                        HoverHandler { cursorShape: Qt.PointingHandCursor }
                         onTriggered: dialog.submit("all")
                     }
                 }

@@ -244,6 +244,16 @@ Dialog {
                     implicitHeight: 40
                     checkable: true
                     text: checked ? "확장 설치·연결 도움말 ▾" : "처음 연결하거나 확장 응답이 없나요? ▸"
+                    HoverHandler {
+                        cursorShape: Qt.PointingHandCursor
+                    }
+                    contentItem: Text {
+                        text: setupToggle.text
+                        font.pixelSize: 14
+                        color: "#f4f1f1"
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
                     background: Rectangle {
                         radius: 10
                         color: setupToggle.hovered || setupToggle.checked ? "#242424" : "#1c1c1c"
@@ -332,9 +342,25 @@ Dialog {
             }
 
             ToolButton {
+                id: advancedMethodToggle
                 Layout.fillWidth: true
+                implicitHeight: 40
                 text: dialog.methodIndex === 1 ? "고급 연결 · 토큰 입력 ▾" : "고급 연결 · 토큰 입력 ▸"
                 enabled: !dialog.unavailable && !dialog.accounts.busy
+                HoverHandler {
+                    cursorShape: Qt.PointingHandCursor
+                }
+                contentItem: Text {
+                    text: advancedMethodToggle.text
+                    font.pixelSize: 14
+                    color: "#f4f1f1"
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                }
+                background: Rectangle {
+                    radius: 10
+                    color: advancedMethodToggle.hovered || dialog.methodIndex === 1 ? "#242424" : "#1c1c1c"
+                }
                 onClicked: dialog.methodIndex = dialog.methodIndex === 1 ? 0 : 1
             }
             ColumnLayout {
