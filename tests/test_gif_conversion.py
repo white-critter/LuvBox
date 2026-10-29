@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import closing
 from dataclasses import replace
@@ -18,6 +19,48 @@ from tests import test_core, test_missing_files
 from luvbox import core, media
 from luvbox.history import HistoryStore
 from luvbox.storage import migrate_records, resolve_storage
+
+
+class ConversionDiagnosticTests(unittest.TestCase):
+    def test_repeated_diagnostics_stop_only_owned_helper_and_preserve_mp4(self):
+        with tempfile.TemporaryDirectory(prefix="luvbox-gif-diagnostics-") as folder:
+            source = Path(folder) / "100_gif_1.mp4.part"
+            original = b"disposable source preserved on conversion failure"
+            source.write_bytes(original)
+            processes = []
+            start = subprocess.Popen
+
+            def noisy_helper(_arguments, **kwargs):
+                process = start([sys.executable, "-c",
+                                 "import sys,time;sys.stderr.write('private diagnostic ' * 512);"
+                                 "sys.stderr.flush();time.sleep(30)"], **kwargs)
+                processes.append(process)
+                return process
+
+            try:
+                with patch.object(media, "ffmpeg_path", return_value=Path(sys.executable)), \
+                        patch.object(media.subprocess, "Popen", side_effect=noisy_helper), \
+                        patch.object(media, "_DIAGNOSTIC_LIMIT_BYTES", 4096), \
+                        self.assertRaises(media.ConversionError) as raised:
+                    media.convert_mp4_to_gif(source)
+                self.assertIn("오류가 반복", str(raised.exception))
+                self.assertNotIn("private diagnostic", str(raised.exception))
+                self.assertEqual(len(processes), 1)
+                self.assertIsNotNone(processes[0].poll())
+                self.assertEqual(source.read_bytes(), original)
+                self.assertEqual(list(Path(folder).iterdir()), [source])
+            finally:
+                for process in processes:
+                    if process.poll() is None:
+                        process.kill()
+                    process.wait(timeout=5)
+
+    def test_small_duration_report_remains_available_to_the_second_pass(self):
+        report = b"Duration: 00:00:01.23, start: 0.000000\n"
+        result = media._run([sys.executable, "-c",
+                             "import sys;sys.stderr.buffer.write(" + repr(report) + ")"],
+                            check_stop=lambda: None, deadline=time.monotonic() + 10)
+        self.assertEqual(result, report)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")

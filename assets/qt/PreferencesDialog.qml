@@ -84,7 +84,7 @@ Dialog {
             app.setPreference(key, options[index].value)
     }
 
-    contentItem: ScrollView {
+    contentItem: FocusScrollView {
         id: scrollView
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
@@ -196,6 +196,8 @@ Dialog {
                     }
                     background: Rectangle {
                         radius: 10
+                        border.width: advancedToggle.visualFocus ? 2 : 0
+                        border.color: "#ff8791"
                         color: advancedToggle.hovered || advancedToggle.checked ? "#242424" : "#1c1c1c"
                     }
                 }

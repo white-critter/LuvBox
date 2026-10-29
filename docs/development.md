@@ -1,4 +1,4 @@
-# LuvBox 1.3.3 개발 안내
+# LuvBox 1.3.4 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -13,6 +13,10 @@ git lfs pull
 ```
 
 Python 위치를 지정하려면 `setup.ps1 -PythonPath 'C:\경로\python.exe'`를 사용합니다. 준비 스크립트는 `.venv`에 `requirements-dev.txt`를 설치하되 `requirements-lock.txt`의 고정 버전을 적용하고, ExifTool을 준비해 번들 FFmpeg를 확인합니다. UI·다운로드 실행에 별도 서버나 X 개발자 API 키는 필요하지 않습니다. Node.js는 선택적 브라우저 확장 호환 검사에만 사용합니다.
+
+Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사용합니다. `check_build_inputs.py --python-only`로 자산 없이 확인할 수 있으며 준비·빌드도 같은 기준으로 검사합니다. 1.3.4 Windows 빌드는 Astral python-build-standalone 20261026의 CPython 3.12.16 x64를 프로젝트의 `.python/`에 두고 기존 `.venv`를 `python.exe -m venv --upgrade .venv`로 갱신했습니다. 시스템 전역·Codex Python은 변경하지 않습니다. `.python/`은 개인 가상환경의 기반이므로 사용하는 동안 보존하며 Git·배포 소스에는 넣지 않습니다. 원본 자산 SHA-256은 `590dfcbe3a34c07301e6332e13e2188b98655cd072b08afa45a7998dc4c22bc5`입니다.
+
+대응하는 Python 전체 배포의 빌드 메타데이터·원본 라이선스는 `tools/python/`에 보존하고 릴리스에 동봉합니다. 다른 Python 배포로 빌드할 때는 그 배포의 라이선스와 구성요소 고지도 확인하세요.
 
 콘솔에서 실행하려면 `.\.venv\Scripts\python.exe entry.py`를 사용합니다. 제품 버전의 기준은 `luvbox/__init__.py`입니다. Pillow 13.0.0, certifi 2026.10.19, setuptools 84.1.0의 보안 수정은 고정 의존성과 함께 유지합니다.
 
@@ -71,9 +75,11 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 `build.ps1`은 고정 입력·ExifTool·FFmpeg와 Qt 원본 소스·라이선스를 준비하고 PyInstaller 폴더형 앱을 만듭니다. Windows System32를 우선해 잘못된 ICU DLL 수집을 막습니다. 빌드 Python이 요구하는 선택적 SSL 보조 파일은 해당 정책을 보존한 채 동봉합니다.
 
+Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합니다. 패키징도 COLLECT의 원본 경로와 실제 번들 바이트를 대조하므로 PATH에 있는 다른 도구의 같은 이름 DLL이나 교체된 파일을 거부합니다.
+
 실제 EXE의 Qt 창·갤러리·미리보기·설정·연결창·종료 검사와 오프라인 저장 시작 검사를 모두 통과해야 ZIP을 만듭니다. 직접 패키징도 현재 버전과 EXE SHA-256에 일치하는 두 검사 보고서를 요구합니다. EXE·`_internal`·동봉 소스·라이선스를 함께 유지합니다. Qt와 미디어 구성요소의 버전별 원본 자료는 [Qt 소스 안내](../tools/qt/README.md), [FFmpeg 안내](../tools/ffmpeg/README.md)를 따릅니다. 검사 실패를 피하려고 입력 체크섬·TLS 검증·패키징 허용 목록을 완화하지 않습니다.
 
-산출물은 `release/LuvBox-1.3.3/`, `release/LuvBox-1.3.3.zip`, `release/SHA256-1.3.3.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox-1.3.4/`, `release/LuvBox-1.3.4.zip`, `release/SHA256-1.3.4.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 `tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 

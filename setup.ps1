@@ -12,13 +12,13 @@ if (-not (Test-Path -LiteralPath '.venv\Scripts\python.exe')) {
         }
         $taskPython = $taskPythonCommand.Source
     }
-    & $taskPython -c "import sys; assert sys.version_info >= (3, 12), 'Python 3.12+ required'"
-    if ($LASTEXITCODE -ne 0) { throw 'Python 3.12 이상이 필요합니다.' }
+    & $taskPython 'tools\check_build_inputs.py' '--python-only'
+    if ($LASTEXITCODE -ne 0) { throw '보안 업데이트된 Python이 필요합니다. 위의 버전 안내를 확인해 주세요.' }
     & $taskPython -m venv .venv
     if ($LASTEXITCODE -ne 0) { throw '가상환경 생성에 실패했습니다.' }
 }
-& '.\.venv\Scripts\python.exe' -c "import sys; assert sys.version_info >= (3, 12), 'Python 3.12+ required'"
-if ($LASTEXITCODE -ne 0) { throw '기존 가상환경에 Python 3.12 이상이 필요합니다. 새 가상환경을 준비해 주세요.' }
+& '.\.venv\Scripts\python.exe' 'tools\check_build_inputs.py' '--python-only'
+if ($LASTEXITCODE -ne 0) { throw '기존 가상환경의 Python 보안 업데이트가 필요합니다. 위의 버전으로 새 가상환경을 준비해 주세요.' }
 & '.\.venv\Scripts\python.exe' -m pip install -r requirements-dev.txt -c requirements-lock.txt
 if ($LASTEXITCODE -ne 0) { throw '패키지 설치에 실패했습니다.' }
 & '.\.venv\Scripts\python.exe' 'tools\exiftool\download.py'

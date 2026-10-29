@@ -15,6 +15,7 @@ from .process_limits import ChildProcessJob
 
 
 CONVERSION_TIMEOUT = 600
+_DIAGNOSTIC_LIMIT_BYTES = 1024 * 1024
 # GIF size presets: longest side in pixels and maximum frames per second.
 # Zero keeps the source value. Smaller GIFs are often several times lighter.
 GIF_SIZES = {"original": (0, 0), "720": (720, 15), "480": (480, 12)}
@@ -50,8 +51,9 @@ def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: floa
          output: Path | None = None, max_bytes: int = 0) -> bytes:
     """Run FFmpeg and return its diagnostics for local parsing only.
 
-    A temporary stderr file cannot block on a full pipe. Raw diagnostics may
-    contain local filenames, so callers get only our fixed safe error text.
+    A temporary stderr file cannot block on a full pipe. Check its growth
+    while running as damaged media can log continuously for the full timeout.
+    Raw diagnostics may contain filenames, so callers get only fixed text.
     """
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(arguments, stdin=subprocess.DEVNULL,
@@ -74,11 +76,13 @@ def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: floa
                     raise ConversionError("GIF 변환 시간이 너무 오래 걸려 중단했습니다. MP4 임시 파일은 보존했습니다.")
                 if output is not None and max_bytes and output.stat().st_size > max_bytes:
                     raise ConversionSizeLimit("변환된 GIF가 용량 제한을 초과했습니다. MP4 임시 파일은 보존했습니다.")
+                if os.fstat(errors.fileno()).st_size > _DIAGNOSTIC_LIMIT_BYTES:
+                    raise ConversionError("GIF 변환 중 오류가 반복되어 중단했습니다. MP4 임시 파일은 보존했습니다.")
                 if process.poll() is not None:
                     if process.returncode:
                         raise ConversionError("GIF로 변환하지 못했습니다. MP4 임시 파일은 보존했습니다. 다시 저장을 시작하면 재시도합니다.")
                     errors.seek(0)
-                    return errors.read(1024 * 1024)
+                    return errors.read(_DIAGNOSTIC_LIMIT_BYTES)
                 time.sleep(0.1)
         finally:
             try:

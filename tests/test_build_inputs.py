@@ -14,6 +14,43 @@ from unittest.mock import patch
 from tools import check_build_inputs
 
 
+class PythonSecurityBaselineTests(unittest.TestCase):
+    def test_each_supported_series_rejects_the_previous_patch(self):
+        for version in ((2, 7, 18), (3, 11, 99), (3, 12, 15), (3, 13, 17),
+                        (3, 14, 9), (3, 15, 1)):
+            with self.subTest(version=version), self.assertRaisesRegex(ValueError, "security baseline"):
+                check_build_inputs.require_secure_python(version)
+
+    def test_each_exact_baseline_later_patch_and_future_series_are_allowed(self):
+        for version in ((3, 12, 16), (3, 12, 17), (3, 13, 18), (3, 13, 19),
+                        (3, 14, 10), (3, 14, 11), (3, 15, 2), (3, 15, 3),
+                        (3, 16, 0), (4, 0, 0)):
+            with self.subTest(version=version):
+                check_build_inputs.require_secure_python(version)
+
+    def test_all_cli_modes_reject_old_runtime_before_accessing_assets(self):
+        for arguments in ([], ["--assets-only"], ["--python-only"]):
+            output = io.StringIO()
+            with self.subTest(arguments=arguments), \
+                    patch.object(check_build_inputs.sys, "version_info", (3, 12, 14)), \
+                    patch.object(check_build_inputs, "require_inputs") as inputs, redirect_stderr(output):
+                self.assertEqual(check_build_inputs.main(arguments), 1)
+                inputs.assert_not_called()
+            message = output.getvalue()
+            self.assertIn("Python 3.12.14", message)
+            self.assertIn("3.12.16", message)
+            self.assertIn("recreate .venv", message)
+            self.assertNotIn("Traceback", message)
+
+    def test_python_only_accepts_secure_runtime_without_prepared_assets(self):
+        output = io.StringIO()
+        with patch.object(check_build_inputs.sys, "version_info", (3, 12, 16)), \
+                patch.object(check_build_inputs, "require_inputs") as inputs, redirect_stdout(output):
+            self.assertEqual(check_build_inputs.main(["--python-only"], root=Path("unprepared-inputs")), 0)
+            inputs.assert_not_called()
+        self.assertIn("Python security baseline verified", output.getvalue())
+
+
 class BuildInputTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="luvbox-build-inputs-")
@@ -56,6 +93,11 @@ class BuildInputTests(unittest.TestCase):
             check_build_inputs.require_inputs(self.root)
         network.assert_not_called()
         execute.assert_not_called()
+
+    def test_pure_input_checks_remain_independent_of_the_host_python(self):
+        with patch.object(check_build_inputs.sys, "version_info", (3, 12, 14)):
+            self.assertEqual(check_build_inputs.check_inputs(self.root), [])
+            check_build_inputs.require_inputs(self.root)
 
     def test_font_and_runtime_lfs_pointers_report_specific_repair(self):
         pointer = (b"version https://git-lfs.github.com/spec/v1\n"
@@ -117,6 +159,7 @@ class BuildInputTests(unittest.TestCase):
                     self.assertEqual((self.root / name).read_bytes(), b"first line\r\nsecond line\r\n")
                 self.assertEqual((self.root / license_name).read_bytes(), b"first line\nsecond line\n")
 
+    @patch.object(check_build_inputs.sys, "version_info", (3, 12, 16))
     def test_invalid_manifest_and_cli_failure_are_clear_without_traceback(self):
         for name in ("assets/fonts/Pretendard/manifest.json", "tools/ffmpeg/manifest.json"):
             original = (self.root / name).read_bytes()
@@ -133,6 +176,7 @@ class BuildInputTests(unittest.TestCase):
         self.assertTrue(any("incomplete font metadata" in error
                             for error in check_build_inputs.check_inputs(self.root)))
 
+    @patch.object(check_build_inputs.sys, "version_info", (3, 12, 16))
     def test_cli_success_is_read_only(self):
         before = {path.relative_to(self.root): path.read_bytes()
                   for path in self.root.rglob("*") if path.is_file()}

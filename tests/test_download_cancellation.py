@@ -49,8 +49,12 @@ def before(extractor, row):
     (output / "resumable.part").write_bytes(b"retained partial input")
     if scenario == "forced-conversion":
         from luvbox.media import _run
+        # Publish only the completed PID; observing a newly opened file can
+        # otherwise race its first write under concurrent build/test load.
         child = ("import os,time;from pathlib import Path;"
-                 f"Path({str(root / 'helper.pid')!r}).write_text(str(os.getpid()));time.sleep(60)")
+                 f"pid=Path({str(root / 'helper.pid')!r});"
+                 "pending=pid.with_suffix('.pending');"
+                 "pending.write_text(str(os.getpid()));pending.replace(pid);time.sleep(60)")
         _run([sys.executable, "-c", child],
              check_stop=lambda: (root / "waiting").touch(), deadline=time.monotonic()+60)
     elif scenario == "cooperative":

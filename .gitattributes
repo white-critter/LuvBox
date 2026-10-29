@@ -5,3 +5,6 @@ tools/ffmpeg/runtime/*.exe filter=lfs diff=lfs merge=lfs -text
 # The pinned recipe hashes record the Windows CRLF bytes used for its build.
 tools/ffmpeg/build.py text eol=crlf
 tools/ffmpeg/configure-flags.json text eol=crlf
+# Preserve the exact original upstream Python inventory and license bytes.
+tools/python/PYTHON.json -text -whitespace
+tools/python/licenses/*.txt -text -whitespace

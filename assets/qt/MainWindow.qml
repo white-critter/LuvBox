@@ -589,7 +589,6 @@ ApplicationWindow {
                         implicitWidth: 24
                         implicitHeight: 24
                     }
-                    Label { text: window.galleryModel.error; color: window.errorColor; visible: text.length > 0 }
                     Item { Layout.fillWidth: true }
                     FlatCombo {
                         id: mediaFilter
@@ -621,6 +620,16 @@ ApplicationWindow {
                         visible: gallery.currentIndex >= 0
                         onClicked: previewDialog.open()
                     }
+                }
+
+                Label {
+                    objectName: "galleryLoadError"
+                    Layout.fillWidth: true
+                    text: window.galleryModel.error
+                    visible: text.length > 0
+                    color: window.errorColor
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
                 }
 
                 RowLayout {
@@ -951,8 +960,9 @@ ApplicationWindow {
                     }
 
                     Label {
+                        objectName: "galleryEmptyState"
                         anchors.centerIn: parent
-                        visible: gallery.count === 0 && !window.galleryModel.busy
+                        visible: gallery.count === 0 && !window.galleryModel.busy && !window.galleryModel.error.length
                         text: search.text.length || (window.app && (window.app.library.filterSummary.length > 0
                             || mediaFilter.currentIndex > 0)) ? "필터에 맞는 사진이 없습니다." : "사진이 없습니다."
                         color: window.mutedColor
@@ -985,7 +995,14 @@ ApplicationWindow {
                 window.updateFocus()
         }
     }
-    Shortcut { sequence: "Ctrl+F"; enabled: window.currentScreen === 1; onActivated: search.forceActiveFocus() }
+    Shortcut {
+        sequence: "Ctrl+F"
+        enabled: window.currentScreen === 1
+        onActivated: {
+            search.forceActiveFocus()
+            search.selectAll()
+        }
+    }
     Dialog {
         id: previewDialog
         objectName: "previewDialog"

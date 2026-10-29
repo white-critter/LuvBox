@@ -2,6 +2,7 @@
 
 from html.parser import HTMLParser
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from tools import package_release
@@ -81,6 +83,65 @@ class QtOnlyPackagingTests(unittest.TestCase):
         self.assertNotIn("build_theme.py", build)
         self.assertFalse(any("assets/theme" in name or name.endswith("build_theme.py")
                              for name in package_release.SOURCE_FILES))
+
+
+class PythonUpstreamPackagingTests(unittest.TestCase):
+    root = Path(__file__).resolve().parents[1]
+
+    def test_python_inventory_and_original_notices_are_explicit_release_inputs(self):
+        materials = package_release._python_materials(self.root)
+        self.assertEqual(len(materials), 22)
+        licenses = [path for path, _name in materials if path.parent.name == "licenses"]
+        self.assertEqual(len(licenses), 20)
+        for path, _name in materials:
+            self.assertIn(path.relative_to(self.root).as_posix(), package_release.SOURCE_FILES)
+        inventory = json.loads((self.root / "tools/python/PYTHON.json").read_text(encoding="utf-8"))
+        self.assertEqual(inventory["python_version"], "3.12.16")
+        self.assertEqual(inventory["target_triple"], "x86_64-pc-windows-msvc")
+        self.assertEqual(inventory["optimizations"], "pgo")
+        self.assertTrue(any(path.name == "LICENSE.openssl-3.txt" for path in licenses))
+        self.assertFalse(any(name.startswith((".python/", ".venv/")) for name in package_release.SOURCE_FILES))
+
+    def populate(self, root):
+        for original, _name in package_release._python_materials(self.root):
+            copied = root / original.relative_to(self.root)
+            copied.parent.mkdir(parents=True, exist_ok=True)
+            copied.write_bytes(original.read_bytes())
+
+    def test_archive_preserves_notices_and_excludes_unlisted_files_and_local_runtime(self):
+        with tempfile.TemporaryDirectory(prefix="luvbox-python-materials-") as folder:
+            root = Path(folder)
+            self.populate(root)
+            for relative in ("tools/python/licenses/private-session.json", ".python/python.exe"):
+                private = root / relative
+                private.parent.mkdir(parents=True, exist_ok=True)
+                private.write_bytes(b"synthetic private fixture")
+            output = io.BytesIO()
+            with zipfile.ZipFile(output, "w") as archive:
+                for path, name in package_release._python_materials(root):
+                    archive.write(path, name)
+            with zipfile.ZipFile(output) as archive:
+                self.assertEqual(len(archive.namelist()), 22)
+                self.assertFalse(any("private-session" in name or "python.exe" in name
+                                     for name in archive.namelist()))
+                for original, name in package_release._python_materials(self.root):
+                    self.assertEqual(archive.read(name), original.read_bytes())
+
+    def test_linked_upstream_notice_is_rejected_before_packaging(self):
+        with tempfile.TemporaryDirectory(prefix="luvbox-python-linked-notice-") as folder:
+            root = Path(folder)
+            self.populate(root)
+            notice = root / "tools/python/licenses/LICENSE.libffi.txt"
+            outside = root / "unrelated.txt"
+            outside.write_bytes(b"synthetic unchanged fixture")
+            notice.unlink()
+            try:
+                os.link(outside, notice)
+            except OSError:
+                self.skipTest("Hard links unavailable in disposable fixture")
+            with self.assertRaisesRegex(ValueError, "linked files"):
+                package_release._python_materials(root)
+            self.assertEqual(outside.read_bytes(), b"synthetic unchanged fixture")
 
 
 class BuildInputPackagingTests(unittest.TestCase):
@@ -350,6 +411,50 @@ class ReleaseManifestTests(unittest.TestCase):
                 self.write_toc([*self.entries, (name, str(self.root / "foreign-icu.dll"), "BINARY")])
                 with self.assertRaisesRegex(ValueError, "unexpected ICU runtime"):
                     self.manifest()
+
+    def openssl_fixture(self, name):
+        interpreter = self.root / "python-runtime"
+        source = interpreter / "DLLs" / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"synthetic matching interpreter library " + name.encode())
+        bundled = self.application / "_internal" / name
+        bundled.write_bytes(source.read_bytes())
+        return interpreter, source, bundled
+
+    def test_root_openssl_requires_matching_interpreter_source_and_bundled_bytes(self):
+        for name in ("libssl-3-x64.dll", "libcrypto-3-x64.dll"):
+            with self.subTest(name=name):
+                interpreter, source, bundled = self.openssl_fixture(name)
+                self.write_toc([*self.entries, (name, str(source), "BINARY")])
+                with patch.object(package_release.sys, "base_prefix", str(interpreter)):
+                    self.assertEqual(self.manifest()[Path("_internal") / name], source)
+                    bundled.write_bytes(b"different OpenSSL already copied into the application")
+                    with self.assertRaisesRegex(ValueError, "Bundled OpenSSL differs"):
+                        self.manifest()
+
+    def test_foreign_path_openssl_is_refused_even_when_its_bytes_match(self):
+        for name in ("libssl-3-x64.dll", "libcrypto-3-x64.dll"):
+            with self.subTest(name=name):
+                interpreter, source, _bundled = self.openssl_fixture(name)
+                foreign = self.root / "path-tool" / name
+                foreign.parent.mkdir(exist_ok=True)
+                foreign.write_bytes(source.read_bytes())
+                self.write_toc([*self.entries, (name, str(foreign), "BINARY")])
+                with patch.object(package_release.sys, "base_prefix", str(interpreter)), \
+                        self.assertRaisesRegex(ValueError, "OpenSSL outside the build interpreter"):
+                    self.manifest()
+
+    def test_root_openssl_cannot_bypass_verification_as_data_or_with_missing_source(self):
+        name = "libssl-3-x64.dll"
+        interpreter, source, _bundled = self.openssl_fixture(name)
+        with patch.object(package_release.sys, "base_prefix", str(interpreter)):
+            self.write_toc([*self.entries, (name, str(source), "DATA")])
+            with self.assertRaisesRegex(ValueError, "OpenSSL outside the build interpreter"):
+                self.manifest()
+            source.unlink()
+            self.write_toc([*self.entries, (name, str(source), "BINARY")])
+            with self.assertRaisesRegex(ValueError, "OpenSSL outside the build interpreter"):
+                self.manifest()
 
     def test_removed_ui_runtime_cannot_return_through_dependencies(self):
         for name in ("_tkinter.pyd", "tcl86t.dll", "tk86t.dll", "_tk_data/init.tcl",

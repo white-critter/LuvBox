@@ -21,12 +21,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def check_scene(screenshot_directory=None, no_browser=False):
     sys.path.insert(0, str(ROOT))
-    from PySide6.QtCore import (QCoreApplication, QEvent, QMetaObject, QObject,
-                                Property, QUrl, QtMsgType, qInstallMessageHandler)
+    from PySide6.QtCore import (QCoreApplication, QEvent, QMetaObject, QObject, QPointF,
+                                Property, Qt, QUrl, QtMsgType, qInstallMessageHandler)
     from PySide6.QtGui import QColor, QFont, QFontDatabase, QGuiApplication, QPalette
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuick import QQuickItem
     from PySide6.QtQuickControls2 import QQuickStyle
+    from PySide6.QtTest import QTest
     from shiboken6 import delete
     from luvbox.browser_bridge import BrowserBridgeError, BrowserSession
     from luvbox.qt_accounts import AccountController
@@ -238,6 +239,35 @@ ApplicationWindow {
             if combo.property("currentValue") != "chrome" or combo.property("currentText") != "Google Chrome":
                 raise AssertionError("browser combo did not bind its initial model/selection")
             capture("initial")
+            # Keyboard focus below a short dialog must scroll into view in
+            # both directions, without opening a browser or submitting a token.
+            window.setWidth(400)
+            window.setHeight(390)
+            settle(.1)
+            advanced = next(item for item in dialog.findChildren(QQuickItem)
+                            if str(item.property("text")).startswith("고급 연결 · 토큰 입력")
+                            and item.metaObject().indexOfSignal("clicked()") >= 0)
+            combo.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+            for _ in range(20):
+                if advanced.property("activeFocus"):
+                    break
+                QTest.keyClick(window, Qt.Key.Key_Tab)
+                settle(.02)
+            if not advanced.property("activeFocus"):
+                raise AssertionError("Tab did not reach the advanced connection toggle")
+            point = advanced.mapToScene(QPointF(0, 0))
+            if not 0 <= point.y() < window.height() - advanced.height():
+                raise AssertionError("Tab focus is hidden below the connection viewport")
+            capture("small-keyboard-focus")
+            QTest.keyClick(window, Qt.Key.Key_Tab, Qt.KeyboardModifier.ShiftModifier)
+            settle(.1)
+            focused = window.activeFocusItem()
+            if focused is None or not 0 <= focused.mapToScene(QPointF(0, 0)).y() < window.height() - focused.height():
+                raise AssertionError("Reverse Tab focus is hidden below the connection viewport")
+            window.setWidth(720)
+            window.setHeight(760)
+            settle(.1)
+            checks.append("small-window-keyboard-focus")
             # Change the backing selection, then invoke the product's activated
             # handler in QML to change it back, covering both binding directions.
             if not setup.setBrowser("edge"):
@@ -374,7 +404,7 @@ class ConnectionQmlTests(unittest.TestCase):
                                 encoding="utf-8", errors="replace", timeout=35)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
-        self.assertEqual(len(report["checks"]), 8)
+        self.assertEqual(len(report["checks"]), 9)
         self.assertEqual(report["qml_errors"], [])
         self.assertEqual(report["browser"], "firefox")
         self.assertEqual(report["token_state"], "saved")

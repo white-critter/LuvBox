@@ -106,6 +106,18 @@ image.close()
         with closing(thumbcache.Cache("offline", create=False)) as cache:
             self.assertEqual(cache.stored([("100", 1, "photo")]), {("100", 1, "photo")})
 
+    def test_pruning_mixed_sizes_keeps_newer_previews_with_an_order_index(self):
+        with closing(thumbcache.Cache("offline")) as cache:
+            with cache._db:
+                cache._db.execute("CREATE INDEX preview_saved_order ON previews(saved_at)")
+                cache._db.executemany("INSERT INTO previews VALUES (?,?,?,?,?)", [
+                    (str(100 + index), 1, "photo", b"x" * size, f"2026-10-{index + 1:02d}")
+                    for index, size in enumerate((10, 20, 30, 40))])
+            self.assertEqual(cache.prune(80), 2)
+            self.assertEqual(cache.total_bytes(), 70)
+            self.assertEqual(cache.stored([(str(index), 1, "photo") for index in range(100, 104)]),
+                             {("102", 1, "photo"), ("103", 1, "photo")})
+
     def test_deleted_cache_is_rebuilt_for_a_known_identity(self):
         thumbcache.remember("offline", self.key, self.image)
         self.assertTrue(thumbcache.known("offline", self.key))

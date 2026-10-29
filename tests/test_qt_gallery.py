@@ -14,7 +14,7 @@ _QT_AVAILABLE = find_spec("PySide6") is not None
 if _QT_AVAILABLE:
     from PySide6.QtCore import QCoreApplication, QModelIndex, QObject, QSize, Signal
     from PySide6.QtQuick import QQuickImageProvider
-    from luvbox.preview import thumbnail
+    from luvbox.preview import Thumbnail, thumbnail
     from luvbox.qt_gallery import GalleryModel, SafeThumbnailProvider
 
 
@@ -511,6 +511,137 @@ class SafeThumbnailProviderTests(unittest.TestCase):
             self.assertTrue(self.request().isNull())
         self.assertEqual(self.provider.snapshot()["cache_count"], 0)
         self.assertFalse(self.request().isNull())
+
+    def test_scheduled_transient_read_lock_recovers_without_gallery_refresh(self):
+        calls = []
+
+        def decoder(path, dimensions):
+            calls.append(path)
+            if len(calls) == 1:
+                return Thumbnail(None, "temporary sharing lock", retryable=True)
+            return thumbnail(path, dimensions)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(provider.join_workers, 2)
+        self.addCleanup(provider.close)
+        provider.register("photo", self.path)
+        provider.schedule(["photo"], 220, 168)
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(provider.snapshot()["cache_count"], 1)
+        self.assertFalse(self.request(provider=provider).isNull())
+
+    def test_transient_retry_rejects_replacement_before_second_decode(self):
+        calls = []
+
+        def decoder(path, dimensions):
+            calls.append(path)
+            replacement = self.folder / "replacement.png"
+            with Image.new("RGBA", (24, 16), "red") as image:
+                image.save(replacement)
+            replacement.replace(path)
+            return Thumbnail(None, "temporary sharing lock", retryable=True)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(provider.join_workers, 2)
+        self.addCleanup(provider.close)
+        provider.register("photo", self.path)
+        provider.schedule(["photo"], 220, 168)
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(provider.snapshot()["cache_count"], 0)
+
+    def test_persistent_lock_retries_are_bounded_and_permanent_errors_do_not_retry(self):
+        for retryable, expected in ((True, 4), (False, 1)):
+            with self.subTest(retryable=retryable):
+                calls = []
+
+                def decoder(path, dimensions):
+                    calls.append(path)
+                    return Thumbnail(None, "unavailable", retryable=retryable)
+
+                provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+                self.addCleanup(provider.join_workers, 2)
+                self.addCleanup(provider.close)
+                provider.register("photo", self.path)
+                provider.schedule(["photo"], 220, 168)
+                self.assertTrue(provider.wait_for_idle(2))
+                self.assertEqual(len(calls), expected)
+                self.assertEqual(provider.snapshot()["cache_count"], 0)
+
+    def test_close_interrupts_transient_retry_without_waiting_for_backoff(self):
+        entered = Event()
+        calls = []
+
+        def decoder(path, dimensions):
+            calls.append(path)
+            entered.set()
+            return Thumbnail(None, "temporary sharing lock", retryable=True)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(provider.join_workers, 2)
+        self.addCleanup(provider.close)
+        provider.register("photo", self.path)
+        provider.schedule(["photo"], 220, 168)
+        self.assertTrue(entered.wait(1))
+        provider.close()
+        self.assertTrue(provider.join_workers(.5))
+        self.assertEqual(len(calls), 1)
+
+    def test_scrolling_away_cancels_retry_without_caching_a_permanent_failure(self):
+        entered, release = Event(), Event()
+        self.addCleanup(release.set)
+        calls = []
+
+        def decoder(path, dimensions):
+            calls.append(path)
+            if len(calls) == 1:
+                entered.set()
+                release.wait(2)
+                return Thumbnail(None, "temporary sharing lock", retryable=True)
+            return thumbnail(path, dimensions)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(provider.join_workers, 2)
+        self.addCleanup(provider.close)
+        provider.register("photo", self.path)
+        provider.schedule(["photo"], 220, 168)
+        self.assertTrue(entered.wait(1))
+        provider.schedule([], 220, 168)
+        release.set()
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(len(calls), 1)
+        provider.schedule(["photo"], 220, 168)
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(provider.snapshot()["cache_count"], 1)
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing modes")
+    def test_native_sharing_lock_recovers_without_changing_media(self):
+        from tests.test_preview_retries import NativePreviewLockTests
+
+        entered = Event()
+        calls = []
+
+        def decoder(path, dimensions):
+            result = thumbnail(path, dimensions)
+            calls.append(result.retryable)
+            entered.set()
+            return result
+
+        before = self.path.read_bytes(), self.path.stat().st_mtime_ns
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(provider.join_workers, 2)
+        self.addCleanup(provider.close)
+        provider.register("photo", self.path)
+        with NativePreviewLockTests.exclusive_reader(self, self.path):
+            provider.schedule(["photo"], 220, 168)
+            self.assertTrue(entered.wait(1))
+            self.assertEqual(calls, [True])
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(calls, [True, False])
+        self.assertEqual(provider.snapshot()["cache_count"], 1)
+        self.assertEqual((self.path.read_bytes(), self.path.stat().st_mtime_ns), before)
 
     def test_schedule_decodes_focus_order_off_the_caller_thread(self):
         folder = self.folder

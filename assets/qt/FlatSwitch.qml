@@ -16,6 +16,8 @@ Switch {
         x: control.leftPadding
         y: (control.height - height) / 2
         radius: 13
+        border.width: control.visualFocus ? 2 : 0
+        border.color: "#ff8791"
         color: {
             if (!control.enabled)
                 return control.checked ? Qt.rgba(0.851, 0.212, 0.271, 0.35) : "#222222"

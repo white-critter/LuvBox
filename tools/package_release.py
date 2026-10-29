@@ -25,12 +25,23 @@ from tools.build_snapshot import require_snapshot
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
     "tools/draw_icon.py",
-    "entry.py", "setup.ps1", "build.ps1", "run.bat", "tools/windows_version.py", "tools/check_qt_startup.py", "tools/package_browser_extension.py", ".gitattributes", "requirements.txt",
+    "entry.py", "setup.ps1", "build.ps1", "run.bat", "tools/windows_version.py", "tools/check_qt_startup.py", "tools/package_browser_extension.py", ".gitattributes", ".gitignore", "requirements.txt",
     "requirements-dev.txt", "requirements-lock.txt", "requirements-qt.txt", "README.md", "WINDOWS_CONTINUE.md", "LICENSE",
     "CHANGELOG.md", "tools/qt_gallery_preview.py",
     "tools/pyinstaller/hook-PySide6.py", "tools/pyinstaller/hook-PySide6.QtQml.py",
     "tools/pyinstaller/hook-PySide6.QtGui.py",
     "tools/pyinstaller/hook-ssl.py",
+    "tools/python/README.md", "tools/python/PYTHON.json",
+    "tools/python/licenses/LICENSE.bdb.txt", "tools/python/licenses/LICENSE.bzip2.txt",
+    "tools/python/licenses/LICENSE.cpython.txt", "tools/python/licenses/LICENSE.expat.txt",
+    "tools/python/licenses/LICENSE.libedit.txt", "tools/python/licenses/LICENSE.libffi.txt",
+    "tools/python/licenses/LICENSE.liblzma.txt", "tools/python/licenses/LICENSE.libuuid.txt",
+    "tools/python/licenses/LICENSE.libX11.txt", "tools/python/licenses/LICENSE.libXau.txt",
+    "tools/python/licenses/LICENSE.libxcb.txt", "tools/python/licenses/LICENSE.mpdecimal.txt",
+    "tools/python/licenses/LICENSE.ncurses.txt", "tools/python/licenses/LICENSE.openssl-3.txt",
+    "tools/python/licenses/LICENSE.sqlite.txt", "tools/python/licenses/LICENSE.tcl.txt",
+    "tools/python/licenses/LICENSE.tix.txt", "tools/python/licenses/LICENSE.zlib-ng.txt",
+    "tools/python/licenses/LICENSE.zlib.txt", "tools/python/licenses/LICENSE.zstd.txt",
     "tools/check_download_startup.py",
     "tools/qt/prepare_sources.py", "tools/qt/sources.json", "tools/qt/README.md",
     "assets/qt/licenses/GPL-2.0-only.txt", "assets/qt/licenses/GPL-3.0-only.txt",
@@ -104,6 +115,19 @@ def project_source_files(root: Path) -> list[Path]:
     return sorted(paths)
 
 
+def _python_materials(root: Path) -> list[tuple[Path, str]]:
+    """Only the explicitly retained upstream inventory; never scan a runtime."""
+    materials = []
+    for name in SOURCE_FILES:
+        if name.startswith("tools/python/"):
+            path = root / name
+            project_file(path, root)
+            if not path.is_file():
+                raise ValueError("Python upstream materials must be regular files")
+            materials.append((path, "licenses/Python-upstream/" + path.name))
+    return materials
+
+
 def _collect_manifest(toc: Path, application_name: str) -> dict[Path, Path]:
     """Read PyInstaller's literal COLLECT tuple, without executing build code."""
     if not toc.is_relative_to(ROOT) or ".." in toc.relative_to(ROOT).parts:
@@ -138,6 +162,16 @@ def _collect_manifest(toc: Path, application_name: str) -> dict[Path, Path]:
         # can share its filename while exporting only version-suffixed names.
         if parts[-1].casefold() in {"icuuc.dll", "icudt78.dll"}:
             raise ValueError(f"Build manifest contains an unexpected ICU runtime: {name}")
+        if len(parts) == 1 and basename.startswith(("libssl", "libcrypto")) and basename.endswith(".dll"):
+            expected_ssl = Path(sys.base_prefix) / "DLLs" / parts[0]
+            if (kind != "BINARY" or not expected_ssl.is_file()
+                    or Path(os.path.realpath(source)) != Path(os.path.realpath(expected_ssl))):
+                raise ValueError(f"Build manifest contains OpenSSL outside the build interpreter: {name}")
+            bundled_ssl = ROOT / "release" / application_name / "_internal" / parts[0]
+            project_file(bundled_ssl, ROOT)
+            with expected_ssl.open("rb") as original, bundled_ssl.open("rb") as bundled:
+                if hashlib.file_digest(original, "sha256").digest() != hashlib.file_digest(bundled, "sha256").digest():
+                    raise ValueError(f"Bundled OpenSSL differs from the build interpreter: {name}")
         if normalized.startswith("pyside6/") and (
                 parts[-1].casefold() in EXCLUDED_QT_COMPONENTS or
                 normalized.startswith("pyside6/plugins/qmltooling/")):
@@ -241,6 +275,7 @@ def package() -> None:
     runtimes = {component: _runtime_files(manifest, component) for component in ("ffmpeg", "exiftool")}
     qt_materials = qt_source_files()
     source_files = project_source_files(ROOT)
+    python_materials = _python_materials(ROOT)
     destination = output / f"LuvBox-{__version__}.zip"
     descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".zip", dir=output)
     os.close(descriptor)
@@ -256,6 +291,8 @@ def package() -> None:
             for name in ("GPL-2.0-only.txt", "GPL-3.0-only.txt", "LGPL-3.0-only.txt"):
                 archive.write(ROOT / "assets/qt/licenses" / name, "licenses/Qt/" + name)
             for path, name in qt_materials:
+                archive.write(path, name)
+            for path, name in python_materials:
                 archive.write(path, name)
             archive.write(ROOT / "assets/fonts/Pretendard/OFL.txt", "licenses/Pretendard-OFL.txt")
             archive.write(ROOT / "tools/ffmpeg/LICENSE.LGPLv2.1.txt", "licenses/FFmpeg-LGPLv2.1.txt")

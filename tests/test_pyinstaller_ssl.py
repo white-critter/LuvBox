@@ -4,6 +4,7 @@ from pathlib import Path
 import runpy
 import shutil
 import ssl
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,10 +25,34 @@ class PyInstallerSSLTests(unittest.TestCase):
         self.standard_library.mkdir(parents=True)
         self.ssl_module = self.standard_library / "ssl.py"
         self.ssl_module.write_text("# disposable interpreter fixture\n", encoding="utf-8")
+        self.dlls = self.standard_library.parent / "DLLs"
+        self.dlls.mkdir()
+        for name in ("libssl-3-x64.dll", "libcrypto-3-x64.dll"):
+            (self.dlls / name).write_bytes(b"synthetic interpreter library " + name.encode())
 
-    def run_hook(self):
-        with patch.object(ssl, "__file__", str(self.ssl_module)):
+    def run_hook(self, platform="win32"):
+        with patch.object(ssl, "__file__", str(self.ssl_module)), \
+                patch.object(sys, "base_prefix", str(self.standard_library.parent)), \
+                patch.object(sys, "platform", platform):
             return runpy.run_path(str(HOOK))
+
+    def test_openssl_comes_from_the_interpreter_instead_of_path_tools(self):
+        foreign = self.root / "unrelated-tool"
+        foreign.mkdir()
+        for name in ("libssl-3-x64.dll", "libcrypto-3-x64.dll"):
+            (foreign / name).write_bytes(b"foreign same-named library")
+        with patch.dict("os.environ", {"PATH": str(foreign)}):
+            binaries = self.run_hook()["binaries"]
+        self.assertEqual(binaries, [(str(self.dlls / name), ".")
+                                    for name in ("libssl-3-x64.dll", "libcrypto-3-x64.dll")])
+
+    def test_missing_interpreter_openssl_cannot_fall_back_to_path(self):
+        (self.dlls / "libcrypto-3-x64.dll").unlink()
+        with self.assertRaisesRegex(RuntimeError, "interpreter's OpenSSL DLLs are missing"):
+            self.run_hook()
+
+    def test_non_windows_hook_does_not_collect_windows_libraries(self):
+        self.assertEqual(self.run_hook(platform="linux")["binaries"], [])
 
     def test_optional_ssl_policy_survives_at_frozen_ssl_sibling_path(self):
         policy = self.standard_library / "codex-rejected-cas.pem"

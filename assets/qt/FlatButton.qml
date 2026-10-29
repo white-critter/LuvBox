@@ -15,6 +15,8 @@ Button {
     }
     background: Rectangle {
         radius: 8
+        border.width: control.visualFocus ? 2 : 0
+        border.color: "#ff8791"
         color: {
             if (control.tone === "primary") {
                 if (!control.enabled)

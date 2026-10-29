@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import uuid
+from array import array
 from collections import OrderedDict
 from contextlib import closing
 from datetime import datetime, timezone
@@ -239,20 +240,25 @@ class Cache:
         total = self.total_bytes()
         if total <= limit:
             return 0
-        removed = 0
         target = int(limit * 0.9)
-        with self._db:
-            for rowid, size in self._db.execute(
-                    "SELECT rowid,length(image) FROM previews ORDER BY saved_at,rowid").fetchall():
+        # Read only until enough bytes can be reclaimed, retaining compact
+        # row IDs rather than every (rowid, size) tuple in a large cache.
+        # Finish the SELECT before deleting, even if a future index changes
+        # its query plan from a materialized sort to a live table scan.
+        pending = array("q")
+        with closing(self._db.execute(
+                "SELECT rowid,length(image) FROM previews ORDER BY saved_at,rowid")) as rows:
+            for rowid, size in rows:
                 if total <= target:
                     break
-                self._db.execute("DELETE FROM previews WHERE rowid=?", (rowid,))
+                pending.append(rowid)
                 total -= size
-                removed += 1
+        with self._db:
+            self._db.executemany("DELETE FROM previews WHERE rowid=?", ((rowid,) for rowid in pending))
         _mark_pruned(self.path)
         with _known_lock:
             _known.pop(str(self.path), None)
-        return removed
+        return len(pending)
 
     def close(self) -> None:
         if self._db is not None:

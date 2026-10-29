@@ -4,7 +4,7 @@ LuvBox (러브박스) is provided under GNU GPL version 2. The license text is i
 
 - gallery-dl 1.32.15 by Mike Fährmann: GPL-2.0-only. https://codeberg.org/mikf/gallery-dl
 - Requests and its HTTP dependencies retain their own licenses in the included package metadata. https://github.com/psf/requests
-- Python 3.12 retains its upstream license. https://www.python.org/
+- Python 3.12.16 retains its upstream license. The 1.3.4 Windows release uses Astral python-build-standalone 20261026, with the original build inventory and component notices under source/tools/python/ and licenses/Python-upstream/. The install-only runtime and matching full archive's Python, OpenSSL, libffi, SQLite, zlib and Expat binaries were compared by SHA-256. The current interpreter's LICENSE.txt is also included as licenses/Python-LICENSE.txt. https://www.python.org/ and https://github.com/astral-sh/python-build-standalone/releases/tag/20261026
 - Pillow 13.0.0: HPND and upstream component licenses, retained in the release's dependency notices. https://python-pillow.github.io/
 - FFmpeg 7.1: LGPL-2.1-or-later for this native-code-only build. The separate local command-line executable has no GPL codecs, external codec libraries, or network protocols. Its matching complete FFmpeg source archive, build recipe, configuration, and license are included in the release ZIP. https://ffmpeg.org/
 - Pretendard 1.3.9 by Kil Hyung-jin and upstream contributors: SIL Open Font License 1.1. The unmodified Regular/Bold TrueType fonts and copyright/license text are bundled under assets/fonts/Pretendard; the ZIP also includes licenses/Pretendard-OFL.txt. https://github.com/orioncactus/pretendard

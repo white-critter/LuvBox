@@ -85,7 +85,7 @@ Dialog {
         }
     }
 
-    contentItem: ScrollView {
+    contentItem: FocusScrollView {
         id: scrollView
         clip: true
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
@@ -256,6 +256,8 @@ Dialog {
                     }
                     background: Rectangle {
                         radius: 10
+                        border.width: setupToggle.visualFocus ? 2 : 0
+                        border.color: "#ff8791"
                         color: setupToggle.hovered || setupToggle.checked ? "#242424" : "#1c1c1c"
                     }
                 }
@@ -359,6 +361,8 @@ Dialog {
                 }
                 background: Rectangle {
                     radius: 10
+                    border.width: advancedMethodToggle.visualFocus ? 2 : 0
+                    border.color: "#ff8791"
                     color: advancedMethodToggle.hovered || dialog.methodIndex === 1 ? "#242424" : "#1c1c1c"
                 }
                 onClicked: dialog.methodIndex = dialog.methodIndex === 1 ? 0 : 1

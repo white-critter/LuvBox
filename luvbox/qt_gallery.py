@@ -21,6 +21,7 @@ _KEY = re.compile(r"[A-Za-z0-9_-]{1,96}\Z")
 _READ_ERROR = "사진 목록을 불러오지 못했습니다."
 _LOOKAHEAD_CAP = 48
 _TIMING_CAP = 8192
+_READ_RETRY_DELAYS = (0.1, 0.2, 0.4)
 
 
 def _timing_summary(values):
@@ -358,7 +359,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._active -= 1
                 closed = self._closed
                 stale = generation != self._registry_generation
-                if not closed and not stale and image.isNull():
+                if not closed and not stale and image.isNull() and key in self._wanted:
                     self._failures.add(token)
                 elif (not closed and not stale and not image.isNull() and key in self._wanted
                       and self._target_size == (width, height) and token not in self._published):
@@ -399,7 +400,26 @@ class SafeThumbnailProvider(QQuickImageProvider):
             if not decode:
                 return QImage(), False
         started = time.perf_counter()
-        result = self._decoder(path, (width, height))
+        for delay in (0, *_READ_RETRY_DELAYS):
+            if delay:
+                # Antivirus and sync clients can briefly deny shared reads.
+                # Retry only the decoder's precise transient classification,
+                # and release this wait immediately on close/library change.
+                with self._lock:
+                    if self._lock.wait_for(
+                            lambda: self._closed or generation != self._registry_generation
+                            or (not deliver and key not in self._wanted), timeout=delay):
+                        return QImage(), False
+                try:
+                    current = path.stat()
+                except OSError:
+                    return QImage(), False
+                if ((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != stamp
+                        or path.is_symlink() or path.resolve() != path or cloud_only(path, status=current)):
+                    return QImage(), False
+            result = self._decoder(path, (width, height))
+            if result.image is not None or not getattr(result, "retryable", False):
+                break
         decode_ms = (time.perf_counter() - started) * 1000
         picture = result.image
         if picture is None:

@@ -10,6 +10,20 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 _LFS_HEADER = b"version https://git-lfs.github.com/spec/v1"
 _FONT_FILES = ("Pretendard-Regular.ttf", "Pretendard-Bold.ttf", "OFL.txt")
+_SECURE_PYTHON_PATCHES = {(3, 12): 16, (3, 13): 18, (3, 14): 10, (3, 15): 2}
+
+
+def require_secure_python(version=None):
+    """Reject runtimes older than the security baseline for their series."""
+    current = tuple((sys.version_info if version is None else version)[:3])
+    minimum = _SECURE_PYTHON_PATCHES.get(current[:2])
+    if current[:2] < (3, 12) or (minimum is not None and current[2] < minimum):
+        found = ".".join(map(str, current))
+        baselines = ", ".join(f"{major}.{minor}.{patch}" for (major, minor), patch
+                              in _SECURE_PYTHON_PATCHES.items())
+        raise ValueError(f"Python {found} is below the security baseline. "
+                         f"Minimum patch per supported series: {baselines}; newer series are allowed. "
+                         "Update Python and recreate .venv before setup or building.")
 
 
 def check_inputs(root=ROOT, *, assets_only=False):
@@ -88,15 +102,23 @@ def require_inputs(root=ROOT, *, assets_only=False):
 
 def main(argv=None, *, root=ROOT):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--assets-only", action="store_true",
-                        help="Check pinned Git assets before setup helpers prepare other inputs")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--assets-only", action="store_true",
+                      help="Check pinned Git assets before setup helpers prepare other inputs")
+    mode.add_argument("--python-only", action="store_true",
+                      help="Check the Python security baseline before creating or preparing a virtual environment")
     options = parser.parse_args(argv)
     try:
-        require_inputs(root, assets_only=options.assets_only)
+        require_secure_python()
+        if not options.python_only:
+            require_inputs(root, assets_only=options.assets_only)
     except ValueError as error:
         print(error, file=sys.stderr)
         return 1
-    print("Pinned build inputs verified (files only; no tools executed).")
+    if options.python_only:
+        print("Python security baseline verified.")
+    else:
+        print("Python security baseline and pinned build inputs verified (files only; no tools executed).")
     return 0
 
 
