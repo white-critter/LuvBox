@@ -55,9 +55,18 @@ def scene():
 
     def find(name):
         result = window.findChild(QObject, name)
-        if result is None:
-            raise AssertionError("Missing product control: " + name)
-        return result
+        if result is not None:
+            return result
+        stack = [window.contentItem()]
+        popup = window.findChild(QObject, "galleryDatePickerPopup")
+        if popup is not None and popup.property("contentItem") is not None:
+            stack.append(popup.property("contentItem"))
+        while stack:
+            current = stack.pop()
+            if current.objectName() == name:
+                return current
+            stack.extend(current.childItems())
+        raise AssertionError("Missing product control: " + name)
 
     def click(name):
         # QQuick Layouts are polished on a frame boundary.  After opening or
@@ -119,15 +128,39 @@ def scene():
         controller.accounts._connected = False
         controller.accounts.changed.emit()
         window.setProperty("currentScreen", 1)
-        wait(lambda: not controller.library.model.busy and controller.library.model.total == 5, "initial gallery")
+        wait(lambda: not controller.library.model.busy and controller.library.model.total == 5
+             and len(controller.library.authors) == 3, "initial gallery")
         for width, height in ((680, 480), (1080, 760)):
             window.setWidth(width)
             window.setHeight(height)
             settle()
             click("galleryFilterToggle")
-            find("galleryAuthorFilter").setProperty("text", "@ALICE")
-            find("galleryDateFrom").setProperty("text", "2026-10-01")
-            find("galleryDateTo").setProperty("text", "2026-10-01")
+            author_combo = find("galleryAuthorFilter")
+            assert len(author_combo.property("model")) >= 4
+            if width == 680:
+                date_from = find("galleryDateFrom")
+                date_from.setProperty("text", "2026-10-15")
+                invoke(date_from, "forceActiveFocus")
+                settle()
+                assert date_from.property("activeFocus")
+                QTest.keyClick(window, Qt.Key.Key_Space)
+                picker = find("galleryDatePickerPopup")
+                wait(lambda: picker.property("visible"), "date picker open via keyboard")
+                click("datePickerDay_1")
+                wait(lambda: not picker.property("visible"), "date picker close")
+                assert date_from.property("text") == "2026-10-01"
+                invoke(date_from, "forceActiveFocus")
+                settle()
+                QTest.keyClick(window, Qt.Key.Key_Backspace)
+                settle()
+                assert date_from.property("text") == ""
+                date_from.setProperty("text", "2026-10-01")
+                find("galleryDateTo").setProperty("text", "2026-10-01")
+                author_combo.setProperty("text", "@ALICE")
+            else:
+                author_combo.setProperty("text", "@ALICE")
+                find("galleryDateFrom").setProperty("text", "2026-10-01")
+                find("galleryDateTo").setProperty("text", "2026-10-01")
             click("galleryFilterApply")
             wait(lambda: not controller.library.model.busy and controller.library.model.total == 2, "exact author/date")
             assert "작성자 @alice" in find("galleryActiveFilters").property("text")
@@ -153,8 +186,13 @@ def scene():
             wait(lambda: not controller.management.deleteConfirmationPending, "cancel deletion")
             assert {path: path.read_bytes() for path in files} == originals
             click("gallerySelectionToggle")
-            click("galleryFilterReset")
-            wait(lambda: not controller.library.model.busy and controller.library.model.total == 5, "reset filter")
+            authors_queries = []
+            original_authors = controller.library._repository.authors
+            with patch.object(controller.library._repository, "authors",
+                              side_effect=lambda gen: (authors_queries.append(gen), original_authors(gen))[1]):
+                click("galleryFilterReset")
+                wait(lambda: not controller.library.model.busy and controller.library.model.total == 5, "reset filter")
+                assert authors_queries == [], authors_queries
             assert controller.library.selectedCount == 0
             assert controller.library.filterSummary == ""
         # A missing tile must not make selecting and recycling the other
@@ -162,6 +200,24 @@ def scene():
         files[-1].unlink()
         controller.library.refresh()
         wait(lambda: not controller.library.model.busy and controller.library.model.total == 5, "missing gallery item")
+        QTest.qWait(40)
+        grid_stack = list(find("galleryGrid").property("contentItem").childItems())
+        placeholders = []
+        while grid_stack:
+            node = grid_stack.pop()
+            if node.objectName() == "galleryTileMissingPlaceholder":
+                placeholders.append(node)
+            grid_stack.extend(node.childItems())
+        assert any(item.property("visible") for item in placeholders), "missing tile placeholder should be visible"
+        missing_key = next(row["key"] for row in controller.library.model._rows if row.get("missing"))
+        controller.library.selectItem(missing_key)
+        wait(lambda: not controller.library.busy and controller.library.selectedKey == missing_key, "select missing item")
+        preview_dialog = find("previewDialog")
+        invoke(preview_dialog, "open")
+        wait(lambda: preview_dialog.property("visible"), "open missing preview dialog")
+        assert find("previewMissingBox").property("visible"), "preview missing placeholder should be visible"
+        invoke(preview_dialog, "close")
+        wait(lambda: not preview_dialog.property("visible"), "close missing preview dialog")
         click("gallerySelectionToggle")
         click("gallerySelectLoaded")
         assert controller.library.selectedCount == 4

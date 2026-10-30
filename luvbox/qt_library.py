@@ -142,7 +142,7 @@ class LibraryRepository:
                     caption = ("@" + author + " · " if author else "") + detail
                     if path is None:
                         caption += " · 파일 없음"
-                    rows.append({"key": key, "caption": caption})
+                    rows.append({"key": key, "caption": caption, "missing": path is None})
                 if page["page"] * limit != offset:
                     return page["total"], []
                 with self._condition:
@@ -153,6 +153,16 @@ class LibraryRepository:
                 return page["total"], rows
         except FileNotFoundError:
             return 0, []
+
+    def authors(self, generation=None):
+        request = self.current(generation)
+        if request is None:
+            return []
+        try:
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                return store.authors(include_deleted=False)
+        except Exception:
+            return []
 
     @staticmethod
     def _path(store, row):
@@ -322,6 +332,8 @@ class LibraryController(QObject):
         self._media_type = "all"
         self._order = "saved"
         self._author = ""
+        self._authors = []
+        self._authors_loaded = False
         self._date_field = "posted"
         self._date_from = self._date_to = ""
         self._selection_mode = False
@@ -365,6 +377,10 @@ class LibraryController(QObject):
     @Property(str, notify=changed)
     def filterAuthor(self):
         return self._author
+
+    @Property("QVariantList", notify=changed)
+    def authors(self):
+        return self._authors.copy()
 
     @Property(str, notify=changed)
     def dateField(self):
@@ -474,10 +490,15 @@ class LibraryController(QObject):
         self._account = account.strip().lstrip("@").lower()
         self._output_dir = output_dir
         self._separate_accounts = separate_accounts
-        self.refresh()
+        self._authors = []
+        self._authors_loaded = False
+        self._refresh(reload_authors=True)
 
     @Slot()
     def refresh(self):
+        self._refresh(reload_authors=True)
+
+    def _refresh(self, *, reload_authors=True):
         if self._closed:
             return
         self._generation += 1
@@ -495,7 +516,14 @@ class LibraryController(QObject):
             request = _Request(self._generation, self._account, self._output_dir, self._separate_accounts,
                                self._query, self._media_type, self._order, self._author,
                                self._date_field, self._date_from, self._date_to)
+        else:
+            self._authors = []
+            self._authors_loaded = False
         self._repository.configure(request)
+        if request is not None and (reload_authors or not self._authors_loaded):
+            with self._condition:
+                self._pending.append(("authors", self._generation, self._selection_serial, ""))
+                self._condition.notify()
         self.provider.clear_registry()
         self.model.search(str(self._generation))
         self.changed.emit()
@@ -505,7 +533,7 @@ class LibraryController(QObject):
         query = query[:500]
         if query != self._query:
             self._query = query
-            self.refresh()
+            self._refresh(reload_authors=False)
 
     @Slot(str, str, str)
     def setFilters(self, media_type, order, author):
@@ -516,7 +544,7 @@ class LibraryController(QObject):
             self.changed.emit()
             return
         self._media_type, self._order, self._author = media_type, order, author
-        self.refresh()
+        self._refresh(reload_authors=False)
 
     @Slot(str, str, str, str, result=bool)
     def setAdvancedFilters(self, author, date_field, first, last):
@@ -539,7 +567,7 @@ class LibraryController(QObject):
             self.changed.emit()
             return False
         self._author, self._date_field, self._date_from, self._date_to = author, date_field, first, last
-        self.refresh()
+        self._refresh(reload_authors=False)
         return True
 
     @Slot()
@@ -547,7 +575,7 @@ class LibraryController(QObject):
         self._query = self._author = self._date_from = self._date_to = ""
         self._date_field = "posted"
         self._media_type, self._order = "all", "saved"
-        self.refresh()
+        self._refresh(reload_authors=False)
 
     @Slot(bool)
     def setSelectionMode(self, enabled):
@@ -727,20 +755,33 @@ class LibraryController(QObject):
                 continue
             selection, message = None, ""
             try:
-                if action == "select":
+                if action == "authors":
+                    reader = getattr(self._repository, "authors", None)
+                    selection = reader(generation) if callable(reader) else []
+                elif action == "select":
                     selection = self._repository.selected(key, generation)
                     if selection is None:
                         message = "사진을 다시 선택해 주세요."
                 else:
                     message = self._repository.action(key, generation, action)
             except Exception:
-                message = "사진 정보를 읽지 못했습니다." if action == "select" else "열지 못했습니다. 파일과 기본 앱을 확인해 주세요."
+                if action == "authors":
+                    selection = []
+                else:
+                    message = "사진 정보를 읽지 못했습니다." if action == "select" else "열지 못했습니다. 파일과 기본 앱을 확인해 주세요."
             self._delivered.emit((generation, serial, action, selection, message))
 
     @Slot(object)
     def _accept(self, result):
         generation, serial, action, selection, message = result
-        if self._closed or generation != self._generation or serial != self._selection_serial:
+        if self._closed or generation != self._generation:
+            return
+        if action == "authors":
+            self._authors = list(selection) if isinstance(selection, (list, tuple)) else []
+            self._authors_loaded = True
+            self.changed.emit()
+            return
+        if serial != self._selection_serial:
             return
         if action == "select":
             self._selected = selection or {}

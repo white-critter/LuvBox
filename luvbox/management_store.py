@@ -8,33 +8,11 @@ import sqlite3
 import stat
 import tempfile
 
-from .history import archive_key
 from .qt_library import _ReadOnlyHistory
 from .thumbcache import cloud_only
 
 
 PAGE_SIZE = 100
-_MISSING = """
-WITH states AS (
- SELECT m.tweet_id,m.num,m.media_type,
-        MAX(o.state='present') present,MAX(o.state='unavailable') uncertain
- FROM media m JOIN observed_rows o ON o.id=m.rowid
- GROUP BY m.tweet_id,m.num,m.media_type
-), ranked AS (
- SELECT m.*,ROW_NUMBER() OVER(PARTITION BY tweet_id,num,media_type
- ORDER BY (record_source='saved') DESC,updated_at DESC,folder_mode) rank
- FROM media m
-)
-SELECT m.*,CASE WHEN COALESCE(c.ignored,0)=1 OR COALESCE(p.keep_deleted,0)=1 THEN 1 ELSE 0 END ignored,
-       COALESCE(p.pending,0) deletion_pending,
-       CASE WHEN s.uncertain OR COALESCE(p.pending,0)>0 THEN 'unavailable' ELSE 'missing' END availability
-FROM ranked m JOIN states s USING(tweet_id,num,media_type)
-LEFT JOIN missing_choices c USING(tweet_id,num,media_type)
-LEFT JOIN (SELECT tweet_id,num,media_type,COUNT(*) pending,MAX(keep_deleted) keep_deleted
-           FROM deletion_items WHERE status='pending' GROUP BY tweet_id,num,media_type) p
-USING(tweet_id,num,media_type)
-WHERE m.rank=1 AND s.present=0
-"""
 _PRESENT = """
 WITH candidates AS (
  SELECT m.*,o.path_key,o.bytes,
@@ -133,18 +111,6 @@ class ManagementSnapshot:
         page = min(max(0, int(page)), max(0, pages - 1))
         rows = [dict(row) for row in self._db.execute(query + " LIMIT ? OFFSET ?", (*parameters, PAGE_SIZE, page * PAGE_SIZE))]
         return dict(rows=rows, total=total, page=page, pages=pages, page_size=PAGE_SIZE)
-
-    def missing_page(self, page=0, mode="all"):
-        condition = {"all": "", "missing": " AND m.ignored=0 AND m.availability='missing'",
-                     "ignored": " AND m.ignored=1", "unavailable": " AND m.availability='unavailable'"}
-        if mode not in condition:
-            raise ValueError("목록 종류를 확인해 주세요.")
-        query = "SELECT * FROM (" + _MISSING + ") m WHERE 1=1" + condition[mode]
-        result = self._page(query + " ORDER BY COALESCE(saved_at,posted_at,'') DESC,tweet_id DESC,num", page)
-        for row in result["rows"]:
-            row["archive_key"] = archive_key(row["tweet_id"], row["num"], row["media_type"])
-            row["_identity"] = (row["tweet_id"], row["num"], row["media_type"])
-        return result
 
     def deletion_page(self, page=0):
         return self._page("SELECT * FROM deletion_items ORDER BY created_at DESC,id DESC", page)

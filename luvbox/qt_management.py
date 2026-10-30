@@ -1,21 +1,18 @@
 """Off-thread management reads and guarded, explicitly confirmed mutations."""
 
 from collections import deque
-from contextlib import closing
 from pathlib import Path
-import sqlite3
 from threading import Condition, Event, Thread
 import uuid
 
 from PySide6.QtCore import QObject, Property, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 
-from .history import HistoryStore
 from .management_store import ManagementSnapshot, PAGE_SIZE
-from .storage import OutputGuard, publish_snapshot, resolve_storage
+from .storage import resolve_storage
 
 
-_SECTIONS = {"schedule", "missing", "deletions", "statistics", "runs"}
+_SECTIONS = {"schedule", "deletions", "statistics", "runs"}
 _STATUS = {"finished": "완료", "stopped": "중단", "error": "실패", "interrupted": "결과 확인 필요",
            "running": "실행 중", "partial": "일부 완료", "limited": "이전 버전 수량 제한",
            "recycled": "휴지통 이동", "failed": "실패", "cancelled": "취소", "pending": "처리 대기",
@@ -27,7 +24,6 @@ class ManagementController(QObject):
     shutdownFinished = Signal()
     deleteConfirmationRequested = Signal()
     libraryChanged = Signal()
-    retryRequested = Signal(object)
     _delivered = Signal(object)
 
     def __init__(self, library, parent=None):
@@ -43,8 +39,6 @@ class ManagementController(QObject):
         self._rows = []
         self._statistics = {}
         self._tokens = {}
-        self._selected = set()
-        self._mode = "all"
         self._all_accounts = False
         self._reading = self._mutating = self._locked = self._closing = False
         self._error = self._status = self._checked = ""
@@ -65,10 +59,6 @@ class ManagementController(QObject):
     def rows(self): return self._rows
     @Property("QVariantMap", notify=changed)
     def statistics(self): return self._statistics
-    @Property("QVariantList", notify=changed)
-    def selectedKeys(self): return sorted(self._selected)
-    @Property(int, notify=changed)
-    def selectedCount(self): return len(self._selected)
     @Property(int, notify=changed)
     def total(self): return self._total
     @Property(int, notify=changed)
@@ -115,7 +105,7 @@ class ManagementController(QObject):
         self._generation += 1
         self._invalidated = True
         self._context = context
-        self._rows, self._statistics, self._tokens, self._selected = [], {}, {}, set()
+        self._rows, self._statistics, self._tokens = [], {}, {}
         self._total = self._pages = self._page = 0
         self._error = self._status = self._checked = ""
         self._delete = None
@@ -129,19 +119,11 @@ class ManagementController(QObject):
     def setSection(self, section):
         if section not in _SECTIONS or self._closing: return
         self._section, self._page = section, 0
-        self._selected.clear()
         if section != "schedule":
             self._read()
         else:
             self._cancel_reads()
             self.changed.emit()
-
-    @Slot(str)
-    def setMissingMode(self, mode):
-        if mode in {"all", "missing", "ignored", "unavailable"}:
-            self._mode, self._page = mode, 0
-            if self._section != "schedule": self._read()
-            else: self.changed.emit()
 
     @Slot(bool)
     def setAllAccounts(self, value):
@@ -164,57 +146,16 @@ class ManagementController(QObject):
         if self._closing: return
         self._reading = True
         self._read_id += 1
-        self._selected.clear()
         self._tokens.clear()
         if not preserve_error:
             self._error = ""
         with self._condition:
             self._pending = deque(item for item in self._pending if item[0] != "read")
             self._pending.append(("read", self._generation, (self._context, self._section, self._page,
-                                                           self._mode, self._all_accounts,
+                                                           self._all_accounts,
                                                            force or self._invalidated, self._read_id)))
             self._condition.notify()
         self.changed.emit()
-
-    @Slot(str)
-    def toggleRow(self, token):
-        if self._section != "missing" or self._reading or self._mutating or token not in self._tokens: return
-        if self._tokens[token].get("availability") == "unavailable": return
-        self._selected.symmetric_difference_update({token})
-        self.changed.emit()
-
-    @Slot()
-    def selectPage(self):
-        if self._reading or self._mutating: return
-        self._selected = {key for key, row in self._tokens.items() if row.get("availability") == "missing"}
-        self.changed.emit()
-
-    @Slot()
-    def clearSelection(self):
-        if self._reading or self._mutating or not self._selected: return
-        self._selected.clear()
-        self.changed.emit()
-
-    def _chosen(self):
-        return [self._tokens[key] for key in self._selected if key in self._tokens
-                and self._tokens[key].get("availability") == "missing"]
-
-    @Slot(bool)
-    def setIgnored(self, ignored):
-        rows = self._chosen()
-        if self.locked or self._mutating or not rows: return
-        self._mutating = True
-        self._stop.clear()
-        self._enqueue("ignore", (self._context, [row["_identity"] for row in rows], bool(ignored)))
-
-    @Slot()
-    def retrySelected(self):
-        rows = self._chosen()
-        if self.locked or self._mutating or not rows: return
-        self._mutating = True
-        self._stop.clear()
-        self._status = "다시 받을 파일의 상태를 확인합니다"
-        self._enqueue("validate_retry", (self._context, [(row["_identity"], row["archive_key"]) for row in rows]))
 
     @Slot("QVariantList")
     def prepareDelete(self, keys):
@@ -290,7 +231,7 @@ class ManagementController(QObject):
                             self._delivered.emit((kind, generation, {}, "계정이나 목록이 바뀌었습니다."))
                         continue
                     if kind == "read":
-                        context, section, page, mode, all_accounts, force, read_id = payload
+                        context, section, page, all_accounts, force, read_id = payload
                         if context != cache_key or force:
                             if cache: cache.close()
                             cache, cache_key = None, context
@@ -301,8 +242,7 @@ class ManagementController(QObject):
                             except FileNotFoundError:
                                 pass  # Reading an absent catalog never creates a new one.
                         if cache:
-                            if section == "missing": result = cache.missing_page(page, mode)
-                            elif section == "deletions": result = cache.deletion_page(page)
+                            if section == "deletions": result = cache.deletion_page(page)
                             elif section == "statistics": result = cache.statistics(page)
                             else: result = cache.run_page(page, all_accounts)
                             result["checked_at"] = cache.checked_at
@@ -314,84 +254,21 @@ class ManagementController(QObject):
                     elif kind == "prepare_delete":
                         result = self._library.deletionManifest(payload)
                         if self._stop.is_set(): result = {"rows": [], "cancelled": True}
-                    elif kind == "delete":
+                    else:
                         from .deletion import run_deletion
                         manifest, keep = payload
                         result = run_deletion(manifest["location"], manifest["rows"], keep, self._stop,
                                               lambda event: self._delivered.emit(("progress", generation, event, "")))
                         cache_key = None
-                    elif kind == "ignore":
-                        context, identities, ignored = payload
-                        result = self._ignore(context, identities, ignored)
-                        cache_key = None
-                    else:
-                        context, selected = payload
-                        result = self._validate_retry(context, selected)
                     self._delivered.emit((kind, generation, result, ""))
                 except InterruptedError:
                     pass
-                except Exception as exc:
-                    detail = dict(section=payload[1], read_id=payload[6]) if kind == "read" else {}
-                    error = ("파일 상태가 바뀌었습니다. 목록을 다시 확인해 주세요."
-                             if isinstance(exc, ValueError) and kind in {"ignore", "validate_retry"}
-                             else "작업을 마치지 못했습니다. 계정·폴더·파일 상태를 확인해 주세요.")
+                except Exception:
+                    detail = dict(section=payload[1], read_id=payload[5]) if kind == "read" else {}
+                    error = "작업을 마치지 못했습니다. 계정·폴더·파일 상태를 확인해 주세요."
                     self._delivered.emit((kind, generation, detail, error))
         finally:
             if cache: cache.close()
-
-    def _ignore(self, context, identities, ignored):
-        from .protection import AccountGuard
-        paths = resolve_storage(context[1], context[0], context[2])
-        if not (paths.record_dir / ".luvbox-history.sqlite3").is_file():
-            raise FileNotFoundError("catalog disappeared")
-        account = AccountGuard(paths.account, sleep=lambda *_: None)
-        account.acquire(respect_cooldown=False)
-        try:
-            output = OutputGuard(paths.output_dir)
-            output.acquire()
-            guards = [output]
-            try:
-                if self._stop.is_set(): return {"message": "변경을 취소했습니다"}
-                with closing(HistoryStore.for_storage(paths, protected=True, create_media=False)) as store:
-                    for root in store.media_roots:
-                        if root == paths.output_dir:
-                            continue
-                        extra = OutputGuard(root, group=output)
-                        extra.acquire()
-                        guards.append(extra)
-                    self._require_missing(store, identities)
-                    if self._stop.is_set(): return {"message": "변경을 취소했습니다"}
-                    store.set_missing_ignored(identities, ignored)
-                warning = ""
-                if paths.output_dir.is_dir():
-                    try:
-                        publish_snapshot(paths)
-                    except (OSError, ValueError, sqlite3.Error):
-                        warning = " 저장 폴더의 기록 사본은 다음 저장 때 갱신합니다."
-            finally:
-                for guard in reversed(guards):
-                    guard.close()
-        finally: account.close()
-        return {"message": f"{len(identities):,}개 항목의 다시 받기 설정을 변경했습니다." + warning}
-
-    @staticmethod
-    def _require_missing(store, identities):
-        for identity in identities:
-            if store._db.execute("SELECT 1 FROM deletion_items WHERE tweet_id=? AND num=? AND media_type=? AND status='pending' LIMIT 1", identity).fetchone():
-                raise ValueError("deletion outcome is pending")
-            candidates = store._db.execute("SELECT path,last_path FROM media WHERE tweet_id=? AND num=? AND media_type=?", identity).fetchall()
-            if not candidates or any(ManagementSnapshot._availability(store, row["path"] or row["last_path"])[0] != "missing"
-                                     for row in candidates):
-                raise ValueError("file availability changed")
-
-    def _validate_retry(self, context, selected):
-        from .qt_library import _ReadOnlyHistory
-        paths = resolve_storage(context[1], context[0], context[2])
-        with closing(_ReadOnlyHistory(paths)) as store:
-            self._require_missing(store, [identity for identity, _ in selected])
-        if self._stop.is_set():
-            return {"message": "다시 받기를 취소했습니다", "keys": ()}
-        return {"keys": tuple(key for _, key in selected)}
 
     @staticmethod
     def _display_timestamp(value):
@@ -420,13 +297,11 @@ class ManagementController(QObject):
             self._reading = False
             self._invalidated = bool(error)
             self._error = error or self._error
-            self._rows, self._tokens, self._selected = [], {}, set()
+            self._rows, self._tokens = [], {}
             for row in value.get("rows", []):
                 token = uuid.uuid4().hex
                 self._tokens[token] = row
-                status = ("휴지통 이동 결과 확인 필요" if row.get("deletion_pending") else
-                          "확인 불가" if row.get("availability") == "unavailable" else
-                          "다시 받지 않기" if row.get("ignored") else "파일 없음") if self._section == "missing" else _STATUS.get(row.get("status"), str(row.get("status", "")))
+                status = _STATUS.get(row.get("status"), str(row.get("status", "")))
                 origin = {"manual": "수동", "scheduled": "자동", "legacy": "기존 기록"}.get(row.get("origin"), "")
                 stamp = self._display_timestamp(
                     row.get("created_at") or row.get("started_at") or row.get("finished_at") or row.get("posted_at") or "")
@@ -437,12 +312,10 @@ class ManagementController(QObject):
                     detail.extend((f"저장 {row.get('saved', 0):,}개", f"건너뜀 {row.get('skipped', 0):,}개"))
                 elif self._section == "deletions":
                     detail.extend(("다시 받지 않기" if row.get("keep_deleted") else "", row.get("path", "")))
-                elif self._section == "missing":
-                    detail.extend(("@" + row["author"] if row.get("author") else "", row.get("last_path", "")))
                 self._rows.append(dict(token=token, title=row.get("filename") or ("@" + row["author"] if row.get("author") else origin or "실행 기록"),
                                        detail=" · ".join(str(part) for part in detail if part),
                                        message=str(row.get("message") or ""),
-                                       selectable=row.get("availability") == "missing", hasLog=bool(row.get("log"))))
+                                       hasLog=bool(row.get("log"))))
             self._statistics = value.get("statistics", {})
             self._total, self._page, self._pages = value.get("total", 0), value.get("page", 0), value.get("pages", 0)
             self._checked = value.get("checked_at", "")
@@ -458,13 +331,6 @@ class ManagementController(QObject):
                 self._delete = value
                 self._status = "휴지통으로 이동할지 확인해 주세요"
                 self.deleteConfirmationRequested.emit()
-        elif kind == "validate_retry" and not error:
-            self._mutating = False
-            self._status = value.get("message", "")
-            self.changed.emit()
-            if value.get("keys"):
-                self.retryRequested.emit(value["keys"])
-            return
         else:
             self._mutating = False
             self._error = error

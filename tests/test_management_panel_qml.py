@@ -161,9 +161,6 @@ def scene():
         controller._accounts._connected = True
         controller._accounts._authentication_state = "saved"
         controller._accounts.changed.emit()
-        retry_calls = []
-        controller.management.retryRequested.disconnect(controller.retryMissing)
-        controller.management.retryRequested.connect(lambda keys: retry_calls.append(tuple(keys)))
         wheel = WheelInputFilter()
         engine = QQmlApplicationEngine()
         engine.addImageProvider("thumbs", controller.library.provider)
@@ -189,43 +186,6 @@ def scene():
             wait(lambda: confirmation.property("visible"), "schedule confirmation")
             QTest.keyClick(window, Qt.Key.Key_Escape)
             wait(lambda: not confirmation.property("visible"), "cancel schedule")
-
-            click_tab("사라진 파일", "missing")
-            wait(lambda: controller.management.total == 2 and len(controller.management.rows) == 2, "missing rows")
-            assert find("missingModeFilter").width() >= 152
-            assert all(row["selectable"] for row in controller.management.rows)
-            click(button("현재 목록 선택"))
-            assert controller.management.selectedCount == 2
-            assert "선택 2건" in find("managementCount").property("text")
-            assert find("missingSelectPage").property("text") == "선택 해제"
-            click(find("missingSelectPage"))
-            assert controller.management.selectedCount == 0
-            assert "선택 2건" not in find("managementCount").property("text")
-            controller.management.toggleRow(controller.management.rows[0]["token"])
-            assert controller.management.selectedCount == 1
-            assert find("missingSelectPage").property("text") == "현재 목록 선택"
-            click(find("missingSelectPage"))
-            assert controller.management.selectedCount == 2
-            controller._accounts._connected = False
-            controller._accounts.changed.emit()
-            wait(lambda: not button("선택 다시 받기").property("enabled"), "retry requires account")
-            assert find("retryConnectionHelp").property("visible")
-            controller._accounts._connected = True
-            controller._accounts.changed.emit()
-            wait(lambda: button("선택 다시 받기").property("enabled"), "connected retry")
-            click(button("다시 받지 않기"))
-            wait(lambda: not controller.management.mutating and not controller.management.busy, "exclude missing")
-            assert all("다시 받지 않기" in row["detail"] for row in controller.management.rows)
-            assert ignored_identities() == {"101", "102"}
-            click(button("현재 목록 선택"))
-            click(button("제외 해제"))
-            wait(lambda: not controller.management.mutating and not controller.management.busy, "allow missing")
-            assert all("파일 없음" in row["detail"] for row in controller.management.rows)
-            assert ignored_identities() == set()
-            click(button("현재 목록 선택"))
-            click(button("선택 다시 받기"))
-            wait(lambda: bool(retry_calls), "selected retry")
-            assert set(retry_calls.pop()) == {archive_key("101", 1, "photo"), archive_key("102", 1, "photo")}
 
             click_tab("삭제 이력", "deletions")
             assert controller.management.total == 1

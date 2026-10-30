@@ -122,19 +122,6 @@ class ManagementAppIntegrationTests(unittest.TestCase):
     def ledger(self):
         return activity.outcome_page(0, 100, account='offline')['rows']
 
-    def test_selected_missing_file_starts_only_its_target(self):
-        manager = self.controller.management
-        manager.setSection('missing')
-        self.wait(lambda: not manager.busy and manager.total == 1)
-        token = manager.rows[0]['token']
-        manager.toggleRow(token)
-        manager.retrySelected()
-        self.wait(lambda: bool(self.service.started))
-        options = self.service.started[0]
-        self.assertEqual(options.targets, ('200_1',))
-        self.assertEqual(options.account, 'offline')
-        self.assertEqual(Path(options.output_dir), self.output)
-
     def test_normal_terminal_event_links_activity_and_catalog_without_duplicate(self):
         self.begin()
         ident = self.catalog_run()

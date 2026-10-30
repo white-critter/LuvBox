@@ -272,6 +272,24 @@ class GalleryModelTests(unittest.TestCase):
                 self.wait_for(lambda: model.data(model.index(0), model.ThumbReadyRole) is True)
         self.assertEqual(provider.snapshot()["decoded"], decoded)
 
+    def test_search_reset_republishes_failed_thumbnails(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        corrupt = Path(folder.name).resolve() / "corrupt.png"
+        corrupt.write_bytes(b"not-a-valid-image")
+        provider = SafeThumbnailProvider(workers=1)
+        self.addCleanup(lambda: provider.join_workers(2))
+        self.addCleanup(provider.close)
+        provider.register("broken", corrupt)
+        model = self.model(lambda *_: (1, [{"key": "broken", "caption": "???"}]), provider=provider)
+        self.wait_for(lambda: not model.busy and model.count == 1)
+        model.focusViewport(0, 0, 0, 24, 18)
+        self.wait_for(lambda: model.data(model.index(0), model.ThumbMissingRole) is True)
+        model.search("again")
+        self.wait_for(lambda: not model.busy and model.count == 1)
+        model.focusViewport(0, 0, 0, 24, 18)
+        self.wait_for(lambda: model.data(model.index(0), model.ThumbMissingRole) is True)
+
 
 @unittest.skipUnless(_QT_AVAILABLE, "optional Qt experiment dependencies are not installed")
 class SafeThumbnailProviderTests(unittest.TestCase):

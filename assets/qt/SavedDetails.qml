@@ -46,13 +46,49 @@ Frame {
                     running: !!details.item.preview_loading
                     visible: running
                 }
-                Label {
+                Column {
                     anchors.centerIn: parent
                     width: parent.width
                     visible: !details.item.preview_loading && !details.item.preview_url
-                    text: "미리보기를 표시하지 못했습니다."
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.Wrap
+                    spacing: 6
+                    Canvas {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        width: 36
+                        height: 30
+                        onPaint: {
+                            const ctx = getContext("2d")
+                            ctx.reset()
+                            ctx.strokeStyle = "#8a8284"
+                            ctx.lineWidth = 1.8
+                            ctx.lineJoin = "round"
+                            ctx.lineCap = "round"
+                            ctx.strokeRect(3, 3, 30, 24)
+                            ctx.beginPath()
+                            ctx.arc(11, 11, 2.5, 0, Math.PI * 2)
+                            ctx.stroke()
+                            ctx.beginPath()
+                            ctx.moveTo(6, 23)
+                            ctx.lineTo(14, 15)
+                            ctx.lineTo(20, 20)
+                            ctx.lineTo(25, 16)
+                            ctx.lineTo(30, 23)
+                            ctx.stroke()
+                            ctx.strokeStyle = "#d93645"
+                            ctx.lineWidth = 2
+                            ctx.beginPath()
+                            ctx.moveTo(5, 5)
+                            ctx.lineTo(31, 25)
+                            ctx.stroke()
+                        }
+                    }
+                    Label {
+                        width: parent.width
+                        text: "미리보기 없음"
+                        color: "#b9afb1"
+                        font.pixelSize: 12
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.Wrap
+                    }
                 }
             }
             ColumnLayout {

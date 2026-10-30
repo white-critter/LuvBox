@@ -3,6 +3,7 @@ import QtQuick.Controls
 
 ComboBox {
     id: control
+    property int minimumPopupWidth: 0
     implicitHeight: 40
     leftPadding: 14
     rightPadding: 28
@@ -75,7 +76,7 @@ ComboBox {
             font: row.font
             color: "#f4f1f1"
             verticalAlignment: Text.AlignVCenter
-            elide: Text.ElideNone
+            elide: Text.ElideRight
         }
         background: Rectangle {
             radius: 8
@@ -85,7 +86,7 @@ ComboBox {
 
     popup: Popup {
         y: control.height + 6
-        width: Math.max(control.width, control.implicitContentWidth + 32)
+        width: Math.max(control.width, control.minimumPopupWidth, control.implicitContentWidth + 32)
         // Stay inside the window, e.g. for a combo at its right edge.
         margins: 8
         padding: 4

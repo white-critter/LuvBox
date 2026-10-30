@@ -45,7 +45,6 @@ class ApplicationController(QObject):
     storageConfirmationRequested = Signal()
     reviewReady = Signal()
     reviewCleared = Signal()
-    retryStarted = Signal()
     shutdownFinished = Signal()
     _completed = Signal(str, bool, object)
 
@@ -109,7 +108,6 @@ class ApplicationController(QObject):
         self._download.changed.connect(self._state_changed)
         self._schedule.changed.connect(self._state_changed)
         self._management.changed.connect(self._state_changed)
-        self._management.retryRequested.connect(self.retryMissing)
         self._management.libraryChanged.connect(self._managed_library_changed)
         self._download.eventReceived.connect(self._download_event)
         self._download.authenticationChanged.connect(self._accounts.updateAuthentication)
@@ -438,21 +436,6 @@ class ApplicationController(QObject):
         self._message = self._error = ""
         self._commands.put(("prepare", (snapshot, frozenset())))
         self._state_changed()
-
-    @Slot(object)
-    def retryMissing(self, targets):
-        if not self.canStart or self._accounts.authenticationState == "reconnect_required":
-            self._error = "계정을 연결하고 다른 작업이 끝난 뒤 다시 시도해 주세요."
-            self.changed.emit()
-            return
-        snapshot = {**self._preferences, "account": self._account, "output_dir": self._output,
-                    "targets": tuple(targets)}
-        self._begin_manual_outcome()
-        self._preparing = True
-        self._message = self._error = ""
-        self._commands.put(("prepare", (snapshot, frozenset())))
-        self._state_changed()
-        self.retryStarted.emit()
 
     @Slot(bool)
     def confirmStorage(self, approved):

@@ -42,6 +42,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
     """
 
     ready = Signal(str)
+    failed = Signal(str)
 
     def __init__(self, *, cache_size=240, decoder=thumbnail, workers=2):
         if type(cache_size) is not int or not 1 <= cache_size <= 240:
@@ -196,6 +197,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
     def reset_notifications(self):
         with self._lock:
             self._published.clear()
+            self._failures.clear()
 
     def join_workers(self, timeout=2.0):
         deadline = time.monotonic() + max(0.0, min(float(timeout), 5.0))
@@ -283,6 +285,12 @@ class SafeThumbnailProvider(QQuickImageProvider):
             self._notified[key] = time.perf_counter()
         self.ready.emit(key)
 
+    def _publish_failed(self, key, generation):
+        with self._lock:
+            if self._closed or generation != self._registry_generation:
+                return
+        self.failed.emit(key)
+
     def _enqueue_locked(self, key, width, height, priority):
         token = (key, width, height)
         if token in self._inflight or token in self._failures or key not in self._registry:
@@ -350,6 +358,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._active += 1
                 self._record("queue_wait_ms", (time.perf_counter() - enqueued) * 1000)
             publish = False
+            failed = False
             try:
                 image, _hit = self._read(key, path, width, height, decode=True, deliver=False) if path is not None else (QImage(), False)
             except Exception:
@@ -361,6 +370,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 stale = generation != self._registry_generation
                 if not closed and not stale and image.isNull() and key in self._wanted:
                     self._failures.add(token)
+                    failed = True
                 elif (not closed and not stale and not image.isNull() and key in self._wanted
                       and self._target_size == (width, height) and token not in self._published):
                     self._published.add(token)
@@ -368,6 +378,8 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._lock.notify_all()
             if publish:
                 self._publish(key, generation)
+            elif failed:
+                self._publish_failed(key, generation)
             if closed:
                 return
 
@@ -472,6 +484,7 @@ class GalleryModel(QAbstractListModel):
     CaptionRole = KeyRole + 1
     ThumbUrlRole = KeyRole + 2
     ThumbReadyRole = KeyRole + 3
+    ThumbMissingRole = KeyRole + 4
 
     def __init__(self, reader, *, provider=None, batch_size=200, parent=None):
         super().__init__(parent)
@@ -484,10 +497,14 @@ class GalleryModel(QAbstractListModel):
         self._keys = set()
         self._positions = {}
         self._ready = set()
+        self._missing = set()
         self._thumb_size = (0, 0)
         ready = getattr(provider, "ready", None)
         if ready is not None:
             ready.connect(self._thumb_ready)
+        failed = getattr(provider, "failed", None)
+        if failed is not None:
+            failed.connect(self._thumb_failed)
         self._total = 0
         self._busy = False
         self._error = ""
@@ -520,7 +537,8 @@ class GalleryModel(QAbstractListModel):
 
     def roleNames(self):
         return {self.KeyRole: b"key", self.CaptionRole: b"caption",
-                self.ThumbUrlRole: b"thumbUrl", self.ThumbReadyRole: b"thumbReady"}
+                self.ThumbUrlRole: b"thumbUrl", self.ThumbReadyRole: b"thumbReady",
+                self.ThumbMissingRole: b"thumbMissing"}
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._rows)
@@ -537,6 +555,8 @@ class GalleryModel(QAbstractListModel):
             return f"image://thumbs/{quote(row['key'], safe='')}?generation={self._generation}"
         if role == self.ThumbReadyRole:
             return row["key"] in self._ready
+        if role == self.ThumbMissingRole:
+            return row["key"] in self._missing
         return None
 
     def canFetchMore(self, parent=QModelIndex()):
@@ -566,6 +586,7 @@ class GalleryModel(QAbstractListModel):
         self._keys.clear()
         self._positions.clear()
         self._ready.clear()
+        self._missing.clear()
         self._total = 0
         reset = getattr(self._provider, "reset_notifications", None)
         if reset is not None:
@@ -595,7 +616,8 @@ class GalleryModel(QAbstractListModel):
                     caption = row.get("caption", "")
                     if not isinstance(key, str) or not _KEY.fullmatch(key) or not isinstance(caption, str):
                         raise ValueError("invalid gallery row")
-                    cleaned.append({"key": key, "caption": caption[:500]})
+                    cleaned.append({"key": key, "caption": caption[:500],
+                                    "missing": bool(row.get("missing", False))})
                 result = generation, offset, total, cleaned, ""
             except Exception:
                 result = generation, offset, 0, [], _READ_ERROR
@@ -629,6 +651,8 @@ class GalleryModel(QAbstractListModel):
             self._keys.update(keys)
             for index, row in enumerate(rows):
                 self._positions[row["key"]] = start + index
+                if row.get("missing"):
+                    self._missing.add(row["key"])
             self.endInsertRows()
         self._exhausted = len(self._rows) >= total
         self._busy = False
@@ -676,8 +700,20 @@ class GalleryModel(QAbstractListModel):
         if row is None or row >= len(self._rows) or self._rows[row]["key"] != key:
             return
         self._ready.add(key)
+        self._missing.discard(key)
         model_index = self.index(row)
-        self.dataChanged.emit(model_index, model_index, [self.ThumbReadyRole])
+        self.dataChanged.emit(model_index, model_index, [self.ThumbReadyRole, self.ThumbMissingRole])
+
+    @Slot(str)
+    def _thumb_failed(self, key):
+        if self._closed or not isinstance(key, str) or key in self._missing or key in self._ready:
+            return
+        row = self._positions.get(key)
+        if row is None or row >= len(self._rows) or self._rows[row]["key"] != key:
+            return
+        self._missing.add(key)
+        model_index = self.index(row)
+        self.dataChanged.emit(model_index, model_index, [self.ThumbMissingRole])
 
     def shutdown(self, timeout=2.0):
         with self._condition:

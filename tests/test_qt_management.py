@@ -68,39 +68,8 @@ class ManagementControllerTests(unittest.TestCase):
         self.wait(lambda: not self.management._worker.is_alive() and self.library.shutdownComplete)
         self.app.processEvents()
 
-    def missing_page(self):
-        self.management.setSection('missing')
-        self.wait(lambda: not self.management.busy)
-        self.assertFalse(self.management.error, self.management.error)
-        self.assertEqual(len(self.management.rows), 1)
-        return self.management.rows[0]['token']
-
     def gallery_key(self):
         return next(row['key'] for row in self.library.model._rows if '_100_' in row['key'])
-
-    def ignored(self):
-        with closing(HistoryStore.for_storage(self.paths)) as store:
-            return store.ignored_media()
-
-    def test_ignore_and_unignore_use_current_snapshot_and_reject_old_or_unknown_tokens(self):
-        token = self.missing_page()
-        self.management.toggleRow('unknown-token')
-        self.assertEqual(self.management.selectedCount, 0)
-        self.management.toggleRow(token)
-        self.assertEqual(self.management.selectedCount, 1)
-        self.management.setIgnored(True)
-        self.wait(lambda: not self.management.mutating and not self.management.busy)
-        self.assertFalse(self.management.error, self.management.error)
-        self.assertEqual(self.ignored(), {('200', 1, 'photo')})
-        self.management.toggleRow(token)
-        self.assertEqual(self.management.selectedCount, 0)
-        new_token = self.management.rows[0]['token']
-        self.assertNotEqual(new_token, token)
-        self.management.toggleRow(new_token)
-        self.management.setIgnored(False)
-        self.wait(lambda: not self.management.mutating and not self.management.busy)
-        self.assertFalse(self.management.error, self.management.error)
-        self.assertEqual(self.ignored(), set())
 
     def test_run_history_without_selected_account_requires_all_accounts_opt_in(self):
         self.management.setLibrary('', str(self.output), False)
@@ -118,62 +87,6 @@ class ManagementControllerTests(unittest.TestCase):
             self.assertEqual(self.management.total, 1)
             self.assertEqual(len(self.management.rows), 1)
             read_history.assert_called_once_with(0, 100, account='')
-
-    def test_file_restored_after_selection_cannot_be_marked_as_missing(self):
-        token = self.missing_page()
-        self.management.toggleRow(token)
-        self.missing.write_bytes(b'restored outside the application')
-        self.management.setIgnored(True)
-        self.wait(lambda: not self.management.mutating and not self.management.busy)
-        self.assertTrue(self.management.error)
-        self.assertEqual(self.ignored(), set())
-        self.assertEqual(self.missing.read_bytes(), b'restored outside the application')
-
-    def test_file_restored_after_selection_is_not_requested_for_download(self):
-        token = self.missing_page()
-        self.management.toggleRow(token)
-        self.missing.write_bytes(b'restored before retry')
-        requests = []
-        self.management.retryRequested.connect(requests.append)
-        self.management.retrySelected()
-        self.wait(lambda: not self.management.mutating and not self.management.busy)
-        self.app.processEvents()
-        self.assertEqual(requests, [])
-        self.assertEqual(self.missing.read_bytes(), b'restored before retry')
-
-    def test_new_pending_recycle_after_selection_blocks_retry(self):
-        token = self.missing_page()
-        self.management.toggleRow(token)
-        self.missing.write_bytes(b'restored and then moved')
-        with closing(HistoryStore.for_storage(self.paths)) as store:
-            row = store.media_record('flat', {'tweet_id': '200', 'num': 1, 'type': 'photo'})
-            store.begin_deletion('test-batch', row, True, file_signature(self.missing))
-        self.missing.rename(self.kept / self.missing.name)
-        requests = []
-        self.management.retryRequested.connect(requests.append)
-        self.management.retrySelected()
-        self.wait(lambda: not self.management.mutating and not self.management.busy)
-        self.assertEqual(requests, [])
-        self.assertTrue(self.management.error)
-        self.assertEqual((self.kept / self.missing.name).read_bytes(), b'restored and then moved')
-
-    def test_missing_choice_waits_for_other_job_using_approved_former_root(self):
-        previous = self.root / 'previous-output'
-        previous.mkdir()
-        old_path = previous / self.missing.name
-        with closing(HistoryStore.for_storage(self.paths)) as store, store._db:
-            store._db.execute("UPDATE media SET path=?,last_path='' WHERE tweet_id='200'", (str(old_path),))
-            store._db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES('allowed_media_roots',?)",
-                              (json.dumps([str(self.output), str(previous)]),))
-        guard = OutputGuard(previous)
-        guard.acquire()
-        self.addCleanup(guard.close)
-        token = self.missing_page()
-        self.management.toggleRow(token)
-        self.management.setIgnored(True)
-        self.wait(lambda: not self.management.mutating and not self.management.busy)
-        self.assertTrue(self.management.error)
-        self.assertEqual(self.ignored(), set())
 
     def test_cancel_and_stale_generation_never_move_a_file(self):
         original = self.present.read_bytes()

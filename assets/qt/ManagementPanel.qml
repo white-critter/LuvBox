@@ -6,17 +6,8 @@ ColumnLayout {
     id: panel
     property var app: null
     readonly property var manager: app ? app.management : null
-    readonly property int selectableCount: {
-        if (!manager || manager.section !== "missing") return 0
-        var count = 0
-        var rows = manager.rows
-        for (var i = 0; i < rows.length; ++i)
-            if (rows[i].selectable) ++count
-        return count
-    }
-    readonly property bool pageSelected: selectableCount > 0 && manager.selectedCount === selectableCount
     readonly property var sections: [
-        {key: "schedule", label: "자동 저장"}, {key: "missing", label: "사라진 파일"},
+        {key: "schedule", label: "자동 저장"},
         {key: "deletions", label: "삭제 이력"}, {key: "statistics", label: "통계"},
         {key: "runs", label: "실행 기록"}
     ]
@@ -75,8 +66,6 @@ ColumnLayout {
                 objectName: "managementCount"
                 Layout.fillWidth: true
                 text: panel.manager ? (panel.manager.total.toLocaleString() + "건" +
-                     (panel.manager.section === "missing" && panel.manager.selectedCount > 0
-                         ? " · 선택 " + panel.manager.selectedCount.toLocaleString() + "건" : "") +
                      (panel.manager.checkedAt ? " · 확인 " + panel.manager.checkedAt : "")) : ""
                 color: "#b9afb1"
                 elide: Text.ElideRight
@@ -84,65 +73,10 @@ ColumnLayout {
             BusyIndicator { running: panel.manager && panel.manager.busy; visible: running; implicitWidth: 26; implicitHeight: 26 }
             FlatButton { text: "다시 확인"; enabled: panel.manager && !panel.manager.busy && !panel.manager.mutating; onClicked: panel.manager.refresh() }
         }
-        Flow {
-            Layout.fillWidth: true
-            spacing: 8
-            visible: panel.manager && panel.manager.section === "missing"
-            FlatCombo {
-                objectName: "missingModeFilter"
-                implicitWidth: 152
-                model: ["전체", "다시 받을 파일", "다시 받지 않기", "확인 불가"]
-                Accessible.name: "사라진 파일 상태"
-                onActivated: panel.manager.setMissingMode(["all", "missing", "ignored", "unavailable"][currentIndex])
-            }
-            FlatButton {
-                objectName: "missingSelectPage"
-                text: panel.pageSelected ? "선택 해제" : "현재 목록 선택"
-                enabled: panel.manager && !panel.manager.busy && !panel.manager.mutating && panel.selectableCount > 0
-                onClicked: panel.pageSelected ? panel.manager.clearSelection() : panel.manager.selectPage()
-            }
-            FlatButton {
-                text: "선택 다시 받기"
-                enabled: panel.app && panel.app.canStart && panel.app.accounts &&
-                    panel.app.accounts.authenticationState !== "reconnect_required" &&
-                    panel.manager && !panel.manager.locked && !panel.manager.mutating && panel.manager.selectedCount > 0
-                onClicked: panel.manager.retrySelected()
-            }
-            FlatButton {
-                text: "다시 받지 않기"
-                enabled: panel.manager && !panel.manager.locked && !panel.manager.mutating && panel.manager.selectedCount > 0
-                onClicked: panel.manager.setIgnored(true)
-            }
-            FlatButton {
-                text: "제외 해제"
-                enabled: panel.manager && !panel.manager.locked && !panel.manager.mutating && panel.manager.selectedCount > 0
-                onClicked: panel.manager.setIgnored(false)
-            }
-        }
-        Label {
-            id: retryHelp
-            objectName: "retryConnectionHelp"
-            Layout.fillWidth: true
-            visible: !!(panel.manager && panel.manager.section === "missing" && panel.manager.selectedCount > 0 &&
-                panel.app && !panel.app.busy && (!panel.app.canStart ||
-                (panel.app.accounts && panel.app.accounts.authenticationState === "reconnect_required")))
-            text: "다시 받으려면 X 계정 연결과 저장 위치를 확인해 주세요."
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: "#e6bd79"
-        }
         FlatSwitch {
             visible: panel.manager && panel.manager.section === "runs"
             text: "새 실행 기록은 모든 계정 보기"
             onToggled: panel.manager.setAllAccounts(checked)
-        }
-        Label {
-            Layout.fillWidth: true
-            visible: panel.manager && panel.manager.section === "missing" && !retryHelp.visible
-            text: "확인 불가는 드라이브·권한·클라우드 상태를 먼저 확인하세요. 선택 작업은 파일 없음이 확인된 항목에 적용합니다."
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: "#b9afb1"
         }
         Label {
             Layout.fillWidth: true
@@ -214,40 +148,18 @@ ColumnLayout {
             delegate: Frame {
                 id: rowFrame
                 required property var modelData
-                readonly property bool rowSelected: !!(panel.manager && panel.manager.section === "missing"
-                    && panel.manager.selectedKeys.indexOf(modelData.token) >= 0)
-                readonly property bool canToggleRow: !!(panel.manager && panel.manager.section === "missing"
-                    && modelData.selectable && !panel.manager.busy && !panel.manager.mutating)
                 width: records.width
                 padding: 10
                 background: Rectangle {
-                    color: rowFrame.rowSelected ? "#241416" : (rowHover.hovered ? "#222222" : "#191919")
+                    color: "#191919"
                     radius: 10
-                    border.width: 1
-                    border.color: rowFrame.rowSelected ? "#d93645" : (rowHover.hovered ? "#333333" : "transparent")
-                }
-                HoverHandler {
-                    id: rowHover
-                    cursorShape: rowFrame.canToggleRow ? Qt.PointingHandCursor : Qt.ArrowCursor
                 }
                 RowLayout {
                     width: parent.width
                     spacing: 10
-                    CheckBox {
-                        visible: panel.manager && panel.manager.section === "missing"
-                        enabled: rowFrame.canToggleRow
-                        checked: rowFrame.rowSelected
-                        Accessible.name: modelData.title + " 선택"
-                        HoverHandler { cursorShape: Qt.PointingHandCursor }
-                        onClicked: panel.manager.toggleRow(modelData.token)
-                    }
                     ColumnLayout {
                         Layout.fillWidth: true
                         spacing: 4
-                        TapHandler {
-                            enabled: rowFrame.canToggleRow
-                            onTapped: panel.manager.toggleRow(modelData.token)
-                        }
                         Label { Layout.fillWidth: true; text: modelData.title; textFormat: Text.PlainText; elide: Text.ElideMiddle }
                         Label { Layout.fillWidth: true; text: modelData.detail; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; color: "#b9afb1" }
                         Label { Layout.fillWidth: true; text: modelData.message; visible: text.length > 0; textFormat: Text.PlainText; wrapMode: Text.Wrap }

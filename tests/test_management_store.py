@@ -55,50 +55,6 @@ class ManagementSnapshotTests(unittest.TestCase):
         self.addCleanup(result.close)
         return result
 
-    def test_missing_and_cloud_unavailable_are_distinct_and_sources_remain_unchanged(self):
-        present, missing, unavailable = (self.add('100'), self.add('200'), self.add('300'))
-        missing.unlink()
-        self.store.close()
-        before = hashlib.sha256(self.store.path.read_bytes()).digest()
-        with patch('luvbox.management_store.cloud_only', side_effect=lambda path: path == unavailable):
-            snapshot = self.snapshot()
-        rows = {row['tweet_id']: row for row in snapshot.missing_page()['rows']}
-        self.assertEqual(set(rows), {'200', '300'})
-        self.assertEqual(rows['200']['availability'], 'missing')
-        self.assertEqual(rows['300']['availability'], 'unavailable')
-        self.assertEqual([row['tweet_id'] for row in snapshot.missing_page(mode='missing')['rows']], ['200'])
-        self.assertEqual([row['tweet_id'] for row in snapshot.missing_page(mode='unavailable')['rows']], ['300'])
-        self.assertEqual(hashlib.sha256(self.store.path.read_bytes()).digest(), before)
-        self.assertTrue(present.is_file())
-        self.assertTrue(unavailable.is_file())
-
-    def test_many_missing_items_are_paged_without_losing_or_repeating_identities(self):
-        for number in range(PAGE_SIZE + 5):
-            self.add(str(1000 + number)).unlink()
-        snapshot = self.snapshot()
-        first, second = snapshot.missing_page(0), snapshot.missing_page(1)
-        self.assertEqual((first['total'], first['pages'], len(first['rows']), len(second['rows'])),
-                         (PAGE_SIZE + 5, 2, PAGE_SIZE, 5))
-        ids = [row['archive_key'] for row in first['rows'] + second['rows']]
-        self.assertEqual(len(set(ids)), PAGE_SIZE + 5)
-        self.add('4000').unlink()
-        self.assertEqual(snapshot.missing_page()['total'], PAGE_SIZE + 5)
-        self.assertEqual(self.snapshot().missing_page()['total'], PAGE_SIZE + 6)
-
-    def test_pending_recycle_is_unavailable_and_retains_the_requested_exclusion(self):
-        for ident, keep in (('100', True), ('200', False)):
-            path = self.add(ident)
-            row = self.store.media_record('flat', {'tweet_id': ident, 'num': 1, 'type': 'photo'})
-            self.store.begin_deletion('test-batch', row, keep, file_signature(path))
-            path.rename(self.root / path.name)
-        snapshot = self.snapshot()
-        rows = {row['tweet_id']: row for row in snapshot.missing_page()['rows']}
-        self.assertEqual(set(rows), {'100', '200'})
-        self.assertEqual([(rows[key]['availability'], rows[key]['ignored']) for key in ('100', '200')],
-                         [('unavailable', 1), ('unavailable', 0)])
-        self.assertEqual(snapshot.missing_page(mode='missing')['total'], 0)
-        self.assertEqual(snapshot.missing_page(mode='unavailable')['total'], 2)
-
     def test_statistics_preserve_existing_deduped_metadata_and_earliest_save_time(self):
         path = self.add('100', mode='flat', author='alice')
         self.add('100', mode='author', author='', path=path)
@@ -170,7 +126,6 @@ class ManagementSnapshotTests(unittest.TestCase):
         snapshot = self.snapshot()
         self.assertEqual(snapshot.statistics()['statistics']['summary']['files'],
                          sum(item['files'] for item in expected['authors']))
-        self.assertEqual(snapshot.missing_page()['total'], 0)
 
 
 if __name__ == '__main__':

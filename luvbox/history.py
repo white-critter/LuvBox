@@ -1526,6 +1526,20 @@ class HistoryStore:
                                                              include_deleted=include_deleted))
 
     @_safe
+    def authors(self, *, include_deleted=False) -> list[dict]:
+        where, params = self._record_filter("all", "", include_deleted=include_deleted)
+        clause = (where + " AND " if where else " WHERE ") + "media.author!=''"
+        rows = self._read_rows(
+            "SELECT MAX(media.author) AS author, COUNT(*) AS count "
+            "FROM media" + clause +
+            " GROUP BY LOWER(media.author) "
+            "ORDER BY count DESC, LOWER(media.author) ASC",
+            params,
+        )
+        return [{"author": row["author"], "count": row["count"]}
+                for row in rows if re.fullmatch(r"[A-Za-z0-9_]{1,15}", row["author"] or "")]
+
+    @_safe
     def run_page(self, page=0, page_size=100) -> dict:
         return self._page("runs", (), page, page_size, self.runs)
 

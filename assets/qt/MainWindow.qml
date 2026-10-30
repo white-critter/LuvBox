@@ -59,6 +59,7 @@ ApplicationWindow {
     property int currentScreen: 0
     onCurrentScreenChanged: {
         stopWheel()
+        datePickerPopup.close()
         if (app)
             app.galleryVisible(currentScreen === 1)
         if (currentScreen === 1)
@@ -650,7 +651,9 @@ ApplicationWindow {
                         text: checked ? "필터 닫기" : "작성자·날짜 필터"
                         checkable: true
                         onClicked: {
-                            if (checked && window.app) {
+                            if (!checked) {
+                                datePickerPopup.close()
+                            } else if (window.app) {
                                 authorFilter.text = window.app.library.filterAuthor
                                 dateFieldChoice.currentIndex = window.app.library.dateField === "saved" ? 1 : 0
                                 dateFromFilter.text = window.app.library.dateFrom
@@ -663,6 +666,7 @@ ApplicationWindow {
                         text: "필터 초기화"
                         onClicked: {
                             searchDelay.stop()
+                            datePickerPopup.close()
                             search.text = ""
                             authorFilter.text = dateFromFilter.text = dateToFilter.text = ""
                             mediaFilter.currentIndex = orderChoice.currentIndex = dateFieldChoice.currentIndex = 0
@@ -685,48 +689,259 @@ ApplicationWindow {
                     function applyAdvancedFilter() {
                         if (window.app && window.app.library.setAdvancedFilters(authorFilter.text,
                                 dateFieldChoice.currentIndex === 1 ? "saved" : "posted",
-                                dateFromFilter.text, dateToFilter.text))
+                                dateFromFilter.text, dateToFilter.text)) {
+                            datePickerPopup.close()
                             filterToggle.checked = false
+                        }
                     }
-                    FlatField {
+                    FlatCombo {
                         id: authorFilter
                         objectName: "galleryAuthorFilter"
                         Layout.fillWidth: true
                         Layout.minimumWidth: 110
-                        placeholderText: "작성자 ID (정확히 일치)"
-                        Accessible.name: "정확한 작성자 ID"
-                        selectByMouse: true
-                        maximumLength: 16
-                        onAccepted: filterBox.applyAdvancedFilter()
+                        Layout.preferredWidth: 168
+                        minimumPopupWidth: 240
+                        implicitHeight: 40
+                        implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                        Accessible.name: "작성자 선택"
+                        textRole: "label"
+                        valueRole: "value"
+                        property string text: ""
+                        readonly property var authorRows: window.app && window.app.library.authors
+                            ? window.app.library.authors : []
+                        model: {
+                            const items = [{ label: "전체 작성자", value: "" }]
+                            const normalized = String(authorFilter.text || "").trim().replace(/^@+/, "").toLowerCase()
+                            let found = !normalized.length
+                            for (let i = 0; i < authorRows.length; i++) {
+                                const row = authorRows[i]
+                                const handle = row && row.author ? String(row.author) : ""
+                                if (!handle.length)
+                                    continue
+                                if (handle.toLowerCase() === normalized)
+                                    found = true
+                                const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
+                                items.push({ label: "@" + handle + " (" + count + ")", value: handle })
+                            }
+                            if (!found)
+                                items.push({ label: "@" + normalized, value: normalized })
+                            return items
+                        }
+                        function syncSelection() {
+                            const normalized = String(text || "").trim().replace(/^@+/, "").toLowerCase()
+                            if (!normalized.length) {
+                                if (currentIndex !== 0)
+                                    currentIndex = 0
+                                return
+                            }
+                            for (let i = 1; i < model.length; i++) {
+                                if (String(model[i].value).toLowerCase() === normalized) {
+                                    if (currentIndex !== i)
+                                        currentIndex = i
+                                    return
+                                }
+                            }
+                        }
+                        onTextChanged: syncSelection()
+                        onModelChanged: syncSelection()
+                        onActivated: index => {
+                            text = index > 0 && model[index] ? model[index].value : ""
+                        }
                     }
                     FlatCombo {
                         id: dateFieldChoice
                         objectName: "galleryDateField"
                         model: ["게시일", "저장일"]
-                        implicitWidth: 96
+                        implicitWidth: 92
                         implicitHeight: 40
                         Accessible.name: "날짜 필터 기준"
                     }
-                    FlatField {
+                    Rectangle {
                         id: dateFromFilter
                         objectName: "galleryDateFrom"
-                        Layout.preferredWidth: 148
-                        placeholderText: "시작 YYYY-MM-DD"
-                        Accessible.name: "시작 날짜 YYYY-MM-DD"
-                        selectByMouse: true
-                        maximumLength: 10
-                        onAccepted: filterBox.applyAdvancedFilter()
+                        property string text: ""
+                        readonly property bool highlighted: activeFocus
+                            || (datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter)
+                        activeFocusOnTab: true
+                        Layout.preferredWidth: 136
+                        Layout.minimumWidth: 120
+                        implicitHeight: 40
+                        radius: 10
+                        color: "#1c1c1c"
+                        border.width: highlighted ? 2 : (dateFromMouse.containsMouse ? 1 : 0)
+                        border.color: highlighted ? "#ff8791" : "#333333"
+                        Accessible.role: Accessible.Button
+                        Accessible.name: text.length > 0 ? "시작 날짜 " + text : "시작 날짜 선택"
+                        Accessible.onPressAction: datePickerPopup.openFor(dateFromFilter)
+                        Keys.onReturnPressed: datePickerPopup.openFor(dateFromFilter)
+                        Keys.onEnterPressed: datePickerPopup.openFor(dateFromFilter)
+                        Keys.onSpacePressed: datePickerPopup.openFor(dateFromFilter)
+                        Keys.onDeletePressed: {
+                            if (dateFromFilter.text.length > 0) {
+                                dateFromFilter.text = ""
+                                if (datePickerPopup.targetField === dateFromFilter)
+                                    datePickerPopup.close()
+                            }
+                        }
+                        Keys.onPressed: event => {
+                            if (event.key === Qt.Key_Backspace && dateFromFilter.text.length > 0) {
+                                dateFromFilter.text = ""
+                                if (datePickerPopup.targetField === dateFromFilter)
+                                    datePickerPopup.close()
+                                event.accepted = true
+                            }
+                        }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 8
+                            spacing: 6
+                            Canvas {
+                                width: 14
+                                height: 14
+                                onPaint: {
+                                    const ctx = getContext("2d")
+                                    ctx.reset()
+                                    ctx.strokeStyle = "#b9afb1"
+                                    ctx.lineWidth = 1.4
+                                    ctx.strokeRect(1, 2.5, 12, 10.5)
+                                    ctx.beginPath()
+                                    ctx.moveTo(1, 6)
+                                    ctx.lineTo(13, 6)
+                                    ctx.moveTo(4, 1)
+                                    ctx.lineTo(4, 3.5)
+                                    ctx.moveTo(10, 1)
+                                    ctx.lineTo(10, 3.5)
+                                    ctx.stroke()
+                                }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: dateFromFilter.text.length > 0 ? dateFromFilter.text : "시작 날짜"
+                                color: dateFromFilter.text.length > 0 ? "#f4f1f1" : "#8f8587"
+                                font.pixelSize: 13
+                                elide: Text.ElideRight
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            Label {
+                                visible: dateFromFilter.text.length > 0
+                                text: "×"
+                                color: "#b9afb1"
+                                font.pixelSize: 14
+                            }
+                        }
+                        MouseArea {
+                            id: dateFromMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: mouse => {
+                                dateFromFilter.forceActiveFocus()
+                                if (dateFromFilter.text.length > 0 && mouse.x >= dateFromFilter.width - 26) {
+                                    dateFromFilter.text = ""
+                                    if (datePickerPopup.targetField === dateFromFilter)
+                                        datePickerPopup.close()
+                                } else if (datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter) {
+                                    datePickerPopup.close()
+                                } else {
+                                    datePickerPopup.openFor(dateFromFilter)
+                                }
+                            }
+                        }
                     }
                     Label { text: "~" }
-                    FlatField {
+                    Rectangle {
                         id: dateToFilter
                         objectName: "galleryDateTo"
-                        Layout.preferredWidth: 148
-                        placeholderText: "종료 YYYY-MM-DD"
-                        Accessible.name: "종료 날짜 YYYY-MM-DD"
-                        selectByMouse: true
-                        maximumLength: 10
-                        onAccepted: filterBox.applyAdvancedFilter()
+                        property string text: ""
+                        readonly property bool highlighted: activeFocus
+                            || (datePickerPopup.visible && datePickerPopup.targetField === dateToFilter)
+                        activeFocusOnTab: true
+                        Layout.preferredWidth: 136
+                        Layout.minimumWidth: 120
+                        implicitHeight: 40
+                        radius: 10
+                        color: "#1c1c1c"
+                        border.width: highlighted ? 2 : (dateToMouse.containsMouse ? 1 : 0)
+                        border.color: highlighted ? "#ff8791" : "#333333"
+                        Accessible.role: Accessible.Button
+                        Accessible.name: text.length > 0 ? "종료 날짜 " + text : "종료 날짜 선택"
+                        Accessible.onPressAction: datePickerPopup.openFor(dateToFilter)
+                        Keys.onReturnPressed: datePickerPopup.openFor(dateToFilter)
+                        Keys.onEnterPressed: datePickerPopup.openFor(dateToFilter)
+                        Keys.onSpacePressed: datePickerPopup.openFor(dateToFilter)
+                        Keys.onDeletePressed: {
+                            if (dateToFilter.text.length > 0) {
+                                dateToFilter.text = ""
+                                if (datePickerPopup.targetField === dateToFilter)
+                                    datePickerPopup.close()
+                            }
+                        }
+                        Keys.onPressed: event => {
+                            if (event.key === Qt.Key_Backspace && dateToFilter.text.length > 0) {
+                                dateToFilter.text = ""
+                                if (datePickerPopup.targetField === dateToFilter)
+                                    datePickerPopup.close()
+                                event.accepted = true
+                            }
+                        }
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 8
+                            spacing: 6
+                            Canvas {
+                                width: 14
+                                height: 14
+                                onPaint: {
+                                    const ctx = getContext("2d")
+                                    ctx.reset()
+                                    ctx.strokeStyle = "#b9afb1"
+                                    ctx.lineWidth = 1.4
+                                    ctx.strokeRect(1, 2.5, 12, 10.5)
+                                    ctx.beginPath()
+                                    ctx.moveTo(1, 6)
+                                    ctx.lineTo(13, 6)
+                                    ctx.moveTo(4, 1)
+                                    ctx.lineTo(4, 3.5)
+                                    ctx.moveTo(10, 1)
+                                    ctx.lineTo(10, 3.5)
+                                    ctx.stroke()
+                                }
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: dateToFilter.text.length > 0 ? dateToFilter.text : "종료 날짜"
+                                color: dateToFilter.text.length > 0 ? "#f4f1f1" : "#8f8587"
+                                font.pixelSize: 13
+                                elide: Text.ElideRight
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            Label {
+                                visible: dateToFilter.text.length > 0
+                                text: "×"
+                                color: "#b9afb1"
+                                font.pixelSize: 14
+                            }
+                        }
+                        MouseArea {
+                            id: dateToMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: mouse => {
+                                dateToFilter.forceActiveFocus()
+                                if (dateToFilter.text.length > 0 && mouse.x >= dateToFilter.width - 26) {
+                                    dateToFilter.text = ""
+                                    if (datePickerPopup.targetField === dateToFilter)
+                                        datePickerPopup.close()
+                                } else if (datePickerPopup.visible && datePickerPopup.targetField === dateToFilter) {
+                                    datePickerPopup.close()
+                                } else {
+                                    datePickerPopup.openFor(dateToFilter)
+                                }
+                            }
+                        }
                     }
                     FlatButton {
                         objectName: "galleryFilterApply"
@@ -837,7 +1052,8 @@ ApplicationWindow {
                         objectName: "galleryWheel"
                         view: gallery
                         inputFilter: window.wheelInputFilter
-                        enabled: window.currentScreen === 1 && !window.modalOpen && (!window.app || !window.app.closing)
+                        enabled: window.currentScreen === 1 && !window.modalOpen && !datePickerPopup.visible
+                            && (!window.app || !window.app.closing)
                     }
                     onDraggingChanged: if (dragging) window.stopWheel()
                     onContentYChanged: {
@@ -898,9 +1114,12 @@ ApplicationWindow {
                         required property string caption
                         required property string thumbUrl
                         required property bool thumbReady
+                        required property bool thumbMissing
                         property bool activeTile: true
                         readonly property bool batchSelected: window.app && window.app.library.selectedKeys.indexOf(tile.key) >= 0
                         readonly property bool imageReady: photo.status === Image.Ready
+                        readonly property bool imageMissing: !tile.imageReady
+                            && (tile.thumbMissing || photo.status === Image.Error)
                         width: gallery.cellWidth
                         height: gallery.cellHeight
                         GridView.onPooled: activeTile = false
@@ -932,6 +1151,56 @@ ApplicationWindow {
                                 asynchronous: true
                                 cache: false
                                 fillMode: Image.PreserveAspectFit
+                            }
+                            Rectangle {
+                                objectName: "galleryTileMissingPlaceholder"
+                                anchors.fill: photo
+                                radius: 8
+                                color: "#151515"
+                                border.width: 1
+                                border.color: "#252525"
+                                visible: tile.imageMissing
+                                Column {
+                                    anchors.centerIn: parent
+                                    spacing: 6
+                                    Canvas {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        width: 32
+                                        height: 26
+                                        onPaint: {
+                                            const ctx = getContext("2d")
+                                            ctx.reset()
+                                            ctx.strokeStyle = "#7a7274"
+                                            ctx.lineWidth = 1.6
+                                            ctx.lineJoin = "round"
+                                            ctx.lineCap = "round"
+                                            ctx.strokeRect(2, 2, 28, 22)
+                                            ctx.beginPath()
+                                            ctx.arc(10, 9.5, 2.2, 0, Math.PI * 2)
+                                            ctx.stroke()
+                                            ctx.beginPath()
+                                            ctx.moveTo(5, 21)
+                                            ctx.lineTo(13, 13)
+                                            ctx.lineTo(18, 18)
+                                            ctx.lineTo(23, 14)
+                                            ctx.lineTo(27, 21)
+                                            ctx.stroke()
+                                            ctx.strokeStyle = "#d93645"
+                                            ctx.lineWidth = 1.8
+                                            ctx.beginPath()
+                                            ctx.moveTo(4, 4)
+                                            ctx.lineTo(28, 22)
+                                            ctx.stroke()
+                                        }
+                                    }
+                                    Label {
+                                        anchors.horizontalCenter: parent.horizontalCenter
+                                        text: tile.caption.indexOf("파일 없음") >= 0 ? "파일 없음" : "미리보기 없음"
+                                        font.pixelSize: 11
+                                        color: "#8a8284"
+                                        textFormat: Text.PlainText
+                                    }
+                                }
                             }
                             Label {
                                 anchors.left: parent.left
@@ -1164,6 +1433,8 @@ ApplicationWindow {
                 sourcePixelHeight: window.app ? window.app.library.selectedPixelHeight : 0
                 sourceRawWidth: window.app ? window.app.library.selectedRawWidth : 0
                 sourceRawHeight: window.app ? window.app.library.selectedRawHeight : 0
+                missingNote: window.app ? window.app.library.selectedMissingNote : ""
+                externalBusy: window.app ? window.app.library.busy : false
                 playing: previewDialog.visible
             }
             Label {
@@ -1216,7 +1487,7 @@ ApplicationWindow {
                 color: window.mutedColor
             }
             Label {
-                visible: window.app && text.length > 0 && !window.app.library.busy
+                visible: window.app && text.length > 0 && !window.app.library.busy && !selectedMedia.unavailable
                 text: window.app ? window.app.library.selectedMissingNote : ""
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
@@ -1241,6 +1512,217 @@ ApplicationWindow {
                     }
                 }
                 FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
+            }
+        }
+    }
+
+    Popup {
+        id: datePickerPopup
+        objectName: "galleryDatePickerPopup"
+        parent: Overlay.overlay
+        width: 280
+        margins: 8
+        padding: 12
+        modal: false
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        property var targetField: null
+        property int viewYear: 2026
+        property int viewMonth: 0
+        property string todayIso: ""
+        readonly property int firstWeekday: new Date(viewYear, viewMonth, 1).getDay()
+        readonly property int daysInMonth: new Date(viewYear, viewMonth + 1, 0).getDate()
+
+        function pad2(n) {
+            return n < 10 ? "0" + n : String(n)
+        }
+
+        function formatIso(y, m, d) {
+            return String(y) + "-" + pad2(m) + "-" + pad2(d)
+        }
+
+        function stepMonth(delta) {
+            const next = new Date(viewYear, viewMonth + delta, 1)
+            viewYear = next.getFullYear()
+            viewMonth = next.getMonth()
+        }
+
+        function openFor(field) {
+            window.stopWheel()
+            targetField = field
+            const now = new Date()
+            todayIso = formatIso(now.getFullYear(), now.getMonth() + 1, now.getDate())
+            const raw = field && field.text ? String(field.text).trim() : ""
+            const fallback = field === dateToFilter && dateFromFilter.text
+                ? String(dateFromFilter.text).trim()
+                : (field === dateFromFilter && dateToFilter.text ? String(dateToFilter.text).trim() : "")
+            const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw || fallback)
+            if (match) {
+                viewYear = Number(match[1])
+                viewMonth = Math.max(0, Math.min(11, Number(match[2]) - 1))
+            } else {
+                viewYear = now.getFullYear()
+                viewMonth = now.getMonth()
+            }
+            if (field && Overlay.overlay) {
+                const pos = field.mapToItem(Overlay.overlay, 0, field.height + 6)
+                const popupHeight = Math.max(308, height, implicitHeight)
+                x = Math.max(8, Math.min(Overlay.overlay.width - width - 8, pos.x))
+                y = Math.max(8, Math.min(Overlay.overlay.height - popupHeight - 8, pos.y))
+            }
+            open()
+        }
+
+        background: Rectangle {
+            radius: 12
+            color: "#1a1a1a"
+            border.width: 1
+            border.color: "#333333"
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 8
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 4
+                FlatButton {
+                    objectName: "datePickerPrevYear"
+                    text: "«"
+                    implicitWidth: 32
+                    implicitHeight: 30
+                    leftPadding: 0
+                    rightPadding: 0
+                    onClicked: datePickerPopup.viewYear -= 1
+                }
+                FlatButton {
+                    objectName: "datePickerPrevMonth"
+                    text: "‹"
+                    implicitWidth: 32
+                    implicitHeight: 30
+                    leftPadding: 0
+                    rightPadding: 0
+                    onClicked: datePickerPopup.stepMonth(-1)
+                }
+                Label {
+                    objectName: "datePickerHeaderLabel"
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignHCenter
+                    text: datePickerPopup.viewYear + "년 " + (datePickerPopup.viewMonth + 1) + "월"
+                    font.bold: true
+                    font.pixelSize: 14
+                }
+                FlatButton {
+                    objectName: "datePickerNextMonth"
+                    text: "›"
+                    implicitWidth: 32
+                    implicitHeight: 30
+                    leftPadding: 0
+                    rightPadding: 0
+                    onClicked: datePickerPopup.stepMonth(1)
+                }
+                FlatButton {
+                    objectName: "datePickerNextYear"
+                    text: "»"
+                    implicitWidth: 32
+                    implicitHeight: 30
+                    leftPadding: 0
+                    rightPadding: 0
+                    onClicked: datePickerPopup.viewYear += 1
+                }
+            }
+
+            GridLayout {
+                Layout.fillWidth: true
+                columns: 7
+                rowSpacing: 2
+                columnSpacing: 2
+                Repeater {
+                    model: ["일", "월", "화", "수", "목", "금", "토"]
+                    delegate: Label {
+                        required property string modelData
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 34
+                        horizontalAlignment: Text.AlignHCenter
+                        text: modelData
+                        font.pixelSize: 11
+                        color: "#8f8587"
+                    }
+                }
+                Repeater {
+                    model: 42
+                    delegate: Rectangle {
+                        id: dayCell
+                        required property int index
+                        readonly property int dayNumber: index - datePickerPopup.firstWeekday + 1
+                        readonly property bool validDay: dayNumber >= 1 && dayNumber <= datePickerPopup.daysInMonth
+                        readonly property string isoDate: validDay
+                            ? datePickerPopup.formatIso(datePickerPopup.viewYear, datePickerPopup.viewMonth + 1, dayNumber)
+                            : ""
+                        readonly property bool selectedDay: validDay && datePickerPopup.targetField
+                            && datePickerPopup.targetField.text === isoDate
+                        readonly property bool isToday: validDay && isoDate === datePickerPopup.todayIso
+                        objectName: validDay ? "datePickerDay_" + dayNumber : ""
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 34
+                        Layout.preferredHeight: 30
+                        radius: 6
+                        border.width: !selectedDay && isToday ? 1 : 0
+                        border.color: "#7a7274"
+                        color: !validDay ? "transparent"
+                            : (selectedDay ? window.accentColor : (dayMouse.containsMouse ? "#2c2c2c" : "transparent"))
+                        Label {
+                            anchors.centerIn: parent
+                            visible: dayCell.validDay
+                            text: dayCell.validDay ? String(dayCell.dayNumber) : ""
+                            font.pixelSize: 12
+                            font.bold: dayCell.selectedDay
+                            color: dayCell.selectedDay ? "#ffffff" : "#f4f1f1"
+                        }
+                        MouseArea {
+                            id: dayMouse
+                            anchors.fill: parent
+                            enabled: dayCell.validDay
+                            hoverEnabled: dayCell.validDay
+                            cursorShape: dayCell.validDay ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: {
+                                if (datePickerPopup.targetField && dayCell.validDay) {
+                                    datePickerPopup.targetField.text = dayCell.isoDate
+                                    datePickerPopup.close()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                FlatButton {
+                    objectName: "datePickerToday"
+                    Layout.fillWidth: true
+                    implicitHeight: 32
+                    text: "오늘"
+                    onClicked: {
+                        if (datePickerPopup.targetField) {
+                            const now = new Date()
+                            datePickerPopup.targetField.text = datePickerPopup.formatIso(
+                                now.getFullYear(), now.getMonth() + 1, now.getDate())
+                        }
+                        datePickerPopup.close()
+                    }
+                }
+                FlatButton {
+                    objectName: "datePickerClear"
+                    Layout.fillWidth: true
+                    implicitHeight: 32
+                    text: "초기화"
+                    onClicked: {
+                        if (datePickerPopup.targetField)
+                            datePickerPopup.targetField.text = ""
+                        datePickerPopup.close()
+                    }
+                }
             }
         }
     }
@@ -1418,10 +1900,10 @@ ApplicationWindow {
                 repairDialog.close()
                 folderDialog.close()
                 deleteConfirmation.close()
+                datePickerPopup.close()
             }
         }
         function onLoginRequested() { connectionDialog.open() }
-        function onRetryStarted() { window.currentScreen = 0 }
         function onStorageConfirmationRequested() { storageDialog.open() }
         function onReviewReady() { saveReviewDialog.open() }
         function onReviewCleared() { saveReviewDialog.close() }
