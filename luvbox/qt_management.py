@@ -103,6 +103,12 @@ class ManagementController(QObject):
             self._locked = bool(locked)
             self.changed.emit()
 
+    def _cancel_reads(self):
+        self._reading = False
+        self._read_id += 1
+        with self._condition:
+            self._pending = deque(item for item in self._pending if item[0] != "read")
+
     def setLibrary(self, account, output_dir, separate_accounts):
         context = (account, output_dir, bool(separate_accounts))
         if context == self._context: return
@@ -113,26 +119,35 @@ class ManagementController(QObject):
         self._total = self._pages = self._page = 0
         self._error = self._status = self._checked = ""
         self._delete = None
-        self._read(force=True) if self._section != "schedule" else self.changed.emit()
+        if self._section != "schedule":
+            self._read(force=True)
+        else:
+            self._cancel_reads()
+            self.changed.emit()
 
     @Slot(str)
     def setSection(self, section):
         if section not in _SECTIONS or self._closing: return
         self._section, self._page = section, 0
         self._selected.clear()
-        if section != "schedule": self._read()
-        else: self.changed.emit()
+        if section != "schedule":
+            self._read()
+        else:
+            self._cancel_reads()
+            self.changed.emit()
 
     @Slot(str)
     def setMissingMode(self, mode):
         if mode in {"all", "missing", "ignored", "unavailable"}:
             self._mode, self._page = mode, 0
-            self._read()
+            if self._section != "schedule": self._read()
+            else: self.changed.emit()
 
     @Slot(bool)
     def setAllAccounts(self, value):
         self._all_accounts, self._page = bool(value), 0
-        self._read()
+        if self._section != "schedule": self._read()
+        else: self.changed.emit()
 
     @Slot()
     def refresh(self):
@@ -378,6 +393,15 @@ class ManagementController(QObject):
             return {"message": "다시 받기를 취소했습니다", "keys": ()}
         return {"keys": tuple(key for _, key in selected)}
 
+    @staticmethod
+    def _display_timestamp(value):
+        if not value:
+            return ""
+        text = str(value).strip().replace("T", " ")
+        if len(text) >= 19 and text[4:5] == "-" and text[7:8] == "-" and text[10:11] == " ":
+            return text[:16] if text[16:19] == ":00" else text[:19]
+        return text
+
     @Slot(object)
     def _accept(self, event):
         kind, generation, value, error = event
@@ -404,8 +428,9 @@ class ManagementController(QObject):
                           "확인 불가" if row.get("availability") == "unavailable" else
                           "다시 받지 않기" if row.get("ignored") else "파일 없음") if self._section == "missing" else _STATUS.get(row.get("status"), str(row.get("status", "")))
                 origin = {"manual": "수동", "scheduled": "자동", "legacy": "기존 기록"}.get(row.get("origin"), "")
-                detail = [row.get("account", ""), status,
-                          row.get("created_at") or row.get("started_at") or row.get("finished_at") or row.get("posted_at") or "", origin]
+                stamp = self._display_timestamp(
+                    row.get("created_at") or row.get("started_at") or row.get("finished_at") or row.get("posted_at") or "")
+                detail = [row.get("account", ""), status, stamp, origin]
                 if self._section == "runs":
                     if not row.get("account"):
                         detail.insert(0, "계정 미확인")
@@ -431,6 +456,7 @@ class ManagementController(QObject):
                 self._status = "이동할 파일이 없습니다"
             else:
                 self._delete = value
+                self._status = "휴지통으로 이동할지 확인해 주세요"
                 self.deleteConfirmationRequested.emit()
         elif kind == "validate_retry" and not error:
             self._mutating = False

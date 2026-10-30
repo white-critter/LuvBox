@@ -20,9 +20,20 @@ ColumnLayout {
         {key: "deletions", label: "삭제 이력"}, {key: "statistics", label: "통계"},
         {key: "runs", label: "실행 기록"}
     ]
-    spacing: 12
+    spacing: 10
 
-    Label { text: "관리"; font.pixelSize: 24 }
+    RowLayout {
+        Layout.fillWidth: true
+        spacing: 12
+        Label { text: "관리"; font.pixelSize: 22; font.bold: true }
+        Label {
+            Layout.fillWidth: true
+            text: panel.app ? ((panel.app.account ? "@" + panel.app.account + " · " : "계정을 선택하세요 · ") + panel.app.outputFolder) : ""
+            textFormat: Text.PlainText
+            elide: Text.ElideMiddle
+            color: "#b9afb1"
+        }
+    }
     RowLayout {
         Layout.fillWidth: true
         spacing: 6
@@ -38,13 +49,6 @@ ColumnLayout {
                 onClicked: if (panel.manager) panel.manager.setSection(modelData.key)
             }
         }
-    }
-    Label {
-        Layout.fillWidth: true
-        text: panel.app ? ((panel.app.account ? "@" + panel.app.account + " · " : "계정을 선택하세요 · ") + panel.app.outputFolder) : ""
-        textFormat: Text.PlainText
-        elide: Text.ElideMiddle
-        color: "#b9afb1"
     }
     ScrollView {
         id: scheduleScroll
@@ -64,7 +68,7 @@ ColumnLayout {
         Layout.fillWidth: true
         Layout.fillHeight: true
         visible: panel.manager && panel.manager.section !== "schedule"
-        spacing: 10
+        spacing: 8
         RowLayout {
             Layout.fillWidth: true
             Label {
@@ -162,13 +166,17 @@ ColumnLayout {
             onClicked: panel.manager.stop()
         }
         ScrollView {
+            id: statisticsScroll
             Layout.fillWidth: true
             Layout.fillHeight: true
             visible: panel.manager && panel.manager.section === "statistics"
             clip: true
+            contentWidth: availableWidth
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
             ColumnLayout {
-                width: parent.width
-                spacing: 10
+                width: statisticsScroll.availableWidth
+                spacing: 8
                 Label {
                     Layout.fillWidth: true
                     readonly property var summary: panel.manager ? panel.manager.statistics.summary || ({}) : ({})
@@ -181,7 +189,7 @@ ColumnLayout {
                     model: panel.manager ? panel.manager.statistics.authors || [] : []
                     Label { required property var modelData; text: "@" + modelData.author + " · " + modelData.files.toLocaleString() + "개 · 게시물 " + modelData.posts.toLocaleString() + "개"; textFormat: Text.PlainText }
                 }
-                Label { text: "월별 기록"; font.bold: true; Layout.topMargin: 12 }
+                Label { text: "월별 기록"; font.bold: true; Layout.topMargin: 8 }
                 Repeater {
                     model: panel.manager ? panel.manager.statistics.months || [] : []
                     Label { required property var modelData; text: modelData.kind + " · " + modelData.month + " · " + modelData.files.toLocaleString() + "개"; textFormat: Text.PlainText }
@@ -206,29 +214,42 @@ ColumnLayout {
             delegate: Frame {
                 id: rowFrame
                 required property var modelData
+                readonly property bool rowSelected: !!(panel.manager && panel.manager.section === "missing"
+                    && panel.manager.selectedKeys.indexOf(modelData.token) >= 0)
+                readonly property bool canToggleRow: !!(panel.manager && panel.manager.section === "missing"
+                    && modelData.selectable && !panel.manager.busy && !panel.manager.mutating)
                 width: records.width
-                padding: 12
+                padding: 10
                 background: Rectangle {
-                    color: rowHover.hovered ? "#222222" : "#191919"
+                    color: rowFrame.rowSelected ? "#241416" : (rowHover.hovered ? "#222222" : "#191919")
                     radius: 10
                     border.width: 1
-                    border.color: rowHover.hovered ? "#333333" : "transparent"
+                    border.color: rowFrame.rowSelected ? "#d93645" : (rowHover.hovered ? "#333333" : "transparent")
                 }
-                HoverHandler { id: rowHover }
+                HoverHandler {
+                    id: rowHover
+                    cursorShape: rowFrame.canToggleRow ? Qt.PointingHandCursor : Qt.ArrowCursor
+                }
                 RowLayout {
                     width: parent.width
+                    spacing: 10
                     CheckBox {
                         visible: panel.manager && panel.manager.section === "missing"
-                        enabled: modelData.selectable && !panel.manager.busy && !panel.manager.mutating
-                        checked: panel.manager && panel.manager.selectedKeys.indexOf(modelData.token) >= 0
+                        enabled: rowFrame.canToggleRow
+                        checked: rowFrame.rowSelected
                         Accessible.name: modelData.title + " 선택"
                         HoverHandler { cursorShape: Qt.PointingHandCursor }
                         onClicked: panel.manager.toggleRow(modelData.token)
                     }
                     ColumnLayout {
                         Layout.fillWidth: true
+                        spacing: 4
+                        TapHandler {
+                            enabled: rowFrame.canToggleRow
+                            onTapped: panel.manager.toggleRow(modelData.token)
+                        }
                         Label { Layout.fillWidth: true; text: modelData.title; textFormat: Text.PlainText; elide: Text.ElideMiddle }
-                        Label { Layout.fillWidth: true; text: modelData.detail; textFormat: Text.PlainText; wrapMode: Text.Wrap; color: "#b9afb1" }
+                        Label { Layout.fillWidth: true; text: modelData.detail; textFormat: Text.PlainText; wrapMode: Text.WrapAnywhere; color: "#b9afb1" }
                         Label { Layout.fillWidth: true; text: modelData.message; visible: text.length > 0; textFormat: Text.PlainText; wrapMode: Text.Wrap }
                     }
                     FlatButton { text: "로그"; visible: modelData.hasLog; onClicked: panel.manager.openLog(modelData.token) }
@@ -238,6 +259,7 @@ ColumnLayout {
         }
         RowLayout {
             Layout.fillWidth: true
+            visible: panel.manager && panel.manager.section !== "statistics"
             FlatButton { text: "이전"; enabled: panel.manager && !panel.manager.busy && panel.manager.pageIndex > 0; onClicked: panel.manager.goPage(panel.manager.pageIndex - 1) }
             Label { Layout.fillWidth: true; horizontalAlignment: Text.AlignHCenter; text: panel.manager ? ((panel.manager.pageCount ? panel.manager.pageIndex + 1 : 0) + " / " + panel.manager.pageCount) : "0 / 0" }
             FlatButton { text: "다음"; enabled: panel.manager && !panel.manager.busy && panel.manager.pageIndex + 1 < panel.manager.pageCount; onClicked: panel.manager.goPage(panel.manager.pageIndex + 1) }

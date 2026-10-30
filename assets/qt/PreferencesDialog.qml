@@ -34,7 +34,7 @@ Dialog {
     height: Math.min(implicitHeight, windowLimit)
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
-    padding: 24
+    padding: 20
     background: Rectangle {
         color: "#141414"
         radius: 16
@@ -46,10 +46,10 @@ Dialog {
         Label {
             width: parent.width
             text: dialog.title
-            leftPadding: 24
-            rightPadding: 24
-            topPadding: 20
-            bottomPadding: 4
+            leftPadding: 20
+            rightPadding: 20
+            topPadding: 16
+            bottomPadding: 2
             font.pixelSize: 18
         }
         Label {
@@ -57,9 +57,9 @@ Dialog {
             width: parent.width
             visible: dialog.app && dialog.app.error.length > 0
             text: dialog.app ? dialog.app.error : ""
-            leftPadding: 24
-            rightPadding: 24
-            topPadding: 8
+            leftPadding: 20
+            rightPadding: 20
+            topPadding: 6
             color: "#ff8791"
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
@@ -94,30 +94,36 @@ Dialog {
             id: contentColumn
             width: scrollView.availableWidth
             height: implicitHeight
-            spacing: 12
+            spacing: 10
 
             ColumnLayout {
                 Layout.fillWidth: true
                 enabled: dialog.app && !dialog.app.busy
-                spacing: 10
+                spacing: 8
 
                 Label {
                     text: "저장"
                     font.bold: true
-                    font.pixelSize: 17
+                    font.pixelSize: 16
                     textFormat: Text.PlainText
                 }
-                FlatSwitch {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: "동영상 저장"
-                    checked: dialog.pref("include_videos", true) === true
-                    onToggled: dialog.app.setPreference("include_videos", checked)
-                }
-                FlatSwitch {
-                    Layout.fillWidth: true
-                    text: "움직이는 사진 저장"
-                    checked: dialog.pref("include_gifs", true) === true
-                    onToggled: dialog.app.setPreference("include_gifs", checked)
+                    spacing: 12
+                    FlatSwitch {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        text: "동영상 저장"
+                        checked: dialog.pref("include_videos", true) === true
+                        onToggled: dialog.app.setPreference("include_videos", checked)
+                    }
+                    FlatSwitch {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        text: "움직이는 사진 저장"
+                        checked: dialog.pref("include_gifs", true) === true
+                        onToggled: dialog.app.setPreference("include_gifs", checked)
+                    }
                 }
                 Label { text: "폴더 구성"; textFormat: Text.PlainText }
                 FlatCombo {
@@ -129,58 +135,78 @@ Dialog {
                     Accessible.name: "폴더 구성"
                     onActivated: index => dialog.setOption("folder_mode", dialog.folderModes, index)
                 }
-                FlatSwitch {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: "연결 계정별로 폴더 나누기"
-                    checked: dialog.pref("separate_accounts", false) === true
-                    onToggled: dialog.app.setPreference("separate_accounts", checked)
-                }
-                FlatSwitch {
-                    Layout.fillWidth: true
-                    text: "저장 전 사진 확인"
-                    checked: dialog.pref("confirm_each", false) === true
-                    onToggled: dialog.app.setPreference("confirm_each", checked)
+                    spacing: 12
+                    FlatSwitch {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        text: "연결 계정별로 폴더 나누기"
+                        checked: dialog.pref("separate_accounts", false) === true
+                        onToggled: dialog.app.setPreference("separate_accounts", checked)
+                    }
+                    FlatSwitch {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        text: "저장 전 사진 확인"
+                        checked: dialog.pref("confirm_each", false) === true
+                        onToggled: dialog.app.setPreference("confirm_each", checked)
+                    }
                 }
 
                 Label {
-                    Layout.topMargin: 12
+                    Layout.topMargin: 6
                     text: "움직이는 사진"
                     font.bold: true
-                    font.pixelSize: 17
+                    font.pixelSize: 16
                     textFormat: Text.PlainText
                 }
-                Label { text: "저장 형식"; textFormat: Text.PlainText }
-                FlatCombo {
+                RowLayout {
                     Layout.fillWidth: true
-                    model: dialog.gifFormats
-                    textRole: "label"
-                    valueRole: "value"
-                    currentIndex: dialog.optionIndex(dialog.gifFormats, dialog.pref("gif_format", "gif"))
-                    Accessible.name: "움직이는 사진 형식"
-                    onActivated: index => dialog.setOption("gif_format", dialog.gifFormats, index)
-                }
-                Label {
-                    text: "GIF 크기"
-                    textFormat: Text.PlainText
-                    enabled: dialog.pref("gif_format", "gif") === "gif"
-                }
-                FlatCombo {
-                    Layout.fillWidth: true
-                    enabled: dialog.pref("gif_format", "gif") === "gif"
-                    model: dialog.gifSizes
-                    textRole: "label"
-                    valueRole: "value"
-                    currentIndex: dialog.optionIndex(dialog.gifSizes, dialog.pref("gif_size", "original"))
-                    Accessible.name: "GIF 크기"
-                    onActivated: index => dialog.setOption("gif_size", dialog.gifSizes, index)
+                    spacing: 12
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        spacing: 6
+                        Label { text: "저장 형식"; textFormat: Text.PlainText }
+                        FlatCombo {
+                            Layout.fillWidth: true
+                            model: dialog.gifFormats
+                            textRole: "label"
+                            valueRole: "value"
+                            currentIndex: dialog.optionIndex(dialog.gifFormats, dialog.pref("gif_format", "gif"))
+                            Accessible.name: "움직이는 사진 형식"
+                            onActivated: index => dialog.setOption("gif_format", dialog.gifFormats, index)
+                        }
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: 1
+                        spacing: 6
+                        Label {
+                            text: "GIF 크기"
+                            textFormat: Text.PlainText
+                            enabled: dialog.pref("gif_format", "gif") === "gif"
+                        }
+                        FlatCombo {
+                            Layout.fillWidth: true
+                            enabled: dialog.pref("gif_format", "gif") === "gif"
+                            model: dialog.gifSizes
+                            textRole: "label"
+                            valueRole: "value"
+                            currentIndex: dialog.optionIndex(dialog.gifSizes, dialog.pref("gif_size", "original"))
+                            Accessible.name: "GIF 크기"
+                            onActivated: index => dialog.setOption("gif_size", dialog.gifSizes, index)
+                        }
+                    }
                 }
 
                 ToolButton {
                     id: advancedToggle
                     objectName: "advancedSettingsToggle"
-                    Layout.topMargin: 12
+                    Layout.topMargin: 6
                     Layout.fillWidth: true
-                    implicitHeight: 40
+                    implicitHeight: 36
                     text: checked ? "고급 ▾" : "고급 ▸"
                     checkable: true
                     Accessible.name: "고급 설정"
@@ -204,17 +230,51 @@ Dialog {
                 ColumnLayout {
                     Layout.fillWidth: true
                     visible: advancedToggle.checked
-                    spacing: 10
+                    spacing: 8
 
-                    Label { text: "목록 확인 범위"; textFormat: Text.PlainText }
-                    FlatCombo {
+                    RowLayout {
                         Layout.fillWidth: true
-                        model: dialog.scanModes
-                        textRole: "label"
-                        valueRole: "value"
-                        currentIndex: dialog.optionIndex(dialog.scanModes, dialog.pref("scan_mode", "quick"))
-                        Accessible.name: "목록 확인 범위"
-                        onActivated: index => dialog.setOption("scan_mode", dialog.scanModes, index)
+                        spacing: 12
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 1
+                            spacing: 6
+                            Label { text: "목록 확인 범위"; textFormat: Text.PlainText }
+                            FlatCombo {
+                                Layout.fillWidth: true
+                                model: dialog.scanModes
+                                textRole: "label"
+                                valueRole: "value"
+                                currentIndex: dialog.optionIndex(dialog.scanModes, dialog.pref("scan_mode", "quick"))
+                                Accessible.name: "목록 확인 범위"
+                                onActivated: index => dialog.setOption("scan_mode", dialog.scanModes, index)
+                            }
+                        }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredWidth: 1
+                            spacing: 6
+                            Label { text: "동영상·GIF 크기 제한 (MB)"; textFormat: Text.PlainText }
+                            FlatField {
+                                id: videoLimit
+                                objectName: "videoLimitField"
+                                Layout.fillWidth: true
+                                implicitHeight: 42
+                                text: String(dialog.pref("max_video_mb", 200))
+                                validator: IntValidator { bottom: 0; top: 1000000 }
+                                inputMethodHints: Qt.ImhDigitsOnly
+                                selectByMouse: true
+                                Accessible.name: "동영상 GIF 크기 제한 MB"
+                                onEditingFinished: {
+                                    if (acceptableInput && text.trim().length > 0)
+                                        dialog.app.setPreference("max_video_mb", Number(text))
+                                }
+                                onActiveFocusChanged: {
+                                    if (!activeFocus && (!acceptableInput || text.trim().length === 0))
+                                        text = Qt.binding(function() { return String(dialog.pref("max_video_mb", 200)) })
+                                }
+                            }
+                        }
                     }
                     Label {
                         Layout.fillWidth: true
@@ -224,33 +284,18 @@ Dialog {
                         wrapMode: Text.Wrap
                         opacity: 0.72
                     }
-                    Label { text: "동영상·GIF 크기 제한 (MB)"; textFormat: Text.PlainText }
-                    FlatField {
-                        id: videoLimit
-                        objectName: "videoLimitField"
+                    RowLayout {
                         Layout.fillWidth: true
-                        text: String(dialog.pref("max_video_mb", 200))
-                        validator: IntValidator { bottom: 0; top: 1000000 }
-                        inputMethodHints: Qt.ImhDigitsOnly
-                        selectByMouse: true
-                        Accessible.name: "동영상 GIF 크기 제한 MB"
-                        onEditingFinished: {
-                            if (acceptableInput && text.trim().length > 0)
-                                dialog.app.setPreference("max_video_mb", Number(text))
+                        Label {
+                            Layout.fillWidth: true
+                            text: "0은 제한 없음"
+                            textFormat: Text.PlainText
+                            opacity: 0.72
                         }
-                        onActiveFocusChanged: {
-                            if (!activeFocus && (!acceptableInput || text.trim().length === 0))
-                                text = Qt.binding(function() { return String(dialog.pref("max_video_mb", 200)) })
+                        FlatButton {
+                            text: "기록 폴더 열기"
+                            onClicked: dialog.app.openRecordsFolder()
                         }
-                    }
-                    Label {
-                        text: "0은 제한 없음"
-                        textFormat: Text.PlainText
-                        opacity: 0.72
-                    }
-                    FlatButton {
-                        text: "기록 폴더 열기"
-                        onClicked: dialog.app.openRecordsFolder()
                     }
                 }
             }

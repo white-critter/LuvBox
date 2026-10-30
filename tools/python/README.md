@@ -1,7 +1,7 @@
 # Python 3.12.16 upstream materials
 
 These unmodified files preserve the upstream provenance and license inventory
-used for the LuvBox 1.3.4 Windows x64 build. They come from Astral's
+used for the LuvBox 1.3.5 Windows x64 build. They come from Astral's
 [python-build-standalone 20261026 release](https://github.com/astral-sh/python-build-standalone/releases/tag/20261026).
 This inventory describes the full upstream distribution, including optional
 components. The actual shipped files are determined by PyInstaller's COLLECT

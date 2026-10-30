@@ -8,12 +8,12 @@ Frame {
     readonly property var download: app ? app.download : null
     readonly property var item: download ? download.currentSavedItem : ({})
     readonly property bool hasItem: !!(item && item.filename)
-    padding: 16
+    padding: 14
     background: Rectangle { color: "#191919"; radius: 12 }
 
     ColumnLayout {
         width: parent.width
-        spacing: 12
+        spacing: 10
         Label { text: "최근 저장한 파일"; font.bold: true }
         Label {
             Layout.fillWidth: true
@@ -26,10 +26,10 @@ Frame {
         RowLayout {
             Layout.fillWidth: true
             visible: details.hasItem
-            spacing: 16
+            spacing: 14
             Item {
-                Layout.preferredWidth: Math.min(240, details.availableWidth * 0.42)
-                Layout.preferredHeight: 180
+                Layout.preferredWidth: Math.min(188, details.availableWidth * 0.36)
+                Layout.preferredHeight: 132
                 Image {
                     objectName: "savedMediaThumbnail"
                     anchors.fill: parent
@@ -58,7 +58,7 @@ Frame {
             ColumnLayout {
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
-                spacing: 8
+                spacing: 6
                 Label {
                     Layout.fillWidth: true
                     visible: text.length > 0
@@ -91,6 +91,7 @@ Frame {
                 }
                 Label {
                     Layout.fillWidth: true
+                    visible: text.length > 0
                     text: details.item.preview_note || ""
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
@@ -116,7 +117,7 @@ Frame {
         ScrollView {
             id: bodyScroll
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(160, savedBody.implicitHeight)
+            Layout.preferredHeight: Math.min(120, savedBody.implicitHeight)
             visible: details.hasItem && !!details.item.body
             clip: true
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff

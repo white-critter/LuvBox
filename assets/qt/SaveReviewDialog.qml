@@ -26,6 +26,32 @@ Dialog {
         border.color: "#2a2a2a"
     }
 
+    Shortcut {
+        sequence: "+"
+        enabled: dialog.visible && !moreMenu.visible && media.canZoomIn
+        onActivated: media.zoomIn()
+    }
+    Shortcut {
+        sequence: "="
+        enabled: dialog.visible && !moreMenu.visible && media.canZoomIn
+        onActivated: media.zoomIn()
+    }
+    Shortcut {
+        sequence: "-"
+        enabled: dialog.visible && !moreMenu.visible && media.canZoomOut
+        onActivated: media.zoomOut()
+    }
+    Shortcut {
+        sequence: "0"
+        enabled: dialog.visible && !moreMenu.visible && media.ready
+        onActivated: media.fit()
+    }
+    Shortcut {
+        sequence: "1"
+        enabled: dialog.visible && !moreMenu.visible && media.canActualSize
+        onActivated: media.actualSize()
+    }
+
     function submit(action) {
         if (_responded)
             return

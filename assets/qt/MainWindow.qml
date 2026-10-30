@@ -262,8 +262,11 @@ ApplicationWindow {
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: 24
-        spacing: 18
+        anchors.leftMargin: 24
+        anchors.rightMargin: 24
+        anchors.topMargin: 16
+        anchors.bottomMargin: 16
+        spacing: 14
 
         Label {
             visible: !window.app
@@ -282,7 +285,7 @@ ApplicationWindow {
                 id: saveScroll
                 clip: true
                 contentWidth: availableWidth
-                contentHeight: saveForm.implicitHeight + 32
+                contentHeight: saveForm.implicitHeight + 16
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                 ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                 ColumnLayout {
@@ -290,18 +293,22 @@ ApplicationWindow {
                     width: Math.max(1, Math.min(saveScroll.availableWidth - 24, 640))
                     height: implicitHeight
                     x: Math.max(0, (saveScroll.availableWidth - width) / 2)
-                    y: 16
-                    spacing: 18
-                    Label { text: "사진 저장"; font.pixelSize: 26 }
-                    Label { text: "좋아요한 사진과 영상을 내 폴더에."; color: window.mutedColor }
+                    y: 4
+                    spacing: 12
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+                        Label { text: "사진 저장"; font.pixelSize: 24; font.bold: true }
+                        Label { text: "좋아요한 사진과 영상을 내 폴더에."; color: window.mutedColor }
+                    }
                     Frame {
                         Layout.fillWidth: true
-                        padding: 20
+                        padding: 16
                         visible: !!window.app
                         background: Rectangle { color: window.cardColor; radius: 12 }
                         ColumnLayout {
                             width: parent.width
-                            spacing: 12
+                            spacing: 10
                             Label { text: "X 계정"; color: window.mutedColor }
                             RowLayout {
                                 Layout.fillWidth: true
@@ -346,13 +353,14 @@ ApplicationWindow {
                                 enabled: window.app && !window.app.busy
                                 text: window.app ? window.app.account : ""
                                 placeholderText: "저장할 X 아이디 (@ 없이)"
-                                maximumLength: 15
-                                validator: RegularExpressionValidator { regularExpression: /[A-Za-z0-9_]{1,15}/ }
+                                maximumLength: 16
+                                validator: RegularExpressionValidator { regularExpression: /@?[A-Za-z0-9_]{1,15}/ }
                                 selectByMouse: true
                                 Accessible.name: "저장할 X 아이디"
                                 onEditingFinished: if (window.app) window.app.setAccount(text)
+                                onAccepted: if (window.app) window.app.setAccount(text)
                             }
-                            Label { text: "저장 위치"; color: window.mutedColor; Layout.topMargin: 8 }
+                            Label { text: "저장 위치"; color: window.mutedColor; Layout.topMargin: 4 }
                             RowLayout {
                                 Layout.fillWidth: true
                                 Label {
@@ -377,11 +385,11 @@ ApplicationWindow {
                     Frame {
                         Layout.fillWidth: true
                         visible: !!window.app
-                        padding: 20
+                        padding: 16
                         background: Rectangle { color: window.cardColor; radius: 12 }
                         ColumnLayout {
                             width: parent.width
-                            spacing: 14
+                            spacing: 12
                             Label {
                                 id: saveStatus
                                 text: window.app ? window.app.status : ""
@@ -413,7 +421,7 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 implicitHeight: 4
                                 clip: true
-                                visible: window.app && window.app.busy && (sliding || amount > 0)
+                                visible: window.app && window.app.busy && !window.app.management.deleteConfirmationPending && (sliding || amount > 0)
                                 readonly property bool sliding: !!(window.app && window.app.busy &&
                                     (!window.app.download.running || window.app.download.progress < 0))
                                 readonly property real amount: window.app
@@ -544,7 +552,7 @@ ApplicationWindow {
             }
 
             ColumnLayout {
-                spacing: 10
+                spacing: 8
                 RowLayout {
                     spacing: 12
                     Layout.fillWidth: true
@@ -669,7 +677,7 @@ ApplicationWindow {
                         onClicked: window.app.library.setSelectionMode(!window.app.library.selectionMode)
                     }
                 }
-                ColumnLayout {
+                RowLayout {
                     id: filterBox
                     Layout.fillWidth: true
                     visible: !!window.app && filterToggle.checked
@@ -680,54 +688,51 @@ ApplicationWindow {
                                 dateFromFilter.text, dateToFilter.text))
                             filterToggle.checked = false
                     }
-                    RowLayout {
+                    FlatField {
+                        id: authorFilter
+                        objectName: "galleryAuthorFilter"
                         Layout.fillWidth: true
-                        FlatField {
-                            id: authorFilter
-                            objectName: "galleryAuthorFilter"
-                            Layout.fillWidth: true
-                            placeholderText: "작성자 ID (정확히 일치)"
-                            Accessible.name: "정확한 작성자 ID"
-                            selectByMouse: true
-                            maximumLength: 16
-                            onAccepted: filterBox.applyAdvancedFilter()
-                        }
-                        FlatCombo {
-                            id: dateFieldChoice
-                            objectName: "galleryDateField"
-                            model: ["게시일", "저장일"]
-                            implicitWidth: 112
-                            Accessible.name: "날짜 필터 기준"
-                        }
+                        Layout.minimumWidth: 110
+                        placeholderText: "작성자 ID (정확히 일치)"
+                        Accessible.name: "정확한 작성자 ID"
+                        selectByMouse: true
+                        maximumLength: 16
+                        onAccepted: filterBox.applyAdvancedFilter()
                     }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        FlatField {
-                            id: dateFromFilter
-                            objectName: "galleryDateFrom"
-                            Layout.fillWidth: true
-                            placeholderText: "시작 YYYY-MM-DD"
-                            Accessible.name: "시작 날짜 YYYY-MM-DD"
-                            selectByMouse: true
-                            maximumLength: 10
-                            onAccepted: filterBox.applyAdvancedFilter()
-                        }
-                        Label { text: "~" }
-                        FlatField {
-                            id: dateToFilter
-                            objectName: "galleryDateTo"
-                            Layout.fillWidth: true
-                            placeholderText: "종료 YYYY-MM-DD"
-                            Accessible.name: "종료 날짜 YYYY-MM-DD"
-                            selectByMouse: true
-                            maximumLength: 10
-                            onAccepted: filterBox.applyAdvancedFilter()
-                        }
-                        FlatButton {
-                            objectName: "galleryFilterApply"
-                            text: "적용"
-                            onClicked: filterBox.applyAdvancedFilter()
-                        }
+                    FlatCombo {
+                        id: dateFieldChoice
+                        objectName: "galleryDateField"
+                        model: ["게시일", "저장일"]
+                        implicitWidth: 96
+                        implicitHeight: 40
+                        Accessible.name: "날짜 필터 기준"
+                    }
+                    FlatField {
+                        id: dateFromFilter
+                        objectName: "galleryDateFrom"
+                        Layout.preferredWidth: 148
+                        placeholderText: "시작 YYYY-MM-DD"
+                        Accessible.name: "시작 날짜 YYYY-MM-DD"
+                        selectByMouse: true
+                        maximumLength: 10
+                        onAccepted: filterBox.applyAdvancedFilter()
+                    }
+                    Label { text: "~" }
+                    FlatField {
+                        id: dateToFilter
+                        objectName: "galleryDateTo"
+                        Layout.preferredWidth: 148
+                        placeholderText: "종료 YYYY-MM-DD"
+                        Accessible.name: "종료 날짜 YYYY-MM-DD"
+                        selectByMouse: true
+                        maximumLength: 10
+                        onAccepted: filterBox.applyAdvancedFilter()
+                    }
+                    FlatButton {
+                        objectName: "galleryFilterApply"
+                        text: "적용"
+                        implicitHeight: 40
+                        onClicked: filterBox.applyAdvancedFilter()
                     }
                 }
                 Label {
@@ -861,6 +866,22 @@ ApplicationWindow {
                             window.app.library.toggleSelection(currentItem.key)
                         else if (currentIndex >= 0)
                             previewDialog.open()
+                    }
+                    Keys.onSpacePressed: {
+                        window.stopWheel()
+                        if (window.app && window.app.library.selectionMode && currentItem)
+                            window.app.library.toggleSelection(currentItem.key)
+                        else if (currentIndex >= 0)
+                            previewDialog.open()
+                    }
+                    Keys.onDeletePressed: {
+                        window.stopWheel()
+                        if (!window.app || window.app.busy)
+                            return
+                        if (window.app.library.selectionMode && window.app.library.selectedCount > 0)
+                            window.app.management.prepareDelete(window.app.library.selectedKeys)
+                        else if (!window.app.library.selectionMode && currentItem && !window.app.library.selectedMissing)
+                            window.app.management.prepareDelete([currentItem.key])
                     }
                     Keys.onEscapePressed: {
                         window.stopWheel()
@@ -997,10 +1018,20 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+F"
-        enabled: window.currentScreen === 1
+        enabled: window.currentScreen === 1 && !window.modalOpen
         onActivated: {
             search.forceActiveFocus()
             search.selectAll()
+        }
+    }
+    Shortcut {
+        sequence: "F5"
+        enabled: !window.modalOpen && window.app && !window.app.busy
+        onActivated: {
+            if (window.currentScreen === 1)
+                window.app.refreshGallery()
+            else if (window.currentScreen === 2)
+                window.app.management.refresh()
         }
     }
     Dialog {

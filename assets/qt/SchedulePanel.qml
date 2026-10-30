@@ -11,7 +11,7 @@ ColumnLayout {
     property string requestedTime: ""
     property bool timeEdited: false
     readonly property bool validTime: /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(timeField.text.trim())
-    spacing: 14
+    spacing: 10
 
     function stamp(value) {
         return value ? String(value).slice(0, 16).replace("T", " ") : "없음"
@@ -67,22 +67,65 @@ ColumnLayout {
         Layout.fillWidth: true
         visible: !!(panel.schedule && panel.schedule.registered)
         text: "다음 실행: " + panel.stamp(panel.schedule ? panel.schedule.nextRun : "")
-            + "\n최근 시작: " + panel.stamp(panel.schedule ? panel.schedule.lastRun : "")
+            + " · 최근 시작: " + panel.stamp(panel.schedule ? panel.schedule.lastRun : "")
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
     }
     Label { text: "매일 실행 시각 (이 PC 시간)"; textFormat: Text.PlainText }
-    FlatField {
-        id: timeField
-        objectName: "scheduleTimeField"
-        Layout.preferredWidth: 150
-        text: "09:00"
-        placeholderText: "09:00"
-        maximumLength: 5
-        selectByMouse: true
-        Accessible.name: "자동 저장 실행 시각"
-        enabled: panel.schedule && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running
-        onTextEdited: panel.timeEdited = true
+    Flow {
+        Layout.fillWidth: true
+        spacing: 8
+        FlatField {
+            id: timeField
+            objectName: "scheduleTimeField"
+            width: 140
+            text: "09:00"
+            placeholderText: "09:00"
+            maximumLength: 5
+            selectByMouse: true
+            Accessible.name: "자동 저장 실행 시각"
+            enabled: panel.schedule && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running
+            onTextEdited: panel.timeEdited = true
+            onAccepted: if (scheduleSaveButton.enabled) scheduleSaveButton.clicked()
+        }
+        FlatButton {
+            id: scheduleSaveButton
+            objectName: "scheduleSaveButton"
+            text: panel.schedule && panel.schedule.registered ? "예약 저장" : "예약 만들기"
+            tone: "primary"
+            implicitHeight: 40
+            enabled: !!(panel.validTime && panel.app && panel.app.canStart && panel.schedule && panel.schedule.known
+                && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running)
+            onClicked: {
+                panel.action = panel.schedule.registered ? "update" : "create"
+                panel.requestedTime = timeField.text
+                confirmation.open()
+            }
+        }
+        FlatButton {
+            objectName: "scheduleMigrateButton"
+            visible: !!(panel.schedule && panel.schedule.registered && !panel.schedule.current)
+            text: "현재 버전으로 변경"
+            implicitHeight: 40
+            enabled: panel.schedule && panel.schedule.enabled && !panel.schedule.busy
+                && !panel.schedule.locked && !panel.schedule.running && !!panel.schedule.time
+            onClicked: { panel.action = "migrate"; confirmation.open() }
+        }
+        FlatButton {
+            objectName: "scheduleRemoveButton"
+            visible: !!(panel.schedule && panel.schedule.registered)
+            text: "예약 해제"
+            implicitHeight: 40
+            enabled: panel.schedule && !panel.schedule.busy && !panel.schedule.locked
+            onClicked: { panel.action = "remove"; confirmation.open() }
+        }
+        FlatButton {
+            objectName: "scheduleRefreshButton"
+            text: "다시 확인"
+            implicitHeight: 40
+            enabled: panel.schedule && !panel.schedule.busy
+            onClicked: panel.schedule.refresh()
+        }
     }
     Label {
         Layout.fillWidth: true
@@ -99,43 +142,6 @@ ColumnLayout {
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: "#ff8791"
-    }
-    Flow {
-        Layout.fillWidth: true
-        spacing: 8
-        FlatButton {
-            objectName: "scheduleSaveButton"
-            text: panel.schedule && panel.schedule.registered ? "예약 저장" : "예약 만들기"
-            tone: "primary"
-            enabled: !!(panel.validTime && panel.app && panel.app.canStart && panel.schedule && panel.schedule.known
-                && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running)
-            onClicked: {
-                panel.action = panel.schedule.registered ? "update" : "create"
-                panel.requestedTime = timeField.text
-                confirmation.open()
-            }
-        }
-        FlatButton {
-            objectName: "scheduleMigrateButton"
-            visible: !!(panel.schedule && panel.schedule.registered && !panel.schedule.current)
-            text: "현재 버전으로 변경"
-            enabled: panel.schedule && panel.schedule.enabled && !panel.schedule.busy
-                && !panel.schedule.locked && !panel.schedule.running && !!panel.schedule.time
-            onClicked: { panel.action = "migrate"; confirmation.open() }
-        }
-        FlatButton {
-            objectName: "scheduleRemoveButton"
-            visible: !!(panel.schedule && panel.schedule.registered)
-            text: "예약 해제"
-            enabled: panel.schedule && !panel.schedule.busy && !panel.schedule.locked
-            onClicked: { panel.action = "remove"; confirmation.open() }
-        }
-        FlatButton {
-            objectName: "scheduleRefreshButton"
-            text: "다시 확인"
-            enabled: panel.schedule && !panel.schedule.busy
-            onClicked: panel.schedule.refresh()
-        }
     }
     RowLayout {
         visible: !!(panel.schedule && panel.schedule.busy)

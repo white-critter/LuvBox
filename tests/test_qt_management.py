@@ -244,6 +244,25 @@ class ManagementControllerTests(unittest.TestCase):
             self.assertEqual(row['status'], 'recycled')
             self.assertEqual(store.ignored_media(), {('100', 1, 'photo')})
 
+    def test_switching_to_schedule_or_changing_library_clears_inflight_read_busy_state(self):
+        from luvbox.qt_management import ManagementSnapshot
+        started, release = threading.Event(), threading.Event()
+        original = ManagementSnapshot.run_page
+        def slow_run_page(snapshot, *args):
+            started.set()
+            release.wait(5)
+            return original(snapshot, *args)
+        with patch.object(ManagementSnapshot, 'run_page', slow_run_page):
+            self.management.setSection('runs')
+            self.wait(started.is_set)
+            self.assertTrue(self.management.busy)
+            self.management.setSection('schedule')
+            self.assertFalse(self.management.busy)
+            release.set()
+            time.sleep(0.03)
+            self.app.processEvents()
+            self.assertFalse(self.management.busy)
+
 
 if __name__ == '__main__':
     unittest.main()

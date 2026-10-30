@@ -26,7 +26,7 @@ Dialog {
     height: Math.min(implicitHeight, windowLimit)
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
-    padding: 24
+    padding: 20
     background: Rectangle {
         color: "#141414"
         radius: 16
@@ -35,10 +35,10 @@ Dialog {
     }
     header: Label {
         text: dialog.title
-        leftPadding: 24
-        rightPadding: 24
-        topPadding: 20
-        bottomPadding: 4
+        leftPadding: 20
+        rightPadding: 20
+        topPadding: 16
+        bottomPadding: 2
         font.pixelSize: 18
         background: null
     }
@@ -95,7 +95,7 @@ Dialog {
             id: contentColumn
             width: scrollView.availableWidth
             height: implicitHeight
-            spacing: 16
+            spacing: 10
 
             Label {
                 Layout.fillWidth: true
@@ -109,7 +109,7 @@ Dialog {
             ColumnLayout {
                 Layout.fillWidth: true
                 visible: dialog.methodIndex === 0
-                spacing: 12
+                spacing: 8
 
                 Label { text: "연결할 브라우저" }
                 FlatCombo {
@@ -169,7 +169,7 @@ Dialog {
                     background: Rectangle { color: "#1c1c1c"; radius: 12 }
                     ColumnLayout {
                         width: parent.width
-                        spacing: 10
+                        spacing: 8
                         Label {
                             Layout.fillWidth: true
                             text: dialog.accounts && dialog.accounts.approvalPending ? "3 / 3 · 앱에서 최종 승인"
@@ -241,7 +241,7 @@ Dialog {
                 ToolButton {
                     id: setupToggle
                     Layout.fillWidth: true
-                    implicitHeight: 40
+                    implicitHeight: 36
                     checkable: true
                     text: checked ? "확장 설치·연결 도움말 ▾" : "처음 연결하거나 확장 응답이 없나요? ▸"
                     HoverHandler {
@@ -346,7 +346,7 @@ Dialog {
             ToolButton {
                 id: advancedMethodToggle
                 Layout.fillWidth: true
-                implicitHeight: 40
+                implicitHeight: 36
                 text: dialog.methodIndex === 1 ? "고급 연결 · 토큰 입력 ▾" : "고급 연결 · 토큰 입력 ▸"
                 enabled: !dialog.unavailable && !dialog.accounts.busy
                 HoverHandler {
@@ -370,7 +370,7 @@ Dialog {
             ColumnLayout {
                 Layout.fillWidth: true
                 visible: dialog.methodIndex === 1
-                spacing: 12
+                spacing: 10
 
                 Label {
                     Layout.fillWidth: true
@@ -413,6 +413,7 @@ Dialog {
                     && (dialog.browserSetup.error.length > 0
                         || (setupToggle.checked && dialog.browserSetup.status.length > 0))
                 text: dialog.browserSetup ? (dialog.browserSetup.error || dialog.browserSetup.status) : ""
+                color: dialog.browserSetup && dialog.browserSetup.error.length > 0 ? "#ff8791" : "#b9afb1"
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
                 Accessible.role: Accessible.StaticText
@@ -421,6 +422,7 @@ Dialog {
                 Layout.fillWidth: true
                 visible: dialog.accounts && dialog.accounts.connected && !dialog.accounts.busy
                 text: dialog.accounts ? dialog.accounts.authenticationLabel : ""
+                color: dialog.accounts && dialog.accounts.authenticationState === "reconnect_required" ? "#ff8791" : "#b9afb1"
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
             }
@@ -429,6 +431,7 @@ Dialog {
                 visible: dialog.accounts && (dialog.accounts.error.length > 0
                     || (!dialog.accounts.browserConnecting && dialog.accounts.status.length > 0))
                 text: dialog.accounts ? (dialog.accounts.error || dialog.accounts.status) : ""
+                color: dialog.accounts && dialog.accounts.error.length > 0 ? "#ff8791" : "#b9afb1"
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
                 Accessible.role: Accessible.StaticText

@@ -17,8 +17,8 @@ ComboBox {
     background: Rectangle {
         radius: 10
         color: control.enabled ? "#1c1c1c" : "#161616"
-        border.width: control.visualFocus || control.hovered ? 1 : 0
-        border.color: control.visualFocus ? "#d93645" : "#333333"
+        border.width: control.visualFocus ? 2 : (control.hovered && control.enabled ? 1 : 0)
+        border.color: control.visualFocus ? "#ff8791" : "#333333"
     }
 
     contentItem: Text {
