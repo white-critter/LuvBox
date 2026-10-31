@@ -24,6 +24,14 @@ def check_scene():
     previous = qInstallMessageHandler(lambda kind, _context, message: messages.append(message)
         if kind in (QtMsgType.QtWarningMsg, QtMsgType.QtCriticalMsg, QtMsgType.QtFatalMsg) else None)
 
+    class Schedule(QObject):
+        @Property(str, constant=True)
+        def summary(self): return "자동 저장 예약이 없습니다."
+
+    class Records(QObject):
+        @Property(int, constant=True)
+        def unsavedCount(self): return 3
+
     class Fixture(QObject):
         preferencesChanged = Signal()
         changed = Signal()
@@ -32,6 +40,11 @@ def check_scene():
             self._values = {"max_video_mb": 200}
             self._error = ""
             self.writes = []
+            self._schedule, self._records = Schedule(), Records()
+        @Property(QObject, constant=True)
+        def schedule(self): return self._schedule
+        @Property(QObject, constant=True)
+        def records(self): return self._records
         @Property("QVariantMap", notify=preferencesChanged)
         def preferences(self): return self._values
         @Property(bool, constant=True)
@@ -95,6 +108,11 @@ ApplicationWindow {
     fixture.set_error('설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요.')
     QTest.qWait(50)
     assert error.property('visible') and '저장하지 못했습니다' in error.property('text')
+    # Advanced settings also reach automatic save, run history and unsaved media.
+    assert dialog.findChild(QQuickItem, 'preferencesScheduleButton').property('visible')
+    assert dialog.findChild(QQuickItem, 'preferencesRunHistoryButton').property('visible')
+    unsaved = dialog.findChild(QQuickItem, 'preferencesUnsavedButton')
+    assert unsaved.property('visible') and '(3)' in unsaved.property('text'), unsaved.property('text')
     assert error.height() >= error.property('implicitHeight') - 1
     assert dialog.property('height') <= 448
     fixture.set_error('')

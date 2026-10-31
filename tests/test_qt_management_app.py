@@ -12,7 +12,7 @@ from PySide6.QtCore import QCoreApplication
 from luvbox import activity, login
 from luvbox.app_settings import SettingsRepository
 from luvbox.history import HistoryStore
-from luvbox.management_store import ManagementSnapshot
+from luvbox.run_history import run_page
 from luvbox.qt_app import ApplicationController
 from luvbox.qt_download import DownloadController
 from luvbox.storage import resolve_storage
@@ -130,8 +130,7 @@ class ManagementAppIntegrationTests(unittest.TestCase):
         [outcome] = self.ledger()
         self.assertEqual((outcome['origin'], outcome['status'], outcome['history_run_id'], outcome['saved']),
                          ('manual', 'finished', ident, 2))
-        with closing(ManagementSnapshot(self.paths)) as snapshot:
-            rows = snapshot.run_page()['rows']
+        rows = run_page(self.paths)['rows']
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]['origin'], 'manual')
 
@@ -143,8 +142,7 @@ class ManagementAppIntegrationTests(unittest.TestCase):
         [outcome] = self.ledger()
         self.assertEqual((outcome['status'], outcome['history_run_id'], outcome['saved']), ('interrupted', ident, 2))
         self.assertIn('강제로 종료', self.controller.download.status)
-        with closing(ManagementSnapshot(self.paths)) as snapshot:
-            self.assertEqual(len(snapshot.run_page()['rows']), 1)
+        self.assertEqual(len(run_page(self.paths)['rows']), 1)
 
     def test_app_close_waits_for_worker_terminal_and_persists_outcome(self):
         self.begin()

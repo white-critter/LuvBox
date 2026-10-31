@@ -26,7 +26,8 @@ ApplicationWindow {
     readonly property color noticeColor: "#e6bd79"
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
-        folderDialog.visible || deleteConfirmation.visible
+        folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
+        runHistoryDialog.visible || unsavedDialog.visible
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
     color: "#101010"
     palette.window: color
@@ -64,8 +65,6 @@ ApplicationWindow {
             app.galleryVisible(currentScreen === 1)
         if (currentScreen === 1)
             Qt.callLater(updateFocus)
-        if (app && currentScreen === 2)
-            app.management.refresh()
     }
     property int densityChoice: 1
     readonly property int tileWidth: [168, 240, 320][densityChoice]
@@ -208,6 +207,38 @@ ApplicationWindow {
         galleryModel.focusViewport(first | 0, last | 0, (direction * columns * 2) | 0, thumb[0], thumb[1])
     }
 
+    // Apply one changed filter and keep the others as they are applied now.
+    // A date range stays in order: the date just chosen wins over the other end.
+    function applyFilters(changes) {
+        if (!app)
+            return
+        const library = app.library
+        const author = changes.author !== undefined ? changes.author : library.filterAuthor
+        const dateField = changes.dateField !== undefined ? changes.dateField : library.dateField
+        let from = changes.from !== undefined ? changes.from : library.dateFrom
+        let to = changes.to !== undefined ? changes.to : library.dateTo
+        if (from.length > 0 && to.length > 0 && from > to) {
+            if (changes.from !== undefined)
+                to = from
+            else
+                from = to
+        }
+        library.setAdvancedFilters(author, dateField, from, to)
+    }
+
+    property string transientNotice: ""
+
+    function flashNotice(text) {
+        transientNotice = text
+        noticeTimer.restart()
+    }
+
+    Timer {
+        id: noticeTimer
+        interval: 3500
+        onTriggered: window.transientNotice = ""
+    }
+
     function requestMore() {
         if (currentScreen === 1 && gallery.contentY - gallery.originY + gallery.height + gallery.cellHeight * 2 >= gallery.contentHeight)
             galleryModel.loadMore()
@@ -254,10 +285,11 @@ ApplicationWindow {
             Label { text: "LuvBox"; font.pixelSize: 18; Layout.rightMargin: 16 }
             FlatButton { text: "저장"; tone: "nav"; checkable: true; checked: window.currentScreen === 0; onClicked: window.currentScreen = 0 }
             FlatButton { text: "갤러리"; tone: "nav"; checkable: true; checked: window.currentScreen === 1; onClicked: window.currentScreen = 1 }
-            FlatButton { text: "관리"; objectName: "managementNavigation"; visible: !!window.app; tone: "nav"; checkable: true; checked: window.currentScreen === 2; onClicked: window.currentScreen = 2 }
             Item { Layout.fillWidth: true }
             Label { text: window.app ? window.app.version : ""; color: window.mutedColor; visible: window.width > 760 }
-            FlatButton { text: "설정"; visible: !!window.app; enabled: window.app && !window.app.busy; onClicked: preferencesDialog.open() }
+            // Settings stay reachable during a save: its records are read-only, and the
+            // changeable options are locked inside the dialog until the work ends.
+            FlatButton { text: "설정"; visible: !!window.app; enabled: window.app && !window.app.closing; onClicked: preferencesDialog.open() }
         }
     }
 
@@ -456,20 +488,18 @@ ApplicationWindow {
                                 objectName: "saveScheduleSummary"
                                 Label {
                                     Layout.fillWidth: true
-                                    text: window.app ? "자동 저장 · " + window.app.schedule.summary : ""
+                                    text: !window.app ? "" : window.app.schedule.summary.indexOf("자동 저장") === 0
+                                        ? window.app.schedule.summary : "자동 저장 · " + window.app.schedule.summary
                                     color: window.app && window.app.schedule.registered && !window.app.schedule.current
                                         ? window.noticeColor : window.mutedColor
                                     textFormat: Text.PlainText
                                     wrapMode: Text.WordWrap
                                 }
                                 FlatButton {
-                                    text: "예약 관리"
+                                    objectName: "saveScheduleButton"
+                                    text: "자동 저장 설정"
                                     visible: !!window.app
-                                    onClicked: {
-                                        if (window.app)
-                                            window.app.management.setSection("schedule")
-                                        window.currentScreen = 2
-                                    }
+                                    onClicked: scheduleDialog.open()
                                 }
                             }
                             Label {
@@ -483,10 +513,14 @@ ApplicationWindow {
                             RowLayout {
                                 Layout.fillWidth: true
                                 Label {
+                                    objectName: "saveCounters"
                                     Layout.fillWidth: true
                                     text: window.app ? "저장 " + window.app.download.savedCount.toLocaleString() +
-                                        "개 · 건너뜀 " + window.app.download.skippedCount.toLocaleString() + "개" : ""
+                                        "개 · 이미 저장됨 " + window.app.download.skippedCount.toLocaleString() + "개" +
+                                        (window.app.download.unsavedCount > 0
+                                            ? " · 저장 못 함 " + window.app.download.unsavedCount.toLocaleString() + "개" : "") : ""
                                     color: window.mutedColor
+                                    wrapMode: Text.WordWrap
                                 }
                                 FlatSwitch {
                                     objectName: "savedDetailsToggle"
@@ -494,6 +528,24 @@ ApplicationWindow {
                                     checked: window.app ? window.app.preferences.detailed_progress : false
                                     enabled: window.app && !window.app.closing
                                     onToggled: if (window.app) window.app.setPreference("detailed_progress", checked)
+                                }
+                            }
+                            RowLayout {
+                                objectName: "saveUnsavedSummary"
+                                Layout.fillWidth: true
+                                visible: !!window.app && window.app.records.unsavedCount > 0
+                                spacing: 8
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: window.app ? "저장하지 못한 미디어 " + window.app.records.unsavedCount.toLocaleString()
+                                        + "개가 있습니다." : ""
+                                    color: window.noticeColor
+                                    wrapMode: Text.WordWrap
+                                }
+                                FlatButton {
+                                    objectName: "saveUnsavedButton"
+                                    text: "확인"
+                                    onClicked: unsavedDialog.open()
                                 }
                             }
                             Label {
@@ -650,26 +702,18 @@ ApplicationWindow {
                         objectName: "galleryFilterToggle"
                         text: checked ? "필터 닫기" : "작성자·날짜 필터"
                         checkable: true
-                        onClicked: {
-                            if (!checked) {
-                                datePickerPopup.close()
-                            } else if (window.app) {
-                                authorFilter.text = window.app.library.filterAuthor
-                                dateFieldChoice.currentIndex = window.app.library.dateField === "saved" ? 1 : 0
-                                dateFromFilter.text = window.app.library.dateFrom
-                                dateToFilter.text = window.app.library.dateTo
-                            }
-                        }
+                        onClicked: if (!checked) datePickerPopup.close()
                     }
                     FlatButton {
                         objectName: "galleryFilterReset"
                         text: "필터 초기화"
+                        enabled: !!window.app && (window.app.library.filterSummary.length > 0 || search.text.length > 0
+                            || mediaFilter.currentIndex > 0 || orderChoice.currentIndex > 0)
                         onClicked: {
                             searchDelay.stop()
                             datePickerPopup.close()
                             search.text = ""
-                            authorFilter.text = dateFromFilter.text = dateToFilter.text = ""
-                            mediaFilter.currentIndex = orderChoice.currentIndex = dateFieldChoice.currentIndex = 0
+                            mediaFilter.currentIndex = orderChoice.currentIndex = 0
                             window.app.library.resetFilters()
                         }
                     }
@@ -677,7 +721,7 @@ ApplicationWindow {
                     FlatButton {
                         objectName: "gallerySelectionToggle"
                         text: window.app && window.app.library.selectionMode ? "선택 끝내기" : "여러 개 선택"
-                        enabled: window.app && !window.app.busy
+                        enabled: !!window.app
                         onClicked: window.app.library.setSelectionMode(!window.app.library.selectionMode)
                     }
                 }
@@ -686,268 +730,97 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     visible: !!window.app && filterToggle.checked
                     spacing: 6
-                    function applyAdvancedFilter() {
-                        if (window.app && window.app.library.setAdvancedFilters(authorFilter.text,
-                                dateFieldChoice.currentIndex === 1 ? "saved" : "posted",
-                                dateFromFilter.text, dateToFilter.text)) {
-                            datePickerPopup.close()
-                            filterToggle.checked = false
-                        }
-                    }
+                    // Every control applies the moment it changes, so the grid
+                    // always matches what the controls show.
                     FlatCombo {
                         id: authorFilter
                         objectName: "galleryAuthorFilter"
                         Layout.fillWidth: true
                         Layout.minimumWidth: 110
                         Layout.preferredWidth: 168
-                        minimumPopupWidth: 240
+                        Layout.maximumWidth: 360
+                        minimumPopupWidth: 280
                         implicitHeight: 40
                         implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                        // The closed box names the author; the count belongs to the list.
+                        displayText: currentIndex > 0 && model[currentIndex] ? "@" + model[currentIndex].value : "전체 작성자"
                         Accessible.name: "작성자 선택"
                         textRole: "label"
                         valueRole: "value"
-                        property string text: ""
+                        readonly property string applied: window.app ? window.app.library.filterAuthor : ""
                         readonly property var authorRows: window.app && window.app.library.authors
                             ? window.app.library.authors : []
+                        // "미디어 N개" is the author's number of saved photos, videos and GIFs
+                        // in the library, whatever filters are active.
                         model: {
                             const items = [{ label: "전체 작성자", value: "" }]
-                            const normalized = String(authorFilter.text || "").trim().replace(/^@+/, "").toLowerCase()
-                            let found = !normalized.length
+                            let found = !authorFilter.applied.length
                             for (let i = 0; i < authorRows.length; i++) {
                                 const row = authorRows[i]
                                 const handle = row && row.author ? String(row.author) : ""
                                 if (!handle.length)
                                     continue
-                                if (handle.toLowerCase() === normalized)
+                                if (handle.toLowerCase() === authorFilter.applied.toLowerCase())
                                     found = true
                                 const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
-                                items.push({ label: "@" + handle + " (" + count + ")", value: handle })
+                                items.push({ label: "@" + handle + " · 미디어 " + count + "개", value: handle })
                             }
                             if (!found)
-                                items.push({ label: "@" + normalized, value: normalized })
+                                items.push({ label: "@" + authorFilter.applied, value: authorFilter.applied })
                             return items
                         }
-                        function syncSelection() {
-                            const normalized = String(text || "").trim().replace(/^@+/, "").toLowerCase()
-                            if (!normalized.length) {
-                                if (currentIndex !== 0)
-                                    currentIndex = 0
-                                return
-                            }
+                        currentIndex: {
+                            const wanted = authorFilter.applied.toLowerCase()
                             for (let i = 1; i < model.length; i++) {
-                                if (String(model[i].value).toLowerCase() === normalized) {
-                                    if (currentIndex !== i)
-                                        currentIndex = i
-                                    return
-                                }
+                                if (String(model[i].value).toLowerCase() === wanted)
+                                    return i
                             }
+                            return 0
                         }
-                        onTextChanged: syncSelection()
-                        onModelChanged: syncSelection()
-                        onActivated: index => {
-                            text = index > 0 && model[index] ? model[index].value : ""
-                        }
+                        onActivated: index => window.applyFilters({ author: index > 0 && model[index] ? model[index].value : "" })
                     }
                     FlatCombo {
                         id: dateFieldChoice
                         objectName: "galleryDateField"
                         model: ["게시일", "저장일"]
+                        currentIndex: window.app && window.app.library.dateField === "saved" ? 1 : 0
                         implicitWidth: 92
                         implicitHeight: 40
                         Accessible.name: "날짜 필터 기준"
+                        onActivated: index => window.applyFilters({ dateField: index === 1 ? "saved" : "posted" })
                     }
-                    Rectangle {
+                    DateField {
                         id: dateFromFilter
                         objectName: "galleryDateFrom"
-                        property string text: ""
-                        readonly property bool highlighted: activeFocus
-                            || (datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter)
-                        activeFocusOnTab: true
+                        text: window.app ? window.app.library.dateFrom : ""
+                        placeholder: "시작 날짜"
+                        accessibleLabel: "시작 날짜"
+                        pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter
                         Layout.preferredWidth: 136
                         Layout.minimumWidth: 120
-                        implicitHeight: 40
-                        radius: 10
-                        color: "#1c1c1c"
-                        border.width: highlighted ? 2 : (dateFromMouse.containsMouse ? 1 : 0)
-                        border.color: highlighted ? "#ff8791" : "#333333"
-                        Accessible.role: Accessible.Button
-                        Accessible.name: text.length > 0 ? "시작 날짜 " + text : "시작 날짜 선택"
-                        Accessible.onPressAction: datePickerPopup.openFor(dateFromFilter)
-                        Keys.onReturnPressed: datePickerPopup.openFor(dateFromFilter)
-                        Keys.onEnterPressed: datePickerPopup.openFor(dateFromFilter)
-                        Keys.onSpacePressed: datePickerPopup.openFor(dateFromFilter)
-                        Keys.onDeletePressed: {
-                            if (dateFromFilter.text.length > 0) {
-                                dateFromFilter.text = ""
-                                if (datePickerPopup.targetField === dateFromFilter)
-                                    datePickerPopup.close()
-                            }
-                        }
-                        Keys.onPressed: event => {
-                            if (event.key === Qt.Key_Backspace && dateFromFilter.text.length > 0) {
-                                dateFromFilter.text = ""
-                                if (datePickerPopup.targetField === dateFromFilter)
-                                    datePickerPopup.close()
-                                event.accepted = true
-                            }
-                        }
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 10
-                            anchors.rightMargin: 8
-                            spacing: 6
-                            Canvas {
-                                width: 14
-                                height: 14
-                                onPaint: {
-                                    const ctx = getContext("2d")
-                                    ctx.reset()
-                                    ctx.strokeStyle = "#b9afb1"
-                                    ctx.lineWidth = 1.4
-                                    ctx.strokeRect(1, 2.5, 12, 10.5)
-                                    ctx.beginPath()
-                                    ctx.moveTo(1, 6)
-                                    ctx.lineTo(13, 6)
-                                    ctx.moveTo(4, 1)
-                                    ctx.lineTo(4, 3.5)
-                                    ctx.moveTo(10, 1)
-                                    ctx.lineTo(10, 3.5)
-                                    ctx.stroke()
-                                }
-                            }
-                            Label {
-                                Layout.fillWidth: true
-                                text: dateFromFilter.text.length > 0 ? dateFromFilter.text : "시작 날짜"
-                                color: dateFromFilter.text.length > 0 ? "#f4f1f1" : "#8f8587"
-                                font.pixelSize: 13
-                                elide: Text.ElideRight
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            Label {
-                                visible: dateFromFilter.text.length > 0
-                                text: "×"
-                                color: "#b9afb1"
-                                font.pixelSize: 14
-                            }
-                        }
-                        MouseArea {
-                            id: dateFromMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: mouse => {
-                                dateFromFilter.forceActiveFocus()
-                                if (dateFromFilter.text.length > 0 && mouse.x >= dateFromFilter.width - 26) {
-                                    dateFromFilter.text = ""
-                                    if (datePickerPopup.targetField === dateFromFilter)
-                                        datePickerPopup.close()
-                                } else if (datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter) {
-                                    datePickerPopup.close()
-                                } else {
-                                    datePickerPopup.openFor(dateFromFilter)
-                                }
-                            }
+                        onPickRequested: datePickerPopup.openFor(dateFromFilter)
+                        onCleared: {
+                            if (datePickerPopup.targetField === dateFromFilter)
+                                datePickerPopup.close()
+                            window.applyFilters({ from: "" })
                         }
                     }
                     Label { text: "~" }
-                    Rectangle {
+                    DateField {
                         id: dateToFilter
                         objectName: "galleryDateTo"
-                        property string text: ""
-                        readonly property bool highlighted: activeFocus
-                            || (datePickerPopup.visible && datePickerPopup.targetField === dateToFilter)
-                        activeFocusOnTab: true
+                        text: window.app ? window.app.library.dateTo : ""
+                        placeholder: "종료 날짜"
+                        accessibleLabel: "종료 날짜"
+                        pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateToFilter
                         Layout.preferredWidth: 136
                         Layout.minimumWidth: 120
-                        implicitHeight: 40
-                        radius: 10
-                        color: "#1c1c1c"
-                        border.width: highlighted ? 2 : (dateToMouse.containsMouse ? 1 : 0)
-                        border.color: highlighted ? "#ff8791" : "#333333"
-                        Accessible.role: Accessible.Button
-                        Accessible.name: text.length > 0 ? "종료 날짜 " + text : "종료 날짜 선택"
-                        Accessible.onPressAction: datePickerPopup.openFor(dateToFilter)
-                        Keys.onReturnPressed: datePickerPopup.openFor(dateToFilter)
-                        Keys.onEnterPressed: datePickerPopup.openFor(dateToFilter)
-                        Keys.onSpacePressed: datePickerPopup.openFor(dateToFilter)
-                        Keys.onDeletePressed: {
-                            if (dateToFilter.text.length > 0) {
-                                dateToFilter.text = ""
-                                if (datePickerPopup.targetField === dateToFilter)
-                                    datePickerPopup.close()
-                            }
+                        onPickRequested: datePickerPopup.openFor(dateToFilter)
+                        onCleared: {
+                            if (datePickerPopup.targetField === dateToFilter)
+                                datePickerPopup.close()
+                            window.applyFilters({ to: "" })
                         }
-                        Keys.onPressed: event => {
-                            if (event.key === Qt.Key_Backspace && dateToFilter.text.length > 0) {
-                                dateToFilter.text = ""
-                                if (datePickerPopup.targetField === dateToFilter)
-                                    datePickerPopup.close()
-                                event.accepted = true
-                            }
-                        }
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 10
-                            anchors.rightMargin: 8
-                            spacing: 6
-                            Canvas {
-                                width: 14
-                                height: 14
-                                onPaint: {
-                                    const ctx = getContext("2d")
-                                    ctx.reset()
-                                    ctx.strokeStyle = "#b9afb1"
-                                    ctx.lineWidth = 1.4
-                                    ctx.strokeRect(1, 2.5, 12, 10.5)
-                                    ctx.beginPath()
-                                    ctx.moveTo(1, 6)
-                                    ctx.lineTo(13, 6)
-                                    ctx.moveTo(4, 1)
-                                    ctx.lineTo(4, 3.5)
-                                    ctx.moveTo(10, 1)
-                                    ctx.lineTo(10, 3.5)
-                                    ctx.stroke()
-                                }
-                            }
-                            Label {
-                                Layout.fillWidth: true
-                                text: dateToFilter.text.length > 0 ? dateToFilter.text : "종료 날짜"
-                                color: dateToFilter.text.length > 0 ? "#f4f1f1" : "#8f8587"
-                                font.pixelSize: 13
-                                elide: Text.ElideRight
-                                verticalAlignment: Text.AlignVCenter
-                            }
-                            Label {
-                                visible: dateToFilter.text.length > 0
-                                text: "×"
-                                color: "#b9afb1"
-                                font.pixelSize: 14
-                            }
-                        }
-                        MouseArea {
-                            id: dateToMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: mouse => {
-                                dateToFilter.forceActiveFocus()
-                                if (dateToFilter.text.length > 0 && mouse.x >= dateToFilter.width - 26) {
-                                    dateToFilter.text = ""
-                                    if (datePickerPopup.targetField === dateToFilter)
-                                        datePickerPopup.close()
-                                } else if (datePickerPopup.visible && datePickerPopup.targetField === dateToFilter) {
-                                    datePickerPopup.close()
-                                } else {
-                                    datePickerPopup.openFor(dateToFilter)
-                                }
-                            }
-                        }
-                    }
-                    FlatButton {
-                        objectName: "galleryFilterApply"
-                        text: "적용"
-                        implicitHeight: 40
-                        onClicked: filterBox.applyAdvancedFilter()
                     }
                 }
                 Label {
@@ -970,11 +843,12 @@ ApplicationWindow {
                 Label {
                     objectName: "galleryManagementMessage"
                     Layout.fillWidth: true
-                    text: window.app ? (window.app.management.error || window.app.management.status) : ""
+                    text: window.transientNotice || (window.app ? (window.app.management.error || window.app.management.status) : "")
                     visible: text.length > 0
                     wrapMode: Text.WordWrap
                     textFormat: Text.PlainText
-                    color: window.app && window.app.management.error ? window.errorColor : window.mutedColor
+                    color: window.app && window.app.management.error && !window.transientNotice
+                        ? window.errorColor : window.mutedColor
                 }
                 RowLayout {
                     objectName: "gallerySelectionBar"
@@ -982,13 +856,17 @@ ApplicationWindow {
                     visible: window.app && window.app.library.selectionMode
                     spacing: 8
                     Label {
+                        objectName: "gallerySelectionCount"
                         Layout.fillWidth: true
-                        text: window.app ? window.app.library.selectedCount.toLocaleString() + "개 선택" : ""
+                        text: window.app ? window.app.library.selectedCount.toLocaleString() + "개 선택"
+                            + (window.app.busy && window.app.library.selectedCount > 0
+                               ? " · 작업이 끝나면 휴지통으로 이동할 수 있습니다" : "") : ""
+                        elide: Text.ElideRight
                     }
                     FlatButton {
                         objectName: "gallerySelectLoaded"
                         text: "불러온 항목 선택"
-                        enabled: window.app && !window.app.busy
+                        enabled: !!window.app
                         onClicked: window.app.library.selectLoaded()
                     }
                     FlatButton {
@@ -1092,8 +970,12 @@ ApplicationWindow {
                     }
                     Keys.onDeletePressed: {
                         window.stopWheel()
-                        if (!window.app || window.app.busy)
+                        if (!window.app)
                             return
+                        if (window.app.busy) {
+                            window.flashNotice("작업이 끝난 뒤 휴지통으로 이동할 수 있습니다.")
+                            return
+                        }
                         if (window.app.library.selectionMode && window.app.library.selectedCount > 0)
                             window.app.management.prepareDelete(window.app.library.selectedKeys)
                         else if (!window.app.library.selectionMode && currentItem && !window.app.library.selectedMissing)
@@ -1259,9 +1141,6 @@ ApplicationWindow {
                     }
                 }
             }
-            ManagementPanel {
-                app: window.app
-            }
         }
     }
 
@@ -1295,13 +1174,8 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "F5"
-        enabled: !window.modalOpen && window.app && !window.app.busy
-        onActivated: {
-            if (window.currentScreen === 1)
-                window.app.refreshGallery()
-            else if (window.currentScreen === 2)
-                window.app.management.refresh()
-        }
+        enabled: window.currentScreen === 1 && !window.modalOpen && window.app && !window.app.busy
+        onActivated: window.app.refreshGallery()
     }
     Dialog {
         id: previewDialog
@@ -1547,6 +1421,13 @@ ApplicationWindow {
             viewMonth = next.getMonth()
         }
 
+        // Store the picked date (or "" to clear it) as the start or the end of the range.
+        function choose(iso) {
+            const start = targetField === dateFromFilter
+            close()
+            window.applyFilters(start ? { from: iso } : { to: iso })
+        }
+
         function openFor(field) {
             window.stopWheel()
             targetField = field
@@ -1685,10 +1566,8 @@ ApplicationWindow {
                             hoverEnabled: dayCell.validDay
                             cursorShape: dayCell.validDay ? Qt.PointingHandCursor : Qt.ArrowCursor
                             onClicked: {
-                                if (datePickerPopup.targetField && dayCell.validDay) {
-                                    datePickerPopup.targetField.text = dayCell.isoDate
-                                    datePickerPopup.close()
-                                }
+                                if (datePickerPopup.targetField && dayCell.validDay)
+                                    datePickerPopup.choose(dayCell.isoDate)
                             }
                         }
                     }
@@ -1704,12 +1583,9 @@ ApplicationWindow {
                     implicitHeight: 32
                     text: "오늘"
                     onClicked: {
-                        if (datePickerPopup.targetField) {
-                            const now = new Date()
-                            datePickerPopup.targetField.text = datePickerPopup.formatIso(
-                                now.getFullYear(), now.getMonth() + 1, now.getDate())
-                        }
-                        datePickerPopup.close()
+                        const now = new Date()
+                        datePickerPopup.choose(datePickerPopup.formatIso(
+                            now.getFullYear(), now.getMonth() + 1, now.getDate()))
                     }
                 }
                 FlatButton {
@@ -1717,11 +1593,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     implicitHeight: 32
                     text: "초기화"
-                    onClicked: {
-                        if (datePickerPopup.targetField)
-                            datePickerPopup.targetField.text = ""
-                        datePickerPopup.close()
-                    }
+                    onClicked: datePickerPopup.choose("")
                 }
             }
         }
@@ -1773,6 +1645,27 @@ ApplicationWindow {
 
     PreferencesDialog {
         id: preferencesDialog
+        parent: Overlay.overlay
+        app: window.app
+        onScheduleRequested: scheduleDialog.open()
+        onRunHistoryRequested: runHistoryDialog.open()
+        onUnsavedRequested: unsavedDialog.open()
+    }
+
+    ScheduleDialog {
+        id: scheduleDialog
+        parent: Overlay.overlay
+        app: window.app
+    }
+
+    RunHistoryDialog {
+        id: runHistoryDialog
+        parent: Overlay.overlay
+        app: window.app
+    }
+
+    UnsavedMediaDialog {
+        id: unsavedDialog
         parent: Overlay.overlay
         app: window.app
     }
@@ -1896,6 +1789,9 @@ ApplicationWindow {
                 previewDialog.close()
                 connectionDialog.close()
                 preferencesDialog.close()
+                scheduleDialog.close()
+                runHistoryDialog.close()
+                unsavedDialog.close()
                 storageDialog.close()
                 repairDialog.close()
                 folderDialog.close()
@@ -1904,6 +1800,12 @@ ApplicationWindow {
             }
         }
         function onLoginRequested() { connectionDialog.open() }
+        // A retry runs on the save screen, where its progress shows.
+        function onRetryStarted() {
+            unsavedDialog.close()
+            preferencesDialog.close()
+            window.currentScreen = 0
+        }
         function onStorageConfirmationRequested() { storageDialog.open() }
         function onReviewReady() { saveReviewDialog.open() }
         function onReviewCleared() { saveReviewDialog.close() }

@@ -1,4 +1,4 @@
-"""Management actions use displayed identities and guard existing files."""
+"""Recycle-bin moves use displayed identities and guard existing files."""
 from contextlib import closing
 import json
 from pathlib import Path
@@ -71,23 +71,6 @@ class ManagementControllerTests(unittest.TestCase):
     def gallery_key(self):
         return next(row['key'] for row in self.library.model._rows if '_100_' in row['key'])
 
-    def test_run_history_without_selected_account_requires_all_accounts_opt_in(self):
-        self.management.setLibrary('', str(self.output), False)
-        history = {'rows': [{'run_id': '1', 'account': 'alice', 'origin': 'manual',
-                             'status': 'finished'}], 'total': 1, 'page': 0, 'pages': 1}
-        with patch('luvbox.activity.outcome_page', return_value=history) as read_history:
-            self.management.setSection('runs')
-            self.wait(lambda: not self.management.busy)
-            self.assertEqual(self.management.total, 0)
-            self.assertEqual(self.management.rows, [])
-            read_history.assert_not_called()
-
-            self.management.setAllAccounts(True)
-            self.wait(lambda: not self.management.busy)
-            self.assertEqual(self.management.total, 1)
-            self.assertEqual(len(self.management.rows), 1)
-            read_history.assert_called_once_with(0, 100, account='')
-
     def test_cancel_and_stale_generation_never_move_a_file(self):
         original = self.present.read_bytes()
         self.management.prepareDelete([self.gallery_key()])
@@ -156,25 +139,6 @@ class ManagementControllerTests(unittest.TestCase):
             [row] = store.deletion_page()['rows']
             self.assertEqual(row['status'], 'recycled')
             self.assertEqual(store.ignored_media(), {('100', 1, 'photo')})
-
-    def test_switching_to_schedule_or_changing_library_clears_inflight_read_busy_state(self):
-        from luvbox.qt_management import ManagementSnapshot
-        started, release = threading.Event(), threading.Event()
-        original = ManagementSnapshot.run_page
-        def slow_run_page(snapshot, *args):
-            started.set()
-            release.wait(5)
-            return original(snapshot, *args)
-        with patch.object(ManagementSnapshot, 'run_page', slow_run_page):
-            self.management.setSection('runs')
-            self.wait(started.is_set)
-            self.assertTrue(self.management.busy)
-            self.management.setSection('schedule')
-            self.assertFalse(self.management.busy)
-            release.set()
-            time.sleep(0.03)
-            self.app.processEvents()
-            self.assertFalse(self.management.busy)
 
 
 if __name__ == '__main__':

@@ -71,6 +71,10 @@ _LOCAL_WRITE_ERROR = ("파일을 쓰지 못해 멈췄습니다. 폴더 쓰기 �
                       "확인한 뒤 다시 실행해 주세요. 받은 파일은 그대로 있습니다.")
 _REVIEW_ERROR = ("저장 여부 확인을 완료하지 못해 멈췄습니다. 다시 실행해 주세요. "
                  "받은 임시 파일은 보존했습니다.")
+# Why one media is listed as unsaved. Fixed sentences: a server reply never reaches the list.
+_FAILED_DETAIL = "파일을 받지 못했습니다. 연결 상태나 저장 폴더를 확인한 뒤 다시 시도해 주세요."
+_SIZE_DETAIL = "크기 제한({limit:,}MB)을 넘어 저장하지 않았습니다."
+_EXCLUDED_DETAIL = "저장 확인에서 ‘저장 안 함’으로 골랐습니다."
 
 
 def _save_day() -> date:
@@ -553,7 +557,7 @@ def _key_identity(key: str) -> tuple[str, int, str]:
 
 
 def _retry_message(saved: int, found: int, unavailable: int, absent: int, limited: int = 0) -> str:
-    parts = [f"사라진 파일 다시 받기를 마쳤습니다 · 받은 파일 {saved:,}개"]
+    parts = [f"다시 저장을 마쳤습니다 · 받은 파일 {saved:,}개"]
     if found:
         parts.append(f"제자리에 있던 파일 {found:,}개")
     if unavailable:
@@ -564,7 +568,7 @@ def _retry_message(saved: int, found: int, unavailable: int, absent: int, limite
         parts.append(f"용량 제한으로 건너뛴 파일 {limited:,}개")
     text = " · ".join(parts) + "."
     if unavailable or absent or limited:
-        text += " 받지 못한 파일은 ‘사라진 파일’ 목록에 남아 있으며, 필요 없으면 ‘다시 받지 않기’로 숨길 수 있습니다."
+        text += " 받지 못한 파일은 ‘저장 못 한 미디어’ 목록에 남아 있으며, 필요 없으면 목록에서 지울 수 있습니다."
     return text
 
 
@@ -622,9 +626,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     from gallery_dl import config, exception, job, output
     from gallery_dl.extractor import common
     from requests.exceptions import RequestException
+    from . import unsaved
     from .metadata import available, embed_source, failure_message, persistent
 
     saved = skipped = size_skipped = review_skipped = review_never = 0
+    failed = 0
     metadata_failed = 0
     metadata_available = False
     metadata_warned = False
@@ -666,6 +672,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     tweet_texts = []
     visited_ids = set()
     last_tweet_id = last_posted_at = ""
+    # Media this run could not store, and earlier unsaved media it did store.
+    # Both are written once at the end, as (tweet_id, num, media_type).
+    unsaved_items = {}
+    unsaved_known = set()
+    unsaved_resolved = set()
     flag = Path(stop_file) if stop_file is not None else None
     root_logger = logging.getLogger()
     previous_handlers, previous_level = root_logger.handlers[:], root_logger.level
@@ -718,6 +729,32 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             batch = tweet_texts[:]
             tweet_texts.clear()
             history.record_tweets(batch)
+
+    def note_unsaved(reason, detail, *, media=None, identity=None, size=0):
+        """Remember one media this run did not store, with only bounded public facts."""
+        details = _media_details(media) if media is not None else {}
+        tweet_id, number, media_type = identity or (details["tweet_id"], details["num"], details["media_type"])
+        key = (tweet_id, number, media_type)
+        if key not in unsaved_items and len(unsaved_items) >= unsaved.MAX_ITEMS:
+            return
+        media = media or {}
+        duration = media.get("duration")
+        unsaved_items[key] = dict(
+            reason=reason, tweet_id=tweet_id, num=number, media_type=media_type,
+            author=details.get("author", ""), posted_at=details.get("posted_at", ""),
+            width=media.get("width"), height=media.get("height"),
+            duration=round(duration) if type(duration) in (int, float) and 0 <= duration < 10**6 else 0,
+            size_bytes=size, limit_mb=normalized.max_video_mb if reason == unsaved.SIZE else 0, detail=detail)
+
+    def remember_unsaved():
+        if not unsaved_items and not unsaved_resolved:
+            return
+        try:
+            unsaved.record(unsaved_items.values(), account=normalized.account, output_dir=normalized.output_dir,
+                           resolved=unsaved_resolved)
+        except OSError:
+            emit({"type": "log", "level": "warning", "message":
+                  "저장하지 못한 미디어 목록을 갱신하지 못했습니다. 저장한 파일에는 영향이 없습니다."})
 
     progress_fields = {}
     progress_written = 0.0
@@ -960,7 +997,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
         def handle_url(self, url, kwdict):
             nonlocal stop_reason, saved, skipped, size_skipped, review_skipped, review_never, existing_streak
-            nonlocal ignored_encountered
+            nonlocal ignored_encountered, failed
             check_stop()
             media_type = kwdict.get("type")
             if media_type not in {"photo", "video", "animated_gif"}:
@@ -1065,6 +1102,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 except (HistoryError, sqlite3.Error):
                     raise exception.AbortExtraction("history store unavailable") from None
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
+                note_unsaved(unsaved.EXCLUDED, _EXCLUDED_DETAIL, media=kwdict)
                 emit({"type": "review-never", "path": "", **_media_details(kwdict)})
             except ReviewSkip:
                 review_skipped += 1
@@ -1082,6 +1120,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if self.pathfmt.temppath:
                     Path(self.pathfmt.temppath).unlink(missing_ok=True)
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
+                note_unsaved(unsaved.SIZE, _SIZE_DETAIL.format(limit=normalized.max_video_mb), media=kwdict,
+                             size=self.progress_total or self.progress_bytes)
                 emit({"type": "size-skipped", "path": "", "max_video_mb": normalized.max_video_mb,
                       **_media_details(kwdict)})
             else:
@@ -1189,9 +1229,17 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             raise exception.AbortExtraction("history store unavailable") from None
                         if targets:
                             recovered[kwdict["_luvbox_archive_key"]] = media_status
+                        if identity in unsaved_known:
+                            unsaved_resolved.add(identity)
                     if media_status == "saved":
                         payload_size = self.progress_bytes if media_type == "animated_gif" else original_size
                         self.progress(payload_size, self.progress_total, force=True, final=True)
+                else:
+                    # The downloader gave up on this file without a stop, a size
+                    # limit or a choice: it stays unsaved and is listed for a retry.
+                    failed += 1
+                    note_unsaved(unsaved.FAILED, _FAILED_DETAIL, media=kwdict)
+                    emit({"type": "failed", "path": "", **_media_details(kwdict)})
             finally:
                 if self.gif_finalize is not None:
                     self.pathfmt.finalize = self.gif_finalize
@@ -1640,13 +1688,17 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             raise ValueError("선택한 파일의 휴지통 이동이 중단됐습니다. 삭제 이력과 파일 상태를 확인한 뒤 다시 선택해 주세요.")
         targets = frozenset(normalized.targets)
         ignored = history.ignored_media()
+        try:
+            unsaved_known = unsaved.identities(normalized.account, normalized.output_dir)
+        except OSError:
+            unsaved_known = set()  # the list is only a convenience; saving never waits for it
         if not targets:
             remembered = history.review_pending()
             review_unknown = remembered is None
             review_pending = remembered or set()
         scan_note = ""
         if targets:
-            scan_note = (f"사라진 파일 {len(targets):,}개(트윗 {len(_retry_groups(normalized.targets)):,}개)를 다시 받습니다. "
+            scan_note = (f"선택한 미디어 {len(targets):,}개(트윗 {len(_retry_groups(normalized.targets)):,}개)를 다시 받습니다. "
                          "Like 목록 대신 트윗마다 X 요청을 1번씩 보냅니다.")
         elif normalized.scan_mode == "quick":
             readiness = history.quick_scan_readiness(normalized.folder_mode, normalized.media_signature)
@@ -1710,6 +1762,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     else:
                         unavailable_tweets += 1
                         notice = "트윗을 볼 수 없어(삭제·비공개·제한) 다시 받지 못했습니다."
+                    for key in left:
+                        note_unsaved(unsaved.FAILED, notice, identity=_key_identity(key))
                     # The address lets the user check the tweet in a browser.
                     emit({"type": "log", "level": "info", "message": f"{notice} https://x.com/i/web/status/{tweet_id}"})
             else:
@@ -1744,10 +1798,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             status = "finished"
         if review_skipped:
             message += (f" 이번엔 건너뛴 파일 {review_skipped:,}개는 " +
-                        ("‘다시 받기’에서 다시 선택할 수 있습니다." if targets else "다음 저장 때 다시 보여 드립니다."))
+                        ("‘저장 못 한 미디어’에서 다시 선택할 수 있습니다." if targets else "다음 저장 때 다시 보여 드립니다."))
         if review_never:
             message += (f" ‘저장 안 함’으로 고른 파일 {review_never:,}개는 다시 묻지 않습니다. "
-                        "필요하면 ‘사라진 파일’의 숨긴 파일에서 다시 받을 수 있습니다.")
+                        "필요하면 ‘저장 못 한 미디어’의 ‘직접 제외’에서 다시 받을 수 있습니다.")
+        if size_skipped or failed:
+            message += (f" 저장하지 못한 미디어 {size_skipped + failed:,}개는 ‘설정 › 고급 › 저장 못 한 미디어’에서 "
+                        "이유를 확인하고 다시 시도할 수 있습니다.")
     except exception.StopExtraction:
         status, exit_code = "stopped", 0
         message = "저장을 중단했습니다."
@@ -1783,6 +1840,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             error_kind = "authentication"
         exit_code = 1
     finally:
+        remember_unsaved()
         if history is not None:
             try:
                 # Persist completed retries even if a later tweet was stopped
@@ -1865,7 +1923,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         authentication_changed(handler.auth_state)
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,
           "history_run_id": run_id,
-          "size_skipped": size_skipped, "review_skipped": review_skipped, "review_never": review_never,
+          "size_skipped": size_skipped, "failed_media": failed,
+          "review_skipped": review_skipped, "review_never": review_never,
           "metadata_failed": metadata_failed, "author_deferred": author_deferred,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,
           "last_posted_at": last_posted_at,

@@ -25,7 +25,7 @@ _WRITE_LOCK = threading.RLock()
 _KOREA = timezone(timedelta(hours=9))
 _ERROR = "실행 기록을 읽거나 저장하지 못했습니다. 앱 데이터 폴더의 권한을 확인해 주세요."
 _COLUMNS = ("run_id", "origin", "account", "output_dir", "started_at", "finished_at", "status",
-            "saved", "skipped", "size_skipped", "visited", "message", "code", "retry_at", "log",
+            "saved", "skipped", "size_skipped", "failed_media", "visited", "message", "code", "retry_at", "log",
             "history_run_id", "legacy")
 
 
@@ -71,7 +71,8 @@ def _row(outcome, origin, account, output_dir, started_at, *, legacy=False):
                 started_at=_text(started_at or outcome.get("started_at"), 80),
                 finished_at=_text(outcome.get("finished_at"), 80) or _now(), status=status,
                 saved=_count(outcome.get("saved")), skipped=_count(outcome.get("skipped")),
-                size_skipped=_count(outcome.get("size_skipped")), visited=_count(outcome.get("visited")),
+                size_skipped=_count(outcome.get("size_skipped")), failed_media=_count(outcome.get("failed_media")),
+                visited=_count(outcome.get("visited")),
                 message=_text(outcome.get("message"), 4000),
                 code=code if type(code) is int and -(2**31) <= code < 2**31 else None,
                 retry_at=_text(outcome.get("retry_at"), 80), log=_text(outcome.get("log"), 32768),
@@ -129,6 +130,9 @@ def record_outcome(outcome: dict, *, origin: str, account: str = "", output_dir:
                                  "size_skipped INTEGER NOT NULL, visited INTEGER NOT NULL, message TEXT NOT NULL,"
                                  "code INTEGER, retry_at TEXT NOT NULL, log TEXT NOT NULL, history_run_id INTEGER,"
                                  "legacy INTEGER NOT NULL DEFAULT 0)")
+                # Ledgers written before failed downloads were counted lack this column.
+                if "failed_media" not in {column[1] for column in database.execute("PRAGMA table_info(outcomes)")}:
+                    database.execute("ALTER TABLE outcomes ADD COLUMN failed_media INTEGER NOT NULL DEFAULT 0")
                 database.execute("CREATE TABLE IF NOT EXISTS activity_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
                 # A legacy or temporarily unrecorded last result can appear
                 # even after other outcomes have already populated the ledger.

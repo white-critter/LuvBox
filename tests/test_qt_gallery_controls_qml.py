@@ -79,6 +79,13 @@ def scene():
         QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
         settle()
 
+    def show_october():
+        # The calendar opens on the current month; the fixture posts are in October 2026.
+        picker = find("galleryDatePickerPopup")
+        picker.setProperty("viewYear", 2026)
+        picker.setProperty("viewMonth", 9)
+        settle()
+
     def invoke(item, method):
         assert QMetaObject.invokeMethod(item, method), method
 
@@ -134,35 +141,66 @@ def scene():
             window.setWidth(width)
             window.setHeight(height)
             settle()
-            click("galleryFilterToggle")
+            if not find("galleryFilterToggle").property("checked"):
+                click("galleryFilterToggle")
             author_combo = find("galleryAuthorFilter")
-            assert len(author_combo.property("model")) >= 4
-            if width == 680:
-                date_from = find("galleryDateFrom")
-                date_from.setProperty("text", "2026-10-15")
-                invoke(date_from, "forceActiveFocus")
-                settle()
-                assert date_from.property("activeFocus")
-                QTest.keyClick(window, Qt.Key.Key_Space)
-                picker = find("galleryDatePickerPopup")
-                wait(lambda: picker.property("visible"), "date picker open via keyboard")
+            labels = [row["label"] for row in author_combo.property("model")]
+            assert labels == ["전체 작성자", "@alice · 미디어 3개", "@alice2 · 미디어 1개", "@bob · 미디어 1개"], labels
+            date_from, date_to = find("galleryDateFrom"), find("galleryDateTo")
+            picker = find("galleryDatePickerPopup")
+            # A date is applied the moment it is chosen: Space opens the calendar, a day closes it.
+            invoke(date_from, "forceActiveFocus")
+            settle()
+            assert date_from.property("activeFocus")
+            QTest.keyClick(window, Qt.Key.Key_Space)
+            wait(lambda: picker.property("visible"), "date picker open via keyboard")
+            show_october()
+            click("datePickerDay_1")
+            wait(lambda: not picker.property("visible"), "date picker close")
+            wait(lambda: controller.library.dateFrom == "2026-10-01" and not controller.library.model.busy, "start date applied")
+            assert date_from.property("text") == "2026-10-01"
+            assert controller.library.model.total == 5
+            # Backspace clears it again.
+            invoke(date_from, "forceActiveFocus")
+            settle()
+            QTest.keyClick(window, Qt.Key.Key_Backspace)
+            wait(lambda: controller.library.dateFrom == "" and not controller.library.model.busy, "start date cleared")
+            assert date_from.property("text") == ""
+            # Range: 2026-10-01 .. 2026-10-01.
+            for field, name in ((date_from, "galleryDateFrom"), (date_to, "galleryDateTo")):
+                click(name)
+                wait(lambda: picker.property("visible"), "date picker open by mouse")
+                show_october()
                 click("datePickerDay_1")
-                wait(lambda: not picker.property("visible"), "date picker close")
-                assert date_from.property("text") == "2026-10-01"
-                invoke(date_from, "forceActiveFocus")
-                settle()
-                QTest.keyClick(window, Qt.Key.Key_Backspace)
-                settle()
-                assert date_from.property("text") == ""
-                date_from.setProperty("text", "2026-10-01")
-                find("galleryDateTo").setProperty("text", "2026-10-01")
-                author_combo.setProperty("text", "@ALICE")
-            else:
-                author_combo.setProperty("text", "@ALICE")
-                find("galleryDateFrom").setProperty("text", "2026-10-01")
-                find("galleryDateTo").setProperty("text", "2026-10-01")
-            click("galleryFilterApply")
-            wait(lambda: not controller.library.model.busy and controller.library.model.total == 2, "exact author/date")
+                wait(lambda: not picker.property("visible"), "date picker close by mouse")
+            wait(lambda: (controller.library.dateFrom, controller.library.dateTo) == ("2026-10-01", "2026-10-01")
+                 and not controller.library.model.busy and controller.library.model.total == 4, "date range applied")
+            # Choosing an author applies at once and keeps the dates.
+            invoke(author_combo, "forceActiveFocus")
+            settle()
+            QTest.keyClick(window, Qt.Key.Key_Down)
+            wait(lambda: controller.library.filterAuthor == "alice" and not controller.library.model.busy
+                 and controller.library.model.total == 2, "author applied without a search step")
+            assert (controller.library.dateFrom, controller.library.dateTo) == ("2026-10-01", "2026-10-01")
+            assert author_combo.property("currentIndex") == 1
+            assert find("galleryFilterToggle").property("checked"), "the filter panel stays open"
+            # A start date after the end moves the end along instead of failing.
+            click("galleryDateFrom")
+            wait(lambda: picker.property("visible"), "date picker for an impossible range")
+            show_october()
+            click("datePickerDay_2")
+            wait(lambda: controller.library.dateFrom == "2026-10-02" and not controller.library.model.busy, "range kept in order")
+            assert controller.library.dateTo == "2026-10-02" and controller.library.model.total == 1
+            assert controller.library.filterAuthor == "alice"
+            # Back to the first day for the selection checks below.
+            for name in ("galleryDateFrom", "galleryDateTo"):
+                click(name)
+                wait(lambda: picker.property("visible"), "date picker again")
+                show_october()
+                click("datePickerDay_1")
+                wait(lambda: not picker.property("visible"), "date picker closed again")
+            wait(lambda: (controller.library.dateFrom, controller.library.dateTo) == ("2026-10-01", "2026-10-01")
+                 and not controller.library.model.busy and controller.library.model.total == 2, "exact author/date")
             assert "작성자 @alice" in find("galleryActiveFilters").property("text")
             assert find("galleryGrid").property("height") > 40
             click("gallerySelectionToggle")
@@ -195,6 +233,48 @@ def scene():
                 assert authors_queries == [], authors_queries
             assert controller.library.selectedCount == 0
             assert controller.library.filterSummary == ""
+        # Choosing files is screen state: it stays available while a save runs, by button,
+        # Ctrl+click and Space alike. Only the move to the Recycle Bin waits for the save.
+        window.setWidth(1080)
+        window.setHeight(760)
+        controller._download._running = True
+        controller._download.changed.emit()
+        wait(lambda: controller.busy, "a save is running")
+        assert find("gallerySelectionToggle").property("enabled")
+        click("gallerySelectionToggle")
+        assert controller.library.selectionMode
+        click("gallerySelectLoaded")
+        assert controller.library.selectedCount == 5
+        assert not find("galleryRecycleSelected").property("enabled")
+        assert "작업이 끝나면" in find("gallerySelectionCount").property("text")
+        click("gallerySelectionClear")
+        click("gallerySelectionToggle")
+        assert not controller.library.selectionMode and controller.library.selectedCount == 0
+        tiles = []
+        stack = list(find("galleryGrid").property("contentItem").childItems())
+        while stack:
+            node = stack.pop()
+            if node.objectName() == "galleryTile" and node.property("visible"):
+                tiles.append(node)
+            stack.extend(node.childItems())
+        first_tile = min(tiles, key=lambda node: (node.y(), node.x()))
+        point = first_tile.mapToScene(QPointF(first_tile.width() / 2, first_tile.height() / 2)).toPoint()
+        QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ControlModifier, point)
+        settle()
+        assert controller.library.selectedCount == 1, controller.library.selectedCount
+        QTest.keyClick(window, Qt.Key.Key_Delete)
+        settle()
+        notice = find("galleryManagementMessage")
+        assert notice.property("visible") and "작업이 끝난 뒤" in notice.property("text")
+        assert controller.management.deleteConfirmationPending is False
+        assert {path: path.read_bytes() for path in files} == originals
+        controller._download._running = False
+        controller._download.changed.emit()
+        wait(lambda: not controller.busy, "the save ended")
+        assert controller.library.selectedCount == 1, "the choice survives the end of the save"
+        assert find("galleryRecycleSelected").property("enabled")
+        click("gallerySelectionClear")
+        click("gallerySelectionToggle")
         # A missing tile must not make selecting and recycling the other
         # visible files impossible. Only the disposable fixture is removed.
         files[-1].unlink()
@@ -228,8 +308,7 @@ def scene():
         assert controller.management.deleteCount == 4
         invoke(confirmation, "reject")
         wait(lambda: not controller.management.deleteConfirmationPending, "cancel available files")
-        click("managementNavigation")
-        assert window.property("currentScreen") == 2
+        assert window.findChild(QObject, "managementNavigation") is None
         controller.requestClose()
         wait(lambda: controller.shutdownReady, "shutdown")
         window.close()

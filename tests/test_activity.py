@@ -36,6 +36,25 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual(activity.outcome_page(), {"rows": [], "total": 0, "page": 0, "pages": 0, "page_size": 100})
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_a_ledger_from_before_failed_media_were_counted_is_extended_without_losing_rows(self):
+        import sqlite3
+        from contextlib import closing
+        with closing(sqlite3.connect(self.path)) as old, old:
+            old.execute("CREATE TABLE outcomes (run_id TEXT PRIMARY KEY, origin TEXT NOT NULL, account TEXT NOT NULL,"
+                        "output_dir TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL,"
+                        "status TEXT NOT NULL, saved INTEGER NOT NULL, skipped INTEGER NOT NULL,"
+                        "size_skipped INTEGER NOT NULL, visited INTEGER NOT NULL, message TEXT NOT NULL,"
+                        "code INTEGER, retry_at TEXT NOT NULL, log TEXT NOT NULL, history_run_id INTEGER,"
+                        "legacy INTEGER NOT NULL DEFAULT 0)")
+            old.execute("INSERT INTO outcomes VALUES('old-run','manual','fixture','','2026-10-01T09:00:00+09:00',"
+                        "'2026-10-01T09:05:00+09:00','finished',4,2,1,9,'',0,'','',NULL,0)")
+        before = activity.outcome_page()["rows"]
+        self.assertEqual([(row["run_id"], row.get("failed_media", 0)) for row in before], [("old-run", 0)])
+        self.append("new-run", failed_media=3, size_skipped=1)
+        rows = {row["run_id"]: row for row in activity.outcome_page()["rows"]}
+        self.assertEqual((rows["old-run"]["saved"], rows["old-run"]["failed_media"]), (4, 0))
+        self.assertEqual((rows["new-run"]["failed_media"], rows["new-run"]["size_skipped"]), (3, 1))
+
     def test_manual_and_scheduled_outcomes_are_immutable_and_paged(self):
         self.append()
         self.append(status="error", saved=99)

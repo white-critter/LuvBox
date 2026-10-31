@@ -21,6 +21,7 @@ from .qt_download import DownloadController
 from .qt_library import LibraryController
 from .qt_schedule import ScheduleController
 from .qt_management import ManagementController
+from .qt_records import RecordsController
 from .qt_wheel import WheelInputFilter
 
 
@@ -45,6 +46,7 @@ class ApplicationController(QObject):
     storageConfirmationRequested = Signal()
     reviewReady = Signal()
     reviewCleared = Signal()
+    retryStarted = Signal()
     shutdownFinished = Signal()
     _completed = Signal(str, bool, object)
 
@@ -102,6 +104,8 @@ class ApplicationController(QObject):
         self._download.setDetailsEnabled(self._preferences["detailed_progress"])
         self._library = LibraryController(self)
         self._management = ManagementController(self._library, self)
+        self._records = RecordsController(self)
+        self._records.setVideoLimit(self._preferences["max_video_mb"])
         self._schedule = ScheduleController(self)
         self._accounts.changed.connect(self._state_changed)
         self._accounts.accountChanged.connect(self._account_changed)
@@ -109,6 +113,7 @@ class ApplicationController(QObject):
         self._schedule.changed.connect(self._state_changed)
         self._management.changed.connect(self._state_changed)
         self._management.libraryChanged.connect(self._managed_library_changed)
+        self._records.retryRequested.connect(self.retryUnsaved)
         self._download.eventReceived.connect(self._download_event)
         self._download.authenticationChanged.connect(self._accounts.updateAuthentication)
         self._download.reviewRequested.connect(self._prepare_review)
@@ -119,6 +124,7 @@ class ApplicationController(QObject):
         self._browser_setup.shutdownFinished.connect(lambda: self._part_closed("browser_setup"))
         self._schedule.shutdownFinished.connect(lambda: self._part_closed("schedule"))
         self._management.shutdownFinished.connect(lambda: self._part_closed("management"))
+        self._records.shutdownFinished.connect(lambda: self._part_closed("records"))
         self._completed.connect(self._accept, Qt.ConnectionType.QueuedConnection)
         self._commands = Queue()
         self._io_thread = threading.Thread(target=self._work, name="qt-app-storage", daemon=True)
@@ -161,6 +167,10 @@ class ApplicationController(QObject):
     @Property(QObject, constant=True)
     def management(self):
         return self._management
+
+    @Property(QObject, constant=True)
+    def records(self):
+        return self._records
 
     @Property("QVariantMap", notify=preferencesChanged)
     def preferences(self):
@@ -359,6 +369,8 @@ class ApplicationController(QObject):
             self._download.setDetailsEnabled(value)
         if name == "separate_accounts":
             self._load_library()
+        if name == "max_video_mb":
+            self._records.setVideoLimit(value)
         self.preferencesChanged.emit()
         self._state_changed()
 
@@ -391,6 +403,7 @@ class ApplicationController(QObject):
             account = ""
         self._library.setLibrary(account, self._output, self._preferences["separate_accounts"])
         self._management.setLibrary(account, self._output, self._preferences["separate_accounts"])
+        self._records.setLibrary(account, self._output, self._preferences["separate_accounts"])
 
     @Slot(bool)
     def galleryVisible(self, visible):
@@ -404,7 +417,7 @@ class ApplicationController(QObject):
             return
         self._gallery_dirty = False
         self._library.refresh()
-        self._management.refresh()
+        self._records.refresh()
         self.changed.emit()
 
     def _managed_library_changed(self):
@@ -436,6 +449,22 @@ class ApplicationController(QObject):
         self._message = self._error = ""
         self._commands.put(("prepare", (snapshot, frozenset())))
         self._state_changed()
+
+    @Slot(object)
+    def retryUnsaved(self, targets):
+        """Save chosen unsaved media again with the downloader's one-tweet-at-a-time retry."""
+        if not self.canStart or self._accounts.authenticationState == "reconnect_required":
+            self._error = "계정을 연결하고 다른 작업이 끝난 뒤 다시 시도해 주세요."
+            self.changed.emit()
+            return
+        snapshot = {**self._preferences, "account": self._account, "output_dir": self._output,
+                    "targets": tuple(targets)}
+        self._begin_manual_outcome()
+        self._preparing = True
+        self._message = self._error = ""
+        self._commands.put(("prepare", (snapshot, frozenset())))
+        self._state_changed()
+        self.retryStarted.emit()
 
     @Slot(bool)
     def confirmStorage(self, approved):
@@ -607,7 +636,7 @@ class ApplicationController(QObject):
         if kind == "settings":
             self._settings_finished(value["revision"], True)
         elif kind == "activity":
-            self._management.refresh()
+            self._records.refresh()
         elif kind == "prepare":
             self._preparing = False
             if "choice" in value:
@@ -669,7 +698,7 @@ class ApplicationController(QObject):
             outcome.update(status=status, code=event.get("code"), saved=self._download.savedCount,
                            skipped=self._download.skippedCount)
             self._record_manual_outcome(outcome)
-            self._management.refresh()
+            self._records.refresh()
             if not self._gallery_visible and not self._closing:
                 self.refreshGallery()
 
@@ -743,6 +772,7 @@ class ApplicationController(QObject):
         self._browser_setup.shutdown()
         self._schedule.shutdown()
         self._management.shutdown()
+        self._records.shutdown()
         self._close_timer.start()
         self.changed.emit()
 
@@ -750,7 +780,8 @@ class ApplicationController(QObject):
         self._shutdown_parts.add(name)
 
     def _finish_close(self):
-        if self._shutdown_parts >= {"accounts", "download", "library", "browser_setup", "schedule", "management"}:
+        if self._shutdown_parts >= {"accounts", "download", "library", "browser_setup", "schedule", "management",
+                                     "records"}:
             if not self._io_shutdown_queued:
                 self._io_shutdown_queued = True
                 self._commands.put(("quit", None))

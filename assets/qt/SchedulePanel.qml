@@ -34,7 +34,6 @@ ColumnLayout {
         }
     }
 
-    Label { text: "자동 저장"; font.pixelSize: 20; font.bold: true; textFormat: Text.PlainText }
     Label {
         Layout.fillWidth: true
         text: "매일 정한 시각에 현재 저장된 계정과 옵션으로 새 Like를 저장합니다."
@@ -170,7 +169,7 @@ ColumnLayout {
         visible: !!(panel.schedule && panel.schedule.registered)
         text: (panel.schedule && panel.schedule.catchUp ? "놓친 예약은 PC를 다시 사용할 때 실행합니다. " : "")
             + (panel.schedule && panel.schedule.onBattery ? "배터리 전원에서도 실행합니다. " : "")
-            + "예약 저장은 확인창 없이 진행합니다. 결과는 관리의 실행 기록에서 확인하세요."
+            + "예약 저장은 확인창 없이 진행합니다. 결과는 설정 › 고급 › 실행 기록에서 확인하세요."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         opacity: 0.72

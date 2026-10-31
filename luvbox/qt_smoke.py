@@ -146,6 +146,12 @@ class StartupProbe:
         preferences = self.find("preferencesDialog")
         if not preferences.property("visible"):
             raise RuntimeError("Settings did not open.")
+        self.invoke(self.find("scheduleDialog"), "open")
+        self.later(150, self.check_schedule)
+
+    def check_schedule(self):
+        if not self.find("scheduleDialog").property("visible"):
+            raise RuntimeError("The automatic save dialog did not open.")
         self.invoke(self.find("scheduleConfirmation"), "open")
         self.later(150, self.check_confirmation)
 
@@ -154,8 +160,28 @@ class StartupProbe:
         if not confirmation.property("visible"):
             raise RuntimeError("The schedule confirmation did not open.")
         self.invoke(confirmation, "reject")
+        self.invoke(self.find("scheduleDialog"), "close")
+        self.invoke(self.find("runHistoryDialog"), "open")
+        self.later(200, self.check_records)
+
+    def check_records(self):
+        for name in ("runHistoryDialog", "unsavedDialog"):
+            dialog = self.find(name)
+            if name == "unsavedDialog":
+                self.invoke(dialog, "open")
+                self.later(200, self.check_records_done)
+                return
+            if not dialog.property("visible"):
+                raise RuntimeError("The run history dialog did not open.")
+            self.invoke(dialog, "close")
+
+    def check_records_done(self):
+        if not self.find("unsavedDialog").property("visible"):
+            raise RuntimeError("The unsaved media dialog did not open.")
+        self.invoke(self.find("unsavedDialog"), "close")
         self.invoke(self.find("preferencesDialog"), "close")
         self.report["settings_and_confirmation"] = True
+        self.report["records_dialogs"] = True
         self.invoke(self.find("connectionDialog"), "open")
         self.later(200, self.check_connection)
 

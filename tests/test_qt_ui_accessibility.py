@@ -130,7 +130,8 @@ def scene(*, measure=False, qml_root=None, screenshot_dir=None):
         QTest.qWait(40)
         if not measure:
             assert find("galleryEmptyState").property("visible")
-        reset = find("galleryFilterReset")
+        # The reset button is disabled while nothing is filtered, so check a button that is always on.
+        reset = find("galleryFilterToggle")
         reset.forceActiveFocus(Qt.FocusReason.TabFocusReason)
         QTest.qWait(80)
         assert reset.property("visualFocus")

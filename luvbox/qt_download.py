@@ -79,6 +79,7 @@ class DownloadController(QObject):
         self._status = "저장 대기 중"
         self._saved = 0
         self._skipped = 0
+        self._unsaved = 0
         self._error = ""
         self._notice = ""
         self._progress = -1.0
@@ -124,6 +125,11 @@ class DownloadController(QObject):
     @Property(int, notify=changed)
     def skippedCount(self):
         return self._skipped
+
+    @Property(int, notify=changed)
+    def unsavedCount(self):
+        """Media this run could not store (failed or over the size limit)."""
+        return self._unsaved
 
     @Property(str, notify=changed)
     def error(self):
@@ -229,7 +235,7 @@ class DownloadController(QObject):
         self._job_id = self._service.job_id
         self._running = True
         self._stopping = False
-        self._saved = self._skipped = 0
+        self._saved = self._skipped = self._unsaved = 0
         self._final = None
         self._authentication_state = ""
         self._authentication_error = False
@@ -346,6 +352,8 @@ class DownloadController(QObject):
                 self._status = "저장 중입니다"
         elif kind == "skipped":
             self._skipped += 1
+        elif kind in {"size-skipped", "failed"}:
+            self._unsaved += 1
         elif kind == "converting" and not self._stopping:
             self._status = "GIF를 변환하고 있습니다"
         elif kind == "review-request":
@@ -358,6 +366,7 @@ class DownloadController(QObject):
             self._final = event.get("status", "error")
             self._saved = _count(event.get("saved", self._saved))
             self._skipped = _count(event.get("skipped", self._skipped))
+            self._unsaved = _count(event.get("size_skipped", 0)) + _count(event.get("failed_media", 0))
             metadata_failed = _count(event.get("metadata_failed"))
             if metadata_failed:
                 self._notice = f"파일 {metadata_failed:,}개의 작성자·출처 기록을 마치지 못했습니다. 받은 파일은 유지됩니다."

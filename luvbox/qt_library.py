@@ -566,8 +566,14 @@ class LibraryController(QObject):
             self._status = "작성자 ID와 날짜(YYYY-MM-DD), 시작·종료 순서를 확인해 주세요."
             self.changed.emit()
             return False
+        # The basis only matters while a date is set; picking it first must not reload the grid.
+        results_change = (author != self._author or first != self._date_from or last != self._date_to
+                          or (bool(first or last) and date_field != self._date_field))
         self._author, self._date_field, self._date_from, self._date_to = author, date_field, first, last
-        self._refresh(reload_authors=False)
+        if results_change:
+            self._refresh(reload_authors=False)
+        else:
+            self.changed.emit()
         return True
 
     @Slot()

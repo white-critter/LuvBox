@@ -22,6 +22,9 @@ Dialog {
         {label: "새 Like만 확인", value: "quick"}, {label: "전체 목록 확인", value: "full"}
     ]
     title: "설정"
+    signal scheduleRequested()
+    signal runHistoryRequested()
+    signal unsavedRequested()
     modal: true
     focus: true
     closePolicy: Popup.CloseOnEscape
@@ -51,6 +54,19 @@ Dialog {
             topPadding: 16
             bottomPadding: 2
             font.pixelSize: 18
+        }
+        Label {
+            objectName: "preferencesBusyNote"
+            width: parent.width
+            visible: dialog.app && dialog.app.busy
+            text: "작업이 끝난 뒤 설정을 바꿀 수 있습니다. 기록은 지금도 볼 수 있습니다."
+            leftPadding: 20
+            rightPadding: 20
+            topPadding: 4
+            color: "#e6bd79"
+            font.pixelSize: 13
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
         }
         Label {
             objectName: "preferencesError"
@@ -200,7 +216,10 @@ Dialog {
                         }
                     }
                 }
-
+            }
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 8
                 ToolButton {
                     id: advancedToggle
                     objectName: "advancedSettingsToggle"
@@ -232,79 +251,132 @@ Dialog {
                     visible: advancedToggle.checked
                     spacing: 8
 
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        enabled: dialog.app && !dialog.app.busy
+                        spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1
+                                spacing: 6
+                                Label { text: "목록 확인 범위"; textFormat: Text.PlainText }
+                                FlatCombo {
+                                    Layout.fillWidth: true
+                                    model: dialog.scanModes
+                                    textRole: "label"
+                                    valueRole: "value"
+                                    currentIndex: dialog.optionIndex(dialog.scanModes, dialog.pref("scan_mode", "quick"))
+                                    Accessible.name: "목록 확인 범위"
+                                    onActivated: index => dialog.setOption("scan_mode", dialog.scanModes, index)
+                                }
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredWidth: 1
+                                spacing: 6
+                                Label { text: "동영상·GIF 크기 제한 (MB)"; textFormat: Text.PlainText }
+                                FlatField {
+                                    id: videoLimit
+                                    objectName: "videoLimitField"
+                                    Layout.fillWidth: true
+                                    implicitHeight: 42
+                                    text: String(dialog.pref("max_video_mb", 200))
+                                    validator: IntValidator { bottom: 0; top: 1000000 }
+                                    inputMethodHints: Qt.ImhDigitsOnly
+                                    selectByMouse: true
+                                    Accessible.name: "동영상 GIF 크기 제한 MB"
+                                    onEditingFinished: {
+                                        if (acceptableInput && text.trim().length > 0)
+                                            dialog.app.setPreference("max_video_mb", Number(text))
+                                    }
+                                    onActiveFocusChanged: {
+                                        if (!activeFocus && (!acceptableInput || text.trim().length === 0))
+                                            text = Qt.binding(function() { return String(dialog.pref("max_video_mb", 200)) })
+                                    }
+                                }
+                            }
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            visible: dialog.pref("scan_mode", "quick") === "full"
+                            text: "오래된 Like까지 확인하므로 시간이 더 걸립니다."
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            opacity: 0.72
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: "0은 제한 없음. 넘는 파일은 ‘저장 못 한 미디어’에 남깁니다."
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            font.pixelSize: 12
+                            opacity: 0.72
+                        }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 4
+                        implicitHeight: 1
+                        color: "#2a2a2a"
+                    }
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 12
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            Layout.preferredWidth: 1
-                            spacing: 6
-                            Label { text: "목록 확인 범위"; textFormat: Text.PlainText }
-                            FlatCombo {
-                                Layout.fillWidth: true
-                                model: dialog.scanModes
-                                textRole: "label"
-                                valueRole: "value"
-                                currentIndex: dialog.optionIndex(dialog.scanModes, dialog.pref("scan_mode", "quick"))
-                                Accessible.name: "목록 확인 범위"
-                                onActivated: index => dialog.setOption("scan_mode", dialog.scanModes, index)
-                            }
+                        Label {
+                            Layout.preferredWidth: 64
+                            text: "자동 저장"
+                            font.bold: true
+                            textFormat: Text.PlainText
                         }
-                        ColumnLayout {
+                        Label {
+                            objectName: "preferencesScheduleSummary"
                             Layout.fillWidth: true
-                            Layout.preferredWidth: 1
-                            spacing: 6
-                            Label { text: "동영상·GIF 크기 제한 (MB)"; textFormat: Text.PlainText }
-                            FlatField {
-                                id: videoLimit
-                                objectName: "videoLimitField"
-                                Layout.fillWidth: true
-                                implicitHeight: 42
-                                text: String(dialog.pref("max_video_mb", 200))
-                                validator: IntValidator { bottom: 0; top: 1000000 }
-                                inputMethodHints: Qt.ImhDigitsOnly
-                                selectByMouse: true
-                                Accessible.name: "동영상 GIF 크기 제한 MB"
-                                onEditingFinished: {
-                                    if (acceptableInput && text.trim().length > 0)
-                                        dialog.app.setPreference("max_video_mb", Number(text))
-                                }
-                                onActiveFocusChanged: {
-                                    if (!activeFocus && (!acceptableInput || text.trim().length === 0))
-                                        text = Qt.binding(function() { return String(dialog.pref("max_video_mb", 200)) })
-                                }
-                            }
+                            text: dialog.app ? dialog.app.schedule.summary : ""
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            opacity: 0.72
                         }
-                    }
-                    Label {
-                        Layout.fillWidth: true
-                        visible: dialog.pref("scan_mode", "quick") === "full"
-                        text: "오래된 Like까지 확인하므로 시간이 더 걸립니다."
-                        textFormat: Text.PlainText
-                        wrapMode: Text.Wrap
-                        opacity: 0.72
+                        FlatButton {
+                            objectName: "preferencesScheduleButton"
+                            text: "자동 저장 설정"
+                            onClicked: dialog.scheduleRequested()
+                        }
                     }
                     RowLayout {
                         Layout.fillWidth: true
+                        spacing: 12
                         Label {
-                            Layout.fillWidth: true
-                            text: "0은 제한 없음"
+                            Layout.preferredWidth: 64
+                            Layout.alignment: Qt.AlignTop
+                            Layout.topMargin: 8
+                            text: "기록"
+                            font.bold: true
                             textFormat: Text.PlainText
-                            opacity: 0.72
+                        }
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        FlatButton {
+                            objectName: "preferencesRunHistoryButton"
+                            text: "실행 기록"
+                            onClicked: dialog.runHistoryRequested()
+                        }
+                        FlatButton {
+                            objectName: "preferencesUnsavedButton"
+                            text: "저장 못 한 미디어" + (dialog.app && dialog.app.records.unsavedCount > 0
+                                ? " (" + dialog.app.records.unsavedCount.toLocaleString() + ")" : "")
+                            onClicked: dialog.unsavedRequested()
                         }
                         FlatButton {
                             text: "기록 폴더 열기"
                             onClicked: dialog.app.openRecordsFolder()
                         }
                     }
+                    }
                 }
-            }
-            Label {
-                Layout.fillWidth: true
-                visible: dialog.app && dialog.app.busy
-                text: "작업이 끝난 뒤 설정을 바꿀 수 있습니다."
-                textFormat: Text.PlainText
-                wrapMode: Text.Wrap
             }
         }
     }

@@ -418,13 +418,15 @@ def run_saved(*, full: bool = False) -> int:
                 write("저장 · " + str(event.get("path", "")))
             elif kind == "size-skipped":
                 write("용량 초과로 건너뜀 · " + str(event.get("filename", "")))
+            elif kind == "failed":
+                write("저장하지 못함 · " + str(event.get("filename", "")))
             elif kind == "finished":
                 outcome.update(status=str(event.get("status") or "error"), saved=int(event.get("saved") or 0),
                                skipped=int(event.get("skipped") or 0), size_skipped=int(event.get("size_skipped") or 0),
-                               visited=int(event.get("visited") or 0), message=str(event.get("message", "")),
+                               failed_media=int(event.get("failed_media") or 0), visited=int(event.get("visited") or 0), message=str(event.get("message", "")),
                                retry_at=str(event.get("retry_at") or ""), history_run_id=event.get("history_run_id"))
                 write(f"종료 · {event.get('status')} · 저장 {event.get('saved', 0)}개 · 기존 {event.get('skipped', 0)}개 · "
-                      f"용량 초과 {event.get('size_skipped', 0)}개")
+                      f"용량 초과 {event.get('size_skipped', 0)}개 · 저장 실패 {event.get('failed_media', 0)}개")
                 write(str(event.get("message", "")))
                 if event.get("retry_at"):
                     write("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))

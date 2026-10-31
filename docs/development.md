@@ -1,4 +1,4 @@
-# LuvBox 1.3.6 개발 안내
+# LuvBox 1.4.0 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -29,7 +29,8 @@ Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사�
 | `qt_download.py`, `qt_saved_preview.py`, `download_service.py`, `core.py`, `review.py` | 저장 상태·선택적 첫 장면, 별도 worker와 IPC, 실제 다운로드와 저장 여부 확인 |
 | `qt_library.py`, `qt_gallery.py`, `qt_wheel.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력 |
 | `app_settings.py`, `settings.py`, `file_mutex.py`, `qt_schedule.py`, `scheduled.py`, `activity.py` | 설정·일일 예약·수동/자동 실행 결과와 프로세스 간 변경 보호 |
-| `history.py`, `storage.py`, `recovery.py`, `deletion.py`, `recycling.py`, `management_store.py`, `qt_management.py` | 기록·갤러리 필터·관리 화면의 백그라운드 스냅샷, 경로 승인·이전·사본·복구와 휴지통 이동 |
+| `history.py`, `storage.py`, `recovery.py`, `deletion.py`, `recycling.py`, `qt_management.py` | 기록·갤러리 필터의 읽기, 경로 승인·이전·사본·복구와 휴지통 이동 |
+| `activity.py`, `run_history.py`, `unsaved.py`, `qt_records.py` | 실행 결과 기록부, 실행 기록 병합 조회, 저장 못 한 미디어 기록부와 설정 › 고급의 목록·다시 저장 |
 | `preview.py`, `thumbcache.py`, `media.py` | 로컬 미리보기·캐시와 GIF 변환 |
 | `metadata.py`, `process_limits.py`, `protection.py` | 출처·작성자 기록, 외부 도구 제한과 X 요청 보호 |
 | `selftest.py`, `qt_smoke.py`, `tools/check_*startup.py`, `tools/package_release.py` | 격리 검사와 소스·라이선스 배포 패키징 |
@@ -79,8 +80,10 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 실제 EXE의 Qt 창·갤러리·미리보기·설정·연결창·종료 검사와 오프라인 저장 시작 검사를 모두 통과해야 ZIP을 만듭니다. 직접 패키징도 현재 버전과 EXE SHA-256에 일치하는 두 검사 보고서를 요구합니다. EXE·`_internal`·동봉 소스·라이선스를 함께 유지합니다. Qt와 미디어 구성요소의 버전별 원본 자료는 [Qt 소스 안내](../tools/qt/README.md), [FFmpeg 안내](../tools/ffmpeg/README.md)를 따릅니다. 검사 실패를 피하려고 입력 체크섬·TLS 검증·패키징 허용 목록을 완화하지 않습니다.
 
-산출물은 `release/LuvBox-1.3.6/`, `release/LuvBox-1.3.6.zip`, `release/SHA256-1.3.6.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox-1.4.0/`, `release/LuvBox-1.4.0.zip`, `release/SHA256-1.4.0.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 `tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 
-관리 화면은 단일 일일 예약 생성·시간 변경·해제, 휴지통 이동·삭제 이력, 통계·실행 이력과 갤러리의 작성자 드롭다운·달력 날짜 필터를 제공합니다. Windows 휴지통에서 원본을 직접 복원하는 UI와 확장 스토어 등록은 별도 기능 범위입니다. 확장 없는 WebEngine 로그인은 합성 실험 단계이며 제품 런타임에 포함하지 않습니다. 날짜별 검토 보고서는 현재 안내에 통합하고 원문은 Git 태그·기록에 보존합니다.
+설정 › 고급은 단일 일일 예약 생성·시간 변경·해제, 모든 계정의 실행 기록, 저장 못 한 미디어 목록을 제공하고, 갤러리는 작성자 드롭다운·달력 날짜 필터와 휴지통 이동을 제공합니다. 작성자·날짜 필터는 바꾸는 즉시 적용됩니다.
+
+`unsaved.py`의 기록부(`%LOCALAPPDATA%\LuvBox\unsaved.sqlite3`)는 저장 엔진이 용량 제한·내려받기 실패·‘저장 안 함’ 선택을 만난 미디어를 계정·저장 폴더·미디어 식별자 단위로 한 줄씩 보관합니다. 계정별 저장 기록(카탈로그)의 스키마와 병합·복구 경로는 바꾸지 않으며, 같은 미디어를 다시 만나면 한 줄만 갱신하고 저장에 성공하면 지웁니다. 보관은 최대 500건입니다. 다시 저장은 기존 `JobOptions.targets` 경로(트윗마다 요청 1번)를 사용합니다. Windows 휴지통에서 원본을 직접 복원하는 UI와 확장 스토어 등록은 별도 기능 범위입니다. 확장 없는 WebEngine 로그인은 합성 실험 단계이며 제품 런타임에 포함하지 않습니다. 날짜별 검토 보고서는 현재 안내에 통합하고 원문은 Git 태그·기록에 보존합니다.
