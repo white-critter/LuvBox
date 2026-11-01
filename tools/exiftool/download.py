@@ -21,6 +21,10 @@ URL = "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows/exiftool-13.
 SHA256 = "577257dd22baebe77157d905792d6ed2c5916cd03aa627f40b2175db12110ac6"
 MAX_DOWNLOAD = 40 * 1024 * 1024
 MAX_EXPANDED = 100 * 1024 * 1024
+# ExifTool's HTML manual (about 8 MB). Reading and writing tags never opens it,
+# so the bundle leaves it out. The "t" folder stays: this project's tests read
+# its sample media (t/images/QuickTime.mov) as real MP4/MOV input.
+UNUSED_FOLDERS = ("html",)
 
 
 def extract_bundle(archive: Path, destination: Path) -> None:
@@ -40,6 +44,8 @@ def extract_bundle(archive: Path, destination: Path) -> None:
             target = root.joinpath(*relative.parts).resolve()
             if not target.is_relative_to(root):
                 raise ValueError("invalid archive path")
+            if len(relative.parts) > 1 and relative.parts[0] == "exiftool_files" and relative.parts[1] in UNUSED_FOLDERS:
+                continue
             if entry.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
             else:
@@ -60,10 +66,19 @@ def _valid_runtime(runtime: Path) -> bool:
         return False
 
 
+def _prune(runtime: Path) -> None:
+    """Remove the unused folder from a bundle extracted before it was skipped."""
+    for name in UNUSED_FOLDERS:
+        folder = runtime / "exiftool_files" / name
+        if folder.is_dir() and not folder.is_symlink():
+            shutil.rmtree(folder)
+
+
 def prepare(local_zip: Path | None = None) -> Path:
     root = Path(__file__).resolve().parent
     runtime = root / "runtime"
     if _valid_runtime(runtime):
+        _prune(runtime)
         return runtime
     if runtime.exists():
         raise ValueError("existing invalid runtime")

@@ -43,6 +43,7 @@ try {
     --collect-all gallery_dl --exclude-module imageio_ffmpeg `
     --exclude-module tkinter --exclude-module _tkinter --exclude-module turtle `
     --exclude-module PIL.ImageTk --exclude-module PIL._imagingtk --exclude-module PIL._tkinter_finder `
+    --exclude-module PIL._avif `
     --hidden-import PySide6.QtCore --hidden-import PySide6.QtGui --hidden-import PySide6.QtQml `
     --hidden-import PySide6.QtQuick --hidden-import PySide6.QtQuickControls2 `
     --hidden-import PySide6.QtMultimedia --hidden-import PySide6.QtNetwork `

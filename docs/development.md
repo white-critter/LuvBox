@@ -1,4 +1,4 @@
-# LuvBox 1.4.0 개발 안내
+# LuvBox 1.4.1 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -68,6 +68,12 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 테스트와 자체 점검은 임시 앱 데이터·생성 미디어·합성 인증 정보를 사용합니다. `--self-test`는 Qt 시작·종료와 미디어·메타데이터·기록·worker를, `--download-smoke`는 실제 X 추출기의 SSL 초기화와 첫 요청 준비를 검사합니다. 후자는 DNS·접속·전송을 차단하므로 실제 X 요청을 보내지 않습니다. 통과 수·생략 이유·실제 서비스 검증 범위는 실행 결과와 검증 기록을 구분해 보고합니다.
 
+미리보기의 사진·GIF·영상 전환은 실제 창에서도 확인합니다. 아래 명령은 `QT_QPA_PLATFORM`을 지정하지 않아 실제 Windows 창을 열고 전환마다 스크린샷을 저장합니다. 테스트가 쓰는 오프스크린 백엔드는 영상 픽셀을 그리지 않으므로 영상이 화면에 나오는지는 이 방법으로만 눈으로 확인할 수 있습니다.
+
+```powershell
+.\.venv\Scripts\python.exe tests\test_qt_preview_media_switch.py --scene --screenshots '.test-output\preview-shots'
+```
+
 ## 빌드와 배포 자료
 
 ```powershell
@@ -80,7 +86,9 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 실제 EXE의 Qt 창·갤러리·미리보기·설정·연결창·종료 검사와 오프라인 저장 시작 검사를 모두 통과해야 ZIP을 만듭니다. 직접 패키징도 현재 버전과 EXE SHA-256에 일치하는 두 검사 보고서를 요구합니다. EXE·`_internal`·동봉 소스·라이선스를 함께 유지합니다. Qt와 미디어 구성요소의 버전별 원본 자료는 [Qt 소스 안내](../tools/qt/README.md), [FFmpeg 안내](../tools/ffmpeg/README.md)를 따릅니다. 검사 실패를 피하려고 입력 체크섬·TLS 검증·패키징 허용 목록을 완화하지 않습니다.
 
-산출물은 `release/LuvBox-1.4.0/`, `release/LuvBox-1.4.0.zip`, `release/SHA256-1.4.0.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
+
+산출물은 `release/LuvBox-1.4.1/`, `release/LuvBox-1.4.1.zip`, `release/SHA256-1.4.1.txt`입니다. 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 `tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 

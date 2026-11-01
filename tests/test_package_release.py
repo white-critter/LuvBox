@@ -78,6 +78,8 @@ class QtOnlyPackagingTests(unittest.TestCase):
         self.assertIn("--exclude-module tkinter", build)
         self.assertIn("--exclude-module _tkinter", build)
         self.assertIn("--exclude-module PIL._imagingtk", build)
+        # No decode opens AVIF: each Image.open names its formats (JPEG, PNG, WebP, BMP).
+        self.assertIn("--exclude-module PIL._avif", build)
         self.assertNotIn("--collect-binaries PIL", build)
         self.assertNotIn("assets\\theme", build)
         self.assertNotIn("build_theme.py", build)
@@ -403,6 +405,15 @@ class ReleaseManifestTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.toc.write_text(repr(value), encoding="utf-8")
                 with self.assertRaises(ValueError):
+                    self.manifest()
+
+    def test_unused_qt_translations_cannot_return_to_the_bundle(self):
+        # The app installs no QTranslator; a PyInstaller update must not quietly
+        # bring back the 150 files its hook now leaves out.
+        for name in ("PySide6\\translations\\qtbase_ko.qm", "PySide6\\Translations\\qtdeclarative_de.qm"):
+            with self.subTest(name=name):
+                self.write_toc([*self.entries, (name, str(self.root / "qtbase.qm"), "DATA")])
+                with self.assertRaisesRegex(ValueError, "excluded Qt component"):
                     self.manifest()
 
     def test_foreign_icu_runtime_cannot_shadow_windows_qt_dependency(self):

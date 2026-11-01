@@ -174,7 +174,7 @@ def _collect_manifest(toc: Path, application_name: str) -> dict[Path, Path]:
                     raise ValueError(f"Bundled OpenSSL differs from the build interpreter: {name}")
         if normalized.startswith("pyside6/") and (
                 parts[-1].casefold() in EXCLUDED_QT_COMPONENTS or
-                normalized.startswith("pyside6/plugins/qmltooling/")):
+                normalized.startswith(("pyside6/plugins/qmltooling/", "pyside6/translations/"))):
             raise ValueError(f"Build manifest contains an excluded Qt component: {name}")
         if kind == "EXECUTABLE":
             if name != application_name + ".exe":

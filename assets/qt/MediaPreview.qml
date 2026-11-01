@@ -60,6 +60,11 @@ Item {
     readonly property bool gifSource: String(sourceUrl).split("?")[0].split("#")[0].toLowerCase().endsWith(".gif")
     readonly property bool videoSource: mediaType === "video" || (mediaType === "animated_gif" && !gifSource)
     readonly property url activeSource: playing && !_released ? sourceUrl : ""
+    // The player's source is derived, never assigned from change handlers. A
+    // handler can run before the bindings it reads (videoSource) have caught up
+    // with the same change, which left the player empty when a navigation
+    // changed the media type and the file together.
+    readonly property url _playerSource: videoSource ? activeSource : ""
     readonly property bool failed: String(activeSource).length > 0 && (videoSource
         ? player.error !== MediaPlayer.NoError || player.mediaStatus === MediaPlayer.InvalidMedia
         : gifSource ? animation.status === Image.Error : photo.status === Image.Error)
@@ -117,43 +122,30 @@ Item {
     onSourceRawWidthChanged: fit()
     onSourceRawHeightChanged: fit()
 
+    // Setting _released empties the player through its source binding, so the
+    // file handle is gone before this returns.
     function release() {
         _released = true
         muted = true
         fit()
         player.stop()
-        player.source = ""
-        if (typeof videoOutput.clearOutput === "function")
-            videoOutput.clearOutput()
-    }
-
-    function updatePlayer() {
-        player.stop()
-        player.source = videoSource && playing && !_released ? sourceUrl : ""
-        if (String(player.source).length > 0)
-            player.play()
     }
 
     onSourceUrlChanged: {
         muted = true
         fit()
         _released = !playing
-        updatePlayer()
     }
     onMediaTypeChanged: {
         muted = true
         fit()
-        updatePlayer()
     }
     onPlayingChanged: {
-        if (playing) {
+        if (playing)
             _released = false
-            updatePlayer()
-        } else {
+        else
             release()
-        }
     }
-    Component.onCompleted: updatePlayer()
     Component.onDestruction: release()
 
     Item {
@@ -189,7 +181,8 @@ Item {
             visible: preview.gifSource && !preview.videoSource
             source: visible ? preview.activeSource : ""
             asynchronous: true
-            sourceSize: Qt.size(2048, 2048)
+            // No sourceSize: AnimatedImage scales to the exact size it is given,
+            // so a fixed square stretched every non-square GIF out of proportion.
             cache: false
             playing: preview.playing && !preview._released
             fillMode: Image.PreserveAspectFit
@@ -210,11 +203,22 @@ Item {
 
     MediaPlayer {
         id: player
+        source: preview._playerSource
         videoOutput: videoOutput
         audioOutput: audioOutput
         loops: MediaPlayer.Infinite
+        onSourceChanged: {
+            // A new file must not show the previous clip's last frame while it loads.
+            if (typeof videoOutput.clearOutput === "function")
+                videoOutput.clearOutput()
+            if (String(source).length > 0)
+                play()
+            else
+                stop()
+        }
         onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.LoadedMedia && preview.playing && !preview._released)
+            if (mediaStatus === MediaPlayer.LoadedMedia && String(source).length > 0
+                    && preview.playing && !preview._released)
                 play()
         }
     }

@@ -925,6 +925,36 @@ class BundleExtractionTests(unittest.TestCase):
         self.download.extract_bundle(self.archive("exiftool_files/lib/Image/ExifTool.pm"), destination)
         self.assertEqual((destination / "exiftool_files/lib/Image/ExifTool.pm").read_bytes(), b"fake-offline-bundle")
 
+    def test_leaves_out_only_the_manual_and_keeps_the_sample_media(self):
+        archive = self.root / "bundle.zip"
+        names = ("exiftool_files/html/ExifTool.html", "exiftool_files/t/images/Geotag.log",
+                 "exiftool_files/lib/Image/ExifTool.pm", "exiftool_files/lib/t/Keep.pm",
+                 "exiftool_files/htmlish/keep.txt", "exiftool_files/exiftool.pl", "html/outside-bundle.txt")
+        with zipfile.ZipFile(archive, "w") as package:
+            for name in names:
+                package.writestr(name, b"fake")
+        destination = self.root / "runtime"
+        self.download.extract_bundle(archive, destination)
+        found = {path.relative_to(destination).as_posix() for path in destination.rglob("*") if path.is_file()}
+        self.assertEqual(found, {"exiftool_files/lib/Image/ExifTool.pm", "exiftool_files/lib/t/Keep.pm",
+                                 "exiftool_files/htmlish/keep.txt", "exiftool_files/exiftool.pl",
+                                 "exiftool_files/t/images/Geotag.log", "html/outside-bundle.txt"})
+
+    def test_prepare_trims_a_bundle_extracted_before_the_manual_was_skipped(self):
+        runtime = self.root / "runtime"
+        for name in ("exiftool_files/html/ExifTool.html", "exiftool_files/t/images/Geotag.log",
+                     "exiftool_files/lib/Image/ExifTool.pm", "exiftool.exe"):
+            path = runtime / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fake")
+        self.download._prune(runtime)
+        self.assertFalse((runtime / "exiftool_files/html").exists())
+        # The tests read these sample files as real MP4/MOV input.
+        self.assertTrue((runtime / "exiftool_files/t/images/Geotag.log").is_file())
+        self.assertTrue((runtime / "exiftool_files/lib/Image/ExifTool.pm").is_file())
+        self.assertTrue((runtime / "exiftool.exe").is_file())
+        self.download._prune(runtime)  # already trimmed: nothing to do
+
     def test_rejects_traversal_absolute_drive_and_backslash_paths(self):
         for name in ("../outside.exe", "/outside.exe", "C:/outside.exe", "..\\outside.exe"):
             with self.subTest(name=name):
