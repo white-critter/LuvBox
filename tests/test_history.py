@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
-from luvbox.history import HistoryError, HistoryStore, _within
+from luvbox.history import HistoryError, HistoryStore, _within, page_cursor
 
 
 SECRET = "offline-cookie-never-store-in-history"
@@ -1080,6 +1080,44 @@ class HistoryTests(unittest.TestCase):
             self.assertEqual(store.quick_scan_readiness("flat", "v1:videos=1:gifs=1:max_mb=200"), "settings-changed")
         finally:
             store.close()
+
+    def test_cursor_pages_match_offset_pages_and_ignore_a_newer_insert(self):
+        for index in range(5):
+            tweet = str(100 + index)
+            self.store.record_media(
+                "flat", {"tweet_id": tweet, "num": 1, "type": "photo",
+                         "date": datetime(2026, 1, index + 1, tzinfo=KST)},
+                self.file(f"{tweet}_1.jpg"))
+        self.store._db.executemany(
+            "INSERT INTO likes(tweet_id,like_key,liked_before) VALUES (?,?,?)",
+            [(str(101 + index), float(index + 1), "2026-01-01T00:00:00+09:00") for index in range(4)])
+        self.store._db.commit()
+        for order in ("saved", "posted", "posted_oldest", "liked"):
+            offset_rows = []
+            page = 0
+            while True:
+                found = self.store.record_page(page, 2, order=order, include_deleted=False)
+                offset_rows.extend(row["tweet_id"] for row in found["rows"])
+                page += 1
+                if not found["pages"] or page >= found["pages"]:
+                    break
+            cursor_rows, cursor = [], None
+            while len(cursor_rows) <= len(offset_rows):
+                found = self.store.record_page(0, 2, order=order, include_deleted=False, after=cursor)
+                if not found["rows"]:
+                    break
+                cursor_rows.extend(row["tweet_id"] for row in found["rows"])
+                cursor = page_cursor(found["rows"][-1], order)
+            self.assertEqual(cursor_rows, offset_rows, order)
+        saved = self.store.record_page(0, 2, order="saved", include_deleted=False)
+        cursor = page_cursor(saved["rows"][-1], "saved")
+        before = [row["tweet_id"] for row in self.store.record_page(
+            0, 2, order="saved", include_deleted=False, after=cursor)["rows"]]
+        self.store.record_media("flat", {"tweet_id": "999", "num": 1, "type": "photo"}, self.file("999_1.jpg"))
+        after = [row["tweet_id"] for row in self.store.record_page(
+            0, 2, order="saved", include_deleted=False, after=cursor)["rows"]]
+        self.assertEqual(after, before)
+        self.assertNotIn("999", after)
 
 
 if __name__ == "__main__":

@@ -131,7 +131,18 @@ Dialog {
                     displayText: currentIndex >= 0 ? currentText
                         : !dialog.browserSetup || dialog.browserSetup.busy ? "브라우저를 확인하는 중…" : "지원하는 브라우저 없음"
                     Accessible.name: "X 계정을 연결할 브라우저"
-                    onActivated: dialog.browserSetup.setBrowser(currentValue)
+                    onActivated: {
+                        dialog.browserSetup.setBrowser(currentValue)
+                        currentIndex = Qt.binding(function() {
+                            if (!dialog.browserSetup)
+                                return -1
+                            var choices = dialog.browserSetup.browsers
+                            for (var i = 0; i < choices.length; ++i)
+                                if (choices[i].id === dialog.browserSetup.selectedBrowser)
+                                    return i
+                            return -1
+                        })
+                    }
                 }
                 Label {
                     objectName: "noBrowserMessage"

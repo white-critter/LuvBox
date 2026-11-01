@@ -16,7 +16,7 @@ Row {
     }
     Label {
         text: Math.round(controls.preview.zoomPercent) + "%"
-        width: 54
+        width: Math.max(54, implicitWidth)
         height: 36
         verticalAlignment: Text.AlignVCenter
         horizontalAlignment: Text.AlignHCenter

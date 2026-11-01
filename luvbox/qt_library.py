@@ -14,7 +14,7 @@ import webbrowser
 
 from PySide6.QtCore import QObject, Property, Qt, QTimer, QUrl, Signal, Slot
 
-from .history import HistoryStore
+from .history import HistoryStore, page_cursor
 from .preview import Thumbnail, thumbnail
 from .qt_gallery import GalleryModel, SafeThumbnailProvider
 from .recycling import file_signature
@@ -28,6 +28,7 @@ _KINDS = {"all", "photo", "video", "animated_gif"}
 _MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4"}
 _DRIVE_MISSING = "파일을 열 수 없습니다. 저장 드라이브를 연결해 주세요."
 _FILE_MISSING = "이 파일을 찾지 못했습니다. 저장 폴더 밖에서 지우거나 옮긴 파일일 수 있습니다."
+_CLOUD_ONLY = "이 파일은 클라우드에만 있습니다. 탐색기에서 받은 뒤 다시 열 수 있습니다."
 _POSTED = re.compile(r"(\d{4}-\d\d-\d\d)T(\d\d:\d\d)")
 MAX_SELECTION = 2000
 
@@ -89,12 +90,16 @@ class LibraryRepository:
         self._condition = Condition()
         self._request = None
         self._served = {}
+        self._cursor = None
+        self._cursor_offset = 0
         self.provider = None
 
     def configure(self, request):
         with self._condition:
             self._request = request
             self._served.clear()
+            self._cursor = None
+            self._cursor_offset = 0
 
     def current(self, generation=None):
         with self._condition:
@@ -111,45 +116,62 @@ class LibraryRepository:
                 # does. The thumbnail provider checks each file again (link
                 # and resolved path) before and after decoding it.
                 store._folder_cache = {}
-                page = store.record_page(offset // limit, limit, request.media_type, request.query,
+                period = ((request.date_field, request.date_from, request.date_to)
+                          if request.date_from or request.date_to else None)
+                # Continue from the last row this view already accepted. An
+                # OFFSET would slide when a save inserts newer rows, and the
+                # next page would repeat keys until the gallery stopped.
+                after = self._cursor if offset and offset == self._cursor_offset else None
+                page = store.record_page(0 if after is not None else offset // limit, limit,
+                                         request.media_type, request.query,
                                          order=request.order, author=request.author, include_deleted=False,
-                                         period=(request.date_field, request.date_from, request.date_to)
-                                         if request.date_from or request.date_to else None)
+                                         period=period, after=after)
                 rows = []
                 served = {}
+                last = None
                 for row in page["rows"]:
                     key = f"g{request.generation}_{row['folder_mode']}_{row['tweet_id']}_{row['num']}_{row['media_type']}"
                     if not _KEY.fullmatch(key):
                         raise ValueError("invalid media identity")
-                    path = self._path(store, row)
+                    path, kind = self._locate(store, row)
                     stamp = None
-                    if path is not None:
+                    if kind == "ready":
                         try:
                             info = path.stat()
                             stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
                         except OSError:
-                            pass
-                    served[key] = (str(path) if path is not None else "", stamp)
+                            path, kind = None, "missing"
+                    served[key] = (str(path) if kind == "ready" else "", stamp)
                     with self._condition:
                         if self._request is not request:
                             return 0, []
-                        if path is not None:
+                        if kind == "ready":
                             self.provider.register(key, path)
                     author = row.get("author") or ""
                     # New file names already start with the author; the post
                     # date tells tiles apart, the name stays searchable.
                     detail = _posted(row.get("posted_at")) or row.get("filename") or row["tweet_id"]
                     caption = ("@" + author + " · " if author else "") + detail
-                    if path is None:
+                    if kind == "cloud":
+                        caption += " · 클라우드에만 있음"
+                    elif kind != "ready":
                         caption += " · 파일 없음"
-                    rows.append({"key": key, "caption": caption, "missing": path is None})
-                if page["page"] * limit != offset:
+                    rows.append({"key": key, "caption": caption, "missing": kind != "ready"})
+                    last = row
+                if after is None and page["page"] * limit != offset:
                     return page["total"], []
+                if after is not None and not rows:
+                    # Nothing is left after the last shown row. Newer saves sit
+                    # in front of this cursor; "새 사진 보기" loads them.
+                    return offset, []
                 with self._condition:
                     if self._request is not request:
                         return 0, []
                     for key, item in served.items():
                         self._served.setdefault(key, item)
+                    if last is not None:
+                        self._cursor = page_cursor(last, request.order)
+                        self._cursor_offset = offset + len(rows)
                 return page["total"], rows
         except FileNotFoundError:
             return 0, []
@@ -165,17 +187,28 @@ class LibraryRepository:
             return []
 
     @staticmethod
-    def _path(store, row):
+    def _locate(store, row):
+        """``(path, kind)`` where kind is ready, cloud, or missing.
+
+        A cloud-only file is still in the folder. Reading it would download it,
+        so the gallery refuses the bytes and says so instead of calling it deleted.
+        """
         value = row.get("path")
         if not isinstance(value, str) or not value or not Path(value).is_absolute():
-            return None
+            return None, "missing"
         try:
             path = store._media_path(value)
-            if path is None or not path.is_file() or cloud_only(path):
-                return None
+            if path is None or not path.is_file():
+                return None, "missing"
+            if cloud_only(path):
+                return path, "cloud"
         except (OSError, RuntimeError, ValueError):
-            return None
-        return path
+            return None, "missing"
+        return path, "ready"
+
+    def _path(self, store, row):
+        path, kind = self._locate(store, row)
+        return path if kind == "ready" else None
 
     def _row(self, store, key, request):
         match = _KEY.fullmatch(key) if isinstance(key, str) else None
@@ -192,7 +225,9 @@ class LibraryRepository:
             if row is None:
                 return None
             content = store._db.execute("SELECT content FROM tweets WHERE tweet_id=?", (row["tweet_id"],)).fetchone()
-            path = self._path(store, row)
+            path, kind = self._locate(store, row)
+            if kind != "ready":
+                path = None
             width = height = raw_width = raw_height = 0
             if path is not None and row["media_type"] == "photo":
                 from .preview import photo_info
@@ -211,10 +246,16 @@ class LibraryRepository:
             source = f"https://x.com/i/web/status/{row['tweet_id']}"
             info = " · ".join(value for value in (row.get("filename") or "", _posted(row.get("posted_at"), time=True))
                               if value)
+            if kind == "cloud":
+                note = _CLOUD_ONLY
+            elif path is None:
+                note = absence_note(store.output_dir)
+            else:
+                note = ""
             return {"key": key, "author": row.get("author") or "",
                     "body": content[0] if content and isinstance(content[0], str) else "",
                     "source": source, "path": str(path) if path is not None else "", "missing": path is None,
-                    "missing_note": "" if path is not None else absence_note(store.output_dir),
+                    "missing_note": note,
                     "preview": QUrl.fromLocalFile(str(path)).toString() if path is not None else "",
                     "media_type": row["media_type"], "public_info": info,
                     "pixel_width": width, "pixel_height": height,
@@ -291,7 +332,12 @@ class LibraryRepository:
                 return "지원하는 사진·영상 파일만 열 수 있습니다. 폴더에서 파일을 확인해 주세요."
             os.startfile(selection["path"])
         elif action == "reveal":
-            subprocess.Popen(["explorer.exe", "/select," + selection["path"]],
+            # The comma is explorer's own separator. A folder such as
+            # "My, Photos" has to be one quoted argument or the wrong place opens.
+            shown = selection["path"]
+            if "\"" in shown or "\x00" in shown:
+                return "폴더를 열지 못했습니다."
+            subprocess.Popen(["explorer.exe", f'/select,"{shown}"'],
                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return ""
 
@@ -543,6 +589,8 @@ class LibraryController(QObject):
             self._status = "필터를 확인해 주세요."
             self.changed.emit()
             return
+        if (media_type, order, author) == (self._media_type, self._order, self._author):
+            return
         self._media_type, self._order, self._author = media_type, order, author
         self._refresh(reload_authors=False)
 
@@ -674,6 +722,8 @@ class LibraryController(QObject):
             return
         self._selection_serial += 1
         self._selection_key = key
+        # Drop the open file before the catalog read. Keeping it made the video
+        # player stay in PlayingState after the next item was a photo or GIF.
         self._selected = {}
         self._busy = True
         self._status = ""

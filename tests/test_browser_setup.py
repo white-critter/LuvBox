@@ -86,7 +86,7 @@ class BrowserSetupTests(unittest.TestCase):
         (folder / "manifest.json").write_text("{}", encoding="utf-8")
         with patch("luvbox.qt_browser_setup.subprocess.Popen") as popen:
             BrowserSetupController._reveal(folder)
-        self.assertEqual(popen.call_args.args[0], ["explorer.exe", "/select," + str(folder / "manifest.json")])
+        self.assertEqual(popen.call_args.args[0], ["explorer.exe", f'/select,"{folder / "manifest.json"}"'])
 
     def test_firefox_uses_the_firefox_manifest_and_persistent_app_folder(self):
         target = BrowserSetupController._extension_folder("firefox")

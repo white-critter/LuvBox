@@ -38,7 +38,7 @@ ApplicationWindow {
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
         folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
-        runHistoryDialog.visible || unsavedDialog.visible
+        runHistoryDialog.visible || unsavedDialog.visible || datePickerPopup.visible
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
     color: "#101010"
     palette.window: color
@@ -91,8 +91,11 @@ ApplicationWindow {
     })
 
     function screenHeightLimit() {
-        // QScreen.availableGeometry is not exposed to QML. This is the usable desktop height.
-        const available = Screen.desktopAvailableHeight
+        // The virtual desktop spans every monitor. Grow only within the screen this window is on.
+        let available = Screen.desktopAvailableHeight
+        const geometry = window.screen ? window.screen.availableGeometry : null
+        if (geometry && geometry.height > 0)
+            available = Math.min(available, geometry.height)
         if (available < minimumHeight)
             return height
         return Math.max(minimumHeight, available - 48)
@@ -370,8 +373,26 @@ ApplicationWindow {
                 fillMode: Image.PreserveAspectFit
             }
             Label { text: "LuvBox"; font.pixelSize: 18; Layout.rightMargin: 16 }
-            FlatButton { text: "저장"; tone: "nav"; checkable: true; checked: window.currentScreen === 0; onClicked: window.currentScreen = 0 }
-            FlatButton { text: "갤러리"; tone: "nav"; checkable: true; checked: window.currentScreen === 1; onClicked: window.currentScreen = 1 }
+            FlatButton {
+                text: "저장"
+                tone: "nav"
+                checkable: true
+                checked: window.currentScreen === 0
+                onClicked: {
+                    window.currentScreen = 0
+                    checked = Qt.binding(function() { return window.currentScreen === 0 })
+                }
+            }
+            FlatButton {
+                text: "갤러리"
+                tone: "nav"
+                checkable: true
+                checked: window.currentScreen === 1
+                onClicked: {
+                    window.currentScreen = 1
+                    checked = Qt.binding(function() { return window.currentScreen === 1 })
+                }
+            }
             Item { Layout.fillWidth: true }
             Label { text: window.app ? window.app.version : ""; color: window.mutedColor; visible: window.width > 760 }
             // Settings stay reachable during a save: its records are read-only, and the
@@ -401,7 +422,7 @@ ApplicationWindow {
             Layout.fillWidth: true
             Layout.fillHeight: true
 
-            ScrollView {
+            FocusScrollView {
                 id: saveScroll
                 objectName: "saveScroll"
                 onContentHeightChanged: Qt.callLater(window.fitSaveWindow)
@@ -444,7 +465,11 @@ ApplicationWindow {
                                     displayText: currentIndex >= 0 ? "@" + currentText : "연결 계정 선택"
                                     visible: count > 0
                                     enabled: window.app && !window.app.busy
-                                    onActivated: if (window.app) window.app.accounts.selectAccount(currentValue)
+                                    onActivated: {
+                                        if (window.app)
+                                            window.app.accounts.selectAccount(currentValue)
+                                        currentIndex = Qt.binding(function() { return window.accountIndex() })
+                                    }
                                     Accessible.name: "연결된 X 계정"
                                 }
                                 Label {
@@ -617,7 +642,13 @@ ApplicationWindow {
                                     text: "자세히 보기"
                                     checked: window.app ? window.app.preferences.detailed_progress : false
                                     enabled: window.app && !window.app.closing
-                                    onToggled: if (window.app) window.app.setPreference("detailed_progress", checked)
+                                    onToggled: {
+                                        if (window.app)
+                                            window.app.setPreference("detailed_progress", checked)
+                                        checked = Qt.binding(function() {
+                                            return window.app ? window.app.preferences.detailed_progress : false
+                                        })
+                                    }
                                 }
                             }
                             RowLayout {
@@ -677,6 +708,7 @@ ApplicationWindow {
                                 }
                                 FlatButton {
                                     text: window.app && window.app.download.stopping ? "중단하는 중" : "중단"
+                                    implicitHeight: 44
                                     visible: window.app && window.app.download.running
                                     enabled: window.app && !window.app.download.stopping
                                     onClicked: window.app.download.stop()
@@ -727,7 +759,10 @@ ApplicationWindow {
                         implicitWidth: 108
                         implicitHeight: 40
                         Accessible.name: "미리보기 크기"
-                        onActivated: window.setDensity(currentIndex)
+                        onActivated: {
+                            window.setDensity(currentIndex)
+                            currentIndex = Qt.binding(function() { return window.densityChoice })
+                        }
                     }
                 }
 
@@ -910,7 +945,7 @@ ApplicationWindow {
                                 items.push({ label: "@" + authorFilter.applied, value: authorFilter.applied })
                             return items
                         }
-                        currentIndex: {
+                        function authorIndex() {
                             const wanted = authorFilter.applied.toLowerCase()
                             for (let i = 1; i < model.length; i++) {
                                 if (String(model[i].value).toLowerCase() === wanted)
@@ -918,7 +953,11 @@ ApplicationWindow {
                             }
                             return 0
                         }
-                        onActivated: index => window.applyFilters({ author: index > 0 && model[index] ? model[index].value : "" })
+                        currentIndex: authorIndex()
+                        onActivated: index => {
+                            window.applyFilters({ author: index > 0 && model[index] ? model[index].value : "" })
+                            currentIndex = Qt.binding(function() { return authorFilter.authorIndex() })
+                        }
                     }
                     FlatCombo {
                         id: dateFieldChoice
@@ -930,7 +969,12 @@ ApplicationWindow {
                         width: implicitWidth
                         height: implicitHeight
                         Accessible.name: "날짜 필터 기준"
-                        onActivated: index => window.applyFilters({ dateField: index === 1 ? "saved" : "posted" })
+                        onActivated: index => {
+                            window.applyFilters({ dateField: index === 1 ? "saved" : "posted" })
+                            currentIndex = Qt.binding(function() {
+                                return window.app && window.app.library.dateField === "saved" ? 1 : 0
+                            })
+                        }
                     }
                     Row {
                         id: dateRange
@@ -1266,7 +1310,8 @@ ApplicationWindow {
                                     }
                                     Label {
                                         anchors.horizontalCenter: parent.horizontalCenter
-                                        text: tile.caption.indexOf("파일 없음") >= 0 ? "파일 없음" : "미리보기 없음"
+                                        text: tile.caption.indexOf("클라우드") >= 0 ? "클라우드"
+                                            : tile.caption.indexOf("파일 없음") >= 0 ? "파일 없음" : "미리보기 없음"
                                         font.pixelSize: 11
                                         color: "#8a8284"
                                         textFormat: Text.PlainText
@@ -1307,7 +1352,10 @@ ApplicationWindow {
                                 enabled: window.app && window.app.library.canSelect(tile.key)
                                 checked: tile.batchSelected
                                 Accessible.name: "사진 선택: " + tile.caption
-                                onClicked: window.app.library.toggleSelection(tile.key)
+                                onClicked: {
+                                    window.app.library.toggleSelection(tile.key)
+                                    checked = Qt.binding(function() { return tile.batchSelected })
+                                }
                             }
                         }
                         Accessible.role: Accessible.ListItem
@@ -1449,22 +1497,51 @@ ApplicationWindow {
                 }
             }
         }
-        footer: DialogButtonBox {
-            background: null
-            FlatButton {
-                objectName: "previewDetailsButton"
-                visible: window.app && window.app.library.selectedBody.length > 0
-                text: previewDialog.detailsVisible ? "본문 접기" : "본문 보기"
-                checkable: true
-                checked: previewDialog.detailsVisible
-                DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
-                onClicked: previewDialog.detailsVisible = !previewDialog.detailsVisible
+        footer: ColumnLayout {
+            width: parent ? parent.width : 0
+            spacing: 8
+            Flow {
+                visible: !!window.app
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                spacing: 8
+                FlatButton { text: "파일 열기"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.openSelected() }
+                FlatButton { text: "폴더"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.revealSelected() }
+                FlatButton {
+                    objectName: "previewRecycle"
+                    text: "휴지통으로"
+                    enabled: window.app && !window.app.busy && !window.app.library.selectedMissing
+                    onClicked: {
+                        const key = window.app.library.selectedKey
+                        selectedMedia.release()
+                        previewDialog.close()
+                        window.app.management.prepareDelete([key])
+                    }
+                }
+                FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
             }
-            FlatButton {
-                text: "닫기"
-                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            DialogButtonBox {
+                Layout.fillWidth: true
+                background: null
+                FlatButton {
+                    objectName: "previewDetailsButton"
+                    visible: window.app && window.app.library.selectedBody.length > 0
+                    text: previewDialog.detailsVisible ? "본문 접기" : "본문 보기"
+                    checkable: true
+                    checked: previewDialog.detailsVisible
+                    DialogButtonBox.buttonRole: DialogButtonBox.ActionRole
+                    onClicked: {
+                        previewDialog.detailsVisible = !previewDialog.detailsVisible
+                        checked = Qt.binding(function() { return previewDialog.detailsVisible })
+                    }
+                }
+                FlatButton {
+                    text: "닫기"
+                    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                }
+                onRejected: previewDialog.close()
             }
-            onRejected: previewDialog.close()
         }
         contentItem: ColumnLayout {
             spacing: 12
@@ -1490,6 +1567,7 @@ ApplicationWindow {
                 objectName: "selectedMedia"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
+                Layout.minimumHeight: 80
                 sourceUrl: window.app ? window.app.library.selectedPreviewUrl : window.selectedThumb
                 mediaType: window.app ? window.app.library.selectedMediaType : "photo"
                 sourcePixelWidth: window.app ? window.app.library.selectedPixelWidth : 0
@@ -1557,25 +1635,17 @@ ApplicationWindow {
                 Layout.fillWidth: true
                 color: window.mutedColor
             }
-            Flow {
-                visible: !!window.app
-                Layout.fillWidth: true
-                spacing: 8
-                FlatButton { text: "파일 열기"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.openSelected() }
-                FlatButton { text: "폴더"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.revealSelected() }
-                FlatButton {
-                    objectName: "previewRecycle"
-                    text: "휴지통으로"
-                    enabled: window.app && !window.app.busy && !window.app.library.selectedMissing
-                    onClicked: {
-                        const key = window.app.library.selectedKey
-                        selectedMedia.release()
-                        previewDialog.close()
-                        window.app.management.prepareDelete([key])
-                    }
-                }
-                FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
-            }
+        }
+    }
+
+    Connections {
+        target: window.app ? window.app.library : null
+        function onChanged() {
+            // A filter or account change clears the selection. An empty preview
+            // would otherwise say the file is gone while the list reloads.
+            if (previewDialog.visible && window.app && !window.app.library.busy
+                    && window.app.library.selectedKey.length === 0)
+                previewDialog.close()
         }
     }
 
@@ -1658,6 +1728,7 @@ ApplicationWindow {
                 FlatButton {
                     objectName: "datePickerPrevYear"
                     text: "«"
+                    Accessible.name: "이전 해"
                     implicitWidth: 32
                     implicitHeight: 30
                     leftPadding: 0
@@ -1667,6 +1738,7 @@ ApplicationWindow {
                 FlatButton {
                     objectName: "datePickerPrevMonth"
                     text: "‹"
+                    Accessible.name: "이전 달"
                     implicitWidth: 32
                     implicitHeight: 30
                     leftPadding: 0
@@ -1684,6 +1756,7 @@ ApplicationWindow {
                 FlatButton {
                     objectName: "datePickerNextMonth"
                     text: "›"
+                    Accessible.name: "다음 달"
                     implicitWidth: 32
                     implicitHeight: 30
                     leftPadding: 0
@@ -1693,6 +1766,7 @@ ApplicationWindow {
                 FlatButton {
                     objectName: "datePickerNextYear"
                     text: "»"
+                    Accessible.name: "다음 해"
                     implicitWidth: 32
                     implicitHeight: 30
                     leftPadding: 0
@@ -1873,7 +1947,8 @@ ApplicationWindow {
         anchors.centerIn: parent
         width: Math.min(window.width - 48, 440)
         modal: true
-        closePolicy: Popup.NoAutoClose
+        focus: true
+        closePolicy: Popup.CloseOnEscape
         background: Rectangle {
             color: "#141414"
             radius: 16
@@ -1892,6 +1967,7 @@ ApplicationWindow {
         footer: DialogButtonBox {
             background: null
             FlatButton {
+                id: storageContinue
                 text: "계속"
                 tone: "primary"
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
@@ -1901,6 +1977,7 @@ ApplicationWindow {
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
             }
         }
+        onOpened: storageContinue.forceActiveFocus()
         onAccepted: if (window.app) window.app.confirmStorage(true)
         onRejected: if (window.app) window.app.confirmStorage(false)
         Label {
@@ -1919,6 +1996,7 @@ ApplicationWindow {
         anchors.centerIn: parent
         width: Math.min(window.width - 48, 460)
         modal: true
+        focus: true
         closePolicy: Popup.CloseOnEscape
         background: Rectangle {
             color: "#141414"
@@ -1938,6 +2016,7 @@ ApplicationWindow {
         footer: DialogButtonBox {
             background: null
             FlatButton {
+                id: repairAccept
                 text: "복구"
                 tone: "primary"
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
@@ -1947,6 +2026,7 @@ ApplicationWindow {
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
             }
         }
+        onOpened: repairAccept.forceActiveFocus()
         onAccepted: if (window.app) window.app.repairRecords()
         Label {
             width: parent.width

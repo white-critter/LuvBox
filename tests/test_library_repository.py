@@ -190,6 +190,31 @@ class LibraryRepositoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "새로 고침"):
             self.repository.deletion_manifest(["g1_flat_100_1_photo"])
 
+    def test_scrolling_keeps_its_place_when_a_newer_file_is_saved(self):
+        _total, first = self.repository.read("1", 0, 2)
+        first_ids = [row["key"].split("_")[2] for row in first]
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            path = self.paths.media_dir / "999_1.jpg"
+            Image.new("RGB", (8, 8)).save(path, "JPEG")
+            store.record_media("flat", {"tweet_id": "999", "num": 1, "type": "photo",
+                                        "author": {"name": "alice"}}, path)
+        _total, second = self.repository.read("1", 2, 2)
+        second_ids = [row["key"].split("_")[2] for row in second]
+        self.assertEqual(first_ids, ["105", "104"])
+        self.assertEqual(second_ids, ["103", "102"])
+        self.assertNotIn("999", second_ids)
+
+    def test_cloud_only_files_are_not_described_as_deleted(self):
+        with patch("luvbox.qt_library.cloud_only", return_value=True):
+            _total, rows = self.repository.read("1", 0, 100)
+            selected = self.repository.selected(rows[0]["key"], 1)
+        self.assertTrue(rows)
+        self.assertTrue(all("클라우드에만 있음" in row["caption"] for row in rows))
+        self.assertFalse(any("파일 없음" in row["caption"] for row in rows))
+        self.assertIn("클라우드", selected["missing_note"])
+        self.assertNotIn("지우거나", selected["missing_note"])
+        self.assertEqual(selected["preview"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

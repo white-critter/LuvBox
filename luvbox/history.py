@@ -143,6 +143,114 @@ def _within(path: Path, folder: Path) -> bool:
     return child == parent or child.startswith(parent if parent.endswith(os.sep) else parent + os.sep)
 
 
+_IDENTITY_COLUMNS = ("media.num", "media.folder_mode", "media.media_type")
+
+
+def _ordered_after(columns, descending, values):
+    """Rows strictly later than ``values`` in this mixed-direction order."""
+    parts, params = [], []
+    for index, value in enumerate(values):
+        op = "<" if descending[index] else ">"
+        terms = [f"{columns[earlier]} = ?" for earlier in range(index)]
+        terms.append(f"{columns[index]} {op} ?")
+        parts.append("(" + " AND ".join(terms) + ")")
+        params.extend(values[:index])
+        params.append(value)
+    return "(" + " OR ".join(parts) + ")", tuple(params)
+
+
+def _text_key(*values) -> str:
+    """First non-NULL text, matching SQLite COALESCE. Empty text is kept."""
+    for value in values:
+        if value is None:
+            continue
+        if not isinstance(value, str) or len(value) > 64:
+            raise HistoryError(_HISTORY_HELP)
+        return value
+    return ""
+
+
+def _cursor_identity(number, mode, media_type):
+    if (isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 10000
+            or mode not in _MODES or media_type not in _TYPES):
+        raise HistoryError(_HISTORY_HELP)
+    return number, mode, media_type
+
+
+def page_cursor(row, order: str):
+    """Sort position of one catalog row. The next gallery page starts after it.
+
+    Offset pages move when a save inserts newer rows at the front. The gallery
+    keeps this cursor so scrolling continues the list the person is already seeing.
+    """
+    if order not in _ORDERS or not hasattr(row, "keys"):
+        raise HistoryError(_HISTORY_HELP)
+    tweet_id = str(row["tweet_id"] if "tweet_id" in row.keys() else "")
+    if not re.fullmatch(r"[0-9]{1,20}", tweet_id):
+        raise HistoryError(_HISTORY_HELP)
+    identity = _cursor_identity(row["num"], row["folder_mode"], row["media_type"])
+    if order == "saved":
+        return (order, _text_key(row["saved_at"], row["posted_at"]), tweet_id, *identity)
+    if order == "posted":
+        return (order, _text_key(row["posted_at"]), tweet_id, *identity)
+    if order == "posted_oldest":
+        posted = row["posted_at"]
+        return (order, int(posted is None), _text_key(posted), tweet_id, *identity)
+    like = row["like_key"] if "like_key" in row.keys() else None
+    if like is None:
+        return (order, 1, tweet_id, *identity)
+    if isinstance(like, bool) or not isinstance(like, (int, float)) or not math.isfinite(float(like)):
+        raise HistoryError(_HISTORY_HELP)
+    return (order, 0, float(like), tweet_id, *identity)
+
+
+def _after_clause(order, cursor):
+    if cursor is None:
+        return "", ()
+    if not isinstance(cursor, tuple) or not cursor or cursor[0] != order:
+        raise HistoryError(_HISTORY_HELP)
+    if order in {"saved", "posted"}:
+        if len(cursor) != 6 or not isinstance(cursor[1], str):
+            raise HistoryError(_HISTORY_HELP)
+        if not re.fullmatch(r"[0-9]{1,20}", cursor[2]):
+            raise HistoryError(_HISTORY_HELP)
+        _text_key(cursor[1])
+        identity = _cursor_identity(*cursor[3:])
+        column = ("COALESCE(media.saved_at,media.posted_at,'')" if order == "saved"
+                  else "COALESCE(media.posted_at,'')")
+        return _ordered_after((column, "media.tweet_id", *_IDENTITY_COLUMNS),
+                              (True, True, False, False, False),
+                              (cursor[1], cursor[2], *identity))
+    if order == "posted_oldest":
+        if len(cursor) != 7 or cursor[1] not in (0, 1) or not isinstance(cursor[2], str):
+            raise HistoryError(_HISTORY_HELP)
+        if not re.fullmatch(r"[0-9]{1,20}", cursor[3]):
+            raise HistoryError(_HISTORY_HELP)
+        _text_key(cursor[2])
+        identity = _cursor_identity(*cursor[4:])
+        return _ordered_after(("(media.posted_at IS NULL)", "COALESCE(media.posted_at,'')",
+                               "media.tweet_id", *_IDENTITY_COLUMNS),
+                              (False, False, False, False, False, False),
+                              (cursor[1], cursor[2], cursor[3], *identity))
+    if order != "liked":
+        raise HistoryError(_HISTORY_HELP)
+    if cursor[1] == 1:
+        if len(cursor) != 6 or not re.fullmatch(r"[0-9]{1,20}", str(cursor[2])):
+            raise HistoryError(_HISTORY_HELP)
+        identity = _cursor_identity(*cursor[3:])
+        return _ordered_after(("(likes.like_key IS NULL)", "media.tweet_id", *_IDENTITY_COLUMNS),
+                              (False, True, False, False, False),
+                              (1, cursor[2], *identity))
+    if (cursor[1] != 0 or len(cursor) != 7 or isinstance(cursor[2], bool)
+            or not isinstance(cursor[2], (int, float)) or not math.isfinite(float(cursor[2]))
+            or not re.fullmatch(r"[0-9]{1,20}", str(cursor[3]))):
+        raise HistoryError(_HISTORY_HELP)
+    identity = _cursor_identity(*cursor[4:])
+    return _ordered_after(("(likes.like_key IS NULL)", "likes.like_key", "media.tweet_id", *_IDENTITY_COLUMNS),
+                          (False, True, True, False, False, False),
+                          (0, float(cursor[2]), cursor[3], *identity))
+
+
 def _now() -> str:
     return datetime.now(_KOREA).isoformat(timespec="microseconds")
 
@@ -1498,7 +1606,7 @@ class HistoryStore:
             pass  # An inaccessible file is not evidence that it was removed.
         return False
 
-    def _apply_deleted_path(self, item: dict, stamp: str) -> None:
+    def _apply_deleted_path(self, item: dict, stamp: str) -> list:
         """Update only records of this physical path, within the journal commit."""
         path = item["path"]
         identities = {(item["tweet_id"], item["num"], item["media_type"])}
@@ -1527,6 +1635,7 @@ class HistoryStore:
                 "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,?,?) "
                 "ON CONFLICT(tweet_id,num,media_type) DO UPDATE SET ignored=excluded.ignored,updated_at=excluded.updated_at",
                 (*identity, item["keep_deleted"], stamp))
+        return list(identities)
 
     @_safe
     def finish_deletion(self, ident: str, status: str, message: str = "", recycle_path: str = "") -> None:
@@ -1546,11 +1655,25 @@ class HistoryStore:
             return
         stamp = _now()
         with self._db:
+            drop_archive = []
             if status == "recycled" or (status == "interrupted" and self._deletion_path_absent(item["path"])):
-                self._apply_deleted_path(item, stamp)
+                identities = self._apply_deleted_path(item, stamp)
+                # The delete checkbox defaults to off, so the next save should
+                # fetch the file again. gallery-dl returns on an archive hit
+                # before it notices the file is gone. Drop the key only when
+                # no copy remains; a file still on disk keeps its key.
+                if not item["keep_deleted"]:
+                    for identity in identities:
+                        present = self._db.execute(
+                            "SELECT 1 FROM media WHERE tweet_id=? AND num=? AND media_type=? "
+                            "AND path!='' LIMIT 1", identity).fetchone()
+                        if present is None:
+                            drop_archive.append(identity)
             self._db.execute(
                 "UPDATE deletion_items SET status=?,message=?,recycle_path=?,finished_at=? WHERE id=? AND status='pending'",
                 (status, _clean_text(message, 2000), recycle_path, stamp, ident))
+            if drop_archive:
+                self._drop_archive_skips(drop_archive)
 
     @_safe
     def pending_deletions(self) -> list[dict]:
@@ -1637,12 +1760,19 @@ class HistoryStore:
 
     @_safe
     def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None,
-                author="", include_deleted=True) -> list[dict]:
+                author="", include_deleted=True, after=None) -> list[dict]:
         if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
                 isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
                 media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS):
             raise HistoryError(_HISTORY_HELP)
         where, params = self._record_filter(media_type, query, period, author, include_deleted)
+        extra, extra_params = _after_clause(order, after)
+        if extra:
+            # A cursor replaces OFFSET. Inserts at the front of a newest-first
+            # list would otherwise repeat keys the gallery already showed.
+            where = (where + " AND " if where else " WHERE ") + extra
+            params = (*params, *extra_params)
+            offset = 0
         # The keys include the whole primary key, so both sorts agree exactly.
         order_by = " ORDER BY " + _ORDERS[order] + ",media.num,media.folder_mode,media.media_type"
         # Choose the page by row id first and attach Like order and tweet text
@@ -1667,13 +1797,15 @@ class HistoryStore:
 
     @_safe
     def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None,
-                    author="", include_deleted=True) -> dict:
+                    author="", include_deleted=True, after=None) -> dict:
+        if after is not None and page != 0:
+            raise HistoryError(_HISTORY_HELP)
         where, params = self._record_filter(media_type, query, period, author, include_deleted)
         # Only a text search reads tweets; the joins never change the count.
         return self._page((_JOINED if query else "media") + where, params, page, page_size,
                           lambda limit, offset: self.records(limit, offset, media_type, query,
                                                              order=order, period=period, author=author,
-                                                             include_deleted=include_deleted))
+                                                             include_deleted=include_deleted, after=after))
 
     @_safe
     def authors(self, *, include_deleted=False) -> list[dict]:

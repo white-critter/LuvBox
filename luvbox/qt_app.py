@@ -865,6 +865,7 @@ def launch(*, startup_probe=None):
         controller.requestClose()
         application.exec()
         wheel_input.close()
+        controller._library.provider = None
         delete(engine)
         if startup_probe is None:
             QMessageBox.critical(None, "LuvBox", "화면을 열지 못했습니다. Qt 패키지와 앱 파일을 확인해 주세요.")
@@ -878,5 +879,6 @@ def launch(*, startup_probe=None):
         startup_probe.attach(application, controller, window)
     result = application.exec()
     wheel_input.close()
+    controller._library.provider = None
     delete(engine)
     return result

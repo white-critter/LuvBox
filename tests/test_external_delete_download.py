@@ -84,6 +84,39 @@ class ExternalDeleteDownloadTests(unittest.TestCase):
                                  [f"https://pbs.twimg.com/media/{fresh}_1?format=jpg&name=orig"])
                 self.assertEqual(list(self.output.rglob("100_1.jpg")), [])
 
+    def _finish_recycle(self, keep):
+        row = self.record()
+        path = Path(row["path"])
+        info = path.stat()
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            ident = store.begin_deletion(
+                "keep" if keep else "again", row, keep,
+                (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+        path.unlink()
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            store.finish_deletion(ident, "recycled", recycle_path=str(self.recycled / path.name))
+            ignored = store.ignored_media()
+        return ignored
+
+    def test_unchecked_recycle_is_downloaded_on_the_next_save(self):
+        self.worker([("100", 1, "photo", "alice")])
+        self.assertNotIn(("100", 1, "photo"), self._finish_recycle(False))
+        core_support.FakeHttpDownloader.downloaded = []
+        code, events = self.worker([("100", 1, "photo", "alice")])
+        self.assertEqual(code, 0)
+        self.assertEqual(events[-1]["saved"], 1)
+        self.assertTrue(list(self.output.rglob("*100_1.jpg")))
+
+    def test_checked_recycle_stays_out_of_the_next_save(self):
+        self.worker([("100", 1, "photo", "alice")])
+        self.assertIn(("100", 1, "photo"), self._finish_recycle(True))
+        core_support.FakeHttpDownloader.downloaded = []
+        code, events = self.worker([("100", 1, "photo", "alice"), ("101", 1, "photo", "bob")])
+        self.assertEqual(code, 0)
+        self.assertEqual(events[-1]["saved"], 1)
+        self.assertEqual(list(self.output.rglob("*100_1.jpg")), [])
+        self.assertTrue(list(self.output.rglob("*101_1.jpg")))
+
     def test_external_deletion_can_be_restored_by_explicit_missing_retry(self):
         self.worker([("100", 1, "photo", "alice")])
         self.delete([self.record()], keep=False)

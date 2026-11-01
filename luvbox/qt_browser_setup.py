@@ -211,7 +211,10 @@ class BrowserSetupController(QObject):
         """Show manifest.json itself so the load dialog is not left in Documents."""
         manifest = Path(folder) / "manifest.json"
         target = manifest if manifest.is_file() else Path(folder)
-        subprocess.Popen(["explorer.exe", "/select," + str(target)],
+        shown = str(target)
+        if "\"" in shown or "\x00" in shown:
+            return
+        subprocess.Popen(["explorer.exe", f'/select,"{shown}"'],
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True)
 

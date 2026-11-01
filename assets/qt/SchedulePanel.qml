@@ -203,6 +203,7 @@ ColumnLayout {
         title: panel.action === "remove" ? "자동 저장 예약을 해제할까요?"
             : panel.action === "migrate" ? "현재 버전으로 변경할까요?"
             : panel.action === "create" ? "자동 저장을 예약할까요?" : "예약을 저장할까요?"
+        focus: true
         closePolicy: Popup.CloseOnEscape
         contentItem: Label {
             text: panel.action === "remove"
@@ -213,6 +214,7 @@ ColumnLayout {
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
         }
+        onOpened: scheduleConfirm.forceActiveFocus()
         onAccepted: {
             if (!panel.schedule)
                 return
@@ -226,6 +228,7 @@ ColumnLayout {
         footer: DialogButtonBox {
             background: null
             FlatButton {
+                id: scheduleConfirm
                 text: panel.action === "remove" ? "예약 해제" : "확인"
                 tone: "primary"
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole

@@ -131,14 +131,20 @@ Dialog {
                         Layout.preferredWidth: 1
                         text: "동영상 저장"
                         checked: dialog.pref("include_videos", true) === true
-                        onToggled: dialog.app.setPreference("include_videos", checked)
+                        onToggled: {
+                            dialog.app.setPreference("include_videos", checked)
+                            checked = Qt.binding(function() { return dialog.pref("include_videos", true) === true })
+                        }
                     }
                     FlatSwitch {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 1
                         text: "움직이는 사진 저장"
                         checked: dialog.pref("include_gifs", true) === true
-                        onToggled: dialog.app.setPreference("include_gifs", checked)
+                        onToggled: {
+                            dialog.app.setPreference("include_gifs", checked)
+                            checked = Qt.binding(function() { return dialog.pref("include_gifs", true) === true })
+                        }
                     }
                 }
                 Label { text: "폴더 구성"; textFormat: Text.PlainText }
@@ -149,24 +155,33 @@ Dialog {
                     valueRole: "value"
                     currentIndex: dialog.optionIndex(dialog.folderModes, dialog.pref("folder_mode", "flat"))
                     Accessible.name: "폴더 구성"
-                    onActivated: index => dialog.setOption("folder_mode", dialog.folderModes, index)
+                    onActivated: index => {
+                        dialog.setOption("folder_mode", dialog.folderModes, index)
+                        currentIndex = Qt.binding(function() {
+                            return dialog.optionIndex(dialog.folderModes, dialog.pref("folder_mode", "flat"))
+                        })
+                    }
                 }
-                RowLayout {
+                ColumnLayout {
                     Layout.fillWidth: true
-                    spacing: 12
+                    spacing: 8
                     FlatSwitch {
                         Layout.fillWidth: true
-                        Layout.preferredWidth: 1
                         text: "연결 계정별로 폴더 나누기"
                         checked: dialog.pref("separate_accounts", false) === true
-                        onToggled: dialog.app.setPreference("separate_accounts", checked)
+                        onToggled: {
+                            dialog.app.setPreference("separate_accounts", checked)
+                            checked = Qt.binding(function() { return dialog.pref("separate_accounts", false) === true })
+                        }
                     }
                     FlatSwitch {
                         Layout.fillWidth: true
-                        Layout.preferredWidth: 1
                         text: "저장 전 사진 확인"
                         checked: dialog.pref("confirm_each", false) === true
-                        onToggled: dialog.app.setPreference("confirm_each", checked)
+                        onToggled: {
+                            dialog.app.setPreference("confirm_each", checked)
+                            checked = Qt.binding(function() { return dialog.pref("confirm_each", false) === true })
+                        }
                     }
                 }
 
@@ -192,7 +207,12 @@ Dialog {
                             valueRole: "value"
                             currentIndex: dialog.optionIndex(dialog.gifFormats, dialog.pref("gif_format", "gif"))
                             Accessible.name: "움직이는 사진 형식"
-                            onActivated: index => dialog.setOption("gif_format", dialog.gifFormats, index)
+                            onActivated: index => {
+                                dialog.setOption("gif_format", dialog.gifFormats, index)
+                                currentIndex = Qt.binding(function() {
+                                    return dialog.optionIndex(dialog.gifFormats, dialog.pref("gif_format", "gif"))
+                                })
+                            }
                         }
                     }
                     ColumnLayout {
@@ -212,7 +232,12 @@ Dialog {
                             valueRole: "value"
                             currentIndex: dialog.optionIndex(dialog.gifSizes, dialog.pref("gif_size", "original"))
                             Accessible.name: "GIF 크기"
-                            onActivated: index => dialog.setOption("gif_size", dialog.gifSizes, index)
+                            onActivated: index => {
+                                dialog.setOption("gif_size", dialog.gifSizes, index)
+                                currentIndex = Qt.binding(function() {
+                                    return dialog.optionIndex(dialog.gifSizes, dialog.pref("gif_size", "original"))
+                                })
+                            }
                         }
                     }
                 }
@@ -270,7 +295,12 @@ Dialog {
                                     valueRole: "value"
                                     currentIndex: dialog.optionIndex(dialog.scanModes, dialog.pref("scan_mode", "quick"))
                                     Accessible.name: "목록 확인 범위"
-                                    onActivated: index => dialog.setOption("scan_mode", dialog.scanModes, index)
+                                    onActivated: index => {
+                                        dialog.setOption("scan_mode", dialog.scanModes, index)
+                                        currentIndex = Qt.binding(function() {
+                                            return dialog.optionIndex(dialog.scanModes, dialog.pref("scan_mode", "quick"))
+                                        })
+                                    }
                                 }
                             }
                             ColumnLayout {

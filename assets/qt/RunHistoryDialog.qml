@@ -65,51 +65,6 @@ Dialog {
         radius: 16
         border.width: 1
         border.color: "#2a2a2a"
-        Canvas {
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            anchors.margins: 7
-            width: 10
-            height: 10
-            onPaint: {
-                const ctx = getContext("2d")
-                ctx.reset()
-                ctx.strokeStyle = "#6e6668"
-                ctx.lineWidth = 1.4
-                ctx.beginPath()
-                ctx.moveTo(2, 8)
-                ctx.lineTo(8, 2)
-                ctx.moveTo(5, 8)
-                ctx.lineTo(8, 5)
-                ctx.stroke()
-            }
-        }
-        MouseArea {
-            objectName: "runHistoryResize"
-            anchors.right: parent.right
-            anchors.bottom: parent.bottom
-            width: 22
-            height: 22
-            cursorShape: Qt.SizeFDiagCursor
-            preventStealing: true
-            property real originX
-            property real originY
-            property int originWidth
-            property int originHeight
-            onPressed: function(mouse) {
-                originX = mouse.x
-                originY = mouse.y
-                originWidth = dialog.width
-                originHeight = dialog.height
-                dialog.resizing = true
-            }
-            onPositionChanged: function(mouse) {
-                if (!pressed)
-                    return
-                dialog.applySize(originWidth + mouse.x - originX, originHeight + mouse.y - originY)
-            }
-            onReleased: dialog.resizing = false
-        }
     }
     header: Column {
         width: dialog.width
@@ -288,13 +243,65 @@ Dialog {
             }
         }
     }
-    footer: DialogButtonBox {
-        background: null
-        rightPadding: 18
-        FlatButton {
-            text: "닫기"
-            DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+    footer: Item {
+        implicitWidth: closeBox.implicitWidth
+        implicitHeight: closeBox.implicitHeight
+        DialogButtonBox {
+            id: closeBox
+            anchors.fill: parent
+            background: null
+            rightPadding: 28
+            FlatButton {
+                text: "닫기"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+            onRejected: dialog.close()
         }
-        onRejected: dialog.close()
+        Canvas {
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 7
+            width: 10
+            height: 10
+            onPaint: {
+                const ctx = getContext("2d")
+                ctx.reset()
+                ctx.strokeStyle = "#6e6668"
+                ctx.lineWidth = 1.4
+                ctx.beginPath()
+                ctx.moveTo(2, 8)
+                ctx.lineTo(8, 2)
+                ctx.moveTo(5, 8)
+                ctx.lineTo(8, 5)
+                ctx.stroke()
+            }
+        }
+        MouseArea {
+            objectName: "runHistoryResize"
+            z: 2
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            width: 22
+            height: 22
+            cursorShape: Qt.SizeFDiagCursor
+            preventStealing: true
+            property real originX
+            property real originY
+            property int originWidth
+            property int originHeight
+            onPressed: function(mouse) {
+                originX = mouse.x
+                originY = mouse.y
+                originWidth = dialog.width
+                originHeight = dialog.height
+                dialog.resizing = true
+            }
+            onPositionChanged: function(mouse) {
+                if (!pressed)
+                    return
+                dialog.applySize(originWidth + mouse.x - originX, originHeight + mouse.y - originY)
+            }
+            onReleased: dialog.resizing = false
+        }
     }
 }

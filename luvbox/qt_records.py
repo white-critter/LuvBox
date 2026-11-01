@@ -85,6 +85,8 @@ class RecordsController(QObject):
         self._unsaved_view, self._unsaved_page = "unsaved", 0
         self._unsaved_rows, self._unsaved_tokens = [], {}
         self._unsaved_total = self._unsaved_pages = 0
+        self._retryable_total = None
+        self._retryable_limit = None
         self._unsaved_busy, self._unsaved_error, self._unsaved_status = False, "", ""
         self._counts = {reason: 0 for reason in unsaved.REASONS}
         self._condition = Condition()
@@ -135,7 +137,19 @@ class RecordsController(QObject):
     def excludedCount(self): return self._counts[unsaved.EXCLUDED]
     @Property(int, notify=changed)
     def retryableCount(self):
-        return sum(1 for row in self._unsaved_tokens.values() if self._can_retry(row))
+        if self._unsaved_view == "excluded":
+            return self._counts[unsaved.EXCLUDED]
+        visible = sum(1 for row in self._unsaved_tokens.values() if self._can_retry(row))
+        if self._unsaved_pages <= 1:
+            return visible
+        if self._retryable_total is None or self._retryable_limit != self._limit_mb:
+            account, output_dir, _separate = self._context
+            try:
+                self._retryable_total = unsaved.retryable_count(account, output_dir, self._limit_mb)
+                self._retryable_limit = self._limit_mb
+            except Exception:
+                return visible
+        return self._retryable_total
 
     # -- context -------------------------------------------------------------------------
 
@@ -151,6 +165,8 @@ class RecordsController(QObject):
         self._run_rows, self._run_tokens = [], {}
         self._run_total = self._run_page = self._run_pages = 0
         self._unsaved_status = self._unsaved_error = self._run_error = self._run_note = ""
+        self._retryable_total = None
+        self._retryable_limit = None
         self.refresh()
 
     def setVideoLimit(self, megabytes):
@@ -158,6 +174,7 @@ class RecordsController(QObject):
         megabytes = megabytes if type(megabytes) is int and megabytes >= 0 else 0
         if megabytes != self._limit_mb:
             self._limit_mb = megabytes
+            self._retryable_total = None
             self._rebuild_unsaved()
             self.changed.emit()
 

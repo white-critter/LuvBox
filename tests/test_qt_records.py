@@ -125,6 +125,19 @@ class RecordsControllerTests(unittest.TestCase):
         self.assertNotIn('2000_animated_gif_3', keys)
         self.assertIn('1000_1', keys)
 
+    def test_retry_all_stays_available_when_the_open_page_cannot_be_saved(self):
+        self.add([self.item('4000')] + [
+            self.item(str(3000 + number), unsaved.SIZE, 1, 'video', limit_mb=200) for number in range(50)])
+        self.records.setVideoLimit(200)
+        self.open_unsaved()
+        self.assertEqual(self.records.unsavedPages, 2)
+        self.assertTrue(self.records.unsavedRows)
+        self.assertTrue(all(not row['canRetry'] for row in self.records.unsavedRows))
+        self.assertEqual(self.records.retryableCount, 1)
+        self.records.retryAll()
+        self.wait(lambda: bool(self.retries))
+        self.assertEqual(self.retries[0], ('4000_1',))
+
     def test_dismissing_forgets_the_row_without_touching_other_lists(self):
         self.add([self.item('100'), self.item('200'), self.item('300', unsaved.EXCLUDED)])
         self.exclude('300')

@@ -225,7 +225,7 @@ Item {
 
     BusyIndicator {
         anchors.centerIn: parent
-        running: preview.loading
+        running: preview.loading || (preview.externalBusy && !preview.ready)
         visible: running
         Accessible.name: "미리보기 불러오는 중"
     }

@@ -164,6 +164,22 @@ def counts(account, output_dir) -> dict:
     return {reason: found.get(reason, 0) for reason in REASONS}
 
 
+def retryable_count(account, output_dir, limit_mb) -> int:
+    """Failed rows, plus size-limited rows the current limit can now accept.
+
+    The open page is not the whole list. A page of files that are still too
+    large must not hide failures waiting on the next page.
+    """
+    if isinstance(limit_mb, bool) or not isinstance(limit_mb, int) or limit_mb < 0:
+        limit_mb = 0
+    account, folder = _scope(account, output_dir)
+    row = next(iter(_read(
+        "SELECT COUNT(*) total FROM unsaved WHERE account=? AND folder=? AND ("
+        "reason=? OR (reason=? AND (?=0 OR (limit_mb>0 AND ?>limit_mb))))",
+        (account, folder, FAILED, SIZE, limit_mb, limit_mb))), {"total": 0})
+    return int(row["total"])
+
+
 def page(account, output_dir, kinds=(FAILED, SIZE), page=0, page_size=50) -> dict:
     kinds = [kind for kind in kinds if kind in REASONS]
     if (type(page) is not int or page < 0 or type(page_size) is not int or not 1 <= page_size <= 200
