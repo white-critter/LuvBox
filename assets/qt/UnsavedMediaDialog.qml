@@ -13,16 +13,101 @@ Dialog {
     modal: true
     focus: true
     closePolicy: Popup.CloseOnEscape
-    width: Math.min(680, parent ? Math.max(240, parent.width - 32) : 680)
-    height: Math.min(620, parent ? Math.max(260, parent.height - 32) : 620)
-    x: parent ? Math.round((parent.width - width) / 2) : 0
-    y: parent ? Math.round((parent.height - height) / 2) : 0
+    readonly property int frameMargin: 24
+    readonly property int preferredWidth: 1000
+    readonly property int preferredHeight: 740
+    property int chosenWidth: preferredWidth
+    property int chosenHeight: preferredHeight
+    property bool resizing: false
+    property int placedX: 0
+    property int placedY: 0
+    readonly property int limitWidth: parent ? Math.max(0, parent.width - frameMargin * 2) : preferredWidth
+    readonly property int limitHeight: parent ? Math.max(0, parent.height - frameMargin * 2) : preferredHeight
+    width: Math.min(chosenWidth, limitWidth)
+    height: Math.min(chosenHeight, limitHeight)
+    x: placedX
+    y: placedY
     padding: 20
+
+    function place() {
+        if (!parent || resizing)
+            return
+        placedX = Math.max(0, Math.round((parent.width - width) / 2))
+        placedY = Math.max(0, Math.round((parent.height - height) / 2))
+    }
+
+    function syncContent() {
+        if (!contentItem)
+            return
+        contentItem.width = availableWidth
+        contentItem.height = Math.max(0, height - topPadding - bottomPadding
+            - (header ? header.height + spacing : 0)
+            - (footer ? footer.height + spacing : 0))
+    }
+
+    function applySize(nextWidth, nextHeight) {
+        const fittedWidth = Math.max(Math.min(520, limitWidth), Math.min(nextWidth, limitWidth))
+        const fittedHeight = Math.max(Math.min(400, limitHeight), Math.min(nextHeight, limitHeight))
+        chosenWidth = fittedWidth
+        chosenHeight = fittedHeight
+        if (!parent)
+            return
+        placedX = Math.max(0, Math.min(placedX, parent.width - fittedWidth))
+        placedY = Math.max(0, Math.min(placedY, parent.height - fittedHeight))
+    }
+
+    onWidthChanged: { place(); syncContent() }
+    onHeightChanged: { place(); syncContent() }
     background: Rectangle {
         color: "#141414"
         radius: 16
         border.width: 1
         border.color: "#2a2a2a"
+        Canvas {
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 7
+            width: 10
+            height: 10
+            onPaint: {
+                const ctx = getContext("2d")
+                ctx.reset()
+                ctx.strokeStyle = "#6e6668"
+                ctx.lineWidth = 1.4
+                ctx.beginPath()
+                ctx.moveTo(2, 8)
+                ctx.lineTo(8, 2)
+                ctx.moveTo(5, 8)
+                ctx.lineTo(8, 5)
+                ctx.stroke()
+            }
+        }
+        MouseArea {
+            objectName: "unsavedResize"
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            width: 22
+            height: 22
+            cursorShape: Qt.SizeFDiagCursor
+            preventStealing: true
+            property real originX
+            property real originY
+            property int originWidth
+            property int originHeight
+            onPressed: function(mouse) {
+                originX = mouse.x
+                originY = mouse.y
+                originWidth = dialog.width
+                originHeight = dialog.height
+                dialog.resizing = true
+            }
+            onPositionChanged: function(mouse) {
+                if (!pressed)
+                    return
+                dialog.applySize(originWidth + mouse.x - originX, originHeight + mouse.y - originY)
+            }
+            onReleased: dialog.resizing = false
+        }
     }
     header: Column {
         width: dialog.width
@@ -48,6 +133,9 @@ Dialog {
         }
     }
     onAboutToShow: {
+        place()
+        syncContent()
+        Qt.callLater(syncContent)
         confirmClear = false
         if (records)
             records.setActive("unsaved", true)
@@ -148,7 +236,7 @@ Dialog {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            spacing: 6
+            spacing: 8
             model: dialog.records ? dialog.records.unsavedRows : []
             ScrollBar.vertical: ScrollBar { policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
             delegate: Rectangle {
@@ -163,18 +251,34 @@ Dialog {
                     anchors.fill: parent
                     anchors.margins: 12
                     spacing: 12
-                    // The file was never downloaded, so there is nothing to preview; the tile
-                    // keeps the row recognisable and the original post stays one click away.
+                    // A preview is shown only when this PC already kept one (a reviewed
+                    // exclusion). Failed and size-limited files are not downloaded again
+                    // just to draw this list.
                     Rectangle {
                         objectName: "unsavedPlaceholder"
                         Layout.alignment: Qt.AlignTop
-                        Layout.preferredWidth: 72
-                        Layout.preferredHeight: 54
+                        Layout.preferredWidth: 112
+                        Layout.preferredHeight: 84
                         radius: 8
                         color: "#151515"
                         border.width: 1
                         border.color: "#252525"
+                        clip: true
+                        Image {
+                            id: preview
+                            objectName: "unsavedPreview"
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            source: card.modelData.preview || ""
+                            sourceSize: Qt.size(224, 168)
+                            asynchronous: true
+                            cache: false
+                            fillMode: Image.PreserveAspectFit
+                            visible: status === Image.Ready
+                            Accessible.name: "저장하지 못한 미디어 미리보기"
+                        }
                         Canvas {
+                            visible: !preview.visible
                             anchors.centerIn: parent
                             width: 32
                             height: 26
@@ -309,16 +413,28 @@ Dialog {
                 text: dialog.excludedView ? "직접 제외한 미디어가 없습니다." : "저장하지 못한 미디어가 없습니다."
                 color: "#b9afb1"
             }
-            BusyIndicator {
+            Column {
                 anchors.centerIn: parent
-                running: list.count === 0 && !!dialog.records && dialog.records.unsavedBusy
-                visible: running
+                visible: list.count === 0 && !!dialog.records && dialog.records.unsavedBusy && !dialog.records.unsavedError.length
+                spacing: 8
+                BusyIndicator {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    running: parent.visible
+                    width: 32
+                    height: 32
+                }
+                Label {
+                    objectName: "unsavedLoading"
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "목록을 불러오는 중"
+                    color: "#b9afb1"
+                }
             }
         }
         Label {
             Layout.fillWidth: true
-            visible: list.count > 0
-            text: "내려받지 못한 파일은 미리볼 수 없습니다. ‘원문 보기’로 게시물을 확인하세요."
+            visible: list.count > 0 && dialog.height >= 560
+            text: "이 PC에 남겨 둔 미리보기가 있으면 보여 줍니다. 미리보기가 없는 항목은 종류, 이유, 원문으로 구분할 수 있습니다."
             color: "#8f8587"
             font.pixelSize: 12
             wrapMode: Text.Wrap
@@ -347,6 +463,7 @@ Dialog {
     }
     footer: DialogButtonBox {
         background: null
+        rightPadding: 18
         FlatButton {
             text: "닫기"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole

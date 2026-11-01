@@ -169,6 +169,25 @@ class RecordsControllerTests(unittest.TestCase):
         self.assertEqual((oldest['when'], oldest['summary'], oldest['message']),
                          ('2026-10-30 21:05', '저장 12개 · 이미 저장됨 340개 · 저장 못 함 3개', ''))
 
+    def test_a_kept_local_preview_is_used_and_a_missing_one_stays_blank(self):
+        from PIL import Image
+
+        from luvbox import thumbcache
+
+        self.add([self.item('100'), self.item('301', unsaved.EXCLUDED, media_type='photo')])
+        self.exclude('301', media_type='photo')
+        cache = thumbcache.Cache('alice')
+        try:
+            cache.put(('301', 1, 'photo'), Image.new('RGB', (32, 24), 'navy'))
+        finally:
+            cache.close()
+        self.open_unsaved('excluded')
+        self.wait(lambda: self.records.unsavedTotal == 1 and not self.records.unsavedBusy)
+        self.assertTrue(self.records.unsavedRows[0]['preview'].startswith('data:image/png;base64,'))
+        self.records.setUnsavedView('unsaved')
+        self.wait(lambda: not self.records.unsavedBusy and self.records.unsavedTotal == 1)
+        self.assertEqual(self.records.unsavedRows[0]['preview'], '')
+
     def test_an_unreadable_ledger_is_reported_as_an_error_not_an_empty_list(self):
         (self.root / 'unsaved.sqlite3').write_bytes(b'broken' * 200)
         self.open_unsaved()

@@ -10,6 +10,7 @@ LIMIT_BYTES the oldest previews are dropped.
 
 from __future__ import annotations
 
+import base64
 import io
 import os
 import re
@@ -321,6 +322,45 @@ def recall(account: str, key):
         return decode(data) if data else None
     except Exception:
         return None
+
+
+def preview_data_urls(account: str, identities) -> dict:
+    """PNG data URLs for previews already stored on this PC.
+
+    Only the local thumbnail cache is read. A missing file, a failed download
+    and a size-limited video are omitted rather than fetched again. Never raises.
+    """
+    found = {}
+    try:
+        if not isinstance(account, str) or not _ACCOUNT.fullmatch(account):
+            return found
+        path = directory() / (account + ".sqlite3")
+        if not path.is_file():
+            return found
+        keys = []
+        for key in list(identities)[:50]:
+            try:
+                keys.append(identity(*key))
+            except (TypeError, ValueError):
+                continue
+        if not keys:
+            return found
+        with closing(Cache(account, create=False)) as cache:
+            blobs = {key: cache.get(key) for key in keys}
+        for key, blob in blobs.items():
+            if not blob:
+                continue
+            image = decode(blob)
+            if image is None:
+                continue
+            buffer = io.BytesIO()
+            image.save(buffer, "PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+            if len(encoded) <= 150_000:
+                found[key] = "data:image/png;base64," + encoded
+    except Exception:
+        return {}
+    return found
 
 
 class Recorder:

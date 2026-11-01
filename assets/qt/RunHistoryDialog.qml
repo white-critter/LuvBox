@@ -11,16 +11,105 @@ Dialog {
     modal: true
     focus: true
     closePolicy: Popup.CloseOnEscape
-    width: Math.min(640, parent ? Math.max(240, parent.width - 32) : 640)
-    height: Math.min(560, parent ? Math.max(240, parent.height - 32) : 560)
-    x: parent ? Math.round((parent.width - width) / 2) : 0
-    y: parent ? Math.round((parent.height - height) / 2) : 0
+    // A desk-sized list, kept inside the window. The corner grip changes chosenWidth/Height
+    // and the list fills whatever remains.
+    readonly property int frameMargin: 24
+    readonly property int preferredWidth: 960
+    readonly property int preferredHeight: 720
+    property int chosenWidth: preferredWidth
+    property int chosenHeight: preferredHeight
+    property bool resizing: false
+    property int placedX: 0
+    property int placedY: 0
+    readonly property int limitWidth: parent ? Math.max(0, parent.width - frameMargin * 2) : preferredWidth
+    readonly property int limitHeight: parent ? Math.max(0, parent.height - frameMargin * 2) : preferredHeight
+    width: Math.min(chosenWidth, limitWidth)
+    height: Math.min(chosenHeight, limitHeight)
+    x: placedX
+    y: placedY
     padding: 20
+
+    function place() {
+        if (!parent || resizing)
+            return
+        placedX = Math.max(0, Math.round((parent.width - width) / 2))
+        placedY = Math.max(0, Math.round((parent.height - height) / 2))
+    }
+
+    function syncContent() {
+        if (!contentItem)
+            return
+        // The dialog's own geometry pass does not always relayout a hidden popup
+        // after the parent window changes size. Assign the slot explicitly.
+        contentItem.width = availableWidth
+        contentItem.height = Math.max(0, height - topPadding - bottomPadding
+            - (header ? header.height + spacing : 0)
+            - (footer ? footer.height + spacing : 0))
+    }
+
+    function applySize(nextWidth, nextHeight) {
+        const fittedWidth = Math.max(Math.min(480, limitWidth), Math.min(nextWidth, limitWidth))
+        const fittedHeight = Math.max(Math.min(360, limitHeight), Math.min(nextHeight, limitHeight))
+        chosenWidth = fittedWidth
+        chosenHeight = fittedHeight
+        if (!parent)
+            return
+        placedX = Math.max(0, Math.min(placedX, parent.width - fittedWidth))
+        placedY = Math.max(0, Math.min(placedY, parent.height - fittedHeight))
+    }
+
+    onWidthChanged: { place(); syncContent() }
+    onHeightChanged: { place(); syncContent() }
     background: Rectangle {
         color: "#141414"
         radius: 16
         border.width: 1
         border.color: "#2a2a2a"
+        Canvas {
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            anchors.margins: 7
+            width: 10
+            height: 10
+            onPaint: {
+                const ctx = getContext("2d")
+                ctx.reset()
+                ctx.strokeStyle = "#6e6668"
+                ctx.lineWidth = 1.4
+                ctx.beginPath()
+                ctx.moveTo(2, 8)
+                ctx.lineTo(8, 2)
+                ctx.moveTo(5, 8)
+                ctx.lineTo(8, 5)
+                ctx.stroke()
+            }
+        }
+        MouseArea {
+            objectName: "runHistoryResize"
+            anchors.right: parent.right
+            anchors.bottom: parent.bottom
+            width: 22
+            height: 22
+            cursorShape: Qt.SizeFDiagCursor
+            preventStealing: true
+            property real originX
+            property real originY
+            property int originWidth
+            property int originHeight
+            onPressed: function(mouse) {
+                originX = mouse.x
+                originY = mouse.y
+                originWidth = dialog.width
+                originHeight = dialog.height
+                dialog.resizing = true
+            }
+            onPositionChanged: function(mouse) {
+                if (!pressed)
+                    return
+                dialog.applySize(originWidth + mouse.x - originX, originHeight + mouse.y - originY)
+            }
+            onReleased: dialog.resizing = false
+        }
     }
     header: Column {
         width: dialog.width
@@ -43,7 +132,13 @@ Dialog {
             wrapMode: Text.Wrap
         }
     }
-    onAboutToShow: if (records) records.setActive("runs", true)
+    onAboutToShow: {
+        place()
+        syncContent()
+        Qt.callLater(syncContent)
+        if (records)
+            records.setActive("runs", true)
+    }
     onClosed: if (records) records.setActive("runs", false)
 
     readonly property var tones: ({
@@ -76,7 +171,7 @@ Dialog {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            spacing: 6
+            spacing: 8
             model: dialog.records ? dialog.records.runRows : []
             ScrollBar.vertical: ScrollBar { policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
             delegate: Rectangle {
@@ -154,10 +249,22 @@ Dialog {
                 text: "아직 실행 기록이 없습니다."
                 color: "#b9afb1"
             }
-            BusyIndicator {
+            Column {
                 anchors.centerIn: parent
-                running: list.count === 0 && dialog.records && dialog.records.runBusy
-                visible: running
+                visible: list.count === 0 && dialog.records && dialog.records.runBusy && !dialog.records.runError.length
+                spacing: 8
+                BusyIndicator {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    running: parent.visible
+                    width: 32
+                    height: 32
+                }
+                Label {
+                    objectName: "runHistoryLoading"
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "기록을 불러오는 중"
+                    color: "#b9afb1"
+                }
             }
         }
         RowLayout {
@@ -183,6 +290,7 @@ Dialog {
     }
     footer: DialogButtonBox {
         background: null
+        rightPadding: 18
         FlatButton {
             text: "닫기"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole

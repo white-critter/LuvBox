@@ -19,7 +19,7 @@ import uuid
 from PySide6.QtCore import QObject, Property, Qt, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QDesktopServices
 
-from . import unsaved
+from . import thumbcache, unsaved
 from .core import RETRY_LIMIT
 from .history import HistoryError, HistoryStore, archive_key
 from .protection import AccountGuard, ProtectionError
@@ -300,10 +300,13 @@ class RecordsController(QObject):
             hint = "설정 › 고급에서 크기 제한을 올린 뒤 다시 저장할 수 있습니다."
         elif row["attempts"] > 1:
             hint = f"{row['attempts']}번째 시도까지 저장하지 못했습니다."
+        preview = row.get("preview") if isinstance(row.get("preview"), str) else ""
+        if not preview.startswith("data:image/png;base64,") or len(preview) > 200_000:
+            preview = ""
         return dict(token=token, author=("@" + row["author"]) if row["author"] else "작성자 미확인",
                     reason=row["reason"], reasonLabel=_REASON.get(row["reason"], ""), mediaType=row["media_type"],
                     info=info, posted=(row["posted_at"] or "")[:10], detail=row["detail"],
-                    seen=display_time(row["last_seen"]), canRetry=can_retry, hint=hint)
+                    seen=display_time(row["last_seen"]), canRetry=can_retry, hint=hint, preview=preview)
 
     # -- worker --------------------------------------------------------------------------
 
@@ -345,6 +348,7 @@ class RecordsController(QObject):
                     else:
                         result = dict(unsaved.page(account, output_dir, _KINDS[view], page, _UNSAVED_PAGE),
                                       serial=serial, view=view)
+                    self._attach_previews(account, result)
                 elif kind == "counts":
                     result = unsaved.counts(account, output_dir) if account else {}
                     result[unsaved.EXCLUDED] = self._excluded_total(account, output_dir, separate)
@@ -381,6 +385,14 @@ class RecordsController(QObject):
             return 0
         with closing(_ReadOnlyHistory(paths)) as store:
             return store.excluded_media(page=0, page_size=1)["total"]
+
+    def _attach_previews(self, account, result):
+        """Fill previews from this PC's cache. A miss stays blank; nothing is downloaded."""
+        rows = result.get("rows") or []
+        urls = thumbcache.preview_data_urls(
+            account, [(row.get("tweet_id"), row.get("num"), row.get("media_type")) for row in rows])
+        for row in rows:
+            row["preview"] = urls.get((row.get("tweet_id"), row.get("num"), row.get("media_type")), "")
 
     def _excluded_page(self, account, output_dir, separate, page):
         try:

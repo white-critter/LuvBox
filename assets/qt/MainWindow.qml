@@ -15,6 +15,17 @@ ApplicationWindow {
     height: 760
     minimumWidth: 680
     minimumHeight: 480
+    // Grown only while a saved-file detail card needs more room than the current window.
+    property bool saveFitReady: false
+    property bool applyingSaveHeight: false
+    property bool saveHeightExpanded: false
+    property int saveRestoreHeight: 0
+    property int fittedSaveNeed: 0
+    property bool saveHeightHeld: false
+    property string fittedDetailName: ""
+    property int appliedSaveHeight: 0
+    readonly property bool savedDetailVisible: !!(app && app.download && app.download.detailsEnabled
+        && app.download.currentSavedItem && app.download.currentSavedItem.filename)
     visible: true
     readonly property var app: appController
     readonly property color cardColor: "#191919"
@@ -65,6 +76,82 @@ ApplicationWindow {
             app.galleryVisible(currentScreen === 1)
         if (currentScreen === 1)
             Qt.callLater(updateFocus)
+        Qt.callLater(fitSaveWindow)
+    }
+    onSavedDetailVisibleChanged: Qt.callLater(fitSaveWindow)
+    onHeightChanged: {
+        if (applyingSaveHeight || !saveFitReady || height === appliedSaveHeight)
+            return
+        // The person resized the window. Keep that choice until the open detail changes.
+        saveHeightHeld = true
+    }
+    Component.onCompleted: Qt.callLater(function() {
+        saveFitReady = true
+        fitSaveWindow()
+    })
+
+    function screenHeightLimit() {
+        // QScreen.availableGeometry is not exposed to QML. This is the usable desktop height.
+        const available = Screen.desktopAvailableHeight
+        if (available < minimumHeight)
+            return height
+        return Math.max(minimumHeight, available - 48)
+    }
+
+    function saveNeededHeight() {
+        // The window height at which the save form fits, plus a few pixels so the scrollbar stays hidden.
+        return height + (saveScroll.contentHeight - saveScroll.height) + 8
+    }
+
+    function fitSaveWindow() {
+        if (!saveFitReady || currentScreen !== 0 || applyingSaveHeight || saveScroll.contentHeight < 40)
+            return
+        const detailName = savedDetailVisible ? (app.download.currentSavedItem.filename || "") : ""
+        if (!savedDetailVisible) {
+            fittedSaveNeed = 0
+            fittedDetailName = ""
+            saveHeightHeld = false
+            if (saveHeightExpanded && saveRestoreHeight >= minimumHeight) {
+                appliedSaveHeight = Math.min(saveRestoreHeight, screenHeightLimit())
+                applyingSaveHeight = true
+                height = appliedSaveHeight
+                applyingSaveHeight = false
+                saveHeightExpanded = false
+            }
+            return
+        }
+        if (saveHeightHeld && detailName === fittedDetailName)
+            return
+        saveHeightHeld = false
+        fittedDetailName = detailName
+        const needed = saveNeededHeight()
+        const limit = screenHeightLimit()
+        if (needed > height + 4 && needed > fittedSaveNeed + 4) {
+            const next = Math.min(Math.max(needed, minimumHeight), limit)
+            if (next > height + 4) {
+                if (!saveHeightExpanded)
+                    saveRestoreHeight = height
+                saveHeightExpanded = true
+                appliedSaveHeight = next
+                applyingSaveHeight = true
+                height = next
+                applyingSaveHeight = false
+            }
+            fittedSaveNeed = needed
+            return
+        }
+        if (saveHeightExpanded && needed + 4 < height && needed + 4 < fittedSaveNeed) {
+            const next = Math.max(saveRestoreHeight, Math.min(needed, limit))
+            if (next + 4 < height) {
+                appliedSaveHeight = next
+                applyingSaveHeight = true
+                height = next
+                applyingSaveHeight = false
+                if (height <= saveRestoreHeight + 4)
+                    saveHeightExpanded = false
+            }
+            fittedSaveNeed = needed
+        }
     }
     property int densityChoice: 1
     readonly property int tileWidth: [168, 240, 320][densityChoice]
@@ -316,6 +403,8 @@ ApplicationWindow {
 
             ScrollView {
                 id: saveScroll
+                objectName: "saveScroll"
+                onContentHeightChanged: Qt.callLater(window.fitSaveWindow)
                 clip: true
                 contentWidth: availableWidth
                 contentHeight: saveForm.implicitHeight + 16
@@ -323,6 +412,7 @@ ApplicationWindow {
                 ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                 ColumnLayout {
                     id: saveForm
+                    onImplicitHeightChanged: Qt.callLater(window.fitSaveWindow)
                     width: Math.max(1, Math.min(saveScroll.availableWidth - 24, 640))
                     height: implicitHeight
                     x: Math.max(0, (saveScroll.availableWidth - width) / 2)

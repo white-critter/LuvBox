@@ -137,5 +137,63 @@ class ExcludedRecoveryTests(unittest.TestCase):
         self.assertEqual(ignored(destination)[0], {("100", 1, "photo")})
 
 
+class ExcludedPageTests(unittest.TestCase):
+    def test_one_page_keeps_the_newest_author_without_reading_the_whole_catalog(self):
+        import tempfile
+        import time
+
+        folder = tempfile.TemporaryDirectory(prefix="luvbox-excluded-page-")
+        self.addCleanup(folder.cleanup)
+        root = Path(folder.name)
+        output = root / "사진"
+        output.mkdir()
+        paths = resolve_storage(output, "alice")
+        store = HistoryStore.for_storage(paths)
+        try:
+            media = []
+            choices = []
+            for index in range(8000):
+                tweet = str(10**18 + index)
+                stamp = f"2024-{(index % 12) + 1:02d}-{(index % 27) + 1:02d}T12:00:00+09:00"
+                media.append(("flat", tweet, 1, "photo", "crowd", tweet + ".jpg", stamp, "metadata", stamp,
+                              str(paths.media_dir / (tweet + ".jpg")), 1000, "saved", "saved", stamp,
+                              "https://x.com/i/web/status/" + tweet))
+            for index in range(120):
+                tweet = str(10**18 + index)
+                stamp = f"2026-10-01T{index // 60:02d}:{index % 60:02d}:00+09:00"
+                choices.append((tweet, 1, "photo", 1, stamp))
+            store._db.executemany(
+                "INSERT INTO media(folder_mode,tweet_id,num,media_type,author,filename,posted_at,"
+                "posted_source,saved_at,path,filesize,status,record_source,updated_at,source_url) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", media)
+            store._db.executemany(
+                "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,?,?)",
+                choices)
+            # A newer row in another layout must win the displayed author.
+            store._db.execute(
+                "INSERT INTO media(folder_mode,tweet_id,num,media_type,author,filename,posted_at,"
+                "posted_source,saved_at,path,filesize,status,record_source,updated_at,source_url) "
+                "VALUES ('date',?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (choices[-1][0], 1, "photo", "carol", "carol.jpg", "2026-10-02T00:00:00+09:00", "metadata",
+                 None, "", None, "existing", "declined", "2026-11-01T00:00:00+09:00",
+                 "https://x.com/i/web/status/" + choices[-1][0]))
+            store._db.commit()
+            query_started = time.perf_counter()
+            page = store.excluded_media(page=0, page_size=50)
+            later = store.excluded_media(page=2, page_size=50)
+            elapsed = time.perf_counter() - query_started
+            self.assertEqual((page["total"], page["pages"], len(page["rows"])), (120, 3, 50))
+            self.assertEqual(page["rows"][0]["author"], "carol")
+            self.assertIn("저장 안 함", page["rows"][0]["detail"])
+            self.assertEqual(page["rows"][1]["author"], "crowd")
+            self.assertNotIn("저장 안 함", page["rows"][1]["detail"])
+            self.assertEqual(len(later["rows"]), 20)
+            self.assertNotEqual(later["rows"][0]["tweet_id"], page["rows"][0]["tweet_id"])
+            # The previous query scanned the catalog once per skip and took seconds at this size.
+            self.assertLess(elapsed, 0.4, f"excluded pages took {elapsed:.3f}s")
+        finally:
+            store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

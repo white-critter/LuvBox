@@ -383,7 +383,7 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                 from luvbox.core import _media_details, _saved_post_details
                 download = controller.download
                 window.setProperty("currentScreen", 0)
-                window.resize(1080, 1000)
+                window.resize(1080, 760)
                 if not download.start(object()):
                     raise AssertionError("The synthetic current job did not start")
                 body = "<b>literal body</b>\nsecond line & <not-html>"
@@ -406,6 +406,21 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                 invoke(toggle, "toggled")
                 wait(lambda: download.detailsEnabled and bool(download.currentSavedItem.get("preview_url"))
                      and thumb.property("paintedWidth") > 0, "live details toggle and thumbnail")
+                scroll = find("saveScroll")
+                screen_limit = window.screen().availableGeometry().height() - 48
+                details_fit = scroll.property("contentHeight") <= scroll.property("height") + 8
+                if window.height() > max(760, screen_limit) + 1:
+                    raise AssertionError(
+                        "Saved details grew the window past the screen "
+                        f"(height={window.height()} limit={screen_limit})")
+                if not details_fit and window.height() + 4 < screen_limit:
+                    raise AssertionError(
+                        "Saved details overflow the window "
+                        f"(height={window.height()} content={scroll.property('contentHeight')} "
+                        f"view={scroll.property('height')} limit={screen_limit})")
+                report["saved_details_fit"] = {
+                    "height": window.height(), "content": scroll.property("contentHeight"),
+                    "view": scroll.property("height"), "limit": screen_limit, "fits": details_fit}
                 wait(lambda: not controller._pending_settings, "details preference commit")
                 if not panel.property("visible") or not toggle.property("enabled") or not download.running:
                     raise AssertionError("Details could not be enabled during the running save")

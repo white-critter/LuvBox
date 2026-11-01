@@ -31,7 +31,7 @@ def scene():
     from shiboken6 import delete
 
     sys.path.insert(0, str(ROOT))
-    from luvbox import unsaved
+    from luvbox import thumbcache, unsaved
     from luvbox.activity import record_outcome
     from luvbox.history import HistoryStore
     from luvbox.qt_app import ApplicationController
@@ -169,6 +169,11 @@ def scene():
              "detail": "저장 확인에서 ‘저장 안 함’으로 골랐습니다."},
         ]
         unsaved.record(fixture_rows, account="offline", output_dir=str(paths.output_dir))
+        preview_cache = thumbcache.Cache("offline")
+        try:
+            preview_cache.put(("302", 1, "animated_gif"), Image.new("RGB", (48, 32), (20, 80, 200)))
+        finally:
+            preview_cache.close()
         (base / "LuvBox/settings.json").write_text(json.dumps({"account": "offline", "output_dir": str(paths.output_dir)}),
                                                     encoding="utf-8")
         controller = ApplicationController()
@@ -247,6 +252,28 @@ def scene():
             assert rows[1]["message"] == "X 연결이 만료됐습니다."
             assert rows[3]["origin"] == "이전 기록"
             assert not any("모든 계정" in text for text in visible_texts())
+            overlay = history.property("parent")
+            assert history.property("x") >= -1 and history.property("y") >= -1
+            assert history.property("x") + history.property("width") <= overlay.width() + 1
+            assert history.property("y") + history.property("height") <= overlay.height() + 1
+            assert history.property("width") >= min(900, width - 56)
+            assert history.property("height") >= min(680, height - 56)
+            list_box = find("runHistoryList")
+            content = history.property("contentItem")
+            assert list_box.property("width") > history.property("width") * 0.7, (
+                list_box.property("width"), content.property("width") if content is not None else None,
+                content.property("height") if content is not None else None,
+                history.property("width"), history.property("availableWidth"), width, height)
+            if width >= 1080:
+                history.setProperty("chosenWidth", 780)
+                history.setProperty("chosenHeight", 520)
+                QTest.qWait(40)
+                assert history.property("width") == 780 and history.property("height") == 520, (
+                    history.property("width"), history.property("height"))
+                assert find("runHistoryList").property("width") > 700
+                history.setProperty("chosenWidth", 960)
+                history.setProperty("chosenHeight", 720)
+                QTest.qWait(40)
             shot(f"{tag}-run-history")
             QTest.keyClick(window, Qt.Key.Key_Escape)
             wait(lambda: not history.property("visible"), "history closed")
@@ -263,12 +290,20 @@ def scene():
             texts = visible_texts()
             assert any("영상 · 1280×720 · 2분 13초 · 약 340MB" in text for text in texts), texts
             assert any("설정 › 고급에서 크기 제한을 올린 뒤" in text for text in texts), texts
-            assert any("미리볼 수 없습니다" in text for text in texts)
+            if height >= 700:
+                assert any("미리보기가 없는 항목" in text for text in texts)
+            assert all(not row["preview"] for row in controller.records.unsavedRows)
+            assert dialog.property("width") >= min(940, width - 56)
+            assert dialog.property("height") >= min(700, height - 56)
+            assert dialog.property("x") >= -1 and dialog.property("y") + dialog.property("height") <= overlay.height() + 1
             shot(f"{tag}-unsaved")
             click("unsavedViewExcluded")
             wait(lambda: controller.records.unsavedView == "excluded" and controller.records.unsavedTotal == 1
                  and not controller.records.unsavedBusy, "excluded view")
             assert controller.records.unsavedRows[0]["reasonLabel"] == "직접 제외"
+            assert controller.records.unsavedRows[0]["preview"].startswith("data:image/png;base64,")
+            preview = next(item for item in inside(dialog) if item.objectName() == "unsavedPreview")
+            wait(lambda: preview.property("paintedWidth") > 0, "excluded local preview")
             shot(f"{tag}-unsaved-excluded")
             click("unsavedViewFailed")
             wait(lambda: controller.records.unsavedView == "unsaved" and controller.records.unsavedTotal == 2

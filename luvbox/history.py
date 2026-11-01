@@ -1301,43 +1301,67 @@ class HistoryStore:
         """Media the user chose not to download again, in any layout."""
         return self._ignored()
 
-    def _excluded_rows(self) -> list[dict]:
-        """Every still-skipped choice, newest first, without dropping older ones.
-
-        ``missing_choices`` is the durable record. A display ledger can lose a
-        row; this list cannot, and it does not delete or rewrite anything.
-        """
-        statement = """
-            SELECT choices.tweet_id, choices.num, choices.media_type, choices.updated_at,
-                   COALESCE((SELECT author FROM media
-                             WHERE tweet_id=choices.tweet_id AND num=choices.num
-                             AND media_type=choices.media_type AND author!=''
-                             ORDER BY updated_at DESC LIMIT 1), '') AS author,
-                   COALESCE((SELECT posted_at FROM media
-                             WHERE tweet_id=choices.tweet_id AND num=choices.num
-                             AND media_type=choices.media_type AND posted_at IS NOT NULL
-                             AND posted_at!='' ORDER BY updated_at DESC LIMIT 1), '') AS posted_at,
-                   EXISTS(SELECT 1 FROM media
-                          WHERE tweet_id=choices.tweet_id AND num=choices.num
-                          AND media_type=choices.media_type AND record_source='declined') AS declined
-            FROM missing_choices AS choices
-            WHERE choices.ignored=1
-            ORDER BY choices.updated_at DESC, choices.tweet_id, choices.num
-        """
+    def _read_skipped(self, statement, parameters=()):
+        """Rows from ``missing_choices``, or None when this catalog has no such table."""
         try:
-            fetched = list(self._db.execute(statement))
+            return list(self._db.execute(statement, parameters))
         except sqlite3.OperationalError as error:
             # A catalog from before this table still opens. It has no skips.
             if "no such table" in str(error):
-                return []
+                return None
             raise
+
+    def _excluded_count(self) -> int:
+        found = self._read_skipped("SELECT COUNT(*) AS total FROM missing_choices WHERE ignored=1")
+        return 0 if found is None else found[0]["total"]
+
+    def _excluded_identities(self, limit=None) -> list[tuple]:
+        """Skip identities, newest first. Display columns are not read."""
+        statement = ("SELECT tweet_id,num,media_type FROM missing_choices WHERE ignored=1 "
+                     "ORDER BY updated_at DESC,tweet_id,num")
+        parameters = ()
+        if limit is not None:
+            statement += " LIMIT ?"
+            parameters = (limit,)
+        found = self._read_skipped(statement, parameters)
+        if found is None:
+            return []
+        return [(row["tweet_id"], row["num"], row["media_type"]) for row in found]
+
+    def _excluded_display(self, limit, offset) -> list[dict]:
+        """One page of skips, with author and post time from the catalog.
+
+        The media primary key starts with the folder layout, so each identity
+        is read once per layout. A lookup that ignores the layout scans the
+        whole catalog for every skip, which made this list wait several seconds
+        once a library had grown.
+        """
+        found = self._read_skipped(
+            "SELECT tweet_id,num,media_type,updated_at FROM missing_choices WHERE ignored=1 "
+            "ORDER BY updated_at DESC,tweet_id,num LIMIT ? OFFSET ?", (limit, offset))
+        if not found:
+            return []
         rows = []
-        for row in fetched:
-            declined = bool(row["declined"])
+        for choice in found:
+            author, author_at = "", ""
+            posted, posted_at = "", ""
+            declined = False
+            for mode in sorted(_MODES):
+                media = self._db.execute(
+                    "SELECT author,posted_at,record_source,updated_at FROM media "
+                    "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                    (mode, choice["tweet_id"], choice["num"], choice["media_type"])).fetchone()
+                if media is None:
+                    continue
+                updated = media["updated_at"] or ""
+                if media["author"] and updated >= author_at:
+                    author, author_at = media["author"], updated
+                if media["posted_at"] and updated >= posted_at:
+                    posted, posted_at = media["posted_at"], updated
+                declined = declined or media["record_source"] == "declined"
             rows.append({
-                "tweet_id": row["tweet_id"], "num": row["num"], "media_type": row["media_type"],
-                "author": row["author"] or "", "posted_at": row["posted_at"] or "",
-                "updated_at": row["updated_at"] or "",
+                "tweet_id": choice["tweet_id"], "num": choice["num"], "media_type": choice["media_type"],
+                "author": author, "posted_at": posted, "updated_at": choice["updated_at"] or "",
                 "detail": ("저장 확인에서 ‘저장 안 함’으로 골랐습니다." if declined
                            else "다시 받지 않도록 빼 두었습니다."),
             })
@@ -1348,21 +1372,18 @@ class HistoryStore:
         """One page of media the user can still choose to save again."""
         if type(page) is not int or page < 0 or type(page_size) is not int or not 1 <= page_size <= 200:
             raise ValueError("invalid excluded page")
-        rows = self._excluded_rows()
-        total = len(rows)
-        pages = (total + page_size - 1) // page_size
+        total = self._excluded_count()
+        pages = (total + page_size - 1) // page_size if total else 0
         page = min(page, max(0, pages - 1))
-        start = page * page_size
-        return {"rows": rows[start:start + page_size], "total": total, "page": page,
-                "pages": pages, "page_size": page_size}
+        rows = self._excluded_display(page_size, page * page_size) if total else []
+        return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
     @_safe
     def excluded_archive_keys(self, limit=2000) -> tuple:
         """Archive keys of every current skip, for one retry of the whole list."""
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2000:
             raise ValueError("invalid excluded key limit")
-        rows = self._excluded_rows()
-        return tuple(archive_key(row["tweet_id"], row["num"], row["media_type"]) for row in rows[:limit])
+        return tuple(archive_key(*identity) for identity in self._excluded_identities(limit))
 
     @_safe
     def release_excluded(self, items=None) -> int:
@@ -1374,10 +1395,9 @@ class HistoryStore:
         over itself. ``items`` is ``(tweet_id, num, media_type)`` or ``None``
         for every current skip.
         """
-        chosen = self._excluded_rows() if items is None else None
         targets = []
         if items is None:
-            targets = [(row["tweet_id"], row["num"], row["media_type"]) for row in chosen]
+            targets = self._excluded_identities()
         else:
             for tweet_id, number, media_type in items:
                 tweet_id = str(tweet_id)
