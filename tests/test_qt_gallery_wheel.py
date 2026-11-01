@@ -272,6 +272,167 @@ Window {
         qInstallMessageHandler(previous)
 
 
+def check_popup_wheel():
+    """An open combo list scrolls itself; the gallery behind it does not."""
+    from PySide6.QtCore import QCoreApplication, QMetaObject, QObject, QPoint, QPointF, Qt, QUrl, qInstallMessageHandler
+    from PySide6.QtGui import QGuiApplication, QPointingDevice, QWheelEvent
+    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtQuick import QQuickItem
+    from shiboken6 import delete
+
+    sys.path.insert(0, str(ROOT))
+    from luvbox.qt_wheel import WheelInputFilter
+
+    application = QGuiApplication([])
+    messages = []
+    previous = qInstallMessageHandler(lambda kind, context, message: messages.append(message))
+    engine = QQmlApplicationEngine()
+    wheel_filter = WheelInputFilter()
+    engine.setInitialProperties({"wheelInputFilter": wheel_filter})
+    directory = QUrl.fromLocalFile(str(ROOT / "assets/qt") + "/")
+    engine.loadData(b'''import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import "."
+ApplicationWindow {
+    required property var wheelInputFilter
+    width: 520; height: 480; visible: true
+    property int chosen: -1
+    Column {
+        anchors.fill: parent
+        anchors.margins: 12
+        spacing: 8
+        FlatCombo {
+            id: combo
+            objectName: "combo"
+            width: 220
+            model: popupNames
+            Component.onCompleted: {
+                popup.objectName = "authorPopup"
+                popup.contentItem.objectName = "authorPopupList"
+            }
+            onActivated: index => chosen = index
+        }
+        Flickable {
+            id: gallery
+            objectName: "gallery"
+            width: parent.width
+            height: 360
+            contentWidth: width
+            contentHeight: 8000
+            boundsBehavior: Flickable.StopAtBounds
+            GalleryWheel { view: gallery; inputFilter: wheelInputFilter; wheelLines: 3 }
+        }
+    }
+    property var popupNames: {
+        const names = []
+        for (let index = 0; index < 24; index++)
+            names.push("author_" + index + "_with_a_long_name")
+        return names
+    }
+}''', directory.resolved(QUrl("PopupWheel.qml")))
+    if not engine.rootObjects():
+        raise AssertionError(f"popup wheel scene failed: {messages}")
+    window = engine.rootObjects()[0]
+    combo = window.findChild(QQuickItem, "combo")
+    gallery = window.findChild(QQuickItem, "gallery")
+    checks = []
+
+    def settle(milliseconds=60):
+        deadline = time.monotonic() + milliseconds / 1000
+        while time.monotonic() < deadline:
+            application.processEvents()
+            time.sleep(.002)
+
+    def send(item, x, y, angle=-120):
+        local = QPointF(x, y)
+        scene = item.mapToScene(local)
+        event = QWheelEvent(scene, scene, QPoint(0, 0), QPoint(0, angle), Qt.MouseButton.NoButton,
+                            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False,
+                            Qt.MouseEventSource.MouseEventNotSynthesized,
+                            QPointingDevice.primaryPointingDevice())
+        event.setTimestamp(int(time.monotonic() * 1000))
+        QCoreApplication.sendEvent(window, event)
+        application.processEvents()
+
+    try:
+        settle(40)
+        before = combo.property("currentIndex")
+        send(combo, combo.width() / 2, combo.height() / 2)
+        settle()
+        if combo.property("currentIndex") != before or gallery.property("contentY") != 0:
+            raise AssertionError("a closed author list changed or scrolled the gallery")
+        checks.append("closed-combo-keeps-choice")
+        send(gallery, 40, 80)
+        settle(160)
+        if not 55 <= gallery.property("contentY") <= 65:
+            raise AssertionError(f"gallery missed a wheel beside the combo: {gallery.property('contentY')}")
+        gallery.setProperty("contentY", 0)
+        popup = window.findChild(QObject, "authorPopup")
+        if popup is None or not QMetaObject.invokeMethod(popup, "open"):
+            raise AssertionError("author popup did not open")
+        settle(40)
+        popup_list = window.findChild(QQuickItem, "authorPopupList")
+        if popup_list is None:
+            raise AssertionError("author list is missing")
+        popup_point = popup_list.mapToScene(QPointF(popup_list.width() / 2, popup_list.height() / 2))
+        gallery_local = gallery.mapFromScene(popup_point)
+        if not gallery.contains(gallery_local):
+            raise AssertionError("the fixture popup does not cover the gallery")
+        send(popup_list, popup_list.width() / 2, popup_list.height() / 2)
+        settle(160)
+        if gallery.property("contentY") != 0:
+            raise AssertionError(f"gallery scrolled under the open author list: {gallery.property('contentY')}")
+        if popup_list.property("contentY") < 20:
+            raise AssertionError(f"author list did not scroll: {popup_list.property('contentY')}")
+        checks.append("open-list-scrolls")
+        maximum = popup_list.property("originY") + max(0, popup_list.property("contentHeight") - popup_list.property("height"))
+        popup_list.setProperty("contentY", maximum)
+        settle(20)
+        send(popup_list, popup_list.width() / 2, popup_list.height() / 2)
+        settle(160)
+        if abs(popup_list.property("contentY") - maximum) > 1 or gallery.property("contentY") != 0:
+            raise AssertionError("wheel past the author list moved the gallery")
+        checks.append("list-boundary-stays-in-list")
+        # A point in the gallery, clear of the popup, still scrolls the grid.
+        send(gallery, 30, gallery.property("height") - 20)
+        settle(160)
+        if gallery.property("contentY") < 20:
+            raise AssertionError("gallery no longer scrolls beside an open author list")
+        checks.append("gallery-scrolls-beside-popup")
+        scrollbar = next((child for child in popup_list.childItems()
+                          if "ScrollBar" in str(child.metaObject().className())), None)
+        # A ScrollBar is the drag target. A ScrollIndicator would not match this name.
+        if scrollbar is None or not scrollbar.isVisible() or scrollbar.height() < 20:
+            raise AssertionError(f"author list has no draggable scrollbar: {scrollbar}")
+        checks.append("scrollbar-present")
+        if not QMetaObject.invokeMethod(popup, "close"):
+            raise AssertionError("author popup did not close")
+        settle(20)
+        QMetaObject.invokeMethod(combo, "forceActiveFocus")
+        settle(20)
+        from PySide6.QtTest import QTest
+        QTest.keyClick(window, Qt.Key.Key_Down)
+        settle(30)
+        QTest.keyClick(window, Qt.Key.Key_Down)
+        settle(30)
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        settle(30)
+        if combo.property("currentIndex") < 0 and window.property("chosen") < 0:
+            raise AssertionError("keyboard could not choose an author")
+        checks.append("keyboard-chooses-author")
+        if any(term in message for message in messages for term in (
+                "ReferenceError", "TypeError", "Binding loop", "Cannot assign")):
+            raise AssertionError(messages)
+        return {"checks": checks}
+    finally:
+        window.close()
+        wheel_filter.close()
+        delete(engine)
+        application.processEvents()
+        qInstallMessageHandler(previous)
+
+
 @unittest.skipUnless(find_spec("PySide6") is not None, "optional Qt experiment dependencies are not installed")
 class GalleryWheelTests(unittest.TestCase):
     def test_click_wheel_acceleration_routing_reset_and_native_passthrough(self):
@@ -282,6 +443,17 @@ class GalleryWheelTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(json.loads(result.stdout)["checks"]), 10)
 
+    def test_open_author_popup_takes_the_wheel_without_moving_the_gallery(self):
+        environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software")
+        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--popup-scene"],
+                                cwd=ROOT, env=environment, capture_output=True, text=True,
+                                encoding="utf-8", errors="replace", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(json.loads(result.stdout)["checks"]), 6)
+
 
 if __name__ == "__main__":
-    print(json.dumps(check_wheel()))
+    if "--popup-scene" in sys.argv:
+        print(json.dumps(check_popup_wheel()))
+    else:
+        print(json.dumps(check_wheel()))

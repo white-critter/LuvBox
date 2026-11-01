@@ -9,6 +9,8 @@ ComboBox {
     rightPadding: 28
     font.pixelSize: 14
     hoverEnabled: true
+    // A closed list must keep its choice when the pointer wheel passes over it.
+    wheelEnabled: false
     // Measures the widest choice, so the list fits its labels and no more.
     implicitContentWidthPolicy: ComboBox.WidestText
     HoverHandler {
@@ -98,12 +100,30 @@ ComboBox {
             border.color: "#2e2e2e"
         }
         contentItem: ListView {
+            id: popupList
             width: control.popup.availableWidth
             clip: true
             implicitHeight: contentHeight
             model: control.popup.visible ? control.delegateModel : null
             currentIndex: control.highlightedIndex
-            ScrollIndicator.vertical: ScrollIndicator {}
+            boundsBehavior: Flickable.StopAtBounds
+            // The bar can be dragged. The wheel is accepted here, including at
+            // the first and last row, so it does not fall through to a list behind.
+            ScrollBar.vertical: ScrollBar {
+                policy: popupList.contentHeight > popupList.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+            }
+            WheelHandler {
+                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                blocking: true
+                onWheel: function(event) {
+                    const step = event.angleDelta.y !== 0 ? event.angleDelta.y / 120 * 48 : event.pixelDelta.y
+                    if (!step)
+                        return
+                    const minimum = popupList.originY
+                    const maximum = minimum + Math.max(0, popupList.contentHeight - popupList.height)
+                    popupList.contentY = Math.max(minimum, Math.min(maximum, popupList.contentY - step))
+                }
+            }
         }
     }
 }

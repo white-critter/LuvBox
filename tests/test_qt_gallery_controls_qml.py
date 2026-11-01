@@ -141,11 +141,57 @@ def scene():
             window.setWidth(width)
             window.setHeight(height)
             settle()
+            QTest.qWait(40)
             if not find("galleryFilterToggle").property("checked"):
                 click("galleryFilterToggle")
             author_combo = find("galleryAuthorFilter")
             labels = [row["label"] for row in author_combo.property("model")]
             assert labels == ["전체 작성자", "@alice · 미디어 3개", "@alice2 · 미디어 1개", "@bob · 미디어 1개"], labels
+            def inside(name, bar):
+                node = find(name)
+                while node is not None:
+                    if node.objectName() == bar:
+                        return True
+                    node = node.parent()
+                return False
+
+            assert inside("galleryFilterToggle", "galleryFilterBar")
+            assert inside("galleryFilterReset", "galleryFilterBar")
+            names = ("galleryAuthorFilter", "galleryDateField", "galleryDateFrom", "galleryDateTo",
+                     "galleryFilterToggle", "galleryFilterReset")
+            placed = []
+            for name in names:
+                item = find(name)
+                origin = item.mapToScene(QPointF(0, 0))
+                rect = (origin.x(), origin.y(), item.property("width"), item.property("height"))
+                assert item.property("visible") and rect[2] >= 36 and rect[3] >= 36, (name, rect)
+                assert rect[0] >= 16 and rect[0] + rect[2] <= width - 16, (name, rect, width)
+                placed.append(rect)
+            for index, left in enumerate(placed):
+                for right in placed[index + 1:]:
+                    apart = (left[0] + left[2] <= right[0] + 0.5 or right[0] + right[2] <= left[0] + 0.5
+                             or left[1] + left[3] <= right[1] + 0.5 or right[1] + right[3] <= left[1] + 0.5)
+                    assert apart, (left, right)
+            bar = find("galleryFilterBar")
+            kids = [child for child in bar.childItems() if child.property("visible")]
+            total = sum(child.width() for child in kids) + 8 * max(0, len(kids) - 1)
+            bands = [child.mapToScene(QPointF(0, 0)).y() for child in kids]
+            if total <= bar.property("width") + 1:
+                assert max(bands) - min(bands) <= 2, (width, total, bar.property("width"), bands)
+            else:
+                assert max(bands) - min(bands) >= 30, (width, total, bar.property("width"), bands)
+            assert author_combo.property("width") <= 280 and find("galleryDateFrom").property("width") >= 136
+            open_grid = find("galleryGrid").property("height")
+            open_bar = find("galleryFilterBar").property("height")
+            click("galleryFilterToggle")
+            wait(lambda: not find("galleryAuthorFilter").property("visible")
+                 and find("galleryFilterToggle").property("visible"), "filter inputs hidden")
+            if open_bar > 56:
+                wait(lambda: find("galleryFilterBar").property("height") <= open_bar - 20, "filter row collapsed")
+                assert find("galleryGrid").property("height") > open_grid + 20, (
+                    open_grid, find("galleryGrid").property("height"), open_bar)
+            click("galleryFilterToggle")
+            wait(lambda: find("galleryAuthorFilter").property("visible"), "filter reopened")
             date_from, date_to = find("galleryDateFrom"), find("galleryDateTo")
             picker = find("galleryDatePickerPopup")
             # A date is applied the moment it is chosen: Space opens the calendar, a day closes it.

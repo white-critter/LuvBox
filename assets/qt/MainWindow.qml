@@ -731,21 +731,64 @@ ApplicationWindow {
                     }
                 }
 
-                RowLayout {
+                Item {
+                    id: toolHost
+                    objectName: "galleryToolBar"
                     Layout.fillWidth: true
-                    Label { text: window.galleryModel.total.toLocaleString() + "개"; color: window.mutedColor }
-                    BusyIndicator {
-                        running: window.galleryModel.busy
-                        visible: running
-                        implicitWidth: 24
-                        implicitHeight: 24
+                    implicitWidth: 0
+                    property real laidHeight: 0
+                    implicitHeight: laidHeight
+                    function layout() {
+                        let x = 0
+                        let y = 0
+                        let rowHeight = 0
+                        const limit = width
+                        for (let index = 0; index < children.length; index++) {
+                            const child = children[index]
+                            if (!child || !child.visible || child.width < 1 || child.height < 1)
+                                continue
+                            if (x > 0 && x + child.width > limit) {
+                                x = 0
+                                y += rowHeight + 8
+                                rowHeight = 0
+                            }
+                            child.x = x
+                            child.y = y
+                            x += child.width + 8
+                            rowHeight = Math.max(rowHeight, child.height)
+                        }
+                        const next = y + rowHeight
+                        if (Math.abs(laidHeight - next) > 0.5)
+                            laidHeight = next
                     }
-                    Item { Layout.fillWidth: true }
+                    onWidthChanged: layout()
+                    Component.onCompleted: Qt.callLater(layout)
+                    Label {
+                        objectName: "galleryCount"
+                        width: implicitWidth
+                        height: 40
+                        verticalAlignment: Text.AlignVCenter
+                        text: window.galleryModel.total.toLocaleString() + "개"
+                        color: window.mutedColor
+                    }
+                    Item {
+                        width: 24
+                        height: 40
+                        visible: window.galleryModel.busy
+                        BusyIndicator {
+                            anchors.centerIn: parent
+                            running: window.galleryModel.busy
+                            implicitWidth: 24
+                            implicitHeight: 24
+                        }
+                    }
                     FlatCombo {
                         id: mediaFilter
                         visible: !!window.app
                         model: ["전체", "사진", "영상", "GIF"]
                         implicitWidth: 112
+                        width: implicitWidth
+                        height: implicitHeight
                         Accessible.name: "미디어 종류"
                         onActivated: window.app.library.setFilters(
                             ["all", "photo", "video", "animated_gif"][currentIndex],
@@ -756,6 +799,8 @@ ApplicationWindow {
                         visible: !!window.app
                         model: ["최근 저장", "최신 게시물", "오래된 게시물", "좋아요 순"]
                         implicitWidth: 168
+                        width: implicitWidth
+                        height: implicitHeight
                         Accessible.name: "사진 정렬"
                         onActivated: window.app.library.setFilters(
                             ["all", "photo", "video", "animated_gif"][mediaFilter.currentIndex],
@@ -763,75 +808,81 @@ ApplicationWindow {
                     }
                     FlatButton {
                         visible: !!window.app
+                        implicitHeight: 40
+                        width: implicitWidth
                         text: window.app && window.app.galleryChanged ? "새 사진 보기" : "새로고침"
                         onClicked: window.app.refreshGallery()
+                        onWidthChanged: Qt.callLater(toolHost.layout)
                     }
                     FlatButton {
                         text: "미리보기"
+                        implicitHeight: 40
+                        width: implicitWidth
                         visible: gallery.currentIndex >= 0
                         onClicked: previewDialog.open()
-                    }
-                }
-
-                Label {
-                    objectName: "galleryLoadError"
-                    Layout.fillWidth: true
-                    text: window.galleryModel.error
-                    visible: text.length > 0
-                    color: window.errorColor
-                    wrapMode: Text.Wrap
-                    textFormat: Text.PlainText
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: !!window.app
-                    spacing: 8
-                    FlatButton {
-                        id: filterToggle
-                        objectName: "galleryFilterToggle"
-                        text: checked ? "필터 닫기" : "작성자·날짜 필터"
-                        checkable: true
-                        onClicked: if (!checked) datePickerPopup.close()
+                        onVisibleChanged: Qt.callLater(toolHost.layout)
                     }
                     FlatButton {
-                        objectName: "galleryFilterReset"
-                        text: "필터 초기화"
-                        enabled: !!window.app && (window.app.library.filterSummary.length > 0 || search.text.length > 0
-                            || mediaFilter.currentIndex > 0 || orderChoice.currentIndex > 0)
-                        onClicked: {
-                            searchDelay.stop()
-                            datePickerPopup.close()
-                            search.text = ""
-                            mediaFilter.currentIndex = orderChoice.currentIndex = 0
-                            window.app.library.resetFilters()
-                        }
-                    }
-                    Item { Layout.fillWidth: true }
-                    FlatButton {
+                        id: selectionToggle
                         objectName: "gallerySelectionToggle"
+                        implicitHeight: 40
+                        width: implicitWidth
                         text: window.app && window.app.library.selectionMode ? "선택 끝내기" : "여러 개 선택"
                         enabled: !!window.app
                         onClicked: window.app.library.setSelectionMode(!window.app.library.selectionMode)
+                        onVisibleChanged: Qt.callLater(toolHost.layout)
+                        onWidthChanged: Qt.callLater(toolHost.layout)
                     }
                 }
-                RowLayout {
-                    id: filterBox
+
+                Item {
+                    id: filterHost
+                    objectName: "galleryFilterBar"
                     Layout.fillWidth: true
-                    visible: !!window.app && filterToggle.checked
-                    spacing: 6
+                    implicitWidth: 0
+                    visible: !!window.app
+                    property real laidHeight: 0
+                    implicitHeight: laidHeight
+                    function layout() {
+                        let x = 0
+                        let y = 0
+                        let rowHeight = 0
+                        const limit = width
+                        for (let index = 0; index < children.length; index++) {
+                            const child = children[index]
+                            if (!child || !child.visible || child.width < 1 || child.height < 1)
+                                continue
+                            if (x > 0 && x + child.width > limit) {
+                                x = 0
+                                y += rowHeight + 8
+                                rowHeight = 0
+                            }
+                            child.x = x
+                            child.y = y
+                            x += child.width + 8
+                            rowHeight = Math.max(rowHeight, child.height)
+                        }
+                        const next = y + rowHeight
+                        if (Math.abs(laidHeight - next) > 0.5)
+                            laidHeight = next
+                    }
+                    onWidthChanged: layout()
+                    onVisibleChanged: Qt.callLater(layout)
+                    Component.onCompleted: Qt.callLater(layout)
                     // Every control applies the moment it changes, so the grid
-                    // always matches what the controls show.
+                    // always matches what the controls show. The start and end
+                    // stay in one group so the range does not split across lines.
                     FlatCombo {
                         id: authorFilter
                         objectName: "galleryAuthorFilter"
-                        Layout.fillWidth: true
-                        Layout.minimumWidth: 110
-                        Layout.preferredWidth: 168
-                        Layout.maximumWidth: 360
+                        visible: filterToggle.checked
                         minimumPopupWidth: 280
                         implicitHeight: 40
                         implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                        width: Math.min(280, Math.max(180, implicitContentWidth + leftPadding + rightPadding))
+                        height: implicitHeight
+                        onVisibleChanged: Qt.callLater(filterHost.layout)
+                        onWidthChanged: Qt.callLater(filterHost.layout)
                         // The closed box names the author; the count belongs to the list.
                         displayText: currentIndex > 0 && model[currentIndex] ? "@" + model[currentIndex].value : "전체 작성자"
                         Accessible.name: "작성자 선택"
@@ -872,46 +923,94 @@ ApplicationWindow {
                     FlatCombo {
                         id: dateFieldChoice
                         objectName: "galleryDateField"
+                        visible: filterToggle.checked
                         model: ["게시일", "저장일"]
                         currentIndex: window.app && window.app.library.dateField === "saved" ? 1 : 0
                         implicitWidth: 92
-                        implicitHeight: 40
+                        width: implicitWidth
+                        height: implicitHeight
                         Accessible.name: "날짜 필터 기준"
                         onActivated: index => window.applyFilters({ dateField: index === 1 ? "saved" : "posted" })
                     }
-                    DateField {
-                        id: dateFromFilter
-                        objectName: "galleryDateFrom"
-                        text: window.app ? window.app.library.dateFrom : ""
-                        placeholder: "시작 날짜"
-                        accessibleLabel: "시작 날짜"
-                        pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter
-                        Layout.preferredWidth: 136
-                        Layout.minimumWidth: 120
-                        onPickRequested: datePickerPopup.openFor(dateFromFilter)
-                        onCleared: {
-                            if (datePickerPopup.targetField === dateFromFilter)
-                                datePickerPopup.close()
-                            window.applyFilters({ from: "" })
+                    Row {
+                        id: dateRange
+                        visible: filterToggle.checked
+                        spacing: 6
+                        DateField {
+                            id: dateFromFilter
+                            objectName: "galleryDateFrom"
+                            text: window.app ? window.app.library.dateFrom : ""
+                            placeholder: "시작 날짜"
+                            accessibleLabel: "시작 날짜"
+                            pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter
+                            width: 136
+                            onPickRequested: datePickerPopup.openFor(dateFromFilter)
+                            onCleared: {
+                                if (datePickerPopup.targetField === dateFromFilter)
+                                    datePickerPopup.close()
+                                window.applyFilters({ from: "" })
+                            }
+                        }
+                        Label {
+                            width: 16
+                            height: 40
+                            verticalAlignment: Text.AlignVCenter
+                            horizontalAlignment: Text.AlignHCenter
+                            text: "~"
+                            color: window.mutedColor
+                        }
+                        DateField {
+                            id: dateToFilter
+                            objectName: "galleryDateTo"
+                            text: window.app ? window.app.library.dateTo : ""
+                            placeholder: "종료 날짜"
+                            accessibleLabel: "종료 날짜"
+                            pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateToFilter
+                            width: 136
+                            onPickRequested: datePickerPopup.openFor(dateToFilter)
+                            onCleared: {
+                                if (datePickerPopup.targetField === dateToFilter)
+                                    datePickerPopup.close()
+                                window.applyFilters({ to: "" })
+                            }
                         }
                     }
-                    Label { text: "~" }
-                    DateField {
-                        id: dateToFilter
-                        objectName: "galleryDateTo"
-                        text: window.app ? window.app.library.dateTo : ""
-                        placeholder: "종료 날짜"
-                        accessibleLabel: "종료 날짜"
-                        pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateToFilter
-                        Layout.preferredWidth: 136
-                        Layout.minimumWidth: 120
-                        onPickRequested: datePickerPopup.openFor(dateToFilter)
-                        onCleared: {
-                            if (datePickerPopup.targetField === dateToFilter)
-                                datePickerPopup.close()
-                            window.applyFilters({ to: "" })
+                    FlatButton {
+                        id: filterToggle
+                        objectName: "galleryFilterToggle"
+                        implicitHeight: 40
+                        width: implicitWidth
+                        text: checked ? "필터 닫기" : "작성자·날짜 필터"
+                        checkable: true
+                        onClicked: if (!checked) datePickerPopup.close()
+                        onCheckedChanged: Qt.callLater(filterHost.layout)
+                        onWidthChanged: Qt.callLater(filterHost.layout)
+                    }
+                    FlatButton {
+                        id: filterReset
+                        objectName: "galleryFilterReset"
+                        implicitHeight: 40
+                        width: implicitWidth
+                        text: "필터 초기화"
+                        enabled: !!window.app && (window.app.library.filterSummary.length > 0 || search.text.length > 0
+                            || mediaFilter.currentIndex > 0 || orderChoice.currentIndex > 0)
+                        onClicked: {
+                            searchDelay.stop()
+                            datePickerPopup.close()
+                            search.text = ""
+                            mediaFilter.currentIndex = orderChoice.currentIndex = 0
+                            window.app.library.resetFilters()
                         }
                     }
+                }
+                Label {
+                    objectName: "galleryLoadError"
+                    Layout.fillWidth: true
+                    text: window.galleryModel.error
+                    visible: text.length > 0
+                    color: window.errorColor
+                    wrapMode: Text.Wrap
+                    textFormat: Text.PlainText
                 }
                 Label {
                     objectName: "galleryActiveFilters"

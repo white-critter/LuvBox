@@ -260,6 +260,10 @@ def scene():
             assert history.property("height") >= min(680, height - 56)
             list_box = find("runHistoryList")
             content = history.property("contentItem")
+            # syncContent is posted when the dialog opens, so the list can still
+            # be at its previous width for one frame.
+            wait(lambda: find("runHistoryList").property("width") > history.property("width") * 0.7,
+                 "history list filled the dialog")
             assert list_box.property("width") > history.property("width") * 0.7, (
                 list_box.property("width"), content.property("width") if content is not None else None,
                 content.property("height") if content is not None else None,

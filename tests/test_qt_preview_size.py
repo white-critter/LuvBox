@@ -332,11 +332,13 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                         settle()
                         right_edge = density.mapToScene(QPointF(density.width(), 0)).x()
                         preview_right = preview_button.mapToScene(QPointF(preview_button.width(), 0)).x()
-                        if abs(right_edge - preview_right) > 1:
-                            raise AssertionError(f"Gallery filter buttons do not align at {width}px: {right_edge}, {preview_right}")
+                        # The toolbar packs from the left and wraps. Buttons stay
+                        # inside the search row; they are not pinned to its right edge.
+                        if preview_right > right_edge + 1:
+                            raise AssertionError(f"Gallery toolbar extends past the search row at {width}px: {right_edge}, {preview_right}")
                         bounds(preview_button, "gallery preview button")
                     capture(f"gallery-toolbar-{width}")
-                report["checks"].append("gallery-toolbar-right-edges-aligned")
+                report["checks"].append("gallery-toolbar-stays-inside-the-search-row")
                 window.setProperty("currentScreen", 0)
 
             controller._review = {"id": "synthetic-review", "url": QUrl.fromLocalFile(str(photo_path)).toString(),

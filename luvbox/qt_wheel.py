@@ -71,6 +71,35 @@ class WheelInputFilter(QObject):
     def _window_destroyed(self):
         self._window = None
 
+    @staticmethod
+    def _class_name(item) -> str:
+        name = item.metaObject().className()
+        if isinstance(name, bytes):
+            name = name.split(b"\0", 1)[0].decode("ascii", "replace")
+        return str(name)
+
+    def _popup_contains(self, position) -> bool:
+        window = self._window
+        if window is None or not isValid(window):
+            return False
+        content = window.contentItem()
+        if content is None or not isValid(content):
+            return False
+        overlay = next((child for child in content.childItems()
+                        if isValid(child) and self._class_name(child) == "QQuickOverlay"), None)
+        if overlay is None:
+            return False
+        stack = list(overlay.childItems())
+        while stack:
+            item = stack.pop()
+            if not isValid(item) or not item.isVisible():
+                continue
+            if (self._class_name(item) == "QQuickPopupItem" and
+                    item.contains(item.mapFromScene(position))):
+                return True
+            stack.extend(item.childItems())
+        return False
+
     def _view_destroyed(self):
         self._view = None
         self._window_changed(None)
@@ -88,7 +117,13 @@ class WheelInputFilter(QObject):
             return False
         if kind != QEvent.Type.Wheel:
             return False
-        if not view.contains(view.mapFromScene(event.position())):
+        position = event.position()
+        if not view.contains(view.mapFromScene(position)):
+            return False
+        # A combo or calendar opens over the grid. The wheel belongs to that
+        # popup while the pointer is inside it, including when the list is
+        # already at its end. The gallery still scrolls beside the popup.
+        if self._popup_contains(position):
             return False
         if (event.pointingDevice().type() != QInputDevice.DeviceType.Mouse or
                 event.source() != Qt.MouseEventSource.MouseEventNotSynthesized or
