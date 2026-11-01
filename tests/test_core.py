@@ -829,7 +829,8 @@ class CoreTests(unittest.TestCase):
         self.assertIn("볼 수 없는 미디어(저작권·지역 제한 등)는 건너뜁니다.", messages)
         # The failed download stays the run's reason, not a post notice and not
         # "not found" because the tweet ID happens to contain 404.
-        self.assertIn("일부 파일을 저장하지 못했습니다", events[-1]["message"])
+        self.assertIn("미디어를 찾았지만 1개를 저장하지 못했습니다", events[-1]["message"])
+        self.assertNotIn("저장할 미디어를 찾지 못했습니다", events[-1]["message"])
 
     def test_diagnostics_match_whole_terms(self):
         from luvbox.core import _safe_diagnostic

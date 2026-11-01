@@ -1,11 +1,14 @@
 """Media a save could not store, kept in the app data folder beside the activity ledger.
 
-The catalog only describes files that exist. This small ledger remembers the
-media that failed, went over the size limit or were excluded on purpose, so a
-person can see them and ask for another try. A row is keyed by account, save
-folder and media identity: repeating a failing save updates one row instead of
-adding more, saving the media later removes it, and only the newest MAX_ITEMS
-rows are kept. Nothing here decides what is saved; the catalog stays the record.
+The catalog only describes files that exist, and it is also what keeps a
+'do not save' choice. This small ledger remembers media that failed or went
+over the size limit, so a person can see them and ask for another try. A row
+is keyed by account, save folder and media identity: repeating a failing save
+updates one row instead of adding more, and saving the media later removes it.
+Failed and size-limited rows are kept to the newest MAX_ITEMS per account and
+folder. An older excluded row may still be here, but the excluded screen reads
+the catalog, so trimming this ledger cannot hide that choice. Nothing here
+decides what is saved.
 """
 
 from contextlib import closing
@@ -115,8 +118,13 @@ def record(items, *, account, output_dir, resolved=()) -> None:
                     database.execute(f"INSERT INTO unsaved({names}) VALUES ({','.join('?' for _ in _COLUMNS)}) "
                                      "ON CONFLICT(account,folder,tweet_id,media_type,num) DO UPDATE SET " + update,
                                      tuple(row[name] for name in _COLUMNS))
-                database.execute("DELETE FROM unsaved WHERE rowid IN (SELECT rowid FROM unsaved "
-                                 "ORDER BY last_seen DESC,rowid DESC LIMIT -1 OFFSET ?)", (MAX_ITEMS,))
+                # The documented cap is per account and folder, and only for media the
+                # app failed to store. Excluded choices live in the catalog.
+                database.execute(
+                    "DELETE FROM unsaved WHERE rowid IN (SELECT rowid FROM unsaved "
+                    "WHERE account=? AND folder=? AND reason IN (?,?) "
+                    "ORDER BY last_seen DESC,rowid DESC LIMIT -1 OFFSET ?)",
+                    (account, folder, FAILED, SIZE, MAX_ITEMS))
     except (OSError, ValueError, sqlite3.Error):
         raise UnsavedError(_ERROR) from None
 

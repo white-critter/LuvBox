@@ -1301,6 +1301,136 @@ class HistoryStore:
         """Media the user chose not to download again, in any layout."""
         return self._ignored()
 
+    def _excluded_rows(self) -> list[dict]:
+        """Every still-skipped choice, newest first, without dropping older ones.
+
+        ``missing_choices`` is the durable record. A display ledger can lose a
+        row; this list cannot, and it does not delete or rewrite anything.
+        """
+        statement = """
+            SELECT choices.tweet_id, choices.num, choices.media_type, choices.updated_at,
+                   COALESCE((SELECT author FROM media
+                             WHERE tweet_id=choices.tweet_id AND num=choices.num
+                             AND media_type=choices.media_type AND author!=''
+                             ORDER BY updated_at DESC LIMIT 1), '') AS author,
+                   COALESCE((SELECT posted_at FROM media
+                             WHERE tweet_id=choices.tweet_id AND num=choices.num
+                             AND media_type=choices.media_type AND posted_at IS NOT NULL
+                             AND posted_at!='' ORDER BY updated_at DESC LIMIT 1), '') AS posted_at,
+                   EXISTS(SELECT 1 FROM media
+                          WHERE tweet_id=choices.tweet_id AND num=choices.num
+                          AND media_type=choices.media_type AND record_source='declined') AS declined
+            FROM missing_choices AS choices
+            WHERE choices.ignored=1
+            ORDER BY choices.updated_at DESC, choices.tweet_id, choices.num
+        """
+        try:
+            fetched = list(self._db.execute(statement))
+        except sqlite3.OperationalError as error:
+            # A catalog from before this table still opens. It has no skips.
+            if "no such table" in str(error):
+                return []
+            raise
+        rows = []
+        for row in fetched:
+            declined = bool(row["declined"])
+            rows.append({
+                "tweet_id": row["tweet_id"], "num": row["num"], "media_type": row["media_type"],
+                "author": row["author"] or "", "posted_at": row["posted_at"] or "",
+                "updated_at": row["updated_at"] or "",
+                "detail": ("저장 확인에서 ‘저장 안 함’으로 골랐습니다." if declined
+                           else "다시 받지 않도록 빼 두었습니다."),
+            })
+        return rows
+
+    @_safe
+    def excluded_media(self, *, page=0, page_size=50) -> dict:
+        """One page of media the user can still choose to save again."""
+        if type(page) is not int or page < 0 or type(page_size) is not int or not 1 <= page_size <= 200:
+            raise ValueError("invalid excluded page")
+        rows = self._excluded_rows()
+        total = len(rows)
+        pages = (total + page_size - 1) // page_size
+        page = min(page, max(0, pages - 1))
+        start = page * page_size
+        return {"rows": rows[start:start + page_size], "total": total, "page": page,
+                "pages": pages, "page_size": page_size}
+
+    @_safe
+    def excluded_archive_keys(self, limit=2000) -> tuple:
+        """Archive keys of every current skip, for one retry of the whole list."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2000:
+            raise ValueError("invalid excluded key limit")
+        rows = self._excluded_rows()
+        return tuple(archive_key(row["tweet_id"], row["num"], row["media_type"]) for row in rows[:limit])
+
+    @_safe
+    def release_excluded(self, items=None) -> int:
+        """Allow a later save to download these again. Catalog rows stay.
+
+        Clearing the skip flag is not the same as deleting the list entry that
+        merely described a failure. Archive entries are removed only when no
+        saved path remains, so a file that is still on disk is not fetched again
+        over itself. ``items`` is ``(tweet_id, num, media_type)`` or ``None``
+        for every current skip.
+        """
+        chosen = self._excluded_rows() if items is None else None
+        targets = []
+        if items is None:
+            targets = [(row["tweet_id"], row["num"], row["media_type"]) for row in chosen]
+        else:
+            for tweet_id, number, media_type in items:
+                tweet_id = str(tweet_id)
+                if (not re.fullmatch(r"[0-9]{1,20}", tweet_id) or isinstance(number, bool)
+                        or not isinstance(number, int) or not 1 <= number <= 10000
+                        or media_type not in _TYPES):
+                    raise HistoryError(_HISTORY_HELP)
+                targets.append((tweet_id, number, media_type))
+        if not targets:
+            return 0
+        stamp = _now()
+        released = []
+        with self._db:
+            for tweet_id, number, media_type in targets:
+                row = self._db.execute(
+                    "SELECT ignored FROM missing_choices WHERE tweet_id=? AND num=? AND media_type=?",
+                    (tweet_id, number, media_type)).fetchone()
+                if row is None or not row["ignored"]:
+                    continue
+                present = self._db.execute(
+                    "SELECT 1 FROM media WHERE tweet_id=? AND num=? AND media_type=? AND path!='' LIMIT 1",
+                    (tweet_id, number, media_type)).fetchone()
+                self._db.execute(
+                    "UPDATE missing_choices SET ignored=0,updated_at=? "
+                    "WHERE tweet_id=? AND num=? AND media_type=? AND ignored=1",
+                    (stamp, tweet_id, number, media_type))
+                released.append((tweet_id, number, media_type, present is None))
+        self._drop_archive_skips([identity for *identity, drop in released if drop])
+        return len(released)
+
+    def _drop_archive_skips(self, identities) -> None:
+        """Forget download-archive hits for media that was never kept as a file."""
+        if not identities:
+            return
+        entries = []
+        for tweet_id, number, media_type in identities:
+            key = archive_key(tweet_id, number, media_type)
+            entries.append((f"twitter{key}", key))
+        for name in _ARCHIVES.values():
+            path = self.account_dir / name
+            if not path.is_file() or self._linked(path):
+                continue
+            try:
+                with closing(sqlite3.connect(path, timeout=5)) as database:
+                    database.execute("PRAGMA busy_timeout=5000")
+                    if database.execute(
+                            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='archive'").fetchone() is None:
+                        continue
+                    database.executemany("DELETE FROM archive WHERE entry=? OR entry=?", entries)
+                    database.commit()
+            except sqlite3.Error:
+                raise HistoryError(_HISTORY_HELP) from None
+
     @_safe
     def begin_deletion(self, batch_id: str, row: dict, keep_deleted: bool, signature) -> str:
         """Commit intent before the worker moves one approved file to the Recycle Bin.

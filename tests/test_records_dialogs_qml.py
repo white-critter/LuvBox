@@ -144,6 +144,8 @@ def scene():
             store.finish_run(old_run, "finished", saved=7, skipped=3, message="이전 버전에서 저장")
             with store._db:
                 store._db.execute("UPDATE runs SET started_at='2026-10-01T09:00:00+09:00' WHERE id=?", (old_run,))
+            store.record_declined("flat", {"tweet_id": "302", "num": 1, "type": "animated_gif",
+                                           "author": {"name": "dave"}}, paths.media_dir / "dave_302_1.gif")
         original = {path: path.read_bytes() for path in files}
         record_outcome({"run_id": "scheduled-fixture", "status": "error", "message": "X 연결이 만료됐습니다.",
                         "saved": 0, "skipped": 4},

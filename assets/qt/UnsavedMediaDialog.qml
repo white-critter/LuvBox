@@ -38,8 +38,8 @@ Dialog {
         Label {
             width: parent.width
             text: dialog.excludedView
-                ? "저장 확인에서 ‘저장 안 함’으로 직접 제외한 미디어입니다. 실패가 아니며 다시 묻지 않습니다."
-                : "저장하지 못한 미디어입니다. 이미 저장했거나 중복이라 건너뛴 미디어는 표시하지 않습니다."
+                ? "다시 받지 않도록 빼 둔 미디어입니다. ‘제외 해제’는 다음 저장에서 다시 받게 하고, ‘다시 받기’는 지금 받습니다. 목록을 지우는 동작이 아니며 저장된 파일은 바뀌지 않습니다."
+                : "저장하지 못한 미디어입니다. 이미 저장했거나 중복이라 건너뛴 미디어는 표시하지 않습니다. 목록에서 지워도 저장된 파일은 그대로이고, 직접 제외한 항목은 빠지지 않습니다."
             leftPadding: 20
             rightPadding: 20
             color: "#b9afb1"
@@ -103,13 +103,18 @@ Dialog {
                 onClicked: dialog.records.retryAll()
             }
             FlatButton {
-                objectName: "unsavedClearAll"
-                text: dialog.confirmClear ? "한 번 더 누르면 비웁니다" : "목록 비우기"
+                objectName: dialog.excludedView ? "unsavedReleaseAll" : "unsavedClearAll"
+                text: dialog.excludedView
+                    ? (dialog.confirmClear ? "한 번 더 누르면 제외를 해제합니다" : "모두 제외 해제")
+                    : (dialog.confirmClear ? "한 번 더 누르면 비웁니다" : "목록 비우기")
                 onClicked: {
                     if (dialog.confirmClear) {
                         dialog.confirmClear = false
                         confirmTimer.stop()
-                        dialog.records.dismissAll()
+                        if (dialog.excludedView)
+                            dialog.records.releaseAll()
+                        else
+                            dialog.records.dismissAll()
                     } else {
                         dialog.confirmClear = true
                         confirmTimer.restart()
@@ -286,10 +291,12 @@ Dialog {
                                 onClicked: dialog.records.openSource(card.modelData.token)
                             }
                             FlatButton {
-                                objectName: "unsavedDismiss"
+                                objectName: dialog.excludedView ? "unsavedRelease" : "unsavedDismiss"
                                 implicitHeight: 30
-                                text: "목록에서 지우기"
-                                onClicked: dialog.records.dismiss(card.modelData.token)
+                                text: dialog.excludedView ? "제외 해제" : "목록에서 지우기"
+                                onClicked: dialog.excludedView
+                                    ? dialog.records.release(card.modelData.token)
+                                    : dialog.records.dismiss(card.modelData.token)
                             }
                         }
                     }

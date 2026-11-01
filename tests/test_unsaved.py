@@ -70,6 +70,17 @@ class UnsavedLedgerTests(unittest.TestCase):
                 self.record([item(str(100 + number))])
         self.assertEqual(sorted(row['tweet_id'] for row in self.rows()), ['102', '103', '104'])
 
+    def test_the_cap_is_per_account_and_folder_and_does_not_drop_exclusions(self):
+        other = self.temp.name + '-other'
+        with patch('luvbox.unsaved.MAX_ITEMS', 2):
+            self.record([item('100', reason=unsaved.EXCLUDED), item('101', reason=unsaved.EXCLUDED)])
+            for tweet in ('200', '201', '202'):
+                unsaved.record([item(tweet)], account='bob', output_dir=other)
+            self.record([item('300'), item('301')])
+        self.assertEqual(sorted(row['tweet_id'] for row in self.rows()), ['300', '301'])
+        self.assertEqual(sorted(row['tweet_id'] for row in self.rows((unsaved.EXCLUDED,))), ['100', '101'])
+        self.assertEqual(sorted(row['tweet_id'] for row in unsaved.page('bob', other)['rows']), ['201', '202'])
+
     def test_invalid_items_are_ignored_and_text_is_bounded(self):
         self.record([item('not-a-number'), item(media_type='audio'), item(num=0), item(reason='other'),
                      item('500', detail='x' * 1000, author='bad name!')])

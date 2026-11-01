@@ -1774,11 +1774,24 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         if guard.failure:
             exit_code = 1
         check_stop()
+        found_nothing = (not saved and not skipped and not size_skipped and not review_skipped
+                         and not review_never and not ignored_encountered)
+        # A file was selected and the transfer failed. That is not an empty Like list,
+        # whether or not the downloader also reported a non-zero status.
+        every_download_failed = bool(failed) and found_nothing
+        failed_download_message = (f"미디어를 찾았지만 {failed:,}개를 저장하지 못했습니다. "
+                                   "연결이 끊겼거나 파일을 쓰지 못했을 수 있습니다.")
         if stop_reason == "user":
             status, exit_code = "stopped", 0
             message = "저장을 중단했습니다. 다시 실행하면 저장한 파일은 건너뜁니다."
         elif exit_code:
             message = guard.failure or handler.last_error or "미디어를 모두 저장하지 못했습니다. 로그인과 저장 폴더를 확인한 뒤 다시 실행해 주세요."
+            # Keep a more specific login or limit message. Replace only the generic
+            # download failure, which otherwise reads like a partial save.
+            if every_download_failed and message in {
+                    "일부 파일을 저장하지 못했습니다. 연결과 저장 폴더를 확인한 뒤 다시 실행해 주세요.",
+                    "미디어를 모두 저장하지 못했습니다. 로그인과 저장 폴더를 확인한 뒤 다시 실행해 주세요."}:
+                message = failed_download_message
             error_kind = ("authentication" if auth_response_rejected else "") if guard.failure else handler.error_kind
         elif targets:
             status = "finished"
@@ -1788,7 +1801,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             status = "finished"
             message = (f"새 Like 확인을 마쳤습니다. {saved:,}개를 저장했고, 이미 저장한 파일이 "
                        f"{QUICK_STOP_AFTER}개 이어져 멈췄습니다.")
-        elif not saved and not skipped and not size_skipped and not review_skipped and not review_never and not ignored_encountered:
+        elif every_download_failed:
+            exit_code = 1
+            message = failed_download_message
+        elif found_nothing:
             exit_code = 1
             message = ("저장할 미디어를 찾지 못했습니다. 본인 계정으로 로그인했는지, "
                        "좋아요에 사진·영상이 있는지 확인해 주세요.")

@@ -74,7 +74,15 @@ class UnsavedRecordingTests(unittest.TestCase):
         self.assertEqual((row["reason"], row["tweet_id"], row["num"], row["media_type"], row["author"], row["attempts"]),
                          ("failed", "100", 1, "photo", "alice", 1))
         self.assertIn("받지 못했습니다", row["detail"])
+        self.assertIn("미디어를 찾았지만 1개를 저장하지 못했습니다", events[-1]["message"])
+        self.assertNotIn("저장할 미디어를 찾지 못했습니다", events[-1]["message"])
         self.assertIn("저장하지 못한 미디어 1개", events[-1]["message"])
+
+    def test_an_empty_like_list_is_not_called_a_failed_download(self):
+        code, events = self.run_with(QuietFailure, [])
+        self.assertIn("저장할 미디어를 찾지 못했습니다", events[-1]["message"])
+        self.assertNotIn("미디어를 찾았지만", events[-1]["message"])
+        self.assertEqual(events[-1]["failed_media"], 0)
 
     def test_repeating_a_failure_keeps_one_row_and_saving_it_later_clears_it(self):
         self.use_ledger()

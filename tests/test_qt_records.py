@@ -8,6 +8,7 @@ from unittest.mock import patch
 from tests import app_data_isolation  # Never open the user's app data.
 from PySide6.QtCore import QCoreApplication
 from luvbox import activity, unsaved
+from luvbox.history import HistoryStore
 from luvbox.qt_records import RecordsController
 from luvbox.storage import resolve_storage
 
@@ -61,6 +62,17 @@ class RecordsControllerTests(unittest.TestCase):
         return {'tweet_id': tweet, 'num': num, 'media_type': media_type, 'reason': reason, 'author': 'carol',
                 'posted_at': '2026-10-02T09:30:00+09:00', 'detail': '이유', **fields}
 
+    def exclude(self, tweet='300', num=1, media_type='animated_gif'):
+        """The catalog choice the excluded screen reads, independent of the ledger."""
+        paths = resolve_storage(self.output, 'alice')
+        store = HistoryStore.for_storage(paths)
+        try:
+            store.record_declined('flat', {'tweet_id': str(tweet), 'num': num, 'type': media_type,
+                                           'author': {'name': 'dave'}},
+                                  paths.media_dir / f'{tweet}_{num}.gif')
+        finally:
+            store.close()
+
     def open_unsaved(self, view='unsaved'):
         self.records.setLibrary('alice', str(self.output), False)
         self.records.setActive('unsaved', True)
@@ -72,8 +84,9 @@ class RecordsControllerTests(unittest.TestCase):
                   self.item('200', unsaved.SIZE, 1, 'video', width=1280, height=720, duration=133,
                             size_bytes=340 * MIB, limit_mb=200),
                   self.item('300', unsaved.EXCLUDED)])
+        self.exclude('300')
         self.open_unsaved()
-        self.wait(lambda: self.records.unsavedCount == 2)
+        self.wait(lambda: self.records.unsavedCount == 2 and self.records.excludedCount == 1)
         self.assertEqual((self.records.unsavedCount, self.records.excludedCount, self.records.unsavedTotal), (2, 1, 2))
         rows = {row['reasonLabel']: row for row in self.records.unsavedRows}
         self.assertEqual(set(rows), {'저장 실패', '용량 제한'})
@@ -114,7 +127,9 @@ class RecordsControllerTests(unittest.TestCase):
 
     def test_dismissing_forgets_the_row_without_touching_other_lists(self):
         self.add([self.item('100'), self.item('200'), self.item('300', unsaved.EXCLUDED)])
+        self.exclude('300')
         self.open_unsaved()
+        self.wait(lambda: self.records.excludedCount == 1)
         self.records.dismiss(self.records.unsavedRows[0]['token'])
         self.wait(lambda: self.records.unsavedTotal == 1 and not self.records.unsavedBusy)
         self.assertEqual((self.records.unsavedCount, self.records.excludedCount), (1, 1))
@@ -122,6 +137,9 @@ class RecordsControllerTests(unittest.TestCase):
         self.records.dismissAll()
         self.wait(lambda: self.records.unsavedTotal == 0 and not self.records.unsavedBusy)
         self.assertEqual(self.records.excludedCount, 1)
+        self.records.setUnsavedView('excluded')
+        self.wait(lambda: self.records.unsavedTotal == 1 and not self.records.unsavedBusy)
+        self.assertIn('저장 안 함', self.records.unsavedRows[0]['detail'])
 
     def test_changing_account_or_folder_drops_the_old_list(self):
         self.add([self.item('100')])
