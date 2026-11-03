@@ -336,6 +336,8 @@ Item {
         visible: preview.mediaType === "video" && preview.videoSource && preview.ready && player.hasAudio
         text: preview.muted ? "소리 켜기" : "소리 끄기"
         Accessible.name: text
+        ToolTip.visible: hovered
+        ToolTip.text: preview.muted ? "소리 켜기 (M)" : "소리 끄기 (M)"
         onClicked: preview.muted = !preview.muted
     }
 }

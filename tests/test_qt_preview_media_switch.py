@@ -294,6 +294,16 @@ def check_scene(screenshots=None):
                 verify(4, before, f"reopen {cycle}")
             report["checks"].append("open-close-cycles-release-the-file")
 
+            # Shortcut 'm' toggles video mute
+            show(1, "select")
+            assert media.property("muted") is True
+            QTest.keyClick(window, Qt.Key.Key_M)
+            settle(.05)
+            assert media.property("muted") is False, "M key un-mutes video"
+            QTest.keyClick(window, Qt.Key.Key_M)
+            settle(.05)
+            assert media.property("muted") is True, "M key re-mutes video" 
+
             # Resizing keeps every kind in proportion.
             for index in (3, 6, 1, 7):
                 show(index, "select")

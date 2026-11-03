@@ -739,6 +739,7 @@ ApplicationWindow {
                         Accessible.name: "사진 검색"
                         Layout.fillWidth: true
                         selectByMouse: true
+                        rightPadding: clearSearchButton.visible ? 36 : 14
                         onTextEdited: {
                             window.stopWheel()
                             searchDelay.restart()
@@ -750,6 +751,55 @@ ApplicationWindow {
                                 window.app.library.search(text)
                             else
                                 window.galleryModel.search(text)
+                        }
+                        Keys.onEscapePressed: event => {
+                            if (text.length > 0) {
+                                text = ""
+                                window.stopWheel()
+                                searchDelay.stop()
+                                if (window.app)
+                                    window.app.library.search("")
+                                else
+                                    window.galleryModel.search("")
+                                event.accepted = true
+                            } else {
+                                focus = false
+                            }
+                        }
+                        ToolButton {
+                            id: clearSearchButton
+                            objectName: "searchClearButton"
+                            anchors.right: parent.right
+                            anchors.rightMargin: 6
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 24
+                            height: 24
+                            visible: search.text.length > 0
+                            focusPolicy: Qt.NoFocus
+                            Accessible.name: "검색어 지우기"
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                            contentItem: Text {
+                                text: "×"
+                                font.pixelSize: 16
+                                font.bold: true
+                                color: clearSearchButton.hovered ? "#ffffff" : "#b9afb1"
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            background: Rectangle {
+                                radius: 12
+                                color: clearSearchButton.hovered ? "#333333" : "transparent"
+                            }
+                            onClicked: {
+                                search.text = ""
+                                window.stopWheel()
+                                searchDelay.stop()
+                                if (window.app)
+                                    window.app.library.search("")
+                                else
+                                    window.galleryModel.search("")
+                                search.forceActiveFocus()
+                            }
                         }
                     }
                     FlatCombo {
@@ -1462,6 +1512,18 @@ ApplicationWindow {
             sequence: "1"
             enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canActualSize
             onActivated: selectedMedia.actualSize()
+        }
+        Shortcut {
+            sequence: "m"
+            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.mediaType === "video"
+                && selectedMedia.videoSource && selectedMedia.ready
+            onActivated: selectedMedia.muted = !selectedMedia.muted
+        }
+        Shortcut {
+            sequence: "Shift+M"
+            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.mediaType === "video"
+                && selectedMedia.videoSource && selectedMedia.ready
+            onActivated: selectedMedia.muted = !selectedMedia.muted
         }
         onAboutToShow: {
             detailsVisible = false

@@ -279,6 +279,27 @@ def scene():
                 assert authors_queries == [], authors_queries
             assert controller.library.selectedCount == 0
             assert controller.library.filterSummary == ""
+        # Search field clear button and Escape key
+        search_field = find("searchBox")
+        search_field.setProperty("text", "alice")
+        settle()
+        wait(lambda: find("searchClearButton").property("visible"), "clear button visible")
+        click("searchClearButton")
+        settle()
+        wait(lambda: search_field.property("text") == "", "clear button empties search field")
+        wait(lambda: not find("searchClearButton").property("visible"), "clear button hidden")
+        search_field.setProperty("text", "bob")
+        invoke(search_field, "forceActiveFocus")
+        settle()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        settle()
+        wait(lambda: search_field.property("text") == "", "Escape empties search field")
+        invoke(search_field, "forceActiveFocus")
+        settle()
+        assert search_field.property("activeFocus")
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        settle()
+        assert not search_field.property("activeFocus"), "Escape on empty search removes focus" 
         # Choosing files is screen state: it stays available while a save runs, by button,
         # Ctrl+click and Space alike. Only the move to the Recycle Bin waits for the save.
         window.setWidth(1080)
