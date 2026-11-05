@@ -140,15 +140,9 @@ class RecordsController(QObject):
         if self._unsaved_view == "excluded":
             return self._counts[unsaved.EXCLUDED]
         visible = sum(1 for row in self._unsaved_tokens.values() if self._can_retry(row))
-        if self._unsaved_pages <= 1:
+        if (self._unsaved_pages <= 1 or self._retryable_total is None
+                or self._retryable_limit != self._limit_mb):
             return visible
-        if self._retryable_total is None or self._retryable_limit != self._limit_mb:
-            account, output_dir, _separate = self._context
-            try:
-                self._retryable_total = unsaved.retryable_count(account, output_dir, self._limit_mb)
-                self._retryable_limit = self._limit_mb
-            except Exception:
-                return visible
         return self._retryable_total
 
     # -- context -------------------------------------------------------------------------
@@ -176,6 +170,8 @@ class RecordsController(QObject):
             self._limit_mb = megabytes
             self._retryable_total = None
             self._rebuild_unsaved()
+            if self._unsaved_pages > 1:
+                self.loadUnsaved(self._unsaved_page)
             self.changed.emit()
 
     @Slot(str, bool)
@@ -237,7 +233,9 @@ class RecordsController(QObject):
         self._unsaved_serial += 1
         self._unsaved_busy = True
         self._unsaved_error = ""
-        self._enqueue("unsaved", (self._unsaved_view, max(0, int(page)), self._unsaved_serial), replace=True)
+        self._retryable_total = None
+        self._enqueue("unsaved", (self._unsaved_view, max(0, int(page)), self._unsaved_serial,
+                                  self._limit_mb), replace=True)
         self.changed.emit()
 
     @Slot(str)
@@ -358,13 +356,16 @@ class RecordsController(QObject):
                             paths = None
                     result = dict(run_page(paths, page), serial=serial)
                 elif kind == "unsaved":
-                    view, page, serial = payload
+                    view, page, serial, limit_mb = payload
                     if view == "excluded":
                         result = dict(self._excluded_page(account, output_dir, separate, page),
                                       serial=serial, view=view)
                     else:
                         result = dict(unsaved.page(account, output_dir, _KINDS[view], page, _UNSAVED_PAGE),
                                       serial=serial, view=view)
+                        if result.get("pages", 0) > 1:
+                            result.update(retryable_total=unsaved.retryable_count(account, output_dir, limit_mb),
+                                          retryable_limit=limit_mb)
                     self._attach_previews(account, result)
                 elif kind == "counts":
                     result = unsaved.counts(account, output_dir) if account else {}
@@ -385,6 +386,12 @@ class RecordsController(QObject):
                 result, error = {}, ("목록을 읽지 못했습니다. 앱 데이터 폴더의 권한을 확인해 주세요."
                                      if kind in {"runs", "unsaved", "counts"} else
                                      "저장하지 못한 미디어 목록을 갱신하지 못했습니다.")
+            # Errors belong to the request too. An older failed read must not
+            # clear the busy state or replace an error for a newer page/view.
+            if kind == "runs":
+                result["serial"] = payload[1]
+            elif kind == "unsaved":
+                result["serial"] = payload[2]
             self._delivered.emit((kind, generation, result, error))
 
     def _storage(self, account, output_dir, separate):
@@ -495,6 +502,8 @@ class RecordsController(QObject):
                 self._rebuild_unsaved()
                 self._unsaved_total, self._unsaved_page, self._unsaved_pages = (
                     result.get("total", 0), result.get("page", 0), result.get("pages", 0))
+                self._retryable_total = result.get("retryable_total")
+                self._retryable_limit = result.get("retryable_limit")
         elif kind == "counts":
             if error:
                 self._unsaved_error = error

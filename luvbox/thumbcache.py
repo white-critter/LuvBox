@@ -39,6 +39,11 @@ _CLOUD_ATTRIBUTES = 0x1000 | 0x40000 | 0x400000
 _PRUNE_EVERY = 200
 _RECORDER_PENDING = 32
 _RECORDER_RETRY_SECONDS = 1.0
+# Encoded 150x112 previews are small. Reject malformed SQLite values before
+# fetching them: bytes(integer) would allocate that many zero bytes, and a
+# damaged BLOB should not be copied into memory just to inspect its header.
+_MAX_IMAGE_BYTES = 256 * 1024
+_VALID_IMAGE = "typeof(image)='blob' AND length(image) BETWEEN 1 AND ?"
 
 # Identities already stored, per cache file: the gallery need not ask again.
 # Bound the set so a long session does not retain every identity it has seen.
@@ -196,19 +201,19 @@ class Cache:
         if self._db is None:
             return set()
         found = {key for key in identities if self._db.execute(
-            "SELECT 1 FROM previews WHERE tweet_id=? AND num=? AND media_type=?", key).fetchone()}
+            "SELECT 1 FROM previews WHERE tweet_id=? AND num=? AND media_type=? AND " + _VALID_IMAGE,
+            (*key, _MAX_IMAGE_BYTES)).fetchone()}
         _note(self.path, found)
         return found
 
     def get(self, key) -> bytes | None:
         if self._db is None:
             return None
-        row = self._db.execute("SELECT image FROM previews WHERE tweet_id=? AND num=? AND media_type=?",
-                               identity(*key)).fetchone()
+        row = self._db.execute("SELECT image FROM previews WHERE tweet_id=? AND num=? AND media_type=? AND "
+                               + _VALID_IMAGE, (*identity(*key), _MAX_IMAGE_BYTES)).fetchone()
         if not row:
             return None
-        blob = row[0]
-        return blob if isinstance(blob, bytes) else bytes(blob)
+        return row[0]
 
     def put(self, key, image) -> None:
         if self._db is None:

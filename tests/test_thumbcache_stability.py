@@ -4,6 +4,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tracemalloc
 import tempfile
 import unittest
 from contextlib import closing
@@ -158,6 +159,26 @@ image.close()
             with self.assertRaises(sqlite3.OperationalError) as raised:
                 cache.put(("101", 1, "photo"), self.image)
         self.assertIn("readonly", str(raised.exception).lower())
+
+    def test_invalid_cache_values_are_not_materialized_or_marked_stored(self):
+        with closing(thumbcache.Cache("offline")) as cache:
+            for expression in ("8388608", "zeroblob(8388608)", "'not an image'", "X''"):
+                with self.subTest(expression=expression):
+                    with cache._db:
+                        cache._db.execute(
+                            "INSERT OR REPLACE INTO previews VALUES ('100',1,'photo'," + expression + ",'now')")
+                    tracemalloc.start()
+                    try:
+                        data = cache.get(self.key)
+                        _, peak = tracemalloc.get_traced_memory()
+                    finally:
+                        tracemalloc.stop()
+                    self.assertTrue(data is None, "invalid cache value must be rejected")
+                    self.assertLess(peak, 1024 * 1024)
+                    self.assertEqual(cache.stored([self.key]), set())
+            cache.put(self.key, self.image)
+            self.assertEqual(cache.stored([self.key]), {self.key})
+            self.assertIsNotNone(thumbcache.decode(cache.get(self.key)))
         self.assertIsNone(thumbcache.recall("offline", ("101", 1, "photo")))
 
     def test_failed_recorder_batch_is_bounded_and_releases_every_owned_image(self):

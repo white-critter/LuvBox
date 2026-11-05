@@ -2,6 +2,7 @@
 from pathlib import Path
 import tempfile
 import time
+from threading import Event, get_ident
 import unittest
 from unittest.mock import patch
 
@@ -137,6 +138,81 @@ class RecordsControllerTests(unittest.TestCase):
         self.records.retryAll()
         self.wait(lambda: bool(self.retries))
         self.assertEqual(self.retries[0], ('4000_1',))
+
+    def test_retry_count_is_read_off_the_ui_thread_and_refreshes_after_removal(self):
+        self.add([self.item('4000')] + [
+            self.item(str(3000 + number), unsaved.SIZE, 1, 'video', limit_mb=200) for number in range(51)])
+        self.records.setVideoLimit(200)
+        calls = []
+        original = unsaved.retryable_count
+
+        def read_count(*args):
+            calls.append(get_ident())
+            return original(*args)
+
+        with patch.object(unsaved, 'retryable_count', side_effect=read_count):
+            self.open_unsaved()
+            self.assertEqual(self.records.retryableCount, 1)
+            self.assertTrue(calls)
+            self.assertNotIn(get_ident(), calls)
+            unsaved.remove('alice', str(self.output), [('4000', 1, 'photo')])
+            self.records.refresh()
+            self.wait(lambda: not self.records.unsavedBusy)
+            self.assertEqual(self.records.unsavedPages, 2)
+            self.assertEqual(self.records.retryableCount, 0)
+
+    def test_slow_retry_count_cannot_restore_an_old_video_limit(self):
+        self.add([self.item(str(3000 + number), unsaved.SIZE, 1, 'video', limit_mb=200)
+                  for number in range(51)])
+        self.records.setVideoLimit(200)
+        self.open_unsaved()
+        entered, release = Event(), Event()
+        original = unsaved.retryable_count
+
+        def slow_count(account, output_dir, limit):
+            if limit == 500:
+                entered.set()
+                if not release.wait(5):
+                    raise RuntimeError('count was never released')
+            return original(account, output_dir, limit)
+
+        with patch.object(unsaved, 'retryable_count', side_effect=slow_count):
+            try:
+                self.records.setVideoLimit(500)
+                self.assertTrue(entered.wait(2))
+                self.records.setVideoLimit(200)
+            finally:
+                release.set()
+            self.wait(lambda: not self.records.unsavedBusy)
+            self.assertEqual(self.records.retryableCount, 0)
+            self.assertTrue(all(not row['canRetry'] for row in self.records.unsavedRows))
+
+    def test_old_failed_page_does_not_end_a_new_page_request(self):
+        entered, release = Event(), Event()
+        original = unsaved.page
+
+        def slow_page(*args):
+            if not entered.is_set():
+                entered.set()
+                release.wait(5)
+                raise OSError('old page failed')
+            return original(*args)
+
+        delivered = []
+        self.records._delivered.connect(delivered.append)
+        with patch.object(unsaved, 'page', side_effect=slow_page):
+            try:
+                self.records.setLibrary('alice', str(self.output), False)
+                self.records.loadUnsaved(0)
+                self.assertTrue(entered.wait(2))
+                old_serial = self.records._unsaved_serial
+                self.records.loadUnsaved(1)
+            finally:
+                release.set()
+            self.wait(lambda: not self.records.unsavedBusy)
+        failure = next(event for event in delivered if event[0] == 'unsaved' and event[3])
+        self.assertEqual(failure[2]['serial'], old_serial)
+        self.assertEqual(self.records.unsavedError, '')
 
     def test_dismissing_forgets_the_row_without_touching_other_lists(self):
         self.add([self.item('100'), self.item('200'), self.item('300', unsaved.EXCLUDED)])
