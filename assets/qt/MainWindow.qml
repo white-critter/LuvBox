@@ -847,7 +847,18 @@ ApplicationWindow {
                             laidHeight = next
                     }
                     onWidthChanged: layout()
-                    Component.onCompleted: Qt.callLater(layout)
+                    Component.onCompleted: {
+                        // The count grows with the library, and the spinner
+                        // appears only while a page is loading. Both change
+                        // after the first layout; without this they stay at
+                        // the origin and cover the count.
+                        for (let index = 0; index < children.length; index++) {
+                            const child = children[index]
+                            child.visibleChanged.connect(function() { Qt.callLater(layout) })
+                            child.widthChanged.connect(function() { Qt.callLater(layout) })
+                        }
+                        Qt.callLater(layout)
+                    }
                     Label {
                         objectName: "galleryCount"
                         width: implicitWidth
@@ -857,6 +868,7 @@ ApplicationWindow {
                         color: window.mutedColor
                     }
                     Item {
+                        objectName: "galleryBusy"
                         width: 24
                         height: 40
                         visible: window.galleryModel.busy
@@ -897,7 +909,6 @@ ApplicationWindow {
                         width: implicitWidth
                         text: window.app && window.app.galleryChanged ? "새 사진 보기" : "새로고침"
                         onClicked: window.app.refreshGallery()
-                        onWidthChanged: Qt.callLater(toolHost.layout)
                     }
                     FlatButton {
                         text: "미리보기"
@@ -905,7 +916,6 @@ ApplicationWindow {
                         width: implicitWidth
                         visible: gallery.currentIndex >= 0
                         onClicked: previewDialog.open()
-                        onVisibleChanged: Qt.callLater(toolHost.layout)
                     }
                     FlatButton {
                         id: selectionToggle
@@ -915,8 +925,6 @@ ApplicationWindow {
                         text: window.app && window.app.library.selectionMode ? "선택 끝내기" : "여러 개 선택"
                         enabled: !!window.app
                         onClicked: window.app.library.setSelectionMode(!window.app.library.selectionMode)
-                        onVisibleChanged: Qt.callLater(toolHost.layout)
-                        onWidthChanged: Qt.callLater(toolHost.layout)
                     }
                 }
 
@@ -974,8 +982,12 @@ ApplicationWindow {
                         textRole: "label"
                         valueRole: "value"
                         readonly property string applied: window.app ? window.app.library.filterAuthor : ""
-                        readonly property var authorRows: window.app && window.app.library.authors
-                            ? window.app.library.authors : []
+                        readonly property var authorRows: {
+                            if (!window.app)
+                                return []
+                            const rows = window.app.library.authors
+                            return rows ? rows : []
+                        }
                         // "미디어 N개" is the author's number of saved photos, videos and GIFs
                         // in the library, whatever filters are active.
                         model: {
@@ -1281,7 +1293,10 @@ ApplicationWindow {
                         required property bool thumbReady
                         required property bool thumbMissing
                         property bool activeTile: true
-                        readonly property bool batchSelected: window.app && window.app.library.selectedKeys.indexOf(tile.key) >= 0
+                        readonly property bool batchSelected: {
+                            const revision = window.app ? window.app.library.selectionRevision : -1
+                            return revision >= 0 && window.app.library.isSelected(tile.key)
+                        }
                         readonly property bool imageReady: photo.status === Image.Ready
                         readonly property bool imageMissing: !tile.imageReady
                             && (tile.thumbMissing || photo.status === Image.Error)
@@ -1749,6 +1764,25 @@ ApplicationWindow {
             window.applyFilters(start ? { from: iso } : { to: iso })
         }
 
+        function focusDay(day) {
+            if (day < 1 || day > daysInMonth)
+                return false
+            const pending = [contentItem]
+            while (pending.length) {
+                const item = pending.pop()
+                if (!item)
+                    continue
+                if (item.objectName === "datePickerDay_" + day) {
+                    item.forceActiveFocus()
+                    return true
+                }
+                const nested = item.children || []
+                for (let index = 0; index < nested.length; index++)
+                    pending.push(nested[index])
+            }
+            return false
+        }
+
         function openFor(field) {
             window.stopWheel()
             targetField = field
@@ -1872,8 +1906,33 @@ ApplicationWindow {
                         Layout.preferredWidth: 34
                         Layout.preferredHeight: 30
                         radius: 6
-                        border.width: !selectedDay && isToday ? 1 : 0
-                        border.color: "#7a7274"
+                        activeFocusOnTab: validDay
+                        Accessible.role: Accessible.Button
+                        Accessible.name: validDay
+                            ? datePickerPopup.viewYear + "년 " + (datePickerPopup.viewMonth + 1) + "월 " + dayNumber + "일"
+                            : ""
+                        border.width: activeFocus ? 2 : (!selectedDay && isToday ? 1 : 0)
+                        border.color: activeFocus ? "#ff8791" : "#7a7274"
+                        Keys.onPressed: event => {
+                            if (!validDay)
+                                return
+                            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
+                                datePickerPopup.choose(isoDate)
+                                event.accepted = true
+                            } else if (event.key === Qt.Key_Left) {
+                                datePickerPopup.focusDay(dayNumber - 1)
+                                event.accepted = true
+                            } else if (event.key === Qt.Key_Right) {
+                                datePickerPopup.focusDay(dayNumber + 1)
+                                event.accepted = true
+                            } else if (event.key === Qt.Key_Up) {
+                                datePickerPopup.focusDay(dayNumber - 7)
+                                event.accepted = true
+                            } else if (event.key === Qt.Key_Down) {
+                                datePickerPopup.focusDay(dayNumber + 7)
+                                event.accepted = true
+                            }
+                        }
                         color: !validDay ? "transparent"
                             : (selectedDay ? window.accentColor : (dayMouse.containsMouse ? "#2c2c2c" : "transparent"))
                         Label {

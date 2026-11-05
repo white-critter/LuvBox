@@ -11,7 +11,7 @@ import zlib
 from PIL import Image, WebPImagePlugin, features
 
 from luvbox import preview
-from luvbox.preview import thumbnail
+from luvbox.preview import gif_screen_size, thumbnail
 
 
 class ImageSecurityTests(unittest.TestCase):
@@ -95,6 +95,26 @@ class ImageSecurityTests(unittest.TestCase):
             self.assertIsNone(result.image)
             self.assertEqual(path.read_bytes(), image)
             self.assertTrue(all(width * height <= 1_000_000 for width, height in allocations))
+
+    def test_gif_screen_size_reads_the_header_without_decoding_pixels(self):
+        header = b"GIF89a" + struct.pack("<HH", 8000, 2000) + bytes(3)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "wide.gif"
+            path.write_bytes(header)
+            before = path.read_bytes()
+            with patch.object(Image, "open", side_effect=AssertionError("decoded pixels")):
+                self.assertEqual(gif_screen_size(path), (8000, 2000))
+                self.assertEqual(gif_screen_size(Path(folder) / "wide.png"), (0, 0))
+            path.write_bytes(b"GIF89a\x00")
+            self.assertEqual(gif_screen_size(path), (0, 0))
+            path.write_bytes(b"not-a-gif-file")
+            self.assertEqual(gif_screen_size(path), (0, 0))
+            with Image.new("RGB", (30, 10), "red") as image:
+                image.save(path, "GIF")
+            saved = path.read_bytes()
+            self.assertEqual(gif_screen_size(path), (30, 10))
+            self.assertEqual(path.read_bytes(), saved)
+            self.assertEqual(before[:6], b"GIF89a")
 
 
 if __name__ == "__main__":

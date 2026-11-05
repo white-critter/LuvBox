@@ -80,6 +80,21 @@ class RecordsControllerTests(unittest.TestCase):
         self.records.setUnsavedView(view)
         self.wait(lambda: not self.records.unsavedBusy)
 
+    def test_a_count_refresh_does_not_replace_the_loaded_page(self):
+        self.add([self.item('100')])
+        self.open_unsaved()
+        self.wait(lambda: self.records.unsavedCount == 1 and self.records.unsavedRows)
+        page = self.records.unsavedRows
+        updates = []
+        self.records.unsavedRowsChanged.connect(lambda: updates.append(1))
+        self.records.setActive('unsaved', False)
+        self.add([self.item('101')])
+        self.records.refresh()
+        self.wait(lambda: self.records.unsavedCount == 2)
+        self.app.processEvents()
+        self.assertEqual(updates, [])
+        self.assertIs(self.records.unsavedRows, page)
+
     def test_unsaved_rows_describe_each_media_and_count_what_needs_attention(self):
         self.add([self.item('100'),
                   self.item('200', unsaved.SIZE, 1, 'video', width=1280, height=720, duration=133,

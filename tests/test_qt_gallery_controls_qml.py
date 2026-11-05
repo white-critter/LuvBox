@@ -137,11 +137,44 @@ def scene():
         window.setProperty("currentScreen", 1)
         wait(lambda: not controller.library.model.busy and controller.library.model.total == 5
              and len(controller.library.authors) == 3, "initial gallery")
+        def toolbar_separated(label):
+            QTest.qWait(30)
+            settle()
+            bar = find("galleryToolBar")
+            kids = [child for child in bar.childItems()
+                    if child.property("visible") and child.property("width") >= 1 and child.property("height") >= 1]
+            rects = []
+            for child in kids:
+                origin = child.mapToScene(QPointF(0, 0))
+                rect = (origin.x(), origin.y(), child.property("width"), child.property("height"))
+                assert rect[0] >= 8 and rect[0] + rect[2] <= width - 8, (label, rect, width)
+                rects.append((child.objectName(), rect))
+            for index, (left_name, left) in enumerate(rects):
+                for right_name, right in rects[index + 1:]:
+                    apart = (left[0] + left[2] <= right[0] + 0.5 or right[0] + right[2] <= left[0] + 0.5
+                             or left[1] + left[3] <= right[1] + 0.5 or right[1] + right[3] <= left[1] + 0.5)
+                    assert apart, (label, left_name, left, right_name, right)
+            assert len(rects) >= 4, (label, [name for name, _rect in rects])
+
         for width, height in ((680, 480), (1080, 760)):
             window.setWidth(width)
             window.setHeight(height)
             settle()
             QTest.qWait(40)
+            model = controller.library.model
+            count = find("galleryCount")
+            narrow = count.property("width")
+            model._total = 1234567
+            model._busy = True
+            model.changed.emit()
+            wait(lambda: find("galleryBusy").property("visible") and count.property("width") > narrow + 20,
+                 "toolbar count grew while loading")
+            toolbar_separated(f"busy {width}")
+            model._busy = False
+            model._total = 5
+            model.changed.emit()
+            wait(lambda: not find("galleryBusy").property("visible") and model.total == 5, "toolbar idle")
+            toolbar_separated(f"idle {width}")
             if not find("galleryFilterToggle").property("checked"):
                 click("galleryFilterToggle")
             author_combo = find("galleryAuthorFilter")
@@ -212,6 +245,23 @@ def scene():
             QTest.keyClick(window, Qt.Key.Key_Backspace)
             wait(lambda: controller.library.dateFrom == "" and not controller.library.model.busy, "start date cleared")
             assert date_from.property("text") == ""
+            if width == 1080:
+                invoke(date_from, "forceActiveFocus")
+                settle()
+                QTest.keyClick(window, Qt.Key.Key_Space)
+                wait(lambda: picker.property("visible"), "date picker for a keyboard day")
+                show_october()
+                invoke(find("datePickerDay_1"), "forceActiveFocus")
+                settle()
+                QTest.keyClick(window, Qt.Key.Key_Right)
+                QTest.keyClick(window, Qt.Key.Key_Return)
+                wait(lambda: not picker.property("visible") and controller.library.dateFrom == "2026-10-02"
+                     and not controller.library.model.busy, "keyboard chose the next day")
+                invoke(date_from, "forceActiveFocus")
+                settle()
+                QTest.keyClick(window, Qt.Key.Key_Backspace)
+                wait(lambda: controller.library.dateFrom == "" and not controller.library.model.busy,
+                     "keyboard date cleared")
             # Range: 2026-10-01 .. 2026-10-01.
             for field, name in ((date_from, "galleryDateFrom"), (date_to, "galleryDateTo")):
                 click(name)

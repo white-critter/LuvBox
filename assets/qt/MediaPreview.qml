@@ -42,6 +42,15 @@ Item {
         ? Math.min(1, 2048 / Math.max(sourceRawWidth, sourceRawHeight)) : 1
     readonly property int _fitRawWidth: _safeOriginal ? Math.max(1, Math.round(sourceRawWidth * _fitReduction)) : 2048
     readonly property int _fitRawHeight: _safeOriginal ? Math.max(1, Math.round(sourceRawHeight * _fitReduction)) : 2048
+    // AnimatedImage treats sourceSize as the exact frame size, so a fixed
+    // square stretches every GIF. Ordinary files stay at their own size.
+    // Only a logical screen larger than the still-photo fit cap is reduced,
+    // and the long edge stays in proportion.
+    readonly property int _gifCap: 2048
+    readonly property bool gifBounded: gifSource && sourceRawWidth > 0 && sourceRawHeight > 0
+        && (sourceRawWidth > _gifCap || sourceRawHeight > _gifCap)
+    readonly property real gifBoundScale: gifBounded
+        ? _gifCap / Math.max(sourceRawWidth, sourceRawHeight) : 1
     readonly property int _decodeWidth: _originalResolution && _safeOriginal ? sourceRawWidth : _fitRawWidth
     readonly property int _decodeHeight: _originalResolution && _safeOriginal ? sourceRawHeight : _fitRawHeight
     readonly property real _nativeZoom: _fitPixelScale > 0 ? 1 / _fitPixelScale : 1
@@ -181,8 +190,12 @@ Item {
             visible: preview.gifSource && !preview.videoSource
             source: visible ? preview.activeSource : ""
             asynchronous: true
-            // No sourceSize: AnimatedImage scales to the exact size it is given,
-            // so a fixed square stretched every non-square GIF out of proportion.
+            // Qt.size(-1, -1) is an invalid request and keeps the file's own
+            // frame size. A real sourceSize is only the reduced logical screen.
+            sourceSize: preview.gifBounded
+                ? Qt.size(Math.max(1, Math.round(preview.sourceRawWidth * preview.gifBoundScale)),
+                          Math.max(1, Math.round(preview.sourceRawHeight * preview.gifBoundScale)))
+                : Qt.size(-1, -1)
             cache: false
             playing: preview.playing && !preview._released
             fillMode: Image.PreserveAspectFit

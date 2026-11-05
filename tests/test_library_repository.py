@@ -80,6 +80,22 @@ class LibraryRepositoryTests(unittest.TestCase):
         selected = self.repository.selected(key, 1)
         self.assertEqual(selected["public_info"], "artist_200_1.jpg · 2026-10-01 00:30")
 
+    def test_gif_selection_reports_the_screen_without_decoding_it(self):
+        import struct
+        path = self.paths.media_dir / "alice_300_1.gif"
+        path.write_bytes(b"GIF89a" + struct.pack("<HH", 4000, 1000) + bytes(3))
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            store.record_media("flat", {"tweet_id": "300", "num": 1, "type": "animated_gif",
+                                        "author": {"name": "alice"}}, path)
+        _total, rows = self.repository.read("1", 0, 100)
+        key = next(row["key"] for row in rows if "_300_" in row["key"])
+        with patch("PIL.Image.open", side_effect=AssertionError("decoded pixels")):
+            selected = self.repository.selected(key, 1)
+        self.assertEqual(path.read_bytes()[6:10], struct.pack("<HH", 4000, 1000))
+        self.assertEqual((selected["source_width"], selected["source_height"]), (4000, 1000))
+        self.assertEqual((selected["pixel_width"], selected["pixel_height"]), (4000, 1000))
+        self.assertFalse(selected["missing"])
+
     def test_a_missing_file_the_person_hid_stays_out_of_the_gallery(self):
         self.files[0].unlink()
         self.files[1].unlink()

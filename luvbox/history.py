@@ -1598,8 +1598,18 @@ class HistoryStore:
 
     @staticmethod
     def _deletion_path_absent(path: str) -> bool:
+        candidate = Path(path)
+        # A disconnected drive is also FileNotFoundError (WinError 3). That is
+        # not evidence the file was removed; the catalog path has to remain so
+        # a later save does not fetch it again.
+        anchor = candidate.anchor
         try:
-            Path(path).lstat()
+            if anchor and not Path(anchor).exists():
+                return False
+        except OSError:
+            return False
+        try:
+            candidate.lstat()
         except FileNotFoundError:
             return True
         except OSError:

@@ -199,6 +199,7 @@ Dialog {
             delegate: Rectangle {
                 id: card
                 required property var modelData
+                required property int index
                 width: list.width - (list.contentHeight > list.height ? 14 : 0)
                 implicitHeight: row.implicitHeight + 24
                 radius: 10
@@ -345,11 +346,13 @@ Dialog {
                                 text: dialog.excludedView ? "다시 받기" : "다시 저장"
                                 enabled: !!dialog.app && dialog.app.canStart && card.modelData.canRetry
                                 onClicked: dialog.records.retry(card.modelData.token)
+                                onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                             }
                             FlatButton {
                                 implicitHeight: 30
                                 text: "원문 보기"
                                 onClicked: dialog.records.openSource(card.modelData.token)
+                                onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                             }
                             FlatButton {
                                 objectName: dialog.excludedView ? "unsavedRelease" : "unsavedDismiss"
@@ -358,6 +361,7 @@ Dialog {
                                 onClicked: dialog.excludedView
                                     ? dialog.records.release(card.modelData.token)
                                     : dialog.records.dismiss(card.modelData.token)
+                                onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                             }
                         }
                     }

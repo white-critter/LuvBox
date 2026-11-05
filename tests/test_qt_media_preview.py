@@ -126,6 +126,23 @@ ApplicationWindow {
             if animation.property("frameCount") != 2:
                 raise AssertionError("The GIF was not loaded as a two-frame animation")
             wait_for(lambda: animation.property("currentFrame") == 1, "GIF advances")
+            native_size = animation.property("sourceSize")
+            if (native_size.width(), native_size.height()) != (48, 32):
+                raise AssertionError(
+                    "A small GIF was not left at its own decode size: "
+                    f"{native_size.width()}x{native_size.height()}")
+            if (animation.property("implicitWidth"), animation.property("implicitHeight")) != (48, 32):
+                raise AssertionError("The small GIF was not decoded at its own size")
+            preview.setProperty("sourceRawWidth", 4000)
+            preview.setProperty("sourceRawHeight", 1000)
+            wait_for(lambda: animation.property("sourceSize").width() == 2048
+                     and animation.property("sourceSize").height() == 512, "GIF screen cap")
+            preview.setProperty("sourceRawWidth", 48)
+            preview.setProperty("sourceRawHeight", 32)
+            wait_for(lambda: animation.property("sourceSize").width() == 48
+                     and animation.property("sourceSize").height() == 32
+                     and animation.property("implicitWidth") == 48
+                     and animation.property("implicitHeight") == 32, "GIF cap cleared")
             checks.append("gif-advances")
 
             for media_type, path in (("video", video_audio), ("video", video), ("animated_gif", video)):

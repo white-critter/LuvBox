@@ -124,6 +124,31 @@ def photo_info(path: Path, max_pixels: int = 16_000_000) -> dict[str, int]:
         return {}
 
 
+def gif_screen_size(path: Path) -> tuple[int, int]:
+    """Read a GIF logical screen from its 10-byte header, or ``(0, 0)``.
+
+    The preview asks Qt to decode this size only when it is larger than the
+    still-photo fit cap. The pixel data is not read or allocated here.
+    """
+    path = Path(path)
+    if (path.suffix.lower() != ".gif" or path.is_symlink()
+            or getattr(path, "is_junction", lambda: False)() or cloud_only(path)):
+        return 0, 0
+    try:
+        if not path.is_file():
+            return 0, 0
+        with path.open("rb") as source:
+            header = source.read(10)
+        if len(header) < 10 or header[:6] not in {b"GIF87a", b"GIF89a"}:
+            return 0, 0
+        width, height = struct.unpack("<HH", header[6:10])
+        if not 0 < width <= 65535 or not 0 < height <= 65535:
+            return 0, 0
+        return width, height
+    except (OSError, ValueError, struct.error):
+        return 0, 0
+
+
 def photo_dimensions(path: Path, max_pixels: int = 16_000_000) -> tuple[int, int]:
     """Return the safe display size; unknown or excluded inputs return zeros."""
     details = photo_info(path, max_pixels)

@@ -356,7 +356,22 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                 data = metrics(review, review_media)
                 if not baseline and (data["dialog"][0] < width - 26 or data["dialog"][1] < height - 26):
                     raise AssertionError("Save review retained its old fixed size cap")
-                action_buttons(review, ("닫기", "더보기", "건너뛰기", "저장"))
+                action_buttons(review, ("저장 중단", "더보기", "건너뛰기", "저장"))
+                if width == 680:
+                    more = next(item for item in review.findChildren(QObject)
+                                if item.property("text") == "더보기")
+                    invoke(more, "clicked")
+                    settle()
+                    choices = [item for item in review.findChildren(QObject)
+                               if item.property("visible") and item.property("width") >= 80
+                               and item.property("text") in ("이 사진 다시 받지 않기", "이후 모두 자동 저장")]
+                    if {item.property("text") for item in choices} != {"이 사진 다시 받지 않기", "이후 모두 자동 저장"}:
+                        raise AssertionError("Save review extra actions are not visible: "
+                                             + str([(item.property("text"), item.property("width"), item.property("visible"))
+                                                    for item in review.findChildren(QObject)
+                                                    if item.property("text") in ("이 사진 다시 받지 않기", "이후 모두 자동 저장")]))
+                    invoke(more, "clicked")
+                    settle()
                 if not baseline:
                     action_buttons(review, ("−", "+", "화면 맞춤", "원본 100%", "창 최대화"))
                 report["review"][f"{width}x{height}"] = data

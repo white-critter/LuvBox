@@ -113,7 +113,7 @@ Dialog {
         }
         FlatButton {
             Layout.rightMargin: 12
-            text: "닫기"
+            text: "저장 중단"
             Accessible.name: "저장을 중단하고 닫기"
             onClicked: dialog.submit("stop")
         }
@@ -177,18 +177,23 @@ Dialog {
                 Menu {
                     id: moreMenu
                     y: -height
+                    width: Math.max(220, neverItem.implicitWidth + 24, allItem.implicitWidth + 24)
                     background: Rectangle {
+                        implicitWidth: 220
+                        implicitHeight: 40
                         radius: 10
                         color: "#1c1c1c"
                         border.width: 1
                         border.color: "#2e2e2e"
                     }
                     MenuItem {
+                        id: neverItem
                         text: "이 사진 다시 받지 않기"
                         HoverHandler { cursorShape: Qt.PointingHandCursor }
                         onTriggered: dialog.submit("never")
                     }
                     MenuItem {
+                        id: allItem
                         text: "이후 모두 자동 저장"
                         HoverHandler { cursorShape: Qt.PointingHandCursor }
                         onTriggered: dialog.submit("all")

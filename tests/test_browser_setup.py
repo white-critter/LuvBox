@@ -86,7 +86,22 @@ class BrowserSetupTests(unittest.TestCase):
         (folder / "manifest.json").write_text("{}", encoding="utf-8")
         with patch("luvbox.qt_browser_setup.subprocess.Popen") as popen:
             BrowserSetupController._reveal(folder)
-        self.assertEqual(popen.call_args.args[0], ["explorer.exe", f'/select,"{folder / "manifest.json"}"'])
+        shown = str(folder / "manifest.json")
+        self.assertEqual(popen.call_args.args[0], f'explorer.exe /select,"{shown}"')
+        self.assertIsInstance(popen.call_args.args[0], str)
+
+    def test_reveal_keeps_a_comma_inside_the_select_quotes(self):
+        from luvbox.qt_browser_setup import explorer_select_command
+        folder = self.folder / "My, Photos"
+        folder.mkdir()
+        (folder / "manifest.json").write_text("{}", encoding="utf-8")
+        shown = str(folder / "manifest.json")
+        self.assertEqual(explorer_select_command(shown), f'explorer.exe /select,"{shown}"')
+        self.assertIsNone(explorer_select_command(shown + '"'))
+        self.assertIsNone(explorer_select_command(shown + "\n"))
+        with patch("luvbox.qt_browser_setup.subprocess.Popen") as popen:
+            BrowserSetupController._reveal(folder)
+        self.assertEqual(popen.call_args.args[0], f'explorer.exe /select,"{shown}"')
 
     def test_firefox_uses_the_firefox_manifest_and_persistent_app_folder(self):
         target = BrowserSetupController._extension_folder("firefox")

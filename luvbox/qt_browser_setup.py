@@ -14,6 +14,19 @@ from .file_mutex import replace_file
 from .settings import app_directory
 
 
+def explorer_select_command(path: str) -> str | None:
+    """Explorer command line that keeps a comma inside the ``/select`` quotes.
+
+    A subprocess argument list is rewritten by ``list2cmdline``, which turns
+    the quotes into ``\\"``. Explorer then splits the path on the comma and
+    opens the wrong folder. A single command string leaves the quotes intact.
+    ``shell`` stays off; quotes, NUL, and line breaks are refused.
+    """
+    if not isinstance(path, str) or not path or any(char in path for char in '"\x00\r\n'):
+        return None
+    return f'explorer.exe /select,"{path}"'
+
+
 _WORKING = {
     "discover": "사용할 브라우저를 확인하는 중…",
     "select": "브라우저 선택을 저장하는 중…",
@@ -211,11 +224,10 @@ class BrowserSetupController(QObject):
         """Show manifest.json itself so the load dialog is not left in Documents."""
         manifest = Path(folder) / "manifest.json"
         target = manifest if manifest.is_file() else Path(folder)
-        shown = str(target)
-        if "\"" in shown or "\x00" in shown:
+        command = explorer_select_command(str(target))
+        if command is None:
             return
-        subprocess.Popen(["explorer.exe", f'/select,"{shown}"'],
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, close_fds=True)
 
     def _perform(self, operation, identifier=None):

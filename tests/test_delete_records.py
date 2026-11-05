@@ -155,6 +155,23 @@ class DeleteRecordTests(unittest.TestCase):
         self.assertEqual(self.store.summary(verify_files=False)["files"], 1)
         self.assertEqual(self.store.reconcile_deletions(), {"interrupted": 0, "missing": 0})
 
+    def test_offline_volume_is_not_recorded_as_a_deleted_file(self):
+        row = self.media()
+        self.begin(row)
+        anchor = Path(row["path"]).anchor
+        original_exists = Path.exists
+
+        def missing_drive(path):
+            if os.path.normcase(str(path)).rstrip("\\/") == os.path.normcase(anchor).rstrip("\\/"):
+                return False
+            return original_exists(path)
+
+        with patch.object(Path, "exists", missing_drive):
+            self.assertFalse(self.store._deletion_path_absent(row["path"]))
+            self.assertEqual(self.store.reconcile_deletions()["missing"], 0)
+        self.assertEqual(self.store.records()[0]["path"], row["path"])
+        self.assertEqual(self.store.ignored_media(), set())
+
     def test_inaccessible_original_is_never_cleared_as_missing(self):
         row = self.media()
         self.begin(row)

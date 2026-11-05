@@ -132,6 +132,7 @@ Dialog {
             delegate: Rectangle {
                 id: card
                 required property var modelData
+                required property int index
                 readonly property var tone: dialog.tones[modelData.tone] || dialog.tones.muted
                 width: list.width - (list.contentHeight > list.height ? 14 : 0)
                 implicitHeight: body.implicitHeight + 24
@@ -178,6 +179,7 @@ Dialog {
                             text: "로그"
                             Accessible.name: "실행 로그 열기"
                             onClicked: dialog.records.openLog(card.modelData.token)
+                            onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                         }
                     }
                     Label {

@@ -67,6 +67,9 @@ def duration_text(seconds):
 
 class RecordsController(QObject):
     changed = Signal()
+    # Count refreshes also emit changed. The open page, including its preview
+    # images, is replaced only when that page itself changes.
+    unsavedRowsChanged = Signal()
     retryRequested = Signal(object)
     shutdownFinished = Signal()
     _delivered = Signal(object)
@@ -113,7 +116,7 @@ class RecordsController(QObject):
     @Property(str, notify=changed)
     def runNote(self): return self._run_note
 
-    @Property("QVariantList", notify=changed)
+    @Property("QVariantList", notify=unsavedRowsChanged)
     def unsavedRows(self): return self._unsaved_rows
     @Property(int, notify=changed)
     def unsavedTotal(self): return self._unsaved_total
@@ -155,6 +158,7 @@ class RecordsController(QObject):
         self._context = context
         self._counts = {reason: 0 for reason in unsaved.REASONS}
         self._unsaved_rows, self._unsaved_tokens = [], {}
+        self.unsavedRowsChanged.emit()
         self._unsaved_total = self._unsaved_pages = self._unsaved_page = 0
         self._run_rows, self._run_tokens = [], {}
         self._run_total = self._run_page = self._run_pages = 0
@@ -243,6 +247,7 @@ class RecordsController(QObject):
         if view in _KINDS and view != self._unsaved_view:
             self._unsaved_view, self._unsaved_status = view, ""
             self._unsaved_rows, self._unsaved_tokens, self._unsaved_total = [], {}, 0
+            self.unsavedRowsChanged.emit()
             self.loadUnsaved(0)
 
     @Slot(str)
@@ -303,6 +308,7 @@ class RecordsController(QObject):
 
     def _rebuild_unsaved(self):
         self._unsaved_rows = [self._unsaved_row(token, row) for token, row in self._unsaved_tokens.items()]
+        self.unsavedRowsChanged.emit()
 
     def _unsaved_row(self, token, row):
         media = _MEDIA.get(row["media_type"], "미디어")

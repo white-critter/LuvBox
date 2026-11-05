@@ -44,6 +44,26 @@ class LibraryControlsTests(unittest.TestCase):
         self.library.shutdown()
         self.wait(lambda: self.library.shutdownComplete)
 
+    def test_a_page_load_does_not_republish_authors_and_tiles_check_the_selection_set(self):
+        self.wait(lambda: self.library._authors_loaded)
+        author_updates = []
+        page_updates = []
+        self.library.authorsChanged.connect(lambda: author_updates.append(1))
+        self.library.changed.connect(lambda: page_updates.append(1))
+        self.library.model.changed.emit()
+        self.app.processEvents()
+        self.assertEqual(author_updates, [])
+        self.assertGreaterEqual(len(page_updates), 1)
+        keys = [row["key"] for row in self.library.model._rows]
+        self.library.toggleSelection(keys[0])
+        self.assertEqual(self.library.selectionRevision, 1)
+        self.assertTrue(self.library.isSelected(keys[0]))
+        self.assertFalse(self.library.isSelected(keys[1]))
+        copied = self.library.selectedKeys
+        copied.append("not-a-real-key")
+        self.assertFalse(self.library.isSelected("not-a-real-key"))
+        self.assertEqual(self.library.selectedCount, 1)
+
     def test_selection_is_loaded_only_and_cleared_when_filters_or_account_change(self):
         keys = [row["key"] for row in self.library.model._rows]
         self.library.toggleSelection(keys[0])

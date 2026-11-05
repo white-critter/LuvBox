@@ -578,8 +578,17 @@ class ApplicationController(QObject):
                     if (not path.is_absolute() or path.is_symlink() or path.resolve() != path
                             or tuple(payload.get("signature", ())) != file_signature(path) or cloud_only(path)):
                         raise ValueError("저장 확인 중 파일이 바뀌었습니다.")
-                    from .preview import photo_info
-                    dimensions = photo_info(path) if payload.get("media_type") == "photo" else {}
+                    from .preview import gif_screen_size, photo_info
+                    media_type = payload.get("media_type")
+                    if media_type == "photo":
+                        dimensions = photo_info(path)
+                    elif media_type == "animated_gif" and path.suffix.lower() == ".gif":
+                        screen_width, screen_height = gif_screen_size(path)
+                        dimensions = ({"pixel_width": screen_width, "pixel_height": screen_height,
+                                       "source_width": screen_width, "source_height": screen_height}
+                                      if screen_width and screen_height else {})
+                    else:
+                        dimensions = {}
                     if (path.is_symlink() or path.resolve() != path or cloud_only(path)
                             or tuple(payload.get("signature", ())) != file_signature(path)):
                         raise ValueError("저장 확인 중 파일이 바뀌었습니다.")

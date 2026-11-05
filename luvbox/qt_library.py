@@ -229,14 +229,19 @@ class LibraryRepository:
             if kind != "ready":
                 path = None
             width = height = raw_width = raw_height = 0
-            if path is not None and row["media_type"] == "photo":
-                from .preview import photo_info
+            if path is not None and (row["media_type"] == "photo" or (
+                    row["media_type"] == "animated_gif" and path.suffix.lower() == ".gif")):
+                from .preview import gif_screen_size, photo_info
 
                 try:
                     signature = file_signature(path)
-                    dimensions = photo_info(path)
-                    width, height = dimensions.get("pixel_width", 0), dimensions.get("pixel_height", 0)
-                    raw_width, raw_height = dimensions.get("source_width", 0), dimensions.get("source_height", 0)
+                    if row["media_type"] == "photo":
+                        dimensions = photo_info(path)
+                        width, height = dimensions.get("pixel_width", 0), dimensions.get("pixel_height", 0)
+                        raw_width, raw_height = dimensions.get("source_width", 0), dimensions.get("source_height", 0)
+                    else:
+                        width, height = gif_screen_size(path)
+                        raw_width, raw_height = width, height
                     if file_signature(path) != signature or self._path(store, row) != path:
                         path = None
                         width = height = raw_width = raw_height = 0
@@ -333,12 +338,12 @@ class LibraryRepository:
             os.startfile(selection["path"])
         elif action == "reveal":
             # The comma is explorer's own separator. A folder such as
-            # "My, Photos" has to be one quoted argument or the wrong place opens.
-            shown = selection["path"]
-            if "\"" in shown or "\x00" in shown:
+            # "My, Photos" has to stay inside one quoted /select argument.
+            from .qt_browser_setup import explorer_select_command
+            command = explorer_select_command(selection["path"])
+            if command is None:
                 return "폴더를 열지 못했습니다."
-            subprocess.Popen(["explorer.exe", f'/select,"{shown}"'],
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            subprocess.Popen(command, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return ""
 
 
@@ -361,6 +366,10 @@ class _LibraryThumbnailProvider(SafeThumbnailProvider):
 class LibraryController(QObject):
     changed = Signal()
     selectionChanged = Signal()
+    # Page loads also emit changed. The author list and the chosen author are
+    # not part of a page, so the combo must not rebuild while the grid scrolls.
+    authorsChanged = Signal()
+    authorFilterChanged = Signal()
     shutdownFinished = Signal()
     _delivered = Signal(object)
 
@@ -385,6 +394,7 @@ class LibraryController(QObject):
         self._selection_mode = False
         self._selection_keys = set()
         self._selected_keys_order = []
+        self._selection_revision = 0
         self._selected = {}
         self._selection_key = ""
         self._selection_serial = 0
@@ -417,14 +427,22 @@ class LibraryController(QObject):
         return self._selected_keys_order.copy()
 
     @Property(int, notify=selectionChanged)
+    def selectionRevision(self):
+        return self._selection_revision
+
+    @Slot(str, result=bool)
+    def isSelected(self, key):
+        return isinstance(key, str) and key in self._selection_keys
+
+    @Property(int, notify=selectionChanged)
     def selectedCount(self):
         return len(self._selection_keys)
 
-    @Property(str, notify=changed)
+    @Property(str, notify=authorFilterChanged)
     def filterAuthor(self):
         return self._author
 
-    @Property("QVariantList", notify=changed)
+    @Property("QVariantList", notify=authorsChanged)
     def authors(self):
         return self._authors.copy()
 
@@ -538,6 +556,7 @@ class LibraryController(QObject):
         self._separate_accounts = separate_accounts
         self._authors = []
         self._authors_loaded = False
+        self.authorsChanged.emit()
         self._refresh(reload_authors=True)
 
     @Slot()
@@ -565,6 +584,7 @@ class LibraryController(QObject):
         else:
             self._authors = []
             self._authors_loaded = False
+            self.authorsChanged.emit()
         self._repository.configure(request)
         if request is not None and (reload_authors or not self._authors_loaded):
             with self._condition:
@@ -591,7 +611,10 @@ class LibraryController(QObject):
             return
         if (media_type, order, author) == (self._media_type, self._order, self._author):
             return
+        author_changed = author != self._author
         self._media_type, self._order, self._author = media_type, order, author
+        if author_changed:
+            self.authorFilterChanged.emit()
         self._refresh(reload_authors=False)
 
     @Slot(str, str, str, str, result=bool)
@@ -617,7 +640,10 @@ class LibraryController(QObject):
         # The basis only matters while a date is set; picking it first must not reload the grid.
         results_change = (author != self._author or first != self._date_from or last != self._date_to
                           or (bool(first or last) and date_field != self._date_field))
+        author_changed = author != self._author
         self._author, self._date_field, self._date_from, self._date_to = author, date_field, first, last
+        if author_changed:
+            self.authorFilterChanged.emit()
         if results_change:
             self._refresh(reload_authors=False)
         else:
@@ -626,7 +652,10 @@ class LibraryController(QObject):
 
     @Slot()
     def resetFilters(self):
+        author_changed = self._author != ""
         self._query = self._author = self._date_from = self._date_to = ""
+        if author_changed:
+            self.authorFilterChanged.emit()
         self._date_field = "posted"
         self._media_type, self._order = "all", "saved"
         self._refresh(reload_authors=False)
@@ -698,6 +727,7 @@ class LibraryController(QObject):
                 self.changed.emit()
 
     def _batch_selection_changed(self):
+        self._selection_revision += 1
         self._selected_keys_order = sorted(self._selection_keys, key=lambda key: self.model._positions.get(key, -1))
         self.selectionChanged.emit()
 
@@ -835,6 +865,7 @@ class LibraryController(QObject):
         if action == "authors":
             self._authors = list(selection) if isinstance(selection, (list, tuple)) else []
             self._authors_loaded = True
+            self.authorsChanged.emit()
             self.changed.emit()
             return
         if serial != self._selection_serial:
