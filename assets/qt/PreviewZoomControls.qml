@@ -12,6 +12,8 @@ Row {
         leftPadding: 0
         rightPadding: 0
         enabled: controls.preview.canZoomOut
+        ToolTip.visible: hovered && enabled
+        ToolTip.text: "축소 (-)"
         onClicked: controls.preview.zoomOut()
     }
     Label {
@@ -30,14 +32,21 @@ Row {
         leftPadding: 0
         rightPadding: 0
         enabled: controls.preview.canZoomIn
+        ToolTip.visible: hovered && enabled
+        ToolTip.text: "확대 (+ / =)"
         onClicked: controls.preview.zoomIn()
     }
-    FlatButton { text: "화면 맞춤"; onClicked: controls.preview.fit() }
+    FlatButton {
+        text: "화면 맞춤"
+        ToolTip.visible: hovered && enabled
+        ToolTip.text: "화면에 맞추기 (0)"
+        onClicked: controls.preview.fit()
+    }
     FlatButton {
         text: "원본 100%"
         enabled: controls.preview.canActualSize
         onClicked: controls.preview.actualSize()
         ToolTip.visible: hovered
-        ToolTip.text: "원본 배율은 1,600만 화소 이하의 확인된 사진에서 사용할 수 있습니다."
+        ToolTip.text: "원본 배율은 1,600만 화소 이하의 확인된 사진에서 사용할 수 있습니다. (1)"
     }
 }

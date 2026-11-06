@@ -293,6 +293,14 @@ ApplicationWindow {
             raise AssertionError("Save review did not settle")
 
         wait_for(lambda: window.property("preview").property("ready"))
+        never_item = window.findChild(QObject, "reviewNeverItem")
+        all_item = window.findChild(QObject, "reviewAllItem")
+        if never_item is None or all_item is None:
+            raise AssertionError("Save review menu items are missing")
+        shortcuts = {item.property("sequence") for item in window.findChildren(QObject)
+                     if item.property("sequence") is not None}
+        if not {"m", "Shift+M"}.issubset(shortcuts):
+            raise AssertionError("Save review dialog is missing video mute shortcuts: " + repr(shortcuts))
         # A real click runs inside Qt's event loop, which processes deferred
         # deletion differently from a test's manual processEvents loop.
         method = "approveThenReplace" if replace_candidate else "approve"

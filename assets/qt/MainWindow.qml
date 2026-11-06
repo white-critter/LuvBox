@@ -763,7 +763,8 @@ ApplicationWindow {
                                     window.galleryModel.search("")
                                 event.accepted = true
                             } else {
-                                focus = false
+                                gallery.forceActiveFocus()
+                                event.accepted = true
                             }
                         }
                         ToolButton {
@@ -1629,12 +1630,16 @@ ApplicationWindow {
                     objectName: "previewPreviousButton"
                     text: "이전"
                     enabled: window.app && window.app.library.canPrevious
+                    ToolTip.visible: hovered && enabled
+                    ToolTip.text: "이전 미디어 (←)"
                     onClicked: window.app.library.previousItem()
                 }
                 FlatButton {
                     objectName: "previewNextButton"
                     text: "다음"
                     enabled: window.app && window.app.library.canNext
+                    ToolTip.visible: hovered && enabled
+                    ToolTip.text: "다음 미디어 (→)"
                     onClicked: window.app.library.nextItem()
                 }
                 PreviewZoomControls { preview: selectedMedia }

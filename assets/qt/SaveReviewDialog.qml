@@ -51,6 +51,18 @@ Dialog {
         enabled: dialog.visible && !moreMenu.visible && media.canActualSize
         onActivated: media.actualSize()
     }
+    Shortcut {
+        sequence: "m"
+        enabled: dialog.visible && !moreMenu.visible && media.mediaType === "video"
+            && media.videoSource && media.ready
+        onActivated: media.muted = !media.muted
+    }
+    Shortcut {
+        sequence: "Shift+M"
+        enabled: dialog.visible && !moreMenu.visible && media.mediaType === "video"
+            && media.videoSource && media.ready
+        onActivated: media.muted = !media.muted
+    }
 
     function submit(action) {
         if (_responded)
@@ -176,7 +188,8 @@ Dialog {
 
                 Menu {
                     id: moreMenu
-                    y: -height
+                    y: -height - 4
+                    padding: 4
                     width: Math.max(220, neverItem.implicitWidth + 24, allItem.implicitWidth + 24)
                     background: Rectangle {
                         implicitWidth: 220
@@ -188,14 +201,48 @@ Dialog {
                     }
                     MenuItem {
                         id: neverItem
+                        objectName: "reviewNeverItem"
                         text: "이 사진 다시 받지 않기"
+                        font.pixelSize: 14
+                        leftPadding: 12
+                        rightPadding: 12
+                        hoverEnabled: true
                         HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        contentItem: Text {
+                            text: neverItem.text
+                            font: neverItem.font
+                            color: "#f4f1f1"
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+                        background: Rectangle {
+                            implicitHeight: 36
+                            radius: 8
+                            color: neverItem.highlighted || neverItem.hovered ? "#2c2c2c" : "transparent"
+                        }
                         onTriggered: dialog.submit("never")
                     }
                     MenuItem {
                         id: allItem
+                        objectName: "reviewAllItem"
                         text: "이후 모두 자동 저장"
+                        font.pixelSize: 14
+                        leftPadding: 12
+                        rightPadding: 12
+                        hoverEnabled: true
                         HoverHandler { cursorShape: Qt.PointingHandCursor }
+                        contentItem: Text {
+                            text: allItem.text
+                            font: allItem.font
+                            color: "#f4f1f1"
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+                        background: Rectangle {
+                            implicitHeight: 36
+                            radius: 8
+                            color: allItem.highlighted || allItem.hovered ? "#2c2c2c" : "transparent"
+                        }
                         onTriggered: dialog.submit("all")
                     }
                 }

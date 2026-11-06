@@ -13,6 +13,7 @@ Rectangle {
     signal pickRequested()
     signal cleared()
     readonly property bool highlighted: activeFocus || pickerOpen
+    readonly property bool clearHovered: text.length > 0 && mouse.containsMouse && mouse.mouseX >= width - 26
     activeFocusOnTab: true
     implicitHeight: 40
     radius: 10
@@ -65,11 +66,19 @@ Rectangle {
             elide: Text.ElideRight
             verticalAlignment: Text.AlignVCenter
         }
-        Label {
+        Rectangle {
             visible: field.text.length > 0
-            text: "×"
-            color: "#b9afb1"
-            font.pixelSize: 14
+            width: 20
+            height: 20
+            radius: 10
+            color: field.clearHovered ? "#333333" : "transparent"
+            Label {
+                anchors.centerIn: parent
+                text: "×"
+                color: field.clearHovered ? "#ffffff" : "#b9afb1"
+                font.pixelSize: 14
+                font.bold: true
+            }
         }
     }
     MouseArea {

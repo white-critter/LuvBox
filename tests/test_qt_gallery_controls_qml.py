@@ -349,7 +349,8 @@ def scene():
         assert search_field.property("activeFocus")
         QTest.keyClick(window, Qt.Key.Key_Escape)
         settle()
-        assert not search_field.property("activeFocus"), "Escape on empty search removes focus" 
+        assert not search_field.property("activeFocus"), "Escape on empty search removes focus"
+        assert find("galleryGrid").property("activeFocus"), "Escape on empty search returns focus to gallery" 
         # Choosing files is screen state: it stays available while a save runs, by button,
         # Ctrl+click and Space alike. Only the move to the Recycle Bin waits for the save.
         window.setWidth(1080)
