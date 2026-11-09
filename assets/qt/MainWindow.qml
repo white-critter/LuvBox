@@ -38,7 +38,7 @@ ApplicationWindow {
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
         folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
-        runHistoryDialog.visible || unsavedDialog.visible || datePickerPopup.visible
+        runHistoryDialog.visible || unsavedDialog.visible || datePickerPopup.visible || statisticsDialog.visible
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
     color: "#101010"
     palette.window: color
@@ -314,6 +314,8 @@ ApplicationWindow {
                 from = to
         }
         const hashtag = changes.hashtag !== undefined ? changes.hashtag : library.filterHashtag
+        if (changes.userTag !== undefined)
+            library.setUserTag(changes.userTag)
         library.setAdvancedFilters(author, dateField, from, to, hashtag)
     }
 
@@ -398,6 +400,12 @@ ApplicationWindow {
             Label { text: window.app ? window.app.version : ""; color: window.mutedColor; visible: window.width > 760 }
             // Settings stay reachable during a save: its records are read-only, and the
             // changeable options are locked inside the dialog until the work ends.
+            FlatButton {
+                text: "통계"
+                visible: !!window.app && window.currentScreen === 1
+                enabled: window.app && !window.app.closing
+                onClicked: statisticsDialog.open()
+            }
             FlatButton { text: "설정"; visible: !!window.app; enabled: window.app && !window.app.closing; onClicked: preferencesDialog.open() }
         }
     }
@@ -1146,6 +1154,59 @@ ApplicationWindow {
                         }
                     }
                     FlatCombo {
+                        id: userTagFilter
+                        objectName: "galleryUserTagFilter"
+                        visible: filterToggle.checked
+                        minimumPopupWidth: 200
+                        implicitHeight: 40
+                        implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                        width: Math.min(240, Math.max(140, implicitContentWidth + leftPadding + rightPadding))
+                        height: implicitHeight
+                        onVisibleChanged: Qt.callLater(filterHost.layout)
+                        onWidthChanged: Qt.callLater(filterHost.layout)
+                        displayText: currentIndex > 0 && model[currentIndex] ? "#" + model[currentIndex].value : "내 태그 전체"
+                        Accessible.name: "내 태그 선택"
+                        textRole: "label"
+                        valueRole: "value"
+                        readonly property string applied: window.app ? window.app.library.filterUserTag : ""
+                        readonly property var tagRows: {
+                            if (!window.app)
+                                return []
+                            const rows = window.app.library.userTags
+                            return rows ? rows : []
+                        }
+                        model: {
+                            const items = [{ label: "내 태그 전체", value: "" }]
+                            let found = !userTagFilter.applied.length
+                            for (let i = 0; i < tagRows.length; i++) {
+                                const row = tagRows[i]
+                                const tag = row && row.tag ? String(row.tag) : ""
+                                if (!tag.length)
+                                    continue
+                                if (tag.toLowerCase() === userTagFilter.applied.toLowerCase())
+                                    found = true
+                                const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
+                                items.push({ label: "#" + tag + " · " + count + "개", value: tag })
+                            }
+                            if (!found && userTagFilter.applied.length)
+                                items.push({ label: "#" + userTagFilter.applied, value: userTagFilter.applied })
+                            return items
+                        }
+                        function userTagIndex() {
+                            const wanted = userTagFilter.applied.toLowerCase()
+                            for (let i = 1; i < model.length; i++) {
+                                if (String(model[i].value).toLowerCase() === wanted)
+                                    return i
+                            }
+                            return 0
+                        }
+                        currentIndex: userTagIndex()
+                        onActivated: index => {
+                            window.applyFilters({ userTag: index > 0 && model[index] ? model[index].value : "" })
+                            currentIndex = Qt.binding(function() { return userTagFilter.userTagIndex() })
+                        }
+                    }
+                    FlatCombo {
                         id: dateFieldChoice
                         objectName: "galleryDateField"
                         visible: filterToggle.checked
@@ -1251,13 +1312,25 @@ ApplicationWindow {
                     textFormat: Text.PlainText
                     color: window.mutedColor
                 }
-                Label {
+                RowLayout {
                     Layout.fillWidth: true
-                    text: window.app && !window.app.library.busy ? window.app.library.status : ""
-                    visible: text.length > 0
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    color: window.noticeColor
+                    visible: (window.app && window.app.library.status.length > 0) || (window.app && window.app.library.duplicateProgressTotal > 0)
+                    spacing: 8
+                    Label {
+                        Layout.fillWidth: true
+                        text: window.app ? window.app.library.status : ""
+                        wrapMode: Text.WordWrap
+                        textFormat: Text.PlainText
+                        color: window.noticeColor
+                    }
+                    ProgressBar {
+                        Layout.preferredWidth: 160
+                        Layout.preferredHeight: 6
+                        visible: window.app && window.app.library.busy && window.app.library.duplicateProgressTotal > 0
+                        from: 0
+                        to: window.app && window.app.library.duplicateProgressTotal > 0 ? window.app.library.duplicateProgressTotal : 1
+                        value: window.app ? window.app.library.duplicateProgressCurrent : 0
+                    }
                 }
                 Label {
                     objectName: "galleryManagementMessage"
@@ -1287,6 +1360,12 @@ ApplicationWindow {
                         text: "불러온 항목 선택"
                         enabled: !!window.app
                         onClicked: window.app.library.selectLoaded()
+                    }
+                    FlatButton {
+                        objectName: "galleryAddTagSelected"
+                        text: "태그 추가"
+                        enabled: window.app && !window.app.busy && window.app.library.selectedCount > 0
+                        onClicked: tagBatchPopup.open()
                     }
                     FlatButton {
                         objectName: "gallerySelectionClear"
@@ -1853,13 +1932,31 @@ ApplicationWindow {
                 externalBusy: window.app ? window.app.library.busy : false
                 playing: previewDialog.visible
             }
-            Label {
+            RowLayout {
                 Layout.fillWidth: true
-                visible: text.length > 0
-                text: window.app && window.app.library.selectedAuthor ? "@" + window.app.library.selectedAuthor : ""
-                textFormat: Text.PlainText
-                font.bold: true
-                elide: Text.ElideRight
+                spacing: 8
+                Label {
+                    id: previewAuthorLabel
+                    text: window.app && window.app.library.selectedAuthor ? "@" + window.app.library.selectedAuthor : ""
+                    textFormat: Text.PlainText
+                    font.bold: true
+                    elide: Text.ElideRight
+                    color: authorMouse.containsMouse ? window.accentColor : "#f4f1f1"
+                    MouseArea {
+                        id: authorMouse
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        hoverEnabled: true
+                        onClicked: {
+                            if (window.app && window.app.library.selectedAuthor) {
+                                window.applyFilters({ author: window.app.library.selectedAuthor })
+                                previewDialog.close()
+                            }
+                        }
+                    }
+                    ToolTip.visible: authorMouse.containsMouse && text.length > 0
+                    ToolTip.text: "작성자 모아보기"
+                }
             }
             Label {
                 Layout.fillWidth: true
@@ -1869,6 +1966,117 @@ ApplicationWindow {
                 elide: Text.ElideMiddle
                 color: window.mutedColor
                 font.pixelSize: 12
+            }
+            Flow {
+                Layout.fillWidth: true
+                spacing: 6
+                visible: window.app && (window.app.library.selectedHashtags.length > 0 || window.app.library.selectedTags.length > 0 || !!window.app.library.selectedKey)
+
+                Repeater {
+                    model: window.app ? window.app.library.selectedHashtags : []
+                    delegate: Rectangle {
+                        color: hashMouse.containsMouse ? "#26352c" : "#1c2520"
+                        radius: 6
+                        border.width: 1
+                        border.color: "#2a4030"
+                        implicitWidth: hashLabel.implicitWidth + 12
+                        implicitHeight: 22
+
+                        Label {
+                            id: hashLabel
+                            anchors.centerIn: parent
+                            text: modelData
+                            font.pixelSize: 11
+                            color: "#8fd3a0"
+                        }
+                        MouseArea {
+                            id: hashMouse
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            hoverEnabled: true
+                            onClicked: {
+                                window.applyFilters({ hashtag: modelData })
+                                previewDialog.close()
+                            }
+                        }
+                    }
+                }
+
+                Repeater {
+                    model: window.app ? window.app.library.selectedTags : []
+                    delegate: Rectangle {
+                        color: userTagMouse.containsMouse ? "#35243a" : "#281c2c"
+                        radius: 6
+                        border.width: 1
+                        border.color: "#4a2a50"
+                        implicitWidth: userTagRow.implicitWidth + 10
+                        implicitHeight: 22
+
+                        RowLayout {
+                            id: userTagRow
+                            anchors.centerIn: parent
+                            spacing: 4
+
+                            Label {
+                                text: "#" + (modelData.tag || "")
+                                font.pixelSize: 11
+                                color: "#d99fe6"
+                                MouseArea {
+                                    id: userTagMouse
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    hoverEnabled: true
+                                    onClicked: {
+                                        window.applyFilters({ userTag: modelData.tag })
+                                        previewDialog.close()
+                                    }
+                                }
+                            }
+                            Label {
+                                text: "×"
+                                font.pixelSize: 12
+                                color: removeMouse.containsMouse ? "#ff8791" : "#b9afb1"
+                                MouseArea {
+                                    id: removeMouse
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    hoverEnabled: true
+                                    onClicked: {
+                                        window.app.library.removeSelectedTag(modelData.tag)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                RowLayout {
+                    spacing: 4
+                    visible: !!window.app && !!window.app.library.selectedKey
+                    FlatField {
+                        id: inlineTagField
+                        implicitHeight: 22
+                        Layout.preferredWidth: 90
+                        placeholderText: "새 태그"
+                        font.pixelSize: 11
+                        onAccepted: {
+                            if (text.trim().length > 0) {
+                                window.app.library.addSelectedTag(text.trim())
+                                text = ""
+                            }
+                        }
+                    }
+                    FlatButton {
+                        text: "+ 태그"
+                        implicitHeight: 22
+                        font.pixelSize: 11
+                        enabled: inlineTagField.text.trim().length > 0
+                        onClicked: {
+                            window.app.library.addSelectedTag(inlineTagField.text.trim())
+                            inlineTagField.text = ""
+                        }
+                    }
+                }
             }
             ScrollView {
                 id: bodyScroll
@@ -2246,6 +2454,69 @@ ApplicationWindow {
         app: window.app
     }
 
+    StatisticsDialog {
+        id: statisticsDialog
+        objectName: "statisticsDialog"
+        parent: Overlay.overlay
+        app: window.app
+    }
+
+    Popup {
+        id: tagBatchPopup
+        objectName: "tagBatchPopup"
+        parent: Overlay.overlay
+        modal: true
+        focus: true
+        anchors.centerIn: parent
+        width: 320
+        padding: 16
+        background: Rectangle {
+            color: "#1a1a1a"
+            radius: 12
+            border.width: 1
+            border.color: "#333333"
+        }
+        contentItem: ColumnLayout {
+            spacing: 12
+            Label {
+                text: "선택한 항목에 태그 추가"
+                font.bold: true
+                font.pixelSize: 14
+                color: "#f4f1f1"
+            }
+            FlatField {
+                id: batchTagInput
+                Layout.fillWidth: true
+                placeholderText: "태그 이름 입력"
+                onAccepted: {
+                    if (text.trim().length > 0) {
+                        window.app.library.addTagToSelection(text.trim())
+                        text = ""
+                        tagBatchPopup.close()
+                    }
+                }
+            }
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: 8
+                FlatButton {
+                    text: "취소"
+                    onClicked: tagBatchPopup.close()
+                }
+                FlatButton {
+                    text: "추가"
+                    tone: "primary"
+                    enabled: batchTagInput.text.trim().length > 0
+                    onClicked: {
+                        window.app.library.addTagToSelection(batchTagInput.text.trim())
+                        batchTagInput.text = ""
+                        tagBatchPopup.close()
+                    }
+                }
+            }
+        }
+    }
+
     UnsavedMediaDialog {
         id: unsavedDialog
         parent: Overlay.overlay
@@ -2379,6 +2650,8 @@ ApplicationWindow {
                 preferencesDialog.close()
                 scheduleDialog.close()
                 runHistoryDialog.close()
+                statisticsDialog.close()
+                tagBatchPopup.close()
                 unsavedDialog.close()
                 storageDialog.close()
                 repairDialog.close()

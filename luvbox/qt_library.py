@@ -41,6 +41,19 @@ def _posted(value, *, time=False):
     return f"{match[1]} {match[2]}" if time else match[1]
 
 
+def _format_size(size_bytes: int | None) -> str:
+    if size_bytes is None or size_bytes <= 0:
+        return ""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
 class _ReadOnlyHistory(HistoryStore):
     def __init__(self, paths):
         self.account_dir = paths.record_dir
@@ -205,6 +218,38 @@ class LibraryRepository:
         except Exception:
             return []
 
+    def user_tags(self, generation=None):
+        request = self.current(generation)
+        if request is None:
+            return []
+        try:
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                return store.user_tags()
+        except Exception:
+            return []
+
+    def overview(self, generation=None):
+        request = self.current(generation)
+        if request is None:
+            return {}
+        try:
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                ov = store.overview(verify_files=False, top=10)
+                st = store.statistics(top=10)
+                return {
+                    "files": ov.get("files", 0),
+                    "posts": ov.get("posts", 0),
+                    "bytes": ov.get("bytes", 0),
+                    "formatted_bytes": _format_size(ov.get("bytes", 0)),
+                    "photo": ov.get("photo", 0),
+                    "video": ov.get("video", 0),
+                    "animated_gif": ov.get("animated_gif", 0),
+                    "authors": st.get("authors", []),
+                    "monthly": [{"month": m[0], "count": m[1]} for m in st.get("months", {}).get("posted", [])],
+                }
+        except Exception:
+            return {}
+
     @staticmethod
     def _locate(store, row):
         """``(path, kind)`` where kind is ready, cloud, or missing.
@@ -243,7 +288,14 @@ class LibraryRepository:
             row = self._row(store, key, request)
             if row is None:
                 return None
-            content = store._db.execute("SELECT content FROM tweets WHERE tweet_id=?", (row["tweet_id"],)).fetchone()
+            content_row = None
+            if store._has_table("tweets"):
+                has_hashtags = store._has_column("tweets", "hashtags")
+                select_sql = "SELECT content, hashtags FROM tweets WHERE tweet_id=?" if has_hashtags else "SELECT content, '' FROM tweets WHERE tweet_id=?"
+                content_row = store._db.execute(select_sql, (row["tweet_id"],)).fetchone()
+            body_text = content_row[0] if content_row and isinstance(content_row[0], str) else ""
+            raw_tags = content_row[1] if content_row and len(content_row) > 1 and isinstance(content_row[1], str) else ""
+            tweet_hashtags = [t.strip() for t in raw_tags.split() if t.strip()]
             path, kind = self._locate(store, row)
             if kind != "ready":
                 path = None
@@ -268,8 +320,28 @@ class LibraryRepository:
                     path = None
                     width = height = raw_width = raw_height = 0
             source = f"https://x.com/i/web/status/{row['tweet_id']}"
-            info = " · ".join(value for value in (row.get("filename") or "", _posted(row.get("posted_at"), time=True))
-                              if value)
+            meta_parts = []
+            if row.get("filename"):
+                meta_parts.append(row["filename"])
+            posted_str = _posted(row.get("posted_at"), time=True)
+            if posted_str:
+                meta_parts.append(posted_str)
+            if width and height:
+                dim_str = f"{width}×{height}"
+                if raw_width and raw_height and (raw_width, raw_height) != (width, height):
+                    dim_str += f" (원본 {raw_width}×{raw_height})"
+                meta_parts.append(dim_str)
+            sz = None
+            if path is not None:
+                try:
+                    sz = path.stat().st_size
+                except OSError:
+                    sz = row.get("filesize")
+            else:
+                sz = row.get("filesize")
+            if sz is not None and sz > 0:
+                meta_parts.append(_format_size(sz))
+            info = " · ".join(meta_parts)
             if kind == "cloud":
                 note = _CLOUD_ONLY
             elif path is None:
@@ -279,14 +351,14 @@ class LibraryRepository:
             is_fav = store.is_favorite(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
             tags = store.item_tags(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
             return {"key": key, "author": row.get("author") or "",
-                    "body": content[0] if content and isinstance(content[0], str) else "",
+                    "body": body_text,
                     "source": source, "path": str(path) if path is not None else "", "missing": path is None,
                     "missing_note": note,
                     "preview": QUrl.fromLocalFile(str(path)).toString() if path is not None else "",
                     "media_type": row["media_type"], "public_info": info,
                     "pixel_width": width, "pixel_height": height,
                     "source_width": raw_width, "source_height": raw_height,
-                    "favorite": is_fav, "tags": tags}
+                    "favorite": is_fav, "tags": tags, "hashtags": tweet_hashtags}
 
     def toggle_favorite(self, key, generation):
         request = self.current(generation)
@@ -336,21 +408,24 @@ class LibraryRepository:
             return Thumbnail(None, "")
         return thumbnail(path, size)
 
-    def scan_duplicates(self, generation):
+    def scan_duplicates(self, generation, progress_callback=None):
         request = self.current(generation)
         if request is None:
             return 0
-        from .duplicates import compute_dhash, compute_file_hash
+        from .duplicates import compute_dhash, compute_file_hash, cluster_duplicates
         try:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 store._folder_cache = {}
                 cached = store.get_image_hashes()
                 records = store.records(limit=10000, media_type="photo", include_deleted=False)
+                total_records = len(records)
                 new_hashes = []
                 stale_hashes = []
-                for rec in records:
+                for idx, rec in enumerate(records):
                     if self.current(generation) is None:
                         return 0
+                    if progress_callback and (idx % 25 == 0 or idx == total_records - 1):
+                        progress_callback(idx + 1, total_records)
                     ident = (rec["folder_mode"], rec["tweet_id"], rec["num"], rec["media_type"])
                     path = self._path(store, rec)
                     if path is None or not path.is_file():
@@ -374,6 +449,17 @@ class LibraryRepository:
                     store.delete_image_hashes(stale_hashes)
                 if new_hashes:
                     store.save_image_hashes(new_hashes)
+                hashes = store.get_image_hashes()
+                favs = store.favorite_identities()
+                items = [
+                    {"key": f"g{generation}_{k[0]}_{k[1]}_{k[2]}_{k[3]}",
+                     "ident": k, "filesize": v[0], "file_hash": v[1], "dhash": v[2],
+                     "favorite": k in favs}
+                    for k, v in hashes.items()
+                ]
+                clusters = cluster_duplicates(items, max_distance=4)
+                cluster_idents = [[x["ident"] for x in group] for group in clusters]
+                store.save_clusters(cluster_idents)
                 return store.duplicate_counts()
         except Exception:
             return 0
@@ -393,7 +479,7 @@ class LibraryRepository:
                      "favorite": k in favs}
                     for k, v in hashes.items()
                 ]
-                clusters = cluster_duplicates(items, max_distance=0)
+                clusters = cluster_duplicates(items, max_distance=4)
                 copy_keys = []
                 for group in clusters:
                     for duplicate in group[1:]:
@@ -499,9 +585,13 @@ class LibraryController(QObject):
     authorFilterChanged = Signal()
     hashtagsChanged = Signal()
     hashtagFilterChanged = Signal()
+    userTagsChanged = Signal()
+    userTagFilterChanged = Signal()
     favoriteFilterChanged = Signal()
     duplicateFilterChanged = Signal()
     duplicateCountChanged = Signal()
+    duplicateScanProgress = Signal(int, int)
+    statisticsLoaded = Signal(object)
     shutdownFinished = Signal()
     _delivered = Signal(object)
 
@@ -524,10 +614,14 @@ class LibraryController(QObject):
         self._hashtag = ""
         self._hashtags = []
         self._hashtags_loaded = False
-        self._favorite_only = False
         self._user_tag = ""
+        self._user_tags = []
+        self._user_tags_loaded = False
+        self._favorite_only = False
         self._duplicate_only = False
         self._duplicate_count = 0
+        self._dup_current = 0
+        self._dup_total = 0
         self._date_field = "posted"
         self._date_from = self._date_to = ""
         self._selection_mode = False
@@ -593,6 +687,14 @@ class LibraryController(QObject):
     def hashtags(self):
         return self._hashtags.copy()
 
+    @Property(str, notify=userTagFilterChanged)
+    def filterUserTag(self):
+        return self._user_tag
+
+    @Property("QVariantList", notify=userTagsChanged)
+    def userTags(self):
+        return self._user_tags.copy()
+
     @Property(bool, notify=favoriteFilterChanged)
     def filterFavoriteOnly(self):
         return self._favorite_only
@@ -605,6 +707,14 @@ class LibraryController(QObject):
     def duplicateCount(self):
         return self._duplicate_count
 
+    @Property(int, notify=duplicateScanProgress)
+    def duplicateProgressCurrent(self):
+        return self._dup_current
+
+    @Property(int, notify=duplicateScanProgress)
+    def duplicateProgressTotal(self):
+        return self._dup_total
+
     @Property(bool, notify=changed)
     def selectedIsFavorite(self):
         return bool(self._selected.get("favorite", False))
@@ -612,6 +722,10 @@ class LibraryController(QObject):
     @Property("QVariantList", notify=changed)
     def selectedTags(self):
         return self._selected.get("tags", []).copy()
+
+    @Property("QVariantList", notify=changed)
+    def selectedHashtags(self):
+        return self._selected.get("hashtags", []).copy()
 
     @Property(str, notify=changed)
     def dateField(self):
@@ -634,6 +748,8 @@ class LibraryController(QObject):
             parts.append("작성자 @" + self._author)
         if self._hashtag:
             parts.append("태그 " + (self._hashtag if self._hashtag.startswith("#") else "#" + self._hashtag))
+        if self._user_tag:
+            parts.append("내 태그 #" + self._user_tag)
         if self._favorite_only:
             parts.append("★ 즐겨찾기")
         if self._duplicate_only:
@@ -733,6 +849,9 @@ class LibraryController(QObject):
         self._hashtags = []
         self._hashtags_loaded = False
         self.hashtagsChanged.emit()
+        self._user_tags = []
+        self._user_tags_loaded = False
+        self.userTagsChanged.emit()
         self._duplicate_count = 0
         self.duplicateCountChanged.emit()
         self._refresh(reload_authors=True)
@@ -767,11 +886,15 @@ class LibraryController(QObject):
             self._hashtags = []
             self._hashtags_loaded = False
             self.hashtagsChanged.emit()
+            self._user_tags = []
+            self._user_tags_loaded = False
+            self.userTagsChanged.emit()
         self._repository.configure(request)
-        if request is not None and (reload_authors or not self._authors_loaded or not self._hashtags_loaded):
+        if request is not None and (reload_authors or not self._authors_loaded or not self._hashtags_loaded or not self._user_tags_loaded):
             with self._condition:
                 self._pending.append(("authors", self._generation, self._selection_serial, ""))
                 self._pending.append(("hashtags", self._generation, self._selection_serial, ""))
+                self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
                 self._condition.notify()
         self.provider.clear_registry()
         self.model.search(str(self._generation))
@@ -850,6 +973,7 @@ class LibraryController(QObject):
         hashtag_changed = self._hashtag != ""
         fav_changed = self._favorite_only
         dup_changed = self._duplicate_only
+        tag_changed = self._user_tag != ""
         self._query = self._author = self._hashtag = self._date_from = self._date_to = self._user_tag = ""
         self._favorite_only = False
         self._duplicate_only = False
@@ -857,6 +981,8 @@ class LibraryController(QObject):
             self.authorFilterChanged.emit()
         if hashtag_changed:
             self.hashtagFilterChanged.emit()
+        if tag_changed:
+            self.userTagFilterChanged.emit()
         if fav_changed:
             self.favoriteFilterChanged.emit()
         if dup_changed:
@@ -864,6 +990,43 @@ class LibraryController(QObject):
         self._date_field = "posted"
         self._media_type, self._order = "all", "saved"
         self._refresh(reload_authors=False)
+
+    @Slot(str)
+    def setUserTag(self, tag):
+        tag = tag.strip().lstrip("#") if isinstance(tag, str) else ""
+        if tag == self._user_tag:
+            return
+        self._user_tag = tag
+        self.userTagFilterChanged.emit()
+        self._refresh(reload_authors=False)
+
+    @Slot(str, result=int)
+    def addTagToSelection(self, tag):
+        if self._closed or not tag:
+            return 0
+        clean = tag.strip().lstrip("#")
+        if not clean:
+            return 0
+        count = 0
+        for key in list(self._selection_keys):
+            if self._repository.add_tag(key, self._generation, clean):
+                count += 1
+        if count:
+            if clean not in self._user_tags:
+                self._user_tags.append(clean)
+                self._user_tags.sort()
+                self.userTagsChanged.emit()
+            self._user_tags_loaded = False
+            self._refresh(reload_authors=False, status=f"선택한 {count:,}개 사진에 #{clean} 태그를 추가했습니다.")
+        return count
+
+    @Slot()
+    def requestStatistics(self):
+        if self._closed:
+            return
+        with self._condition:
+            self._pending.append(("statistics", self._generation, self._selection_serial, ""))
+            self._condition.notify()
 
     @Slot(bool)
     def setFavoriteOnly(self, enabled):
@@ -942,11 +1105,18 @@ class LibraryController(QObject):
     def addSelectedTag(self, tag):
         if self._closed or not self.selectedKey or not tag:
             return False
-        ok = self._repository.add_tag(self.selectedKey, self._generation, tag)
+        clean = tag.strip().lstrip("#")
+        if not clean:
+            return False
+        ok = self._repository.add_tag(self.selectedKey, self._generation, clean)
         if ok:
             tags = list(self._selected.get("tags", []))
-            tags.append({"tag": tag.strip().lstrip("#"), "source": "user"})
+            tags.append({"tag": clean, "source": "user"})
             self._selected["tags"] = tags
+            if clean not in self._user_tags:
+                self._user_tags.append(clean)
+                self._user_tags.sort()
+                self.userTagsChanged.emit()
             self.changed.emit()
         return ok
 
@@ -954,11 +1124,17 @@ class LibraryController(QObject):
     def removeSelectedTag(self, tag):
         if self._closed or not self.selectedKey or not tag:
             return False
-        ok = self._repository.remove_tag(self.selectedKey, self._generation, tag)
+        clean = tag.strip().lstrip("#")
+        if not clean:
+            return False
+        ok = self._repository.remove_tag(self.selectedKey, self._generation, clean)
         if ok:
-            clean = tag.strip().lstrip("#")
             tags = [t for t in self._selected.get("tags", []) if t.get("tag") != clean]
             self._selected["tags"] = tags
+            self._user_tags_loaded = False
+            with self._condition:
+                self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
+                self._condition.notify()
             self.changed.emit()
         return ok
 
@@ -1149,10 +1325,18 @@ class LibraryController(QObject):
                 elif action == "hashtags":
                     reader = getattr(self._repository, "hashtags", None)
                     selection = reader(generation) if callable(reader) else []
+                elif action == "user_tags":
+                    reader = getattr(self._repository, "user_tags", None)
+                    selection = reader(generation) if callable(reader) else []
+                elif action == "statistics":
+                    reader = getattr(self._repository, "overview", None)
+                    selection = reader(generation) if callable(reader) else {}
                 elif action == "scan_duplicates":
-                    count = self._repository.scan_duplicates(generation)
+                    def on_progress(cur, tot):
+                        self._delivered.emit((generation, serial, "scan_progress", (cur, tot), f"중복 검사 중… ({cur:,} / {tot:,})"))
+                    count = self._repository.scan_duplicates(generation, progress_callback=on_progress)
                     selection = count
-                    message = f"중복 사진 {count}개를 발견했습니다." if count else "중복 사진이 없습니다."
+                    message = f"중복·유사 사진 {count:,}개를 발견했습니다." if count else "중복·유사 사진이 없습니다."
                 elif action == "select":
                     selection = self._repository.selected(key, generation)
                     if selection is None:
@@ -1160,8 +1344,10 @@ class LibraryController(QObject):
                 else:
                     message = self._repository.action(key, generation, action)
             except Exception:
-                if action in {"authors", "hashtags"}:
+                if action in {"authors", "hashtags", "user_tags"}:
                     selection = []
+                elif action == "statistics":
+                    selection = {}
                 else:
                     message = "사진 정보를 읽지 못했습니다." if action == "select" else "열지 못했습니다. 파일과 기본 앱을 확인해 주세요."
             self._delivered.emit((generation, serial, action, selection, message))
@@ -1170,6 +1356,14 @@ class LibraryController(QObject):
     def _accept(self, result):
         generation, serial, action, selection, message = result
         if self._closed or generation != self._generation:
+            return
+        if action == "scan_progress":
+            curr, tot = selection
+            self._dup_current = curr
+            self._dup_total = tot
+            self._status = message
+            self.duplicateScanProgress.emit(curr, tot)
+            self.changed.emit()
             return
         if action == "authors":
             self._authors = list(selection) if isinstance(selection, (list, tuple)) else []
@@ -1183,9 +1377,21 @@ class LibraryController(QObject):
             self.hashtagsChanged.emit()
             self.changed.emit()
             return
+        if action == "user_tags":
+            self._user_tags = list(selection) if isinstance(selection, (list, tuple)) else []
+            self._user_tags_loaded = True
+            self.userTagsChanged.emit()
+            self.changed.emit()
+            return
+        if action == "statistics":
+            self.statisticsLoaded.emit(selection if isinstance(selection, dict) else {})
+            return
         if action == "scan_duplicates":
             self._duplicate_count = int(selection) if isinstance(selection, int) else 0
+            self._dup_current = 0
+            self._dup_total = 0
             self.duplicateCountChanged.emit()
+            self.duplicateScanProgress.emit(0, 0)
             self._busy = False
             self._refresh(reload_authors=False, status=message)
             return

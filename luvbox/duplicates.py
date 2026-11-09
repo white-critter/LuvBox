@@ -65,9 +65,11 @@ def compute_dhash(image_path: Path | str, hash_size: int = 8) -> str:
         for bit in diff:
             decimal = (decimal << 1) | bit
         # For solid color images (where all adjacent differences are False),
-        # mix in the mean luminance so different solid colors don't collide.
+        # mix in the mean luminance across all 8 bytes so different solid colors
+        # don't falsely match across 56 leading zero bits.
         if decimal == 0 and pixels:
-            decimal = sum(pixels) // len(pixels)
+            lum = sum(pixels) // len(pixels)
+            decimal = sum(lum << (8 * i) for i in range(8))
         return f"{decimal:016x}"
     except (OSError, ValueError, TypeError, SyntaxError, UnidentifiedImageError,
             Image.DecompressionBombError, Image.DecompressionBombWarning):

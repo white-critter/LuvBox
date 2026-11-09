@@ -78,7 +78,9 @@ class LibraryRepositoryTests(unittest.TestCase):
         self.assertEqual(captions["100"], "@alice · 100_1.jpg")
         key = next(row["key"] for row in rows if row["key"].split("_")[2] == "200")
         selected = self.repository.selected(key, 1)
-        self.assertEqual(selected["public_info"], "artist_200_1.jpg · 2026-10-01 00:30")
+        self.assertTrue(selected["public_info"].startswith("artist_200_1.jpg · 2026-10-01 00:30"))
+        self.assertIn("8×8", selected["public_info"])
+        self.assertIn("631 B", selected["public_info"])
 
     def test_gif_selection_reports_the_screen_without_decoding_it(self):
         import struct

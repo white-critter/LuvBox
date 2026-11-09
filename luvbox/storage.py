@@ -847,15 +847,26 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                  row.get("source") or "user", row.get("created_at") or ""))
     if "image_hashes" in source_tables:
         _prepare_table(target, source, "image_hashes")
+        has_cluster = "cluster_id" in _columns(target, "image_hashes")
         for row in _rows(source, "image_hashes"):
-            target.execute(
-                "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
-                "filesize=excluded.filesize,file_hash=excluded.file_hash,dhash=excluded.dhash,"
-                "updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
-                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
-                 row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
-                 row.get("updated_at") or ""))
+            if has_cluster:
+                target.execute(
+                    "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,cluster_id,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                    "filesize=excluded.filesize,file_hash=excluded.file_hash,dhash=excluded.dhash,"
+                    "cluster_id=excluded.cluster_id,updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
+                    (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
+                     row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
+                     row.get("cluster_id") or 0, row.get("updated_at") or ""))
+            else:
+                target.execute(
+                    "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                    "filesize=excluded.filesize,file_hash=excluded.file_hash,dhash=excluded.dhash,"
+                    "updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
+                    (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
+                     row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
+                     row.get("updated_at") or ""))
     if "missing_choices" in source_tables:
         # Keep or download again: the later choice wins across PCs.
         _prepare_table(target, source, "missing_choices")

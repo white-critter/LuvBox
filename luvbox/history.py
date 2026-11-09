@@ -432,11 +432,13 @@ class HistoryStore:
                 CREATE TABLE IF NOT EXISTS image_hashes (
                     folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
                     media_type TEXT NOT NULL, filesize INTEGER NOT NULL,
-                    file_hash TEXT NOT NULL, dhash TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    file_hash TEXT NOT NULL, dhash TEXT NOT NULL, cluster_id INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL,
                     PRIMARY KEY(folder_mode, tweet_id, num, media_type)
                 );
                 CREATE INDEX IF NOT EXISTS image_hashes_dhash ON image_hashes(dhash);
                 CREATE INDEX IF NOT EXISTS image_hashes_file_hash ON image_hashes(file_hash);
+                CREATE INDEX IF NOT EXISTS image_hashes_cluster ON image_hashes(cluster_id);
             """)
             primary = [row["name"] for row in sorted(self._db.execute("PRAGMA table_info(media)").fetchall(),
                                                      key=lambda row: row["pk"]) if row["pk"]]
@@ -481,6 +483,7 @@ class HistoryStore:
                 self._backfill_source_urls()
             run_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}
             tweet_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(tweets)")}
+            hash_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(image_hashes)")} if self._has_table("image_hashes") else set()
             with self._db:
                 # Runs from earlier versions keep 'full' with no signature, so
                 # the first run after an upgrade is always a complete scan.
@@ -497,6 +500,9 @@ class HistoryStore:
                             updates.append((extracted, row["tweet_id"]))
                     if updates:
                         self._db.executemany("UPDATE tweets SET hashtags=? WHERE tweet_id=?", updates)
+                if "cluster_id" not in hash_columns and self._has_table("image_hashes"):
+                    self._db.execute("ALTER TABLE image_hashes ADD COLUMN cluster_id INTEGER NOT NULL DEFAULT 0")
+                    self._db.execute("CREATE INDEX IF NOT EXISTS image_hashes_cluster ON image_hashes(cluster_id)")
             self._media_roots = self._read_media_roots()
         except sqlite3.DatabaseError as exc:
             # Check ambiguous failures before closing this constructor's
@@ -1785,7 +1791,8 @@ class HistoryStore:
     @staticmethod
     def _record_filter(media_type, query, period=None, author="", include_deleted=True, hashtag="",
                        favorite_only=False, user_tag="", duplicate_only=False, *,
-                       has_hashtags=True, has_favorites=True, has_media_tags=True, has_image_hashes=True):
+                       has_hashtags=True, has_favorites=True, has_media_tags=True, has_image_hashes=True,
+                       has_cluster_id=True):
         """WHERE clause on media; ``period`` is (field, first day, last day).
 
         Days are inclusive YYYY-MM-DD dates in Korean time, either may be empty.
@@ -1858,16 +1865,17 @@ class HistoryStore:
             if not has_image_hashes:
                 clauses.append("0")
             else:
+                cluster_cond = "h1.cluster_id > 0 OR " if has_cluster_id else ""
                 clauses.append("media.path!='' AND EXISTS (SELECT 1 FROM image_hashes h1 "
                                "WHERE h1.folder_mode=media.folder_mode AND h1.tweet_id=media.tweet_id "
                                "AND h1.num=media.num AND h1.media_type=media.media_type "
-                               "AND EXISTS (SELECT 1 FROM image_hashes h2 "
+                               f"AND ({cluster_cond}EXISTS (SELECT 1 FROM image_hashes h2 "
                                "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
                                "AND m2.num=h2.num AND m2.media_type=h2.media_type "
                                "WHERE m2.path!='' AND ((h1.dhash!='' AND h2.dhash=h1.dhash) "
                                "OR (h1.file_hash!='' AND h2.file_hash=h1.file_hash)) "
                                "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id "
-                               "AND h2.num=h1.num AND h2.media_type=h1.media_type)))")
+                               "AND h2.num=h1.num AND h2.media_type=h1.media_type))))")
         if author:
             if not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author):
                 raise HistoryError(_HISTORY_HELP)
@@ -1896,6 +1904,7 @@ class HistoryStore:
             has_favorites=self._has_table("favorites"),
             has_media_tags=self._has_table("media_tags"),
             has_image_hashes=self._has_table("image_hashes"),
+            has_cluster_id=self._has_column("image_hashes", "cluster_id"),
         )
 
     @_safe
@@ -2121,20 +2130,44 @@ class HistoryStore:
                 for r in rows}
 
     @_safe
+    def save_clusters(self, clusters: list[list[tuple]]) -> int:
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
+            return 0
+        with self._db:
+            self._db.execute("UPDATE image_hashes SET cluster_id=0")
+            updates = []
+            cluster_id = 1
+            for group in clusters:
+                if len(group) < 2:
+                    continue
+                for ident in group:
+                    updates.append((cluster_id, ident[0], ident[1], ident[2], ident[3]))
+                cluster_id += 1
+            if updates:
+                self._db.executemany(
+                    "UPDATE image_hashes SET cluster_id=? "
+                    "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                    updates
+                )
+        return len(updates)
+
+    @_safe
     def duplicate_counts(self) -> int:
         """Total number of duplicate media items currently detected."""
         if not self._has_table("image_hashes"):
             return 0
+        has_cluster = self._has_column("image_hashes", "cluster_id")
+        cluster_cond = "h1.cluster_id > 0 OR " if has_cluster else ""
         row = self._db.execute(
             "SELECT COUNT(*) FROM image_hashes h1 "
             "JOIN media m1 ON m1.folder_mode=h1.folder_mode AND m1.tweet_id=h1.tweet_id "
             "AND m1.num=h1.num AND m1.media_type=h1.media_type "
-            "WHERE m1.path!='' AND EXISTS ("
+            f"WHERE m1.path!='' AND ({cluster_cond}EXISTS ("
             "SELECT 1 FROM image_hashes h2 "
             "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
             "AND m2.num=h2.num AND m2.media_type=h2.media_type "
             "WHERE m2.path!='' AND ((h1.dhash!='' AND h2.dhash=h1.dhash) OR (h1.file_hash!='' AND h2.file_hash=h1.file_hash)) "
-            "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id AND h2.num=h1.num AND h2.media_type=h1.media_type))"
+            "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id AND h2.num=h1.num AND h2.media_type=h1.media_type)))"
         ).fetchone()
         return row[0] if row else 0
 
