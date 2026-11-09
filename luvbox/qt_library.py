@@ -80,6 +80,10 @@ class _Request:
     date_field: str = "posted"
     date_from: str = ""
     date_to: str = ""
+    hashtag: str = ""
+    favorite_only: bool = False
+    user_tag: str = ""
+    duplicate_only: bool = False
 
     def location(self):
         return resolve_storage(self.output_dir, self.account, self.separate_accounts)
@@ -125,7 +129,10 @@ class LibraryRepository:
                 page = store.record_page(0 if after is not None else offset // limit, limit,
                                          request.media_type, request.query,
                                          order=request.order, author=request.author, include_deleted=False,
-                                         period=period, after=after)
+                                         period=period, after=after, hashtag=request.hashtag,
+                                         favorite_only=request.favorite_only, user_tag=request.user_tag,
+                                         duplicate_only=request.duplicate_only)
+                favs = store.favorite_identities()
                 rows = []
                 served = {}
                 last = None
@@ -156,7 +163,9 @@ class LibraryRepository:
                         caption += " · 클라우드에만 있음"
                     elif kind != "ready":
                         caption += " · 파일 없음"
-                    rows.append({"key": key, "caption": caption, "missing": kind != "ready"})
+                    is_fav = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) in favs
+                    rows.append({"key": key, "caption": caption, "missing": kind != "ready",
+                                 "favorite": is_fav})
                     last = row
                 if after is None and page["page"] * limit != offset:
                     return page["total"], []
@@ -183,6 +192,16 @@ class LibraryRepository:
         try:
             with closing(_ReadOnlyHistory(request.location())) as store:
                 return store.authors(include_deleted=False)
+        except Exception:
+            return []
+
+    def hashtags(self, generation=None):
+        request = self.current(generation)
+        if request is None:
+            return []
+        try:
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                return store.hashtags(include_deleted=False)
         except Exception:
             return []
 
@@ -257,6 +276,8 @@ class LibraryRepository:
                 note = absence_note(store.output_dir)
             else:
                 note = ""
+            is_fav = store.is_favorite(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+            tags = store.item_tags(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
             return {"key": key, "author": row.get("author") or "",
                     "body": content[0] if content and isinstance(content[0], str) else "",
                     "source": source, "path": str(path) if path is not None else "", "missing": path is None,
@@ -264,7 +285,47 @@ class LibraryRepository:
                     "preview": QUrl.fromLocalFile(str(path)).toString() if path is not None else "",
                     "media_type": row["media_type"], "public_info": info,
                     "pixel_width": width, "pixel_height": height,
-                    "source_width": raw_width, "source_height": raw_height}
+                    "source_width": raw_width, "source_height": raw_height,
+                    "favorite": is_fav, "tags": tags}
+
+    def toggle_favorite(self, key, generation):
+        request = self.current(generation)
+        if request is None:
+            return False
+        match = _KEY.fullmatch(key) if isinstance(key, str) else None
+        if match is None or int(match[1]) != request.generation:
+            return False
+        try:
+            with closing(HistoryStore.for_storage(request.location())) as store:
+                return store.toggle_favorite(match[2], match[3], int(match[4]), match[5])
+        except Exception:
+            return False
+
+    def add_tag(self, key, generation, tag):
+        request = self.current(generation)
+        if request is None:
+            return False
+        match = _KEY.fullmatch(key) if isinstance(key, str) else None
+        if match is None or int(match[1]) != request.generation:
+            return False
+        try:
+            with closing(HistoryStore.for_storage(request.location())) as store:
+                return store.add_tag(match[2], match[3], int(match[4]), match[5], tag)
+        except Exception:
+            return False
+
+    def remove_tag(self, key, generation, tag):
+        request = self.current(generation)
+        if request is None:
+            return False
+        match = _KEY.fullmatch(key) if isinstance(key, str) else None
+        if match is None or int(match[1]) != request.generation:
+            return False
+        try:
+            with closing(HistoryStore.for_storage(request.location())) as store:
+                return store.remove_tag(match[2], match[3], int(match[4]), match[5], tag)
+        except Exception:
+            return False
 
     def decode(self, path, size):
         # Only paths that read() checked against this request's catalog are
@@ -274,6 +335,63 @@ class LibraryRepository:
         if self.current() is None:
             return Thumbnail(None, "")
         return thumbnail(path, size)
+
+    def scan_duplicates(self, generation):
+        request = self.current(generation)
+        if request is None:
+            return 0
+        from .duplicates import compute_dhash, compute_file_hash
+        try:
+            with closing(HistoryStore.for_storage(request.location())) as store:
+                cached = store.get_image_hashes()
+                records = store.records(limit=10000, media_type="photo", include_deleted=False)
+                new_hashes = []
+                for rec in records:
+                    ident = (rec["folder_mode"], rec["tweet_id"], rec["num"], rec["media_type"])
+                    path = self._path(store, rec)
+                    if path is None or not path.is_file():
+                        continue
+                    try:
+                        sz = path.stat().st_size
+                    except OSError:
+                        continue
+                    if ident in cached and cached[ident][0] == sz:
+                        continue
+                    fhash = compute_file_hash(path)
+                    dh = compute_dhash(path)
+                    if fhash or dh:
+                        new_hashes.append((*ident, sz, fhash, dh))
+                        if len(new_hashes) >= 100:
+                            store.save_image_hashes(new_hashes)
+                            new_hashes.clear()
+                if new_hashes:
+                    store.save_image_hashes(new_hashes)
+                return store.duplicate_counts()
+        except Exception:
+            return 0
+
+    def duplicate_copy_keys(self, generation):
+        request = self.current(generation)
+        if request is None:
+            return []
+        from .duplicates import cluster_duplicates
+        try:
+            with closing(HistoryStore.for_storage(request.location())) as store:
+                hashes = store.get_image_hashes()
+                items = [
+                    {"key": f"g{generation}_{k[0]}_{k[1]}_{k[2]}_{k[3]}",
+                     "ident": k, "filesize": v[0], "file_hash": v[1], "dhash": v[2]}
+                    for k, v in hashes.items()
+                ]
+                clusters = cluster_duplicates(items, max_distance=4)
+                copy_keys = []
+                for group in clusters:
+                    group.sort(key=lambda x: x["filesize"], reverse=True)
+                    for duplicate in group[1:]:
+                        copy_keys.append(duplicate["key"])
+                return copy_keys
+        except Exception:
+            return []
 
     def deletion_manifest(self, keys):
         """Capture displayed catalog identities without accepting paths from QML."""
@@ -370,6 +488,11 @@ class LibraryController(QObject):
     # not part of a page, so the combo must not rebuild while the grid scrolls.
     authorsChanged = Signal()
     authorFilterChanged = Signal()
+    hashtagsChanged = Signal()
+    hashtagFilterChanged = Signal()
+    favoriteFilterChanged = Signal()
+    duplicateFilterChanged = Signal()
+    duplicateCountChanged = Signal()
     shutdownFinished = Signal()
     _delivered = Signal(object)
 
@@ -389,6 +512,13 @@ class LibraryController(QObject):
         self._author = ""
         self._authors = []
         self._authors_loaded = False
+        self._hashtag = ""
+        self._hashtags = []
+        self._hashtags_loaded = False
+        self._favorite_only = False
+        self._user_tag = ""
+        self._duplicate_only = False
+        self._duplicate_count = 0
         self._date_field = "posted"
         self._date_from = self._date_to = ""
         self._selection_mode = False
@@ -446,6 +576,34 @@ class LibraryController(QObject):
     def authors(self):
         return self._authors.copy()
 
+    @Property(str, notify=hashtagFilterChanged)
+    def filterHashtag(self):
+        return self._hashtag
+
+    @Property("QVariantList", notify=hashtagsChanged)
+    def hashtags(self):
+        return self._hashtags.copy()
+
+    @Property(bool, notify=favoriteFilterChanged)
+    def filterFavoriteOnly(self):
+        return self._favorite_only
+
+    @Property(bool, notify=duplicateFilterChanged)
+    def filterDuplicateOnly(self):
+        return self._duplicate_only
+
+    @Property(int, notify=duplicateCountChanged)
+    def duplicateCount(self):
+        return self._duplicate_count
+
+    @Property(bool, notify=changed)
+    def selectedIsFavorite(self):
+        return bool(self._selected.get("favorite", False))
+
+    @Property("QVariantList", notify=changed)
+    def selectedTags(self):
+        return self._selected.get("tags", []).copy()
+
     @Property(str, notify=changed)
     def dateField(self):
         return self._date_field
@@ -465,6 +623,12 @@ class LibraryController(QObject):
             parts.append("검색: " + self._query)
         if self._author:
             parts.append("작성자 @" + self._author)
+        if self._hashtag:
+            parts.append("태그 " + (self._hashtag if self._hashtag.startswith("#") else "#" + self._hashtag))
+        if self._favorite_only:
+            parts.append("★ 즐겨찾기")
+        if self._duplicate_only:
+            parts.append("중복 사진")
         if self._date_from or self._date_to:
             parts.append(("게시일 " if self._date_field == "posted" else "저장일 ")
                          + (self._date_from or "처음") + " ~ " + (self._date_to or "끝"))
@@ -580,15 +744,20 @@ class LibraryController(QObject):
         if self._account and self._output_dir:
             request = _Request(self._generation, self._account, self._output_dir, self._separate_accounts,
                                self._query, self._media_type, self._order, self._author,
-                               self._date_field, self._date_from, self._date_to)
+                               self._date_field, self._date_from, self._date_to, self._hashtag,
+                               self._favorite_only, self._user_tag, self._duplicate_only)
         else:
             self._authors = []
             self._authors_loaded = False
             self.authorsChanged.emit()
+            self._hashtags = []
+            self._hashtags_loaded = False
+            self.hashtagsChanged.emit()
         self._repository.configure(request)
-        if request is not None and (reload_authors or not self._authors_loaded):
+        if request is not None and (reload_authors or not self._authors_loaded or not self._hashtags_loaded):
             with self._condition:
                 self._pending.append(("authors", self._generation, self._selection_serial, ""))
+                self._pending.append(("hashtags", self._generation, self._selection_serial, ""))
                 self._condition.notify()
         self.provider.clear_registry()
         self.model.search(str(self._generation))
@@ -617,12 +786,17 @@ class LibraryController(QObject):
             self.authorFilterChanged.emit()
         self._refresh(reload_authors=False)
 
+    @Slot(str, str, str, str, str, result=bool)
     @Slot(str, str, str, str, result=bool)
-    def setAdvancedFilters(self, author, date_field, first, last):
+    def setAdvancedFilters(self, author, date_field, first, last, hashtag=None):
         if self._closed:
             return False
         author = author.strip().lstrip("@").lower()
         first, last = first.strip(), last.strip()
+        if hashtag is not None:
+            hashtag = hashtag.strip() if isinstance(hashtag, str) else ""
+            if hashtag and not hashtag.startswith("#"):
+                hashtag = "#" + hashtag
         try:
             if date_field not in {"posted", "saved"} or (author and not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author)):
                 raise ValueError
@@ -639,11 +813,17 @@ class LibraryController(QObject):
             return False
         # The basis only matters while a date is set; picking it first must not reload the grid.
         results_change = (author != self._author or first != self._date_from or last != self._date_to
-                          or (bool(first or last) and date_field != self._date_field))
+                          or (bool(first or last) and date_field != self._date_field)
+                          or (hashtag is not None and hashtag != self._hashtag))
         author_changed = author != self._author
+        hashtag_changed = hashtag is not None and hashtag != self._hashtag
         self._author, self._date_field, self._date_from, self._date_to = author, date_field, first, last
+        if hashtag is not None:
+            self._hashtag = hashtag
         if author_changed:
             self.authorFilterChanged.emit()
+        if hashtag_changed:
+            self.hashtagFilterChanged.emit()
         if results_change:
             self._refresh(reload_authors=False)
         else:
@@ -653,12 +833,111 @@ class LibraryController(QObject):
     @Slot()
     def resetFilters(self):
         author_changed = self._author != ""
-        self._query = self._author = self._date_from = self._date_to = ""
+        hashtag_changed = self._hashtag != ""
+        fav_changed = self._favorite_only
+        dup_changed = self._duplicate_only
+        self._query = self._author = self._hashtag = self._date_from = self._date_to = self._user_tag = ""
+        self._favorite_only = False
+        self._duplicate_only = False
         if author_changed:
             self.authorFilterChanged.emit()
+        if hashtag_changed:
+            self.hashtagFilterChanged.emit()
+        if fav_changed:
+            self.favoriteFilterChanged.emit()
+        if dup_changed:
+            self.duplicateFilterChanged.emit()
         self._date_field = "posted"
         self._media_type, self._order = "all", "saved"
         self._refresh(reload_authors=False)
+
+    @Slot(bool)
+    def setFavoriteOnly(self, enabled):
+        if self._closed or self._favorite_only == bool(enabled):
+            return
+        self._favorite_only = bool(enabled)
+        self.favoriteFilterChanged.emit()
+        self._refresh(reload_authors=False)
+
+    @Slot(bool)
+    def setDuplicateOnly(self, enabled):
+        if self._closed or self._duplicate_only == bool(enabled):
+            return
+        self._duplicate_only = bool(enabled)
+        self.duplicateFilterChanged.emit()
+        self._refresh(reload_authors=False)
+
+    @Slot()
+    def scanDuplicates(self):
+        if self._closed or self._busy:
+            return
+        self._busy = True
+        self._status = "중복 이미지를 검사하는 중…"
+        with self._condition:
+            self._pending.append(("scan_duplicates", self._generation, self._selection_serial, ""))
+            self._condition.notify()
+        self.changed.emit()
+
+    @Slot(result=int)
+    def selectDuplicateCopies(self):
+        if self._closed:
+            return 0
+        copy_keys = self._repository.duplicate_copy_keys(self._generation)
+        if not copy_keys:
+            return 0
+        self._selection_mode = True
+        self._selection_keys.update(copy_keys)
+        self._selected_keys_order = list(self._selection_keys)
+        self._selection_revision += 1
+        self.selectionChanged.emit()
+        self.changed.emit()
+        return len(copy_keys)
+
+    @Slot(result=bool)
+    def toggleSelectedFavorite(self):
+        if self._closed or not self.selectedKey:
+            return False
+        key = self.selectedKey
+        new_state = self._repository.toggle_favorite(key, self._generation)
+        self._selected["favorite"] = new_state
+        self.model.setFavorite(key, new_state)
+        self.changed.emit()
+        return new_state
+
+    @Slot(str, result=bool)
+    def toggleFavorite(self, key):
+        if self._closed or not isinstance(key, str) or not key:
+            return False
+        new_state = self._repository.toggle_favorite(key, self._generation)
+        if key == self.selectedKey:
+            self._selected["favorite"] = new_state
+            self.changed.emit()
+        self.model.setFavorite(key, new_state)
+        return new_state
+
+    @Slot(str, result=bool)
+    def addSelectedTag(self, tag):
+        if self._closed or not self.selectedKey or not tag:
+            return False
+        ok = self._repository.add_tag(self.selectedKey, self._generation, tag)
+        if ok:
+            tags = list(self._selected.get("tags", []))
+            tags.append({"tag": tag.strip().lstrip("#"), "source": "user"})
+            self._selected["tags"] = tags
+            self.changed.emit()
+        return ok
+
+    @Slot(str, result=bool)
+    def removeSelectedTag(self, tag):
+        if self._closed or not self.selectedKey or not tag:
+            return False
+        ok = self._repository.remove_tag(self.selectedKey, self._generation, tag)
+        if ok:
+            clean = tag.strip().lstrip("#")
+            tags = [t for t in self._selected.get("tags", []) if t.get("tag") != clean]
+            self._selected["tags"] = tags
+            self.changed.emit()
+        return ok
 
     @Slot(bool)
     def setSelectionMode(self, enabled):
@@ -844,6 +1123,13 @@ class LibraryController(QObject):
                 if action == "authors":
                     reader = getattr(self._repository, "authors", None)
                     selection = reader(generation) if callable(reader) else []
+                elif action == "hashtags":
+                    reader = getattr(self._repository, "hashtags", None)
+                    selection = reader(generation) if callable(reader) else []
+                elif action == "scan_duplicates":
+                    count = self._repository.scan_duplicates(generation)
+                    selection = count
+                    message = f"중복 사진 {count}개를 발견했습니다." if count else "중복 사진이 없습니다."
                 elif action == "select":
                     selection = self._repository.selected(key, generation)
                     if selection is None:
@@ -851,7 +1137,7 @@ class LibraryController(QObject):
                 else:
                     message = self._repository.action(key, generation, action)
             except Exception:
-                if action == "authors":
+                if action in {"authors", "hashtags"}:
                     selection = []
                 else:
                     message = "사진 정보를 읽지 못했습니다." if action == "select" else "열지 못했습니다. 파일과 기본 앱을 확인해 주세요."
@@ -867,6 +1153,19 @@ class LibraryController(QObject):
             self._authors_loaded = True
             self.authorsChanged.emit()
             self.changed.emit()
+            return
+        if action == "hashtags":
+            self._hashtags = list(selection) if isinstance(selection, (list, tuple)) else []
+            self._hashtags_loaded = True
+            self.hashtagsChanged.emit()
+            self.changed.emit()
+            return
+        if action == "scan_duplicates":
+            self._duplicate_count = int(selection) if isinstance(selection, int) else 0
+            self.duplicateCountChanged.emit()
+            self._busy = False
+            self._status = message
+            self._refresh(reload_authors=False)
             return
         if serial != self._selection_serial:
             return

@@ -313,7 +313,8 @@ ApplicationWindow {
             else
                 from = to
         }
-        library.setAdvancedFilters(author, dateField, from, to)
+        const hashtag = changes.hashtag !== undefined ? changes.hashtag : library.filterHashtag
+        library.setAdvancedFilters(author, dateField, from, to, hashtag)
     }
 
     property string transientNotice: ""
@@ -905,6 +906,55 @@ ApplicationWindow {
                             ["saved", "posted", "posted_oldest", "liked"][currentIndex], window.app.library.filterAuthor)
                     }
                     FlatButton {
+                        id: favoriteFilterButton
+                        visible: !!window.app
+                        implicitHeight: 40
+                        width: implicitWidth
+                        checkable: true
+                        checked: window.app ? window.app.library.filterFavoriteOnly : false
+                        text: checked ? "★ 즐겨찾기" : "☆ 즐겨찾기"
+                        tone: checked ? "primary" : "quiet"
+                        Accessible.name: "즐겨찾기 필터"
+                        onClicked: window.app.library.setFavoriteOnly(!window.app.library.filterFavoriteOnly)
+                    }
+                    FlatButton {
+                        id: duplicateFilterButton
+                        visible: !!window.app
+                        implicitHeight: 40
+                        width: implicitWidth
+                        checkable: true
+                        checked: window.app ? window.app.library.filterDuplicateOnly : false
+                        text: checked ? "중복 해제" : "중복 사진"
+                        tone: checked ? "primary" : "quiet"
+                        Accessible.name: "중복 사진 필터"
+                        onClicked: window.app.library.setDuplicateOnly(!window.app.library.filterDuplicateOnly)
+                    }
+                    FlatButton {
+                        id: scanDuplicatesButton
+                        visible: !!window.app && window.app.library.filterDuplicateOnly
+                        implicitHeight: 40
+                        width: implicitWidth
+                        text: "중복 검사"
+                        onClicked: {
+                            window.app.library.scanDuplicates()
+                            window.flashNotice("중복 이미지를 검사하는 중입니다…")
+                        }
+                    }
+                    FlatButton {
+                        id: selectDuplicatesButton
+                        visible: !!window.app && window.app.library.filterDuplicateOnly
+                        implicitHeight: 40
+                        width: implicitWidth
+                        text: "사본 일괄 선택"
+                        onClicked: {
+                            const count = window.app.library.selectDuplicateCopies()
+                            if (count > 0)
+                                window.flashNotice(count + "개의 중복 사본이 선택되었습니다. '휴지통으로'를 누르면 정리됩니다.")
+                            else
+                                window.flashNotice("선택할 중복 사본이 없습니다. 먼저 '중복 검사'를 실행해 보세요.")
+                        }
+                    }
+                    FlatButton {
                         visible: !!window.app
                         implicitHeight: 40
                         width: implicitWidth
@@ -1023,6 +1073,59 @@ ApplicationWindow {
                         }
                     }
                     FlatCombo {
+                        id: hashtagFilter
+                        objectName: "galleryHashtagFilter"
+                        visible: filterToggle.checked
+                        minimumPopupWidth: 240
+                        implicitHeight: 40
+                        implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                        width: Math.min(260, Math.max(160, implicitContentWidth + leftPadding + rightPadding))
+                        height: implicitHeight
+                        onVisibleChanged: Qt.callLater(filterHost.layout)
+                        onWidthChanged: Qt.callLater(filterHost.layout)
+                        displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].value : "전체 태그"
+                        Accessible.name: "해시태그 선택"
+                        textRole: "label"
+                        valueRole: "value"
+                        readonly property string applied: window.app ? window.app.library.filterHashtag : ""
+                        readonly property var hashtagRows: {
+                            if (!window.app)
+                                return []
+                            const rows = window.app.library.hashtags
+                            return rows ? rows : []
+                        }
+                        model: {
+                            const items = [{ label: "전체 태그", value: "" }]
+                            let found = !hashtagFilter.applied.length
+                            for (let i = 0; i < hashtagRows.length; i++) {
+                                const row = hashtagRows[i]
+                                const tag = row && row.tag ? String(row.tag) : ""
+                                if (!tag.length)
+                                    continue
+                                if (tag.toLowerCase() === hashtagFilter.applied.toLowerCase())
+                                    found = true
+                                const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
+                                items.push({ label: tag + " · 미디어 " + count + "개", value: tag })
+                            }
+                            if (!found && hashtagFilter.applied.length)
+                                items.push({ label: hashtagFilter.applied, value: hashtagFilter.applied })
+                            return items
+                        }
+                        function hashtagIndex() {
+                            const wanted = hashtagFilter.applied.toLowerCase()
+                            for (let i = 1; i < model.length; i++) {
+                                if (String(model[i].value).toLowerCase() === wanted)
+                                    return i
+                            }
+                            return 0
+                        }
+                        currentIndex: hashtagIndex()
+                        onActivated: index => {
+                            window.applyFilters({ hashtag: index > 0 && model[index] ? model[index].value : "" })
+                            currentIndex = Qt.binding(function() { return hashtagFilter.hashtagIndex() })
+                        }
+                    }
+                    FlatCombo {
                         id: dateFieldChoice
                         objectName: "galleryDateField"
                         visible: filterToggle.checked
@@ -1087,7 +1190,7 @@ ApplicationWindow {
                         objectName: "galleryFilterToggle"
                         implicitHeight: 40
                         width: implicitWidth
-                        text: checked ? "필터 닫기" : "작성자·날짜 필터"
+                        text: checked ? "필터 닫기" : "작성자·태그·날짜 필터"
                         checkable: true
                         onClicked: if (!checked) datePickerPopup.close()
                         onCheckedChanged: Qt.callLater(filterHost.layout)
@@ -1100,7 +1203,7 @@ ApplicationWindow {
                         width: implicitWidth
                         text: "필터 초기화"
                         enabled: !!window.app && (window.app.library.filterSummary.length > 0 || search.text.length > 0
-                            || mediaFilter.currentIndex > 0 || orderChoice.currentIndex > 0)
+                            || mediaFilter.currentIndex > 0 || orderChoice.currentIndex > 0 || window.app.library.filterFavoriteOnly || window.app.library.filterDuplicateOnly)
                         onClicked: {
                             searchDelay.stop()
                             datePickerPopup.close()
@@ -1293,6 +1396,7 @@ ApplicationWindow {
                         required property string thumbUrl
                         required property bool thumbReady
                         required property bool thumbMissing
+                        required property bool favorite
                         property bool activeTile: true
                         readonly property bool batchSelected: {
                             const revision = window.app ? window.app.library.selectionRevision : -1
@@ -1409,6 +1513,34 @@ ApplicationWindow {
                                 }
                                 onDoubleClicked: if (!window.app || !window.app.library.selectionMode) previewDialog.open()
                             }
+                            Rectangle {
+                                id: favBadge
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                anchors.margins: 12
+                                z: 3
+                                width: 28
+                                height: 28
+                                radius: 14
+                                color: tile.favorite ? "#d93645" : (favMouse.containsMouse ? "#333333" : "transparent")
+                                visible: tile.favorite || tileMouse.containsMouse
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "★"
+                                    font.pixelSize: 14
+                                    color: tile.favorite ? "#ffffff" : (favMouse.containsMouse ? "#ffffff" : "#7a7274")
+                                }
+                                MouseArea {
+                                    id: favMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (window.app)
+                                            window.app.library.toggleFavorite(tile.key)
+                                    }
+                                }
+                            }
                             CheckBox {
                                 objectName: "galleryItemSelection"
                                 anchors.left: parent.left
@@ -1476,6 +1608,14 @@ ApplicationWindow {
         }
     }
     Shortcut {
+        sequence: "F"
+        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app && !!window.app.library.selectedKey
+        onActivated: {
+            const fav = window.app.library.toggleSelectedFavorite()
+            window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")
+        }
+    }
+    Shortcut {
         sequence: "F5"
         enabled: window.currentScreen === 1 && !window.modalOpen && window.app && !window.app.busy
         onActivated: window.app.refreshGallery()
@@ -1503,6 +1643,14 @@ ApplicationWindow {
             sequence: "Right"
             enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canNext
             onActivated: window.app.library.nextItem()
+        }
+        Shortcut {
+            sequence: "F"
+            enabled: previewDialog.visible && !bodyText.activeFocus && !!window.app
+            onActivated: {
+                const fav = window.app.library.toggleSelectedFavorite()
+                window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")
+            }
         }
         Shortcut {
             sequence: "+"
@@ -1598,6 +1746,15 @@ ApplicationWindow {
                     }
                 }
                 FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
+                FlatButton {
+                    text: window.app && window.app.library.selectedIsFavorite ? "★ 즐겨찾기 해제 (F)" : "☆ 즐겨찾기 (F)"
+                    tone: window.app && window.app.library.selectedIsFavorite ? "primary" : "quiet"
+                    enabled: !!window.app && !!window.app.library.selectedKey
+                    onClicked: {
+                        const fav = window.app.library.toggleSelectedFavorite()
+                        window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")
+                    }
+                }
             }
             DialogButtonBox {
                 Layout.fillWidth: true

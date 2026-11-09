@@ -404,6 +404,26 @@ class HistoryStore:
                 CREATE INDEX IF NOT EXISTS deletion_created ON deletion_items(created_at);
                 -- The library filter looks up each record's deletion receipt.
                 CREATE INDEX IF NOT EXISTS deletion_identity ON deletion_items(tweet_id,num,media_type);
+                CREATE TABLE IF NOT EXISTS favorites (
+                    folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                    media_type TEXT NOT NULL, created_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_mode, tweet_id, num, media_type)
+                );
+                CREATE TABLE IF NOT EXISTS media_tags (
+                    folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                    media_type TEXT NOT NULL, tag TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_mode, tweet_id, num, media_type, tag)
+                );
+                CREATE INDEX IF NOT EXISTS media_tags_lookup ON media_tags(tag);
+                CREATE TABLE IF NOT EXISTS image_hashes (
+                    folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                    media_type TEXT NOT NULL, filesize INTEGER NOT NULL,
+                    file_hash TEXT NOT NULL, dhash TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_mode, tweet_id, num, media_type)
+                );
+                CREATE INDEX IF NOT EXISTS image_hashes_dhash ON image_hashes(dhash);
+                CREATE INDEX IF NOT EXISTS image_hashes_file_hash ON image_hashes(file_hash);
             """)
             primary = [row["name"] for row in sorted(self._db.execute("PRAGMA table_info(media)").fetchall(),
                                                      key=lambda row: row["pk"]) if row["pk"]]
@@ -1715,7 +1735,8 @@ class HistoryStore:
         return self._page("deletion_items", (), page, page_size, reader)
 
     @staticmethod
-    def _record_filter(media_type, query, period=None, author="", include_deleted=True):
+    def _record_filter(media_type, query, period=None, author="", include_deleted=True, hashtag="",
+                       favorite_only=False, user_tag="", duplicate_only=False):
         """WHERE clause on media; ``period`` is (field, first day, last day).
 
         Days are inclusive YYYY-MM-DD dates in Korean time, either may be empty.
@@ -1749,6 +1770,32 @@ class HistoryStore:
                            " OR tweets.content LIKE ? ESCAPE '\\' OR tweets.hashtags LIKE ? ESCAPE '\\')")
             query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             params.extend(["%" + query + "%"] * 5)
+        if hashtag:
+            if not isinstance(hashtag, str):
+                raise HistoryError(_HISTORY_HELP)
+            tag = hashtag.strip()
+            if tag and not tag.startswith("#"):
+                tag = "#" + tag
+            if tag:
+                escaped = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                clauses.append("tweets.hashtags LIKE ? ESCAPE '\\'")
+                params.append("%" + escaped + "%")
+        if favorite_only:
+            clauses.append("EXISTS (SELECT 1 FROM favorites WHERE favorites.folder_mode=media.folder_mode "
+                           "AND favorites.tweet_id=media.tweet_id AND favorites.num=media.num "
+                           "AND favorites.media_type=media.media_type)")
+        if user_tag:
+            tag = user_tag.strip().lstrip("#")
+            if tag:
+                clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
+                               "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
+                               "AND media_tags.media_type=media.media_type AND media_tags.tag=?)")
+                params.append(tag)
+        if duplicate_only:
+            clauses.append("EXISTS (SELECT 1 FROM image_hashes h1 WHERE h1.folder_mode=media.folder_mode "
+                           "AND h1.tweet_id=media.tweet_id AND h1.num=media.num AND h1.media_type=media.media_type "
+                           "AND (EXISTS (SELECT 1 FROM image_hashes h2 WHERE (h2.dhash=h1.dhash OR h2.file_hash=h1.file_hash) "
+                           "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id AND h2.num=h1.num AND h2.media_type=h1.media_type))))")
         if author:
             if not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author):
                 raise HistoryError(_HISTORY_HELP)
@@ -1770,12 +1817,16 @@ class HistoryStore:
 
     @_safe
     def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None,
-                author="", include_deleted=True, after=None) -> list[dict]:
+                author="", include_deleted=True, after=None, hashtag="", favorite_only=False, user_tag="",
+                duplicate_only=False) -> list[dict]:
         if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
                 isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
-                media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS):
+                media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS or
+                not isinstance(hashtag, str) or type(favorite_only) is not bool or not isinstance(user_tag, str) or
+                type(duplicate_only) is not bool):
             raise HistoryError(_HISTORY_HELP)
-        where, params = self._record_filter(media_type, query, period, author, include_deleted)
+        where, params = self._record_filter(media_type, query, period, author, include_deleted, hashtag=hashtag,
+                                            favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only)
         extra, extra_params = _after_clause(order, after)
         if extra:
             # A cursor replaces OFFSET. Inserts at the front of a newest-first
@@ -1789,7 +1840,7 @@ class HistoryStore:
         # to those rows only. Sorting every joined row with its text took most
         # of each page's time in a large library. Only Like order and a text
         # search need the other tables while choosing.
-        source = _JOINED if query or order == "liked" else "media"
+        source = _JOINED if query or hashtag or order == "liked" else "media"
         return self._read_rows("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,"
                                 "tweets.content,tweets.hashtags FROM (SELECT media.rowid AS chosen FROM " +
                                 source + where + order_by + " LIMIT ? OFFSET ?) AS page "
@@ -1807,15 +1858,19 @@ class HistoryStore:
 
     @_safe
     def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None,
-                    author="", include_deleted=True, after=None) -> dict:
+                    author="", include_deleted=True, after=None, hashtag="", favorite_only=False, user_tag="",
+                    duplicate_only=False) -> dict:
         if after is not None and page != 0:
             raise HistoryError(_HISTORY_HELP)
-        where, params = self._record_filter(media_type, query, period, author, include_deleted)
+        where, params = self._record_filter(media_type, query, period, author, include_deleted, hashtag=hashtag,
+                                            favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only)
         # Only a text search reads tweets; the joins never change the count.
-        return self._page((_JOINED if query else "media") + where, params, page, page_size,
+        return self._page((_JOINED if query or hashtag else "media") + where, params, page, page_size,
                           lambda limit, offset: self.records(limit, offset, media_type, query,
                                                              order=order, period=period, author=author,
-                                                             include_deleted=include_deleted, after=after))
+                                                             include_deleted=include_deleted, after=after,
+                                                             hashtag=hashtag, favorite_only=favorite_only,
+                                                             user_tag=user_tag, duplicate_only=duplicate_only))
 
     @_safe
     def authors(self, *, include_deleted=False) -> list[dict]:
@@ -1830,6 +1885,130 @@ class HistoryStore:
         )
         return [{"author": row["author"], "count": row["count"]}
                 for row in rows if re.fullmatch(r"[A-Za-z0-9_]{1,15}", row["author"] or "")]
+
+    @_safe
+    def hashtags(self, *, include_deleted=False, limit=200) -> list[dict]:
+        where, params = self._record_filter("all", "", include_deleted=include_deleted)
+        clause = (where + " AND " if where else " WHERE ") + "tweets.hashtags!=''"
+        rows = self._read_rows(
+            "SELECT tweets.hashtags "
+            "FROM media JOIN tweets ON tweets.tweet_id=media.tweet_id" + clause,
+            params,
+        )
+        counts = Counter()
+        for row in rows:
+            tags = (row.get("hashtags") or "").split()
+            for tag in set(tags):
+                clean = tag.strip()
+                if clean.startswith("#") and len(clean) > 1:
+                    counts[clean] += 1
+        return [{"tag": tag, "count": count} for tag, count in counts.most_common(limit)]
+
+    @_safe
+    def toggle_favorite(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> bool:
+        if not (isinstance(folder_mode, str) and isinstance(tweet_id, str) and isinstance(num, int)
+                and isinstance(media_type, str)):
+            raise HistoryError(_HISTORY_HELP)
+        with self._db:
+            exists = self._db.execute(
+                "SELECT 1 FROM favorites WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                (folder_mode, tweet_id, num, media_type)
+            ).fetchone()
+            if exists:
+                self._db.execute(
+                    "DELETE FROM favorites WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                    (folder_mode, tweet_id, num, media_type)
+                )
+                return False
+            else:
+                self._db.execute(
+                    "INSERT INTO favorites(folder_mode, tweet_id, num, media_type, created_at) VALUES (?,?,?,?,?)",
+                    (folder_mode, tweet_id, num, media_type, _now())
+                )
+                return True
+
+    @_safe
+    def is_favorite(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> bool:
+        row = self._db.execute(
+            "SELECT 1 FROM favorites WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+            (folder_mode, tweet_id, num, media_type)
+        ).fetchone()
+        return bool(row)
+
+    @_safe
+    def favorite_identities(self) -> set[tuple]:
+        rows = self._read_rows("SELECT folder_mode, tweet_id, num, media_type FROM favorites")
+        return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]) for r in rows}
+
+    @_safe
+    def add_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str, source: str = "user") -> bool:
+        tag = tag.strip().lstrip("#")
+        if not tag or len(tag) > 50:
+            return False
+        with self._db:
+            self._db.execute(
+                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                (folder_mode, tweet_id, num, media_type, tag, source, _now())
+            )
+            return True
+
+    @_safe
+    def remove_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str) -> bool:
+        tag = tag.strip().lstrip("#")
+        with self._db:
+            cur = self._db.execute(
+                "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
+                (folder_mode, tweet_id, num, media_type, tag)
+            )
+            return cur.rowcount > 0
+
+    @_safe
+    def item_tags(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> list[dict]:
+        rows = self._read_rows(
+            "SELECT tag, source, created_at FROM media_tags "
+            "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? ORDER BY created_at ASC",
+            (folder_mode, tweet_id, num, media_type)
+        )
+        return [{"tag": row["tag"], "source": row["source"]} for row in rows]
+
+    @_safe
+    def user_tags(self, limit: int = 200) -> list[dict]:
+        rows = self._read_rows(
+            "SELECT tag, COUNT(*) AS count FROM media_tags GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?",
+            (limit,)
+        )
+        return [{"tag": row["tag"], "count": row["count"]} for row in rows]
+
+    @_safe
+    def save_image_hashes(self, hashes: list[tuple]) -> int:
+        """hashes is a list of (folder_mode, tweet_id, num, media_type, filesize, file_hash, dhash)"""
+        now = _now()
+        rows = [(h[0], h[1], h[2], h[3], h[4], h[5], h[6], now) for h in hashes]
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO image_hashes(folder_mode, tweet_id, num, media_type, filesize, file_hash, dhash, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
+                "filesize=excluded.filesize, file_hash=excluded.file_hash, dhash=excluded.dhash, updated_at=excluded.updated_at",
+                rows
+            )
+        return len(rows)
+
+    @_safe
+    def get_image_hashes(self) -> dict[tuple, tuple[int, str, str]]:
+        rows = self._read_rows("SELECT folder_mode, tweet_id, num, media_type, filesize, file_hash, dhash FROM image_hashes")
+        return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]): (r["filesize"], r["file_hash"], r["dhash"])
+                for r in rows}
+
+    @_safe
+    def duplicate_counts(self) -> int:
+        """Total number of duplicate media items currently detected."""
+        row = self._db.execute(
+            "SELECT COUNT(*) FROM image_hashes h1 WHERE EXISTS ("
+            "SELECT 1 FROM image_hashes h2 WHERE (h2.dhash=h1.dhash OR h2.file_hash=h1.file_hash) "
+            "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id AND h2.num=h1.num AND h2.media_type=h1.media_type))"
+        ).fetchone()
+        return row[0] if row else 0
 
     @_safe
     def run_page(self, page=0, page_size=100) -> dict:

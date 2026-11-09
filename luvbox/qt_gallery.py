@@ -485,6 +485,7 @@ class GalleryModel(QAbstractListModel):
     ThumbUrlRole = KeyRole + 2
     ThumbReadyRole = KeyRole + 3
     ThumbMissingRole = KeyRole + 4
+    FavoriteRole = KeyRole + 5
 
     def __init__(self, reader, *, provider=None, batch_size=200, parent=None):
         super().__init__(parent)
@@ -538,7 +539,7 @@ class GalleryModel(QAbstractListModel):
     def roleNames(self):
         return {self.KeyRole: b"key", self.CaptionRole: b"caption",
                 self.ThumbUrlRole: b"thumbUrl", self.ThumbReadyRole: b"thumbReady",
-                self.ThumbMissingRole: b"thumbMissing"}
+                self.ThumbMissingRole: b"thumbMissing", self.FavoriteRole: b"favorite"}
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._rows)
@@ -557,7 +558,16 @@ class GalleryModel(QAbstractListModel):
             return row["key"] in self._ready
         if role == self.ThumbMissingRole:
             return row["key"] in self._missing
+        if role == self.FavoriteRole:
+            return bool(row.get("favorite", False))
         return None
+
+    def setFavorite(self, key, favorite):
+        pos = self._positions.get(key)
+        if pos is not None and 0 <= pos < len(self._rows):
+            self._rows[pos]["favorite"] = bool(favorite)
+            index = self.index(pos, 0)
+            self.dataChanged.emit(index, index, [self.FavoriteRole])
 
     def canFetchMore(self, parent=QModelIndex()):
         return not parent.isValid() and not (self._closed or self._busy or self._exhausted)
@@ -617,7 +627,8 @@ class GalleryModel(QAbstractListModel):
                     if not isinstance(key, str) or not _KEY.fullmatch(key) or not isinstance(caption, str):
                         raise ValueError("invalid gallery row")
                     cleaned.append({"key": key, "caption": caption[:500],
-                                    "missing": bool(row.get("missing", False))})
+                                    "missing": bool(row.get("missing", False)),
+                                    "favorite": bool(row.get("favorite", False))})
                 result = generation, offset, total, cleaned, ""
             except Exception:
                 result = generation, offset, 0, [], _READ_ERROR
