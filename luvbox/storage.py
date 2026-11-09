@@ -820,13 +820,42 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                            (row["tweet_id"], row["like_key"], row["liked_after"], row["liked_before"]))
     if "tweets" in source_tables:
         _prepare_table(target, source, "tweets")
+        if "hashtags" not in _columns(target, "tweets"):
+            target.execute("ALTER TABLE tweets ADD COLUMN hashtags TEXT NOT NULL DEFAULT ''")
         for row in _rows(source, "tweets"):
             # The same post can be refreshed on either PC. Preserve newer
             # text and hashtags together; a stale snapshot must not undo it.
+            hashtags = row.get("hashtags") or ""
             target.execute("INSERT INTO tweets(tweet_id,content,hashtags,updated_at) VALUES (?,?,?,?) "
-                           "ON CONFLICT(tweet_id) DO UPDATE SET content=excluded.content,hashtags=excluded.hashtags,"
+                           "ON CONFLICT(tweet_id) DO UPDATE SET content=excluded.content,"
+                           "hashtags=CASE WHEN excluded.hashtags!='' THEN excluded.hashtags ELSE tweets.hashtags END,"
                            "updated_at=excluded.updated_at WHERE excluded.updated_at>tweets.updated_at",
-                           (row["tweet_id"], row["content"], row["hashtags"], row["updated_at"]))
+                           (row["tweet_id"], row["content"], hashtags, row["updated_at"]))
+    if "favorites" in source_tables:
+        _prepare_table(target, source, "favorites")
+        for row in _rows(source, "favorites"):
+            target.execute(
+                "INSERT OR IGNORE INTO favorites(folder_mode,tweet_id,num,media_type,created_at) VALUES (?,?,?,?,?)",
+                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row.get("created_at") or ""))
+    if "media_tags" in source_tables:
+        _prepare_table(target, source, "media_tags")
+        for row in _rows(source, "media_tags"):
+            target.execute(
+                "INSERT OR IGNORE INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row["tag"],
+                 row.get("source") or "user", row.get("created_at") or ""))
+    if "image_hashes" in source_tables:
+        _prepare_table(target, source, "image_hashes")
+        for row in _rows(source, "image_hashes"):
+            target.execute(
+                "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                "filesize=excluded.filesize,file_hash=excluded.file_hash,dhash=excluded.dhash,"
+                "updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
+                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
+                 row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
+                 row.get("updated_at") or ""))
     if "missing_choices" in source_tables:
         # Keep or download again: the later choice wins across PCs.
         _prepare_table(target, source, "missing_choices")

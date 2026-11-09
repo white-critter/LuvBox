@@ -907,6 +907,7 @@ ApplicationWindow {
                     }
                     FlatButton {
                         id: favoriteFilterButton
+                        objectName: "galleryFavoriteFilter"
                         visible: !!window.app
                         implicitHeight: 40
                         width: implicitWidth
@@ -915,10 +916,16 @@ ApplicationWindow {
                         text: checked ? "★ 즐겨찾기" : "☆ 즐겨찾기"
                         tone: checked ? "primary" : "quiet"
                         Accessible.name: "즐겨찾기 필터"
-                        onClicked: window.app.library.setFavoriteOnly(!window.app.library.filterFavoriteOnly)
+                        ToolTip.visible: hovered
+                        ToolTip.text: checked ? "즐겨찾기 필터 해제" : "즐겨찾기한 사진·영상만 보기"
+                        onClicked: {
+                            window.app.library.setFavoriteOnly(!window.app.library.filterFavoriteOnly)
+                            checked = Qt.binding(function() { return window.app ? window.app.library.filterFavoriteOnly : false })
+                        }
                     }
                     FlatButton {
                         id: duplicateFilterButton
+                        objectName: "galleryDuplicateFilter"
                         visible: !!window.app
                         implicitHeight: 40
                         width: implicitWidth
@@ -927,14 +934,23 @@ ApplicationWindow {
                         text: checked ? "중복 해제" : "중복 사진"
                         tone: checked ? "primary" : "quiet"
                         Accessible.name: "중복 사진 필터"
-                        onClicked: window.app.library.setDuplicateOnly(!window.app.library.filterDuplicateOnly)
+                        ToolTip.visible: hovered
+                        ToolTip.text: checked ? "중복 사진 필터 해제" : "중복 사진 보기 및 정리"
+                        onClicked: {
+                            window.app.library.setDuplicateOnly(!window.app.library.filterDuplicateOnly)
+                            checked = Qt.binding(function() { return window.app ? window.app.library.filterDuplicateOnly : false })
+                        }
                     }
                     FlatButton {
                         id: scanDuplicatesButton
+                        objectName: "galleryScanDuplicates"
                         visible: !!window.app && window.app.library.filterDuplicateOnly
+                        enabled: !!window.app && !window.app.library.busy
                         implicitHeight: 40
                         width: implicitWidth
                         text: "중복 검사"
+                        ToolTip.visible: hovered
+                        ToolTip.text: "저장된 사진들의 해시를 비교해 중복 사진을 찾습니다"
                         onClicked: {
                             window.app.library.scanDuplicates()
                             window.flashNotice("중복 이미지를 검사하는 중입니다…")
@@ -942,10 +958,14 @@ ApplicationWindow {
                     }
                     FlatButton {
                         id: selectDuplicatesButton
+                        objectName: "gallerySelectDuplicates"
                         visible: !!window.app && window.app.library.filterDuplicateOnly
+                        enabled: !!window.app && !window.app.library.busy && window.galleryModel.count > 0
                         implicitHeight: 40
                         width: implicitWidth
                         text: "사본 일괄 선택"
+                        ToolTip.visible: hovered
+                        ToolTip.text: "가장 화질이 좋거나 즐겨찾기한 원본 1장씩만 남기고 나머지 사본을 선택합니다"
                         onClicked: {
                             const count = window.app.library.selectDuplicateCopies()
                             if (count > 0)
@@ -1515,6 +1535,7 @@ ApplicationWindow {
                             }
                             Rectangle {
                                 id: favBadge
+                                objectName: "galleryItemFavorite"
                                 anchors.right: parent.right
                                 anchors.top: parent.top
                                 anchors.margins: 12
@@ -1522,19 +1543,21 @@ ApplicationWindow {
                                 width: 28
                                 height: 28
                                 radius: 14
-                                color: tile.favorite ? "#d93645" : (favMouse.containsMouse ? "#333333" : "transparent")
-                                visible: tile.favorite || tileMouse.containsMouse
+                                color: tile.favorite ? "#d93645" : (favMouse.containsMouse ? "#404040" : "#b3141414")
+                                visible: tile.favorite || tileMouse.containsMouse || favMouse.containsMouse
                                 Text {
                                     anchors.centerIn: parent
                                     text: "★"
                                     font.pixelSize: 14
-                                    color: tile.favorite ? "#ffffff" : (favMouse.containsMouse ? "#ffffff" : "#7a7274")
+                                    color: tile.favorite ? "#ffffff" : (favMouse.containsMouse ? "#ffffff" : "#d8d1d2")
                                 }
                                 MouseArea {
                                     id: favMouse
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
+                                    ToolTip.visible: containsMouse
+                                    ToolTip.text: tile.favorite ? "즐겨찾기 해제 (F)" : "즐겨찾기 추가 (F)"
                                     onClicked: {
                                         if (window.app)
                                             window.app.library.toggleFavorite(tile.key)
@@ -1570,8 +1593,14 @@ ApplicationWindow {
                         objectName: "galleryEmptyState"
                         anchors.centerIn: parent
                         visible: gallery.count === 0 && !window.galleryModel.busy && !window.galleryModel.error.length
-                        text: search.text.length || (window.app && (window.app.library.filterSummary.length > 0
-                            || mediaFilter.currentIndex > 0)) ? "필터에 맞는 사진이 없습니다." : "사진이 없습니다."
+                        text: {
+                            if (window.app && window.app.library.filterDuplicateOnly)
+                                return "발견된 중복 사진이 없습니다. 상단의 '중복 검사'를 눌러 검사해 보세요."
+                            if (window.app && window.app.library.filterFavoriteOnly)
+                                return "즐겨찾기한 사진이 없습니다. 사진 우측 상단의 ★ 버튼이나 F 키로 추가해 보세요."
+                            return search.text.length || (window.app && (window.app.library.filterSummary.length > 0
+                                || mediaFilter.currentIndex > 0)) ? "필터에 맞는 사진이 없습니다." : "사진이 없습니다."
+                        }
                         color: window.mutedColor
                     }
                 }
@@ -1609,9 +1638,13 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "F"
-        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app && !!window.app.library.selectedKey
+        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app
+            && (!!window.app.library.selectedKey || gallery.currentIndex >= 0)
         onActivated: {
-            const fav = window.app.library.toggleSelectedFavorite()
+            const key = window.app.library.selectedKey || (gallery.currentItem ? gallery.currentItem.key : "")
+            if (!key)
+                return
+            const fav = window.app.library.toggleFavorite(key)
             window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")
         }
     }
@@ -1747,9 +1780,12 @@ ApplicationWindow {
                 }
                 FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
                 FlatButton {
-                    text: window.app && window.app.library.selectedIsFavorite ? "★ 즐겨찾기 해제 (F)" : "☆ 즐겨찾기 (F)"
+                    objectName: "previewFavoriteButton"
+                    text: window.app && window.app.library.selectedIsFavorite ? "★ 즐겨찾기 해제" : "☆ 즐겨찾기"
                     tone: window.app && window.app.library.selectedIsFavorite ? "primary" : "quiet"
                     enabled: !!window.app && !!window.app.library.selectedKey
+                    ToolTip.visible: hovered && enabled
+                    ToolTip.text: window.app && window.app.library.selectedIsFavorite ? "즐겨찾기 해제 (F)" : "즐겨찾기 추가 (F)"
                     onClicked: {
                         const fav = window.app.library.toggleSelectedFavorite()
                         window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")

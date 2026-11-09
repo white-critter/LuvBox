@@ -127,6 +127,41 @@ class FavoritesAndTagsTests(unittest.TestCase):
         self.assertTrue(row_301["favorite"])
         self.assertFalse(row_302["favorite"])
 
+    def test_merge_and_recovery_preserve_favorites_tags_and_hashes(self):
+        import sqlite3
+        from luvbox.storage import _merge_history
+        from luvbox.recovery import rebuild_history
+
+        p1 = self.file("m_501_1.jpg")
+        self.store.record_media("flat", {"tweet_id": "501", "num": 1, "type": "photo", "author": "u"}, p1)
+        self.store.toggle_favorite("flat", "501", 1, "photo")
+        self.store.add_tag("flat", "501", 1, "photo", "best")
+        self.store.save_image_hashes([("flat", "501", 1, "photo", 12, "fhash501", "0123456789abcdef")])
+        self.store.close()
+
+        # 1. Test _merge_history into a fresh target db
+        src_db = self.root / ".luvbox-history.sqlite3"
+        dst_dir = self.root / "merged"
+        dst_dir.mkdir()
+        HistoryStore(dst_dir).close()
+        dst_db = dst_dir / ".luvbox-history.sqlite3"
+        with closing(sqlite3.connect(dst_db)) as target, closing(sqlite3.connect(src_db)) as source:
+            with target:
+                _merge_history(target, source)
+        with closing(HistoryStore(dst_dir)) as merged_store:
+            self.assertTrue(merged_store.is_favorite("flat", "501", 1, "photo"))
+            self.assertEqual([t["tag"] for t in merged_store.item_tags("flat", "501", 1, "photo")], ["best"])
+            self.assertIn(("flat", "501", 1, "photo"), merged_store.get_image_hashes())
+
+        # 2. Test rebuild_history preserves favorites, media_tags, and image_hashes
+        rebuilt_dir = self.root / "rebuilt"
+        rebuilt_dir.mkdir()
+        rebuild_history(src_db, rebuilt_dir / ".luvbox-history.sqlite3")
+        with closing(HistoryStore(rebuilt_dir)) as rebuilt_store:
+            self.assertTrue(rebuilt_store.is_favorite("flat", "501", 1, "photo"))
+            self.assertEqual([t["tag"] for t in rebuilt_store.item_tags("flat", "501", 1, "photo")], ["best"])
+            self.assertIn(("flat", "501", 1, "photo"), rebuilt_store.get_image_hashes())
+
 
 if __name__ == "__main__":
     unittest.main()

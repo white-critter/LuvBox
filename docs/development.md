@@ -1,4 +1,4 @@
-# LuvBox 1.4.9 개발 안내
+# LuvBox 1.5.1 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 

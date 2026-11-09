@@ -296,7 +296,7 @@ class LibraryRepository:
         if match is None or int(match[1]) != request.generation:
             return False
         try:
-            with closing(HistoryStore.for_storage(request.location())) as store:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 return store.toggle_favorite(match[2], match[3], int(match[4]), match[5])
         except Exception:
             return False
@@ -309,7 +309,7 @@ class LibraryRepository:
         if match is None or int(match[1]) != request.generation:
             return False
         try:
-            with closing(HistoryStore.for_storage(request.location())) as store:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 return store.add_tag(match[2], match[3], int(match[4]), match[5], tag)
         except Exception:
             return False
@@ -322,7 +322,7 @@ class LibraryRepository:
         if match is None or int(match[1]) != request.generation:
             return False
         try:
-            with closing(HistoryStore.for_storage(request.location())) as store:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 return store.remove_tag(match[2], match[3], int(match[4]), match[5], tag)
         except Exception:
             return False
@@ -342,20 +342,26 @@ class LibraryRepository:
             return 0
         from .duplicates import compute_dhash, compute_file_hash
         try:
-            with closing(HistoryStore.for_storage(request.location())) as store:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                store._folder_cache = {}
                 cached = store.get_image_hashes()
                 records = store.records(limit=10000, media_type="photo", include_deleted=False)
                 new_hashes = []
+                stale_hashes = []
                 for rec in records:
+                    if self.current(generation) is None:
+                        return 0
                     ident = (rec["folder_mode"], rec["tweet_id"], rec["num"], rec["media_type"])
                     path = self._path(store, rec)
                     if path is None or not path.is_file():
+                        if ident in cached:
+                            stale_hashes.append(ident)
                         continue
                     try:
                         sz = path.stat().st_size
                     except OSError:
                         continue
-                    if ident in cached and cached[ident][0] == sz:
+                    if ident in cached and cached[ident][0] == sz and (cached[ident][1] or cached[ident][2]):
                         continue
                     fhash = compute_file_hash(path)
                     dh = compute_dhash(path)
@@ -364,6 +370,8 @@ class LibraryRepository:
                         if len(new_hashes) >= 100:
                             store.save_image_hashes(new_hashes)
                             new_hashes.clear()
+                if stale_hashes:
+                    store.delete_image_hashes(stale_hashes)
                 if new_hashes:
                     store.save_image_hashes(new_hashes)
                 return store.duplicate_counts()
@@ -376,17 +384,18 @@ class LibraryRepository:
             return []
         from .duplicates import cluster_duplicates
         try:
-            with closing(HistoryStore.for_storage(request.location())) as store:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 hashes = store.get_image_hashes()
+                favs = store.favorite_identities()
                 items = [
                     {"key": f"g{generation}_{k[0]}_{k[1]}_{k[2]}_{k[3]}",
-                     "ident": k, "filesize": v[0], "file_hash": v[1], "dhash": v[2]}
+                     "ident": k, "filesize": v[0], "file_hash": v[1], "dhash": v[2],
+                     "favorite": k in favs}
                     for k, v in hashes.items()
                 ]
-                clusters = cluster_duplicates(items, max_distance=4)
+                clusters = cluster_duplicates(items, max_distance=0)
                 copy_keys = []
                 for group in clusters:
-                    group.sort(key=lambda x: x["filesize"], reverse=True)
                     for duplicate in group[1:]:
                         copy_keys.append(duplicate["key"])
                 return copy_keys
@@ -721,13 +730,18 @@ class LibraryController(QObject):
         self._authors = []
         self._authors_loaded = False
         self.authorsChanged.emit()
+        self._hashtags = []
+        self._hashtags_loaded = False
+        self.hashtagsChanged.emit()
+        self._duplicate_count = 0
+        self.duplicateCountChanged.emit()
         self._refresh(reload_authors=True)
 
     @Slot()
     def refresh(self):
         self._refresh(reload_authors=True)
 
-    def _refresh(self, *, reload_authors=True):
+    def _refresh(self, *, reload_authors=True, status=""):
         if self._closed:
             return
         self._generation += 1
@@ -736,7 +750,7 @@ class LibraryController(QObject):
         self._selection_key = ""
         self._navigation = None
         self.clearSelection()
-        self._status = ""
+        self._status = status
         self._busy = False
         with self._condition:
             self._pending.clear()
@@ -884,12 +898,21 @@ class LibraryController(QObject):
             return 0
         copy_keys = self._repository.duplicate_copy_keys(self._generation)
         if not copy_keys:
+            self._status = "선택할 중복 사본이 없습니다."
+            self.changed.emit()
             return 0
+        if self.model._rows:
+            loaded_copies = [k for k in copy_keys if k in self.model._keys]
+            selectable, _, _ = self._repository.selectable_keys(loaded_copies)
+            if not selectable:
+                self._status = "현재 목록에 불러온 중복 사본이 없습니다."
+                self.changed.emit()
+                return 0
+            copy_keys = selectable
         self._selection_mode = True
         self._selection_keys.update(copy_keys)
-        self._selected_keys_order = list(self._selection_keys)
-        self._selection_revision += 1
-        self.selectionChanged.emit()
+        self._batch_selection_changed()
+        self._status = f"중복 사본 {len(copy_keys):,}개를 선택했습니다."
         self.changed.emit()
         return len(copy_keys)
 
@@ -1164,8 +1187,7 @@ class LibraryController(QObject):
             self._duplicate_count = int(selection) if isinstance(selection, int) else 0
             self.duplicateCountChanged.emit()
             self._busy = False
-            self._status = message
-            self._refresh(reload_authors=False)
+            self._refresh(reload_authors=False, status=message)
             return
         if serial != self._selection_serial:
             return

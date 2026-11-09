@@ -329,6 +329,19 @@ def archive_key(tweet_id: str, number: int, media_type: str) -> str:
     return f"{tweet_id}_{number}" if media_type == "photo" else f"{tweet_id}_{media_type}_{number}"
 
 
+_HASHTAG_TOKEN = re.compile(r"(?:^|(?<=\s))#(\w+)", re.UNICODE)
+
+
+def _extract_hashtags(content: str) -> str:
+    """Extract space-separated #tag tokens from tweet text for legacy backfill."""
+    if not isinstance(content, str) or "#" not in content:
+        return ""
+    seen = []
+    for match in _HASHTAG_TOKEN.finditer(content):
+        tag = "#" + _clean_text(match.group(1), 140)
+        if len(tag) > 1 and tag not in seen:
+            seen.append(tag)
+    return " ".join(seen)[:2000]
 
 
 class HistoryStore:
@@ -467,6 +480,7 @@ class HistoryStore:
             if source_url_pending:
                 self._backfill_source_urls()
             run_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(runs)")}
+            tweet_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(tweets)")}
             with self._db:
                 # Runs from earlier versions keep 'full' with no signature, so
                 # the first run after an upgrade is always a complete scan.
@@ -474,6 +488,15 @@ class HistoryStore:
                     self._db.execute("ALTER TABLE runs ADD COLUMN scan_mode TEXT NOT NULL DEFAULT 'full'")
                 if "media_signature" not in run_columns:
                     self._db.execute("ALTER TABLE runs ADD COLUMN media_signature TEXT NOT NULL DEFAULT ''")
+                if "hashtags" not in tweet_columns:
+                    self._db.execute("ALTER TABLE tweets ADD COLUMN hashtags TEXT NOT NULL DEFAULT ''")
+                    updates = []
+                    for row in self._db.execute("SELECT tweet_id, content FROM tweets WHERE content LIKE '%#%'"):
+                        extracted = _extract_hashtags(row["content"])
+                        if extracted:
+                            updates.append((extracted, row["tweet_id"]))
+                    if updates:
+                        self._db.executemany("UPDATE tweets SET hashtags=? WHERE tweet_id=?", updates)
             self._media_roots = self._read_media_roots()
         except sqlite3.DatabaseError as exc:
             # Check ambiguous failures before closing this constructor's
@@ -520,6 +543,24 @@ class HistoryStore:
         """Materialize a list while owning its cursor, including decode failures."""
         with closing(self._db.execute(statement, parameters)) as rows:
             return [dict(row) for row in rows]
+
+    def _has_table(self, name: str) -> bool:
+        known = getattr(self, "_known_tables", None)
+        if known is None:
+            known = {row[0] for row in self._db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self._known_tables = known
+        return name in known
+
+    def _has_column(self, table: str, column: str) -> bool:
+        if not self._has_table(table):
+            return False
+        cols = getattr(self, "_known_columns", None)
+        if cols is None:
+            cols = {}
+            self._known_columns = cols
+        if table not in cols:
+            cols[table] = {row["name"] for row in self._db.execute(f"PRAGMA table_info({table})")}
+        return column in cols[table]
 
     @contextmanager
     def _read_snapshot(self):
@@ -1391,12 +1432,15 @@ class HistoryStore:
                    reverse=True)
         tweets = sorted({item["tweet_id"] for item in items})
         details = {}
-        for start in range(0, len(tweets), 500):
-            chunk = tweets[start:start + 500]
-            marks = ",".join("?" for _ in chunk)
-            for row in self._db.execute("SELECT tweet_id,content,hashtags FROM tweets WHERE tweet_id IN (" + marks + ")",
-                                        chunk):
-                details[row[0]] = (row[1], row[2])
+        if tweets and self._has_table("tweets"):
+            has_hashtags = self._has_column("tweets", "hashtags")
+            select_cols = "tweet_id,content,hashtags" if has_hashtags else "tweet_id,content,'' AS hashtags"
+            for start in range(0, len(tweets), 500):
+                chunk = tweets[start:start + 500]
+                marks = ",".join("?" for _ in chunk)
+                for row in self._db.execute(f"SELECT {select_cols} FROM tweets WHERE tweet_id IN (" + marks + ")",
+                                            chunk):
+                    details[row[0]] = (row[1], row[2])
         for item in items:
             item["content"], item["hashtags"] = details.get(item["tweet_id"], ("", ""))
         return items
@@ -1660,6 +1704,10 @@ class HistoryStore:
                     "path='',filesize=NULL,updated_at=? "
                     "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
                     (stamp, stamp, row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row["path"]))
+                if self._has_table("image_hashes"):
+                    self._db.execute(
+                        "DELETE FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                        (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
         for identity in identities:
             self._db.execute(
                 "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,?,?) "
@@ -1736,7 +1784,8 @@ class HistoryStore:
 
     @staticmethod
     def _record_filter(media_type, query, period=None, author="", include_deleted=True, hashtag="",
-                       favorite_only=False, user_tag="", duplicate_only=False):
+                       favorite_only=False, user_tag="", duplicate_only=False, *,
+                       has_hashtags=True, has_favorites=True, has_media_tags=True, has_image_hashes=True):
         """WHERE clause on media; ``period`` is (field, first day, last day).
 
         Days are inclusive YYYY-MM-DD dates in Korean time, either may be empty.
@@ -1766,36 +1815,59 @@ class HistoryStore:
             clauses.append("media.media_type=?")
             params.append(media_type)
         if query:
-            clauses.append("(media.author LIKE ? ESCAPE '\\' OR media.tweet_id LIKE ? ESCAPE '\\' OR media.filename LIKE ? ESCAPE '\\'"
-                           " OR tweets.content LIKE ? ESCAPE '\\' OR tweets.hashtags LIKE ? ESCAPE '\\')")
-            query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            params.extend(["%" + query + "%"] * 5)
+            escaped_q = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            if has_hashtags:
+                clauses.append("(media.author LIKE ? ESCAPE '\\' OR media.tweet_id LIKE ? ESCAPE '\\' OR media.filename LIKE ? ESCAPE '\\'"
+                               " OR tweets.content LIKE ? ESCAPE '\\' OR tweets.hashtags LIKE ? ESCAPE '\\')")
+                params.extend(["%" + escaped_q + "%"] * 5)
+            else:
+                clauses.append("(media.author LIKE ? ESCAPE '\\' OR media.tweet_id LIKE ? ESCAPE '\\' OR media.filename LIKE ? ESCAPE '\\'"
+                               " OR tweets.content LIKE ? ESCAPE '\\')")
+                params.extend(["%" + escaped_q + "%"] * 4)
         if hashtag:
             if not isinstance(hashtag, str):
                 raise HistoryError(_HISTORY_HELP)
             tag = hashtag.strip()
             if tag and not tag.startswith("#"):
                 tag = "#" + tag
-            if tag:
-                escaped = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                clauses.append("tweets.hashtags LIKE ? ESCAPE '\\'")
-                params.append("%" + escaped + "%")
+            if tag and tag != "#":
+                if not has_hashtags:
+                    clauses.append("0")
+                else:
+                    escaped = tag.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                    clauses.append("(' ' || tweets.hashtags || ' ') LIKE ? ESCAPE '\\'")
+                    params.append("% " + escaped + " %")
         if favorite_only:
-            clauses.append("EXISTS (SELECT 1 FROM favorites WHERE favorites.folder_mode=media.folder_mode "
-                           "AND favorites.tweet_id=media.tweet_id AND favorites.num=media.num "
-                           "AND favorites.media_type=media.media_type)")
+            if not has_favorites:
+                clauses.append("0")
+            else:
+                clauses.append("EXISTS (SELECT 1 FROM favorites WHERE favorites.folder_mode=media.folder_mode "
+                               "AND favorites.tweet_id=media.tweet_id AND favorites.num=media.num "
+                               "AND favorites.media_type=media.media_type)")
         if user_tag:
             tag = user_tag.strip().lstrip("#")
             if tag:
-                clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
-                               "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
-                               "AND media_tags.media_type=media.media_type AND media_tags.tag=?)")
-                params.append(tag)
+                if not has_media_tags:
+                    clauses.append("0")
+                else:
+                    clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
+                                   "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
+                                   "AND media_tags.media_type=media.media_type AND media_tags.tag=?)")
+                    params.append(tag)
         if duplicate_only:
-            clauses.append("EXISTS (SELECT 1 FROM image_hashes h1 WHERE h1.folder_mode=media.folder_mode "
-                           "AND h1.tweet_id=media.tweet_id AND h1.num=media.num AND h1.media_type=media.media_type "
-                           "AND (EXISTS (SELECT 1 FROM image_hashes h2 WHERE (h2.dhash=h1.dhash OR h2.file_hash=h1.file_hash) "
-                           "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id AND h2.num=h1.num AND h2.media_type=h1.media_type))))")
+            if not has_image_hashes:
+                clauses.append("0")
+            else:
+                clauses.append("media.path!='' AND EXISTS (SELECT 1 FROM image_hashes h1 "
+                               "WHERE h1.folder_mode=media.folder_mode AND h1.tweet_id=media.tweet_id "
+                               "AND h1.num=media.num AND h1.media_type=media.media_type "
+                               "AND EXISTS (SELECT 1 FROM image_hashes h2 "
+                               "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
+                               "AND m2.num=h2.num AND m2.media_type=h2.media_type "
+                               "WHERE m2.path!='' AND ((h1.dhash!='' AND h2.dhash=h1.dhash) "
+                               "OR (h1.file_hash!='' AND h2.file_hash=h1.file_hash)) "
+                               "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id "
+                               "AND h2.num=h1.num AND h2.media_type=h1.media_type)))")
         if author:
             if not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author):
                 raise HistoryError(_HISTORY_HELP)
@@ -1815,6 +1887,17 @@ class HistoryStore:
                 params.append(following.isoformat())
         return " WHERE " + " AND ".join(clauses) if clauses else "", params
 
+    def _filter_clause(self, media_type, query, period=None, author="", include_deleted=True, hashtag="",
+                       favorite_only=False, user_tag="", duplicate_only=False):
+        return self._record_filter(
+            media_type, query, period, author, include_deleted,
+            hashtag=hashtag, favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
+            has_hashtags=self._has_column("tweets", "hashtags"),
+            has_favorites=self._has_table("favorites"),
+            has_media_tags=self._has_table("media_tags"),
+            has_image_hashes=self._has_table("image_hashes"),
+        )
+
     @_safe
     def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None,
                 author="", include_deleted=True, after=None, hashtag="", favorite_only=False, user_tag="",
@@ -1825,7 +1908,7 @@ class HistoryStore:
                 not isinstance(hashtag, str) or type(favorite_only) is not bool or not isinstance(user_tag, str) or
                 type(duplicate_only) is not bool):
             raise HistoryError(_HISTORY_HELP)
-        where, params = self._record_filter(media_type, query, period, author, include_deleted, hashtag=hashtag,
+        where, params = self._filter_clause(media_type, query, period, author, include_deleted, hashtag=hashtag,
                                             favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only)
         extra, extra_params = _after_clause(order, after)
         if extra:
@@ -1841,8 +1924,9 @@ class HistoryStore:
         # of each page's time in a large library. Only Like order and a text
         # search need the other tables while choosing.
         source = _JOINED if query or hashtag or order == "liked" else "media"
+        hashtags_col = "tweets.hashtags" if self._has_column("tweets", "hashtags") else "'' AS hashtags"
         return self._read_rows("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,"
-                                "tweets.content,tweets.hashtags FROM (SELECT media.rowid AS chosen FROM " +
+                                "tweets.content," + hashtags_col + " FROM (SELECT media.rowid AS chosen FROM " +
                                 source + where + order_by + " LIMIT ? OFFSET ?) AS page "
                                 "JOIN media ON media.rowid=page.chosen "
                                 "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
@@ -1862,7 +1946,7 @@ class HistoryStore:
                     duplicate_only=False) -> dict:
         if after is not None and page != 0:
             raise HistoryError(_HISTORY_HELP)
-        where, params = self._record_filter(media_type, query, period, author, include_deleted, hashtag=hashtag,
+        where, params = self._filter_clause(media_type, query, period, author, include_deleted, hashtag=hashtag,
                                             favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only)
         # Only a text search reads tweets; the joins never change the count.
         return self._page((_JOINED if query or hashtag else "media") + where, params, page, page_size,
@@ -1874,7 +1958,7 @@ class HistoryStore:
 
     @_safe
     def authors(self, *, include_deleted=False) -> list[dict]:
-        where, params = self._record_filter("all", "", include_deleted=include_deleted)
+        where, params = self._filter_clause("all", "", include_deleted=include_deleted)
         clause = (where + " AND " if where else " WHERE ") + "media.author!=''"
         rows = self._read_rows(
             "SELECT MAX(media.author) AS author, COUNT(*) AS count "
@@ -1888,7 +1972,9 @@ class HistoryStore:
 
     @_safe
     def hashtags(self, *, include_deleted=False, limit=200) -> list[dict]:
-        where, params = self._record_filter("all", "", include_deleted=include_deleted)
+        if not self._has_column("tweets", "hashtags"):
+            return []
+        where, params = self._filter_clause("all", "", include_deleted=include_deleted)
         clause = (where + " AND " if where else " WHERE ") + "tweets.hashtags!=''"
         rows = self._read_rows(
             "SELECT tweets.hashtags "
@@ -1896,13 +1982,19 @@ class HistoryStore:
             params,
         )
         counts = Counter()
+        display = {}
         for row in rows:
             tags = (row.get("hashtags") or "").split()
-            for tag in set(tags):
+            seen = set()
+            for tag in tags:
                 clean = tag.strip()
                 if clean.startswith("#") and len(clean) > 1:
-                    counts[clean] += 1
-        return [{"tag": tag, "count": count} for tag, count in counts.most_common(limit)]
+                    lower = clean.lower()
+                    if lower not in seen:
+                        seen.add(lower)
+                        counts[lower] += 1
+                        display.setdefault(lower, clean)
+        return [{"tag": display[key], "count": count} for key, count in counts.most_common(limit)]
 
     @_safe
     def toggle_favorite(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> bool:
@@ -1929,6 +2021,8 @@ class HistoryStore:
 
     @_safe
     def is_favorite(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> bool:
+        if not self._has_table("favorites"):
+            return False
         row = self._db.execute(
             "SELECT 1 FROM favorites WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
             (folder_mode, tweet_id, num, media_type)
@@ -1937,6 +2031,8 @@ class HistoryStore:
 
     @_safe
     def favorite_identities(self) -> set[tuple]:
+        if not self._has_table("favorites"):
+            return set()
         rows = self._read_rows("SELECT folder_mode, tweet_id, num, media_type FROM favorites")
         return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]) for r in rows}
 
@@ -1965,6 +2061,8 @@ class HistoryStore:
 
     @_safe
     def item_tags(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> list[dict]:
+        if not self._has_table("media_tags"):
+            return []
         rows = self._read_rows(
             "SELECT tag, source, created_at FROM media_tags "
             "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? ORDER BY created_at ASC",
@@ -1974,6 +2072,8 @@ class HistoryStore:
 
     @_safe
     def user_tags(self, limit: int = 200) -> list[dict]:
+        if not self._has_table("media_tags"):
+            return []
         rows = self._read_rows(
             "SELECT tag, COUNT(*) AS count FROM media_tags GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?",
             (limit,)
@@ -1995,17 +2095,45 @@ class HistoryStore:
         return len(rows)
 
     @_safe
+    def delete_image_hashes(self, identities: list[tuple]) -> int:
+        """Remove stale hash rows for (folder_mode, tweet_id, num, media_type) identities."""
+        if not identities or not self._has_table("image_hashes"):
+            return 0
+        with self._db:
+            self._db.executemany(
+                "DELETE FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                [(i[0], i[1], i[2], i[3]) for i in identities]
+            )
+        return len(identities)
+
+    @_safe
     def get_image_hashes(self) -> dict[tuple, tuple[int, str, str]]:
-        rows = self._read_rows("SELECT folder_mode, tweet_id, num, media_type, filesize, file_hash, dhash FROM image_hashes")
+        if not self._has_table("image_hashes"):
+            return {}
+        rows = self._read_rows(
+            "SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.filesize, h.file_hash, h.dhash "
+            "FROM image_hashes h "
+            "JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
+            "AND m.num=h.num AND m.media_type=h.media_type "
+            "WHERE m.path!=''"
+        )
         return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]): (r["filesize"], r["file_hash"], r["dhash"])
                 for r in rows}
 
     @_safe
     def duplicate_counts(self) -> int:
         """Total number of duplicate media items currently detected."""
+        if not self._has_table("image_hashes"):
+            return 0
         row = self._db.execute(
-            "SELECT COUNT(*) FROM image_hashes h1 WHERE EXISTS ("
-            "SELECT 1 FROM image_hashes h2 WHERE (h2.dhash=h1.dhash OR h2.file_hash=h1.file_hash) "
+            "SELECT COUNT(*) FROM image_hashes h1 "
+            "JOIN media m1 ON m1.folder_mode=h1.folder_mode AND m1.tweet_id=h1.tweet_id "
+            "AND m1.num=h1.num AND m1.media_type=h1.media_type "
+            "WHERE m1.path!='' AND EXISTS ("
+            "SELECT 1 FROM image_hashes h2 "
+            "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
+            "AND m2.num=h2.num AND m2.media_type=h2.media_type "
+            "WHERE m2.path!='' AND ((h1.dhash!='' AND h2.dhash=h1.dhash) OR (h1.file_hash!='' AND h2.file_hash=h1.file_hash)) "
             "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id AND h2.num=h1.num AND h2.media_type=h1.media_type))"
         ).fetchone()
         return row[0] if row else 0
@@ -2034,23 +2162,37 @@ class HistoryStore:
 
     @_safe
     def record_tweets(self, tweets) -> None:
-        """Keep each tweet's text and hashtags; ``tweets`` holds (id, text, tags)."""
+        """Keep each tweet's text and hashtags; ``tweets`` holds (id, text[, tags])."""
         rows = []
-        for tweet_id, content, hashtags in tweets:
+        for entry in tweets:
+            if len(entry) == 2:
+                tweet_id, content = entry
+                hashtags = ()
+            else:
+                tweet_id, content, hashtags = entry
             tweet_id = str(tweet_id)
             if not re.fullmatch(r"[0-9]{1,20}", tweet_id):
                 continue
-            tags = " ".join("#" + _clean_text(tag, 140) for tag in hashtags or () if isinstance(tag, str) and tag)
-            # Line breaks become spaces; other control characters are dropped.
             text = " ".join(_clean_text(" ".join(content.split()) if isinstance(content, str) else "",
                                         _TWEET_TEXT_LIMIT).split())
+            tag_list = []
+            seen = set()
+            for tag in hashtags or ():
+                if not isinstance(tag, str):
+                    continue
+                cleaned = _clean_text(tag.strip().lstrip("#"), 140)
+                if cleaned and cleaned.lower() not in seen:
+                    seen.add(cleaned.lower())
+                    tag_list.append("#" + cleaned)
+            tags = " ".join(tag_list) if tag_list else _extract_hashtags(text)
             rows.append((tweet_id, text, tags[:2000], _now()))
         if not rows:
             return
         with self._db:
             self._db.executemany(
                 "INSERT INTO tweets(tweet_id,content,hashtags,updated_at) VALUES (?,?,?,?) "
-                "ON CONFLICT(tweet_id) DO UPDATE SET content=excluded.content,hashtags=excluded.hashtags,"
+                "ON CONFLICT(tweet_id) DO UPDATE SET content=excluded.content,"
+                "hashtags=CASE WHEN excluded.hashtags!='' THEN excluded.hashtags ELSE tweets.hashtags END,"
                 "updated_at=excluded.updated_at", rows)
 
     @_safe

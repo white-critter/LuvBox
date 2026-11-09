@@ -94,6 +94,55 @@ class HashtagFilterTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertIn("2001", rows[0]["key"])
 
+    def test_exact_hashtag_token_matching_and_pre_150_schema_upgrade(self):
+        import sqlite3
+        from luvbox.qt_library import _ReadOnlyHistory
+
+        # 1. Exact token matching: #cat must not match #category or #catgirl
+        p1 = self.file("u_3001_1.jpg")
+        p2 = self.file("u_3002_1.jpg")
+        self.store.record_media("flat", {"tweet_id": "3001", "num": 1, "type": "photo", "author": "u"}, p1)
+        self.store.record_media("flat", {"tweet_id": "3002", "num": 1, "type": "photo", "author": "u"}, p2)
+        self.store.record_tweets([
+            ("3001", "hello #cat world", ["cat"]),
+            ("3002", "hello #category #catgirl", ["category", "catgirl"]),
+        ])
+        cat_page = self.store.record_page(0, 10, "all", "", hashtag="#cat")
+        self.assertEqual([r["tweet_id"] for r in cat_page["rows"]], ["3001"])
+
+        # 2. Pre-1.5.0 catalog schema without tweets.hashtags, favorites, media_tags, image_hashes
+        legacy_root = self.root / "legacy_catalog"
+        paths = resolve_storage(legacy_root, "offline")
+        with closing(HistoryStore.for_storage(paths)) as s:
+            img = paths.output_dir / "user_4001_1.jpg"
+            img.write_bytes(b"img")
+            s.record_media("flat", {"tweet_id": "4001", "num": 1, "type": "photo", "author": "user"}, img)
+        db_file = paths.record_dir / ".luvbox-history.sqlite3"
+        with closing(sqlite3.connect(db_file)) as conn:
+            with conn:
+                conn.execute("DROP TABLE tweets")
+                conn.execute("CREATE TABLE tweets (tweet_id TEXT PRIMARY KEY, content TEXT NOT NULL, updated_at TEXT NOT NULL)")
+                conn.execute("INSERT INTO tweets(tweet_id, content, updated_at) VALUES ('4001', 'Legacy post #retro #pixelart', '2026-01-01T00:00:00+09:00')")
+                conn.execute("DROP TABLE favorites")
+                conn.execute("DROP TABLE media_tags")
+                conn.execute("DROP TABLE image_hashes")
+
+        # Opening read-only before any writable migration must succeed without OperationalError
+        with closing(_ReadOnlyHistory(paths)) as ro:
+            page = ro.record_page(0, 10, "all", "")
+            self.assertEqual(page["total"], 1)
+            self.assertEqual(ro.hashtags(), [])
+            self.assertEqual(ro.favorite_identities(), set())
+            self.assertEqual(ro.duplicate_counts(), 0)
+
+        # Opening writable HistoryStore must add tweets.hashtags and backfill from content
+        with closing(HistoryStore.for_storage(paths)) as migrated:
+            tags = {t["tag"]: t["count"] for t in migrated.hashtags()}
+            self.assertEqual(tags.get("#retro"), 1)
+            self.assertEqual(tags.get("#pixelart"), 1)
+            retro_page = migrated.record_page(0, 10, "all", "", hashtag="#retro")
+            self.assertEqual(retro_page["total"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

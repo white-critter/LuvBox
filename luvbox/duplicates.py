@@ -7,51 +7,83 @@ via Pillow for perceptual duplicates (resized, re-encoded, slightly modified ima
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import Sequence
-from PIL import Image
+import warnings
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+from .preview import MAX_PIXELS, MAX_RASTER_BYTES, PHOTO_FORMATS, _BoundedRasterReader, _prepare_decoders
+from .thumbcache import cloud_only
+
+
+def _safe_local_file(path: Path) -> bool:
+    """Return True only for an ordinary, local, non-linked, non-cloud file."""
+    try:
+        if path.is_symlink() or getattr(path, "is_junction", lambda: False)() or cloud_only(path):
+            return False
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def compute_dhash(image_path: Path | str, hash_size: int = 8) -> str:
     """Compute a 64-bit difference hash (dHash) as a 16-character hex string.
 
-    Fast, robust against scaling and slight recompression.
+    Fast, robust against scaling and slight recompression, bounded by the same
+    raster security limits as gallery previews.
     """
+    if type(hash_size) is not int or not 4 <= hash_size <= 16:
+        return ""
     path = Path(image_path)
-    if not path.is_file():
+    if not _safe_local_file(path):
         return ""
     try:
-        with Image.open(path) as img:
-            # Convert to grayscale and resize to (width + 1, height)
-            resized = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR)
-            # Safe pixel extraction across Pillow versions without DeprecationWarning
-            pixels = list(resized.tobytes())
-            diff = []
-            for row in range(hash_size):
-                start = row * (hash_size + 1)
-                for col in range(hash_size):
-                    diff.append(pixels[start + col] > pixels[start + col + 1])
-            decimal = 0
-            for bit in diff:
-                decimal = (decimal << 1) | bit
-            # For solid color images (where all adjacent differences are False),
-            # mix in the mean luminance so different solid colors don't collide.
-            if decimal == 0:
-                avg = sum(pixels) // len(pixels)
-                decimal = avg
-            return f"{decimal:016x}"
-    except Exception:
+        _prepare_decoders(False)
+        with path.open("rb") as source, warnings.catch_warnings():
+            if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
+                return ""
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
+                if img.width * img.height > MAX_PIXELS:
+                    return ""
+                transposed = ImageOps.exif_transpose(img)
+                try:
+                    resized = transposed.convert("L").resize(
+                        (hash_size + 1, hash_size), Image.Resampling.BILINEAR
+                    )
+                finally:
+                    if transposed is not img:
+                        transposed.close()
+                pixels = list(resized.tobytes())
+        diff = []
+        for row in range(hash_size):
+            start = row * (hash_size + 1)
+            for col in range(hash_size):
+                diff.append(pixels[start + col] > pixels[start + col + 1])
+        decimal = 0
+        for bit in diff:
+            decimal = (decimal << 1) | bit
+        # For solid color images (where all adjacent differences are False),
+        # mix in the mean luminance so different solid colors don't collide.
+        if decimal == 0 and pixels:
+            decimal = sum(pixels) // len(pixels)
+        return f"{decimal:016x}"
+    except (OSError, ValueError, TypeError, SyntaxError, UnidentifiedImageError,
+            Image.DecompressionBombError, Image.DecompressionBombWarning):
         return ""
 
 
 def compute_file_hash(file_path: Path | str) -> str:
-    """Compute SHA-256 checksum of the file bytes."""
+    """Compute SHA-256 checksum of an ordinary local file within raster bounds."""
     path = Path(file_path)
-    if not path.is_file():
+    if not _safe_local_file(path):
         return ""
     try:
         h = hashlib.sha256()
-        with open(path, "rb") as f:
+        with path.open("rb") as f:
+            if os.fstat(f.fileno()).st_size > MAX_RASTER_BYTES:
+                return ""
             while chunk := f.read(65536):
                 h.update(chunk)
         return h.hexdigest()
@@ -79,65 +111,70 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[lis
     - 'file_hash': exact SHA256 (optional, empty string if missing)
     - 'dhash': 16-hex perceptual hash (optional)
 
-    Returns list of groups where each group has >= 2 items.
-    Items with exact file_hash match are grouped first, then nearby dhash matches.
+    Returns list of groups where each group has >= 2 items, sorted so the first
+    item in each group is the preferred primary copy (favorited, then largest).
     """
-    if len(items) < 2:
+    valid = [it for it in items if isinstance(it, dict) and it.get("key")
+             and (it.get("file_hash") or (it.get("dhash") and len(str(it.get("dhash"))) == 16))]
+    n = len(valid)
+    if n < 2:
         return []
 
-    # 1. Exact matches by file_hash
-    exact_groups: dict[str, list[dict]] = {}
-    remaining: list[dict] = []
-    for item in items:
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            if ri < rj:
+                parent[rj] = ri
+            else:
+                parent[ri] = rj
+
+    # 1. Exact matches by non-empty file_hash
+    by_fhash: dict[str, int] = {}
+    for idx, item in enumerate(valid):
         fhash = item.get("file_hash") or ""
         if fhash:
-            exact_groups.setdefault(fhash, []).append(item)
-        else:
-            remaining.append(item)
+            first = by_fhash.get(fhash)
+            if first is not None:
+                union(first, idx)
+            else:
+                by_fhash[fhash] = idx
+
+    # 2. Exact matches by valid 16-hex dhash
+    by_dhash: dict[str, int] = {}
+    for idx, item in enumerate(valid):
+        dh = item.get("dhash") or ""
+        if len(dh) == 16:
+            first = by_dhash.get(dh)
+            if first is not None:
+                union(first, idx)
+            else:
+                by_dhash[dh] = idx
+
+    # 3. Near matches across distinct dhash buckets when max_distance > 0
+    if max_distance > 0 and len(by_dhash) > 1:
+        unique_dhashes = list(by_dhash.items())
+        for i, (dh1, idx1) in enumerate(unique_dhashes):
+            for j in range(i + 1, len(unique_dhashes)):
+                dh2, idx2 = unique_dhashes[j]
+                if hamming_distance(dh1, dh2) <= max_distance:
+                    union(idx1, idx2)
+
+    clusters_by_root: dict[int, list[dict]] = {}
+    for idx, item in enumerate(valid):
+        clusters_by_root.setdefault(find(idx), []).append(item)
 
     groups: list[list[dict]] = []
-    clustered_keys: set[str] = set()
-
-    for fhash, group in exact_groups.items():
+    for group in clusters_by_root.values():
         if len(group) >= 2:
+            group.sort(key=lambda x: (bool(x.get("favorite")), x.get("filesize") or 0), reverse=True)
             groups.append(group)
-            clustered_keys.update(it["key"] for it in group)
-        else:
-            remaining.extend(group)
-
-    # 2. Perceptual matches by dhash for unclustered items
-    dhash_items = [it for it in remaining if it.get("dhash") and len(it["dhash"]) == 16]
-
-    # Quick exact dhash grouping first
-    dhash_buckets: dict[str, list[dict]] = {}
-    for it in dhash_items:
-        dhash_buckets.setdefault(it["dhash"], []).append(it)
-
-    for dh, bucket in dhash_buckets.items():
-        if len(bucket) >= 2:
-            groups.append(bucket)
-            clustered_keys.update(it["key"] for it in bucket)
-
-    unassigned = [it for it in dhash_items if it["key"] not in clustered_keys]
-
-    # Pairwise comparison for items with hamming distance <= max_distance
-    visited: set[str] = set()
-    for i, it1 in enumerate(unassigned):
-        k1 = it1["key"]
-        if k1 in visited:
-            continue
-        current_cluster = [it1]
-        dh1 = it1["dhash"]
-        for j in range(i + 1, len(unassigned)):
-            it2 = unassigned[j]
-            k2 = it2["key"]
-            if k2 in visited:
-                continue
-            if hamming_distance(dh1, it2["dhash"]) <= max_distance:
-                current_cluster.append(it2)
-                visited.add(k2)
-        if len(current_cluster) >= 2:
-            visited.add(k1)
-            groups.append(current_cluster)
 
     return groups
