@@ -998,7 +998,7 @@ ApplicationWindow {
                             if (count > 0)
                                 window.flashNotice(count + "개의 중복 사본이 선택되었습니다. '휴지통으로'를 누르면 정리됩니다.")
                             else
-                                window.flashNotice("선택할 중복 사본이 없습니다. 먼저 '중복 검사'를 실행해 보세요.")
+                                window.flashNotice(window.app.library.status)
                         }
                     }
                     FlatButton {
@@ -1428,13 +1428,20 @@ ApplicationWindow {
                         readonly property bool duplicateWork: window.app && window.app.library.duplicateProgressTotal > 0
                         readonly property bool preparingAi: window.app && window.app.library.aiScanning && !aiWork && !duplicateWork
                         visible: window.app && window.app.library.busy && (aiWork || duplicateWork || preparingAi)
-                        indeterminate: preparingAi
+                        indeterminate: preparingAi || (duplicateWork && window.app.library.duplicateProgressCurrent >= window.app.library.duplicateProgressTotal)
                         from: 0
                         to: aiWork ? window.app.library.aiProgressTotal
                             : (duplicateWork ? window.app.library.duplicateProgressTotal : 1)
                         value: aiWork ? window.app.library.aiProgressCurrent
                             : (window.app ? window.app.library.duplicateProgressCurrent : 0)
                         Accessible.name: "작업 진행"
+                    }
+                    FlatButton {
+                        objectName: "cancelDuplicateScanButton"
+                        text: "검사 중단"
+                        visible: window.app && window.app.library.copiesLocked
+                        Accessible.name: "중복 검사 중단"
+                        onClicked: if (window.app) window.app.library.cancelDuplicateScan()
                     }
                 }
                 Label {
@@ -1803,6 +1810,8 @@ ApplicationWindow {
                         anchors.centerIn: parent
                         visible: gallery.count === 0 && !window.galleryModel.busy && !window.galleryModel.error.length
                         text: {
+                            if (window.app && window.app.library.filterDuplicateOnly && window.app.library.copiesLocked)
+                                return "중복 사진을 검사하고 있습니다. 완료되면 목록을 갱신합니다."
                             if (window.app && window.app.library.filterDuplicateOnly)
                                 return "발견된 중복 사진이 없습니다. 상단의 '중복 검사'를 눌러 검사해 보세요."
                             if (window.app && window.app.library.filterFavoriteOnly)
@@ -1810,6 +1819,9 @@ ApplicationWindow {
                             return search.text.length || (window.app && (window.app.library.filterSummary.length > 0
                                 || mediaFilter.currentIndex > 0)) ? "필터에 맞는 사진이 없습니다." : "사진이 없습니다."
                         }
+                        width: Math.max(0, parent.width - 32)
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
                         color: window.mutedColor
                     }
                 }

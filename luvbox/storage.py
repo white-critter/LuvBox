@@ -851,6 +851,12 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
     if "image_hashes" in source_tables:
         _prepare_table(target, source, "image_hashes")
         has_cluster = "cluster_id" in _columns(target, "image_hashes")
+        # Cluster numbers belong to one complete scan of one catalog. Reusing
+        # them across catalogs can combine unrelated pictures into one group.
+        if has_cluster:
+            target.execute("UPDATE image_hashes SET cluster_id=0 WHERE cluster_id!=0")
+        if "file_signature" in _columns(target, "image_hashes"):
+            target.execute("UPDATE image_hashes SET file_signature='' WHERE file_signature!=''")
         for row in _rows(source, "image_hashes"):
             if has_cluster:
                 target.execute(
@@ -860,7 +866,7 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                     "cluster_id=excluded.cluster_id,updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
                     (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
                      row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
-                     row.get("cluster_id") or 0, row.get("updated_at") or ""))
+                     0, row.get("updated_at") or ""))
             else:
                 target.execute(
                     "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,updated_at) "

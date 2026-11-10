@@ -1,6 +1,9 @@
 import shutil
 import tempfile
 import unittest
+import io
+import os
+from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 from PIL import Image, ImageDraw
@@ -240,6 +243,128 @@ class DuplicateTests(unittest.TestCase):
         for grp in clusters_d4:
             keys = {x["key"] for x in grp}
             self.assertEqual(len(keys), 2)
+
+    def scan_fixture(self):
+        paths = resolve_storage(self.root / "signature-scan", "offline")
+        with closing(HistoryStore.for_storage(paths)) as store:
+            files = [paths.output_dir / f"user_{tid}_1.png" for tid in (801, 802)]
+            for tid, path in zip((801, 802), files):
+                with Image.new("RGB", (60, 60), "red") as image:
+                    image.save(path, compress_level=0)
+                store.record_media("flat", {"tweet_id": str(tid), "num": 1, "type": "photo", "author": "user"}, path)
+        repo = LibraryRepository()
+        repo.configure(_Request(1, "offline", str(paths.output_dir), False))
+        return repo, paths, files
+
+    def test_same_size_edit_invalidates_hash_but_unchanged_scan_reuses_it(self):
+        repo, paths, files = self.scan_fixture()
+        self.assertEqual(repo.scan_duplicates(1), 2)
+        with patch("luvbox.duplicates.compute_image_hashes", side_effect=AssertionError("unneeded decode")):
+            self.assertEqual(repo.scan_duplicates(1), 2)
+        old = files[1].stat()
+        with Image.new("RGB", (60, 60), "white") as image:
+            image.save(files[1], compress_level=0)
+        os.utime(files[1], ns=(old.st_atime_ns, old.st_mtime_ns + 10_000_000))
+        self.assertEqual(files[1].stat().st_size, old.st_size)
+        self.assertEqual(repo.scan_duplicates(1), 0)
+        self.assertEqual(repo.duplicate_copy_keys(1), [])
+
+    def test_unreadable_changed_file_drops_old_hash(self):
+        repo, paths, files = self.scan_fixture()
+        self.assertEqual(repo.scan_duplicates(1), 2)
+        files[1].write_bytes(b"changed")
+        with patch("luvbox.duplicates.compute_image_hashes", return_value=("", "")):
+            self.assertEqual(repo.scan_duplicates(1), 0)
+        with closing(HistoryStore.for_storage(paths)) as store:
+            self.assertNotIn(("flat", "802", 1, "photo"), store.get_image_hashes())
+
+    def test_changed_during_decode_is_not_published(self):
+        from luvbox import duplicates
+        path = self.create_image("changing.png")
+        decode = duplicates._dhash_from_stream
+        def changed(source, hash_size=8):
+            result = decode(source, hash_size)
+            info = path.stat()
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 10_000_000))
+            return result
+        with patch.object(duplicates, "_dhash_from_stream", side_effect=changed):
+            self.assertEqual(duplicates.compute_image_hashes(path), ("", ""))
+
+    def test_hash_read_is_bounded_when_stream_grows(self):
+        from luvbox.duplicates import _stream_hash
+        stream = io.BytesIO(b"x" * 100)
+        with patch("luvbox.duplicates.MAX_RASTER_BYTES", 20):
+            with self.assertRaises(OSError):
+                _stream_hash(stream)
+        self.assertEqual(stream.tell(), 21)
+
+    def test_cancel_during_comparison_does_not_publish_clusters(self):
+        from luvbox.duplicates import ScanCancelled
+        repo, paths, files = self.scan_fixture()
+        self.assertEqual(repo.scan_duplicates(1), 2)
+        def progress(current, total):
+            if current == total:
+                repo._duplicate_cancel.set()
+        with self.assertRaises(ScanCancelled):
+            repo.scan_duplicates(1, progress_callback=progress)
+        with closing(HistoryStore.for_storage(paths)) as store:
+            self.assertEqual(store.duplicate_counts(), 2)
+        repo._duplicate_cancel.clear()
+        self.assertEqual(repo.scan_duplicates(1), 2)
+
+    def test_cluster_failure_rolls_back_reset_and_all_updates(self):
+        repo, paths, files = self.scan_fixture()
+        self.assertEqual(repo.scan_duplicates(1), 2)
+        from luvbox.history import HistoryError
+        with closing(HistoryStore.for_storage(paths)) as store:
+            before = list(store._db.execute("SELECT tweet_id, cluster_id FROM image_hashes ORDER BY tweet_id"))
+            store._db.execute("CREATE TEMP TRIGGER fail_cluster BEFORE UPDATE OF cluster_id ON image_hashes "
+                              "WHEN NEW.tweet_id='802' AND NEW.cluster_id>0 BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+            with self.assertRaises(HistoryError):
+                store.save_clusters([[('flat', str(tid), 1, 'photo') for tid in (801, 802)]])
+            after = list(store._db.execute("SELECT tweet_id, cluster_id FROM image_hashes ORDER BY tweet_id"))
+            self.assertEqual(before, after)
+
+    def test_merge_does_not_combine_unrelated_cluster_numbers(self):
+        from luvbox.storage import _merge_history
+        repo, paths, files = self.scan_fixture()
+        self.assertEqual(repo.scan_duplicates(1), 2)
+        with closing(HistoryStore.for_storage(paths)) as source:
+            for tid in (901, 902):
+                path = self.create_image(f"user_{tid}_1.png", "white", draw_rect=False)
+                self.store.record_media("flat", {"tweet_id": str(tid), "num": 1, "type": "photo"}, path)
+                self.store.save_image_hashes([("flat", str(tid), 1, "photo", path.stat().st_size, "different", "ffffffffffffffff", "local")])
+            self.store.save_clusters([[('flat', str(tid), 1, 'photo') for tid in (901, 902)]])
+            with self.store._db:
+                _merge_history(self.store._db, source._db)
+        rows = self.store._db.execute("SELECT cluster_id, file_signature FROM image_hashes").fetchall()
+        self.assertEqual(len(rows), 4)
+        self.assertTrue(all(tuple(row) == (0, "") for row in rows))
+
+    def test_legacy_hash_schema_upgrades_without_losing_rows(self):
+        self.store.save_image_hashes([("flat", "1", 1, "photo", 10, "hash", "0123456789abcdef")])
+        self.store._db.execute("ALTER TABLE image_hashes DROP COLUMN file_signature")
+        self.store.close()
+        self.store = HistoryStore(self.root)
+        row = self.store._db.execute("SELECT file_hash, file_signature FROM image_hashes").fetchone()
+        self.assertEqual(tuple(row), ("hash", ""))
+
+    def test_invalid_perceptual_hashes_never_form_a_group(self):
+        items = [{"key": str(i), "dhash": "z" * 16} for i in range(2)]
+        self.assertEqual(cluster_duplicates(items), [])
+        with self.assertRaises(ValueError):
+            cluster_duplicates([], max_distance=4.5)
+
+    def test_cluster_comparison_checks_cancellation_inside_buckets(self):
+        from luvbox.duplicates import ScanCancelled
+        calls = []
+        def cancel():
+            calls.append(1)
+            if len(calls) == 3:
+                raise ScanCancelled("stop")
+        with self.assertRaises(ScanCancelled):
+            cluster_duplicates([{"key": str(i), "dhash": f"{i:016x}"} for i in range(200)], check_cancel=cancel)
+        self.assertEqual(len(calls), 3)
 
 
 if __name__ == "__main__":

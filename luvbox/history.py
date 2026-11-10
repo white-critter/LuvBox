@@ -581,6 +581,8 @@ class HistoryStore:
                 if "cluster_id" not in hash_columns and self._has_table("image_hashes"):
                     self._db.execute("ALTER TABLE image_hashes ADD COLUMN cluster_id INTEGER NOT NULL DEFAULT 0")
                     self._db.execute("CREATE INDEX IF NOT EXISTS image_hashes_cluster ON image_hashes(cluster_id)")
+                if "file_signature" not in hash_columns:
+                    self._db.execute("ALTER TABLE image_hashes ADD COLUMN file_signature TEXT NOT NULL DEFAULT ''")
             self._media_roots = self._read_media_roots()
         except sqlite3.DatabaseError as exc:
             # Check ambiguous failures before closing this constructor's
@@ -2672,14 +2674,18 @@ class HistoryStore:
 
     @_safe
     def save_image_hashes(self, hashes: list[tuple]) -> int:
-        """hashes is a list of (folder_mode, tweet_id, num, media_type, filesize, file_hash, dhash)"""
+        """Save identity, size, hashes and an optional local file signature.
+
+        Legacy callers omit the signature; their rows are rechecked next scan.
+        """
         now = _now()
-        rows = [(h[0], h[1], h[2], h[3], h[4], h[5], h[6], now) for h in hashes]
+        rows = [(*h[:7], now, h[7] if len(h) > 7 else "") for h in hashes]
         with self._db:
             self._db.executemany(
-                "INSERT INTO image_hashes(folder_mode, tweet_id, num, media_type, filesize, file_hash, dhash, updated_at) "
-                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
-                "filesize=excluded.filesize, file_hash=excluded.file_hash, dhash=excluded.dhash, updated_at=excluded.updated_at",
+                "INSERT INTO image_hashes(folder_mode, tweet_id, num, media_type, filesize, file_hash, dhash, updated_at, file_signature) "
+                "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
+                "filesize=excluded.filesize, file_hash=excluded.file_hash, dhash=excluded.dhash, "
+                "cluster_id=0, updated_at=excluded.updated_at, file_signature=excluded.file_signature",
                 rows
             )
         return len(rows)
@@ -2697,17 +2703,20 @@ class HistoryStore:
         return len(identities)
 
     @_safe
-    def get_image_hashes(self) -> dict[tuple, tuple[int, str, str]]:
+    def get_image_hashes(self, *, include_signatures=False) -> dict:
         if not self._has_table("image_hashes"):
             return {}
+        signature_sql = ("h.file_signature" if self._has_column("image_hashes", "file_signature") else "''")
         rows = self._read_rows(
-            "SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.filesize, h.file_hash, h.dhash "
+            "SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.filesize, h.file_hash, h.dhash, "
+            + signature_sql + " AS file_signature "
             "FROM image_hashes h "
             "JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
             "AND m.num=h.num AND m.media_type=h.media_type "
             "WHERE m.path!=''"
         )
-        return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]): (r["filesize"], r["file_hash"], r["dhash"])
+        return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]):
+                (r["filesize"], r["file_hash"], r["dhash"]) + ((r["file_signature"],) if include_signatures else ())
                 for r in rows}
 
     @_safe
@@ -2730,12 +2739,11 @@ class HistoryStore:
             for ident in group:
                 updates.append((cluster_id, ident[0], ident[1], ident[2], ident[3]))
             cluster_id += 1
-        # Commit the reset and each chunk on their own so a save in progress
-        # can write the catalog between them instead of waiting for every row.
+        # Publish one coherent snapshot. A failed update must roll back the
+        # reset too; otherwise readers see incomplete groups or wrong copies.
         with self._db:
-            self._db.execute("UPDATE image_hashes SET cluster_id=0")
-        for i in range(0, len(updates), 1000):
-            with self._db:
+            self._db.execute("UPDATE image_hashes SET cluster_id=0 WHERE cluster_id!=0")
+            for i in range(0, len(updates), 1000):
                 self._db.executemany(
                     "UPDATE image_hashes SET cluster_id=? "
                     "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",

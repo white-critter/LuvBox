@@ -9,7 +9,7 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
-from threading import Condition, Thread
+from threading import Condition, Event, Thread
 import webbrowser
 
 from PySide6.QtCore import QObject, Property, Qt, QTimer, QUrl, Signal, Slot
@@ -49,6 +49,7 @@ _HOLD_REASON = {
 }
 _CATALOG_MOVED = "저장 폴더가 바뀌어 작업을 멈췄습니다. 이미 처리한 내용은 유지됩니다."
 _TAG_LOCKED = "AI 작업이 끝난 뒤 태그를 바꿀 수 있습니다. 분류나 초기화가 끝나면 다시 시도해 주세요."
+_FAVORITE_ERROR = "즐겨찾기를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
 
 
 def _posted(value, *, time=False):
@@ -210,6 +211,7 @@ class LibraryRepository:
         self._cursor = None
         self._cursor_offset = 0
         self._scan_note = ""
+        self._duplicate_cancel = Event()
         self.provider = None
 
     def configure(self, request):
@@ -513,17 +515,18 @@ class LibraryRepository:
                     "ai_confidence": float(confidence) if isinstance(confidence, (int, float)) else -1.0}
 
     def toggle_favorite(self, key, generation):
+        """Return the committed state, or None when no change could be saved."""
         request = self.current(generation)
         if request is None:
-            return False
+            return None
         match = _KEY.fullmatch(key) if isinstance(key, str) else None
         if match is None or int(match[1]) != request.generation:
-            return False
+            return None
         try:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 return store.toggle_favorite(match[2], match[3], int(match[4]), match[5])
         except Exception:
-            return False
+            return None
 
     def add_tag(self, key, generation, tag):
         request = self.current(generation)
@@ -587,11 +590,18 @@ class LibraryRepository:
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
-        from .duplicates import compute_image_hashes, cluster_duplicates
+        from .duplicates import compute_image_hashes, cluster_duplicates, image_signature, ScanCancelled
+
+        def check_cancel():
+            if self._duplicate_cancel.is_set():
+                raise ScanCancelled("중복 검사를 중단했습니다. 다시 검사하면 확인한 파일의 해시를 재사용합니다.")
+            if self._catalog_request(generation, epoch) is None:
+                raise ScanCancelled(_CATALOG_MOVED)
+
         try:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 store._folder_cache = {}
-                cached = store.get_image_hashes()
+                cached = store.get_image_hashes(include_signatures=True)
                 records = (store.photo_records_for_scan()
                            if hasattr(store, "photo_records_for_scan")
                            else store.records(limit=10000, media_type="photo", include_deleted=False))
@@ -602,10 +612,9 @@ class LibraryRepository:
                 if progress_callback:
                     progress_callback(0, total_records)
                 for idx, rec in enumerate(records):
-                    if self._catalog_request(generation, epoch) is None:
-                        return 0
-                    if progress_callback and (idx % 25 == 0 or idx == total_records - 1):
-                        progress_callback(idx + 1, total_records)
+                    check_cancel()
+                    if progress_callback and idx % 25 == 0:
+                        progress_callback(idx, total_records)
                     ident = (rec["folder_mode"], rec["tweet_id"], rec["num"], rec["media_type"])
                     path = self._path(store, rec)
                     if path is None or not path.is_file():
@@ -613,19 +622,30 @@ class LibraryRepository:
                             stale_hashes.append(ident)
                         continue
                     try:
-                        sz = path.stat().st_size
+                        signature = image_signature(path)
+                        sz = int(signature.split(":")[2])
                     except OSError:
+                        if ident in cached:
+                            stale_hashes.append(ident)
                         continue
-                    if ident in cached and cached[ident][0] == sz and (cached[ident][1] or cached[ident][2]):
+                    if ident in cached and cached[ident][3] == signature and (cached[ident][1] or cached[ident][2]):
                         active_hashes[ident] = cached[ident]
                         continue
                     fhash, dh = compute_image_hashes(path)
-                    if fhash or dh:
-                        active_hashes[ident] = (sz, fhash, dh)
-                        new_hashes.append((*ident, sz, fhash, dh))
-                        if len(new_hashes) >= 100:
-                            store.save_image_hashes(new_hashes)
-                            new_hashes.clear()
+                    check_cancel()
+                    try:
+                        unchanged = image_signature(path) == signature
+                    except OSError:
+                        unchanged = False
+                    if not unchanged or not (fhash or dh):
+                        stale_hashes.append(ident)
+                        continue
+                    active_hashes[ident] = (sz, fhash, dh)
+                    new_hashes.append((*ident, sz, fhash, dh, signature))
+                    if len(new_hashes) >= 100:
+                        store.save_image_hashes(new_hashes)
+                        new_hashes.clear()
+                check_cancel()
                 if stale_hashes:
                     store.delete_image_hashes(stale_hashes)
                 if new_hashes:
@@ -637,10 +657,15 @@ class LibraryRepository:
                      "favorite": k in favs}
                     for k, v in active_hashes.items()
                 ]
-                clusters = cluster_duplicates(items, max_distance=4)
+                if progress_callback:
+                    progress_callback(total_records, total_records)
+                clusters = cluster_duplicates(items, max_distance=4, check_cancel=check_cancel)
                 cluster_idents = [[x["ident"] for x in group] for group in clusters]
+                check_cancel()
                 store.save_clusters(cluster_idents)
                 return store.duplicate_counts()
+        except ScanCancelled:
+            raise
         except Exception as exc:
             raise RuntimeError(
                 "중복 검사를 끝내지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요."
@@ -1727,7 +1752,16 @@ class LibraryController(QObject):
 
     @Slot(result=bool)
     def scanDuplicates(self):
+        if not self._exclusive and hasattr(self._repository, "_duplicate_cancel"):
+            self._repository._duplicate_cancel.clear()
         return self._begin_exclusive("duplicates", "scan_duplicates", "중복 이미지를 검사하는 중…")
+
+    @Slot()
+    def cancelDuplicateScan(self):
+        if self._exclusive == "duplicates" and hasattr(self._repository, "_duplicate_cancel"):
+            self._repository._duplicate_cancel.set()
+            self._status = "중복 검사를 중단하는 중… 현재 파일 확인이 끝나면 멈춥니다."
+            self.changed.emit()
 
     @Slot(result=bool)
     def scanAiTags(self):
@@ -1750,18 +1784,21 @@ class LibraryController(QObject):
             self._status = "선택할 중복 사본이 없습니다."
             self.changed.emit()
             return 0
-        if self.model._rows:
-            loaded_copies = [k for k in copy_keys if k in self.model._keys]
-            selectable, _, _ = self._repository.selectable_keys(loaded_copies)
-            if not selectable:
-                self._status = "현재 목록에 불러온 중복 사본이 없습니다."
-                self.changed.emit()
-                return 0
-            copy_keys = selectable
+        loaded_copies = [k for k in copy_keys if k in self.model._keys and k not in self._selection_keys]
+        selectable, _, _ = self._repository.selectable_keys(loaded_copies)
+        capacity = max(0, MAX_SELECTION - len(self._selection_keys))
+        copy_keys = selectable[:capacity]
+        if not copy_keys:
+            self._status = ("한 번에 최대 2,000개를 선택할 수 있습니다." if not capacity else
+                            "현재 목록에 새로 선택할 중복 사본이 없습니다.")
+            self.changed.emit()
+            return 0
         self._selection_mode = True
         self._selection_keys.update(copy_keys)
         self._batch_selection_changed()
         self._status = f"중복 사본 {len(copy_keys):,}개를 선택했습니다."
+        if len(selectable) > capacity:
+            self._status += " 한 번에 최대 2,000개를 선택할 수 있습니다."
         self.changed.emit()
         return len(copy_keys)
 
@@ -1769,18 +1806,20 @@ class LibraryController(QObject):
     def toggleSelectedFavorite(self):
         if self._closed or not self.selectedKey:
             return False
-        key = self.selectedKey
-        new_state = self._repository.toggle_favorite(key, self._generation)
-        self._selected["favorite"] = new_state
-        self.model.setFavorite(key, new_state)
-        self.changed.emit()
-        return new_state
+        return self.toggleFavorite(self.selectedKey)
 
     @Slot(str, result=bool)
     def toggleFavorite(self, key):
         if self._closed or not isinstance(key, str) or not key:
             return False
         new_state = self._repository.toggle_favorite(key, self._generation)
+        if type(new_state) is not bool:
+            self._status = _FAVORITE_ERROR
+            self.changed.emit()
+            return False
+        if self._status == _FAVORITE_ERROR:
+            self._status = ""
+            self.changed.emit()
         if key == self.selectedKey:
             self._selected["favorite"] = new_state
             self.changed.emit()
@@ -2037,7 +2076,9 @@ class LibraryController(QObject):
                 selection = reader(generation) if callable(reader) else {}
             elif action == "scan_duplicates":
                 def on_progress(cur, tot):
-                    self._emit(generation, serial, "scan_progress", (cur, tot), f"중복 검사 중… ({cur:,} / {tot:,})", epoch)
+                    message = ("사진 비교·중복 묶음 정리 중…" if cur == tot else
+                               f"사진 확인 중… ({cur:,} / {tot:,})")
+                    self._emit(generation, serial, "scan_progress", (cur, tot), message, epoch)
                 try:
                     count = self._repository.scan_duplicates(generation, progress_callback=on_progress, epoch=epoch)
                 except RuntimeError as exc:

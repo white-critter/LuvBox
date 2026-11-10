@@ -3,12 +3,19 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 from luvbox.history import HistoryStore
 from luvbox.qt_library import LibraryRepository, _Request
 from luvbox.storage import resolve_storage
 
 
 class FavoritesAndTagsTests(unittest.TestCase):
+    def test_repository_distinguishes_write_failure_from_unfavoriting(self):
+        repo = LibraryRepository()
+        repo.configure(_Request(1, "offline", "C:/unused", False))
+        with patch("luvbox.qt_library.HistoryStore.for_storage", side_effect=OSError("locked")):
+            self.assertIsNone(repo.toggle_favorite("g1_flat_101_1_photo", 1))
+
     def setUp(self):
         self.temp_dir = tempfile.mkdtemp()
         self.root = Path(self.temp_dir)

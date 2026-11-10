@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from pathlib import Path
 from typing import Sequence
 import warnings
@@ -15,6 +16,30 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .preview import MAX_PIXELS, MAX_RASTER_BYTES, PHOTO_FORMATS, _BoundedRasterReader, _prepare_decoders
 from .thumbcache import cloud_only
+
+
+class ScanCancelled(RuntimeError):
+    """A requested stop, distinct from a failed duplicate scan."""
+
+
+def image_signature(path: Path | str) -> str:
+    """Local identity and modification stamp; never reusable on a different file."""
+    from .recycling import file_signature
+    if cloud_only(path):
+        raise OSError("cloud-only image")
+    return ":".join(str(value) for value in file_signature(path))
+
+
+def _stream_hash(source) -> str:
+    """Bound the read even when a file grows after the initial stat."""
+    digest = hashlib.sha256()
+    remaining = MAX_RASTER_BYTES
+    while chunk := source.read(min(65536, remaining + 1)):
+        remaining -= len(chunk)
+        if remaining < 0:
+            raise OSError("image exceeded hashing limit")
+        digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _safe_local_file(path: Path) -> bool:
@@ -56,15 +81,12 @@ def _dhash_from_stream(source, hash_size: int = 8) -> str:
             with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
                 if img.width * img.height > MAX_PIXELS:
                     return ""
-                transposed = ImageOps.exif_transpose(img)
-                try:
-                    resized = transposed.convert("L").resize(
-                        (hash_size + 1, hash_size), Image.Resampling.BILINEAR
-                    )
-                finally:
-                    if transposed is not img:
-                        transposed.close()
-                pixels = list(resized.tobytes())
+                # Transpose a one-byte grayscale image instead of copying the
+                # full RGB/RGBA raster, and release both intermediates promptly.
+                with img.convert("L") as gray:
+                    ImageOps.exif_transpose(gray, in_place=True)
+                    with gray.resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR) as resized:
+                        pixels = resized.tobytes()
         diff = []
         for row in range(hash_size):
             start = row * (hash_size + 1)
@@ -88,13 +110,10 @@ def compute_file_hash(file_path: Path | str) -> str:
     if not _safe_local_file(path):
         return ""
     try:
-        h = hashlib.sha256()
         with path.open("rb") as f:
             if os.fstat(f.fileno()).st_size > MAX_RASTER_BYTES:
                 return ""
-            while chunk := f.read(65536):
-                h.update(chunk)
-        return h.hexdigest()
+            return _stream_hash(f)
     except OSError:
         return ""
 
@@ -107,15 +126,17 @@ def compute_image_hashes(file_path: Path | str, hash_size: int = 8) -> tuple[str
     if not _safe_local_file(path):
         return "", ""
     try:
-        h = hashlib.sha256()
+        signature = image_signature(path)
         with path.open("rb") as source:
-            if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
+            info = os.fstat(source.fileno())
+            opened = ":".join(str(value) for value in (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+            if info.st_size > MAX_RASTER_BYTES or opened != signature:
                 return "", ""
-            while chunk := source.read(65536):
-                h.update(chunk)
-            fhash = h.hexdigest()
+            fhash = _stream_hash(source)
             source.seek(0)
             dhash = _dhash_from_stream(source, hash_size=hash_size)
+        if image_signature(path) != signature:
+            return "", ""
         return fhash, dhash
     except OSError:
         return "", ""
@@ -133,7 +154,7 @@ def hamming_distance(hex1: str, hex2: str) -> int:
         return 64
 
 
-def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[list[dict]]:
+def cluster_duplicates(items: Sequence[dict], max_distance: int = 6, *, check_cancel=None) -> list[list[dict]]:
     """Group items by duplicate status.
 
     Each item must contain:
@@ -144,6 +165,10 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[lis
     Returns list of groups where each group has >= 2 items, sorted so the first
     item in each group is the preferred primary copy (favorited, then largest).
     """
+    if type(max_distance) is not int or not 0 <= max_distance <= 64:
+        raise ValueError("max_distance must be an integer between 0 and 64")
+    if check_cancel:
+        check_cancel()
     valid = [it for it in items if isinstance(it, dict) and it.get("key")
              and (it.get("file_hash") or (it.get("dhash") and len(str(it.get("dhash"))) == 16))]
     n = len(valid)
@@ -181,7 +206,8 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[lis
     by_dhash: dict[str, int] = {}
     for idx, item in enumerate(valid):
         dh = item.get("dhash") or ""
-        if len(dh) == 16:
+        if isinstance(dh, str) and re.fullmatch(r"[0-9a-fA-F]{16}", dh):
+            dh = dh.lower()
             first = by_dhash.get(dh)
             if first is not None:
                 union(first, idx)
@@ -213,6 +239,8 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[lis
                     if m < 2:
                         continue
                     for i in range(m - 1):
+                        if check_cancel:
+                            check_cancel()
                         v1, idx1 = bucket[i]
                         for j in range(i + 1, m):
                             v2, idx2 = bucket[j]
@@ -221,6 +249,8 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[lis
                 shift += width
         else:
             for i, (v1, idx1) in enumerate(unique_dhashes):
+                if check_cancel:
+                    check_cancel()
                 for j in range(i + 1, len(unique_dhashes)):
                     v2, idx2 = unique_dhashes[j]
                     if (v1 ^ v2).bit_count() <= max_distance:

@@ -131,6 +131,43 @@ class LibraryControlsTests(unittest.TestCase):
         self.assertEqual(self.library.selectedKey, key)
         self.assertFalse(self.library.selectionMode)
 
+    def test_duplicate_selection_counts_only_new_loaded_items_and_respects_capacity(self):
+        keys = [row["key"] for row in self.library.model._rows]
+        self.library.toggleSelection(keys[0])
+        self.repository.duplicate_copy_keys = lambda generation: [*keys, "unloaded"]
+        self.repository.selectable_keys = lambda candidates: (list(candidates), 0, 0)
+        with patch("luvbox.qt_library.MAX_SELECTION", 1):
+            self.assertEqual(self.library.selectDuplicateCopies(), 0)
+            self.assertEqual(self.library.selectedKeys, [keys[0]])
+        self.assertEqual(self.library.selectDuplicateCopies(), 1)
+        self.assertEqual(set(self.library.selectedKeys), set(keys))
+        self.assertEqual(self.library.selectDuplicateCopies(), 0)
+
+    def test_empty_gallery_does_not_select_unloaded_duplicate_copies(self):
+        self.library.model._rows.clear()
+        self.library.model._keys.clear()
+        self.repository.duplicate_copy_keys = lambda generation: ["unloaded"]
+        self.repository.selectable_keys = lambda candidates: (list(candidates), 0, 0)
+        self.assertEqual(self.library.selectDuplicateCopies(), 0)
+        self.assertEqual(self.library.selectedCount, 0)
+
+    def test_failed_favorite_write_preserves_displayed_state(self):
+        key = self.library.model._rows[0]["key"]
+        self.library.selectItem(key)
+        self.wait(lambda: not self.library.busy)
+        self.library._selected["favorite"] = True
+        self.library.model.setFavorite(key, True)
+        self.repository.toggle_favorite = lambda key, generation: None
+        self.assertFalse(self.library.toggleSelectedFavorite())
+        self.assertTrue(self.library._selected["favorite"])
+        self.assertTrue(self.library.model._rows[0]["favorite"])
+        self.assertIn("저장하지 못했습니다", self.library.status)
+        self.repository.toggle_favorite = lambda key, generation: False
+        self.assertFalse(self.library.toggleSelectedFavorite())
+        self.assertFalse(self.library._selected["favorite"])
+        self.assertFalse(self.library.model._rows[0]["favorite"])
+        self.assertNotIn("저장하지 못했습니다", self.library.status)
+
 
 if __name__ == "__main__":
     unittest.main()
