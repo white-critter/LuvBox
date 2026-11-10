@@ -386,6 +386,29 @@ class LibraryRepository:
         except Exception:
             return False
 
+    def add_tag_batch(self, keys, generation, tag):
+        request = self.current(generation)
+        if request is None or not keys:
+            return 0
+        identities = []
+        for key in keys:
+            match = _KEY.fullmatch(key) if isinstance(key, str) else None
+            if match is not None and int(match[1]) == request.generation:
+                identities.append((match[2], match[3], int(match[4]), match[5]))
+        if not identities:
+            return 0
+        try:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                if hasattr(store, "add_tags_batch"):
+                    return store.add_tags_batch(identities, tag)
+                count = 0
+                for ident in identities:
+                    if store.add_tag(ident[0], ident[1], ident[2], ident[3], tag):
+                        count += 1
+                return count
+        except Exception:
+            return 0
+
     def remove_tag(self, key, generation, tag):
         request = self.current(generation)
         if request is None:
@@ -472,13 +495,16 @@ class LibraryRepository:
         request = self.current(generation)
         if request is None:
             return 0
-        from .clip_classifier import classify_batch, ensure_model, is_available
+        from .clip_classifier import classify_batch, ensure_model, get_session, is_available, release_session
         if not is_available():
             try:
                 ensure_model()
             except Exception:
                 return 0
         try:
+            sess = get_session()
+            if sess is None:
+                return 0
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 store._folder_cache = {}
                 records = store.unclassified_photo_records()
@@ -503,11 +529,12 @@ class LibraryRepository:
 
                     if len(batch_paths) >= batch_size or idx == total_records - 1:
                         if batch_paths:
-                            predictions = classify_batch(batch_paths, batch_size=batch_size)
+                            predictions = classify_batch(batch_paths, batch_size=batch_size, session=sess)
                             tags_to_save = []
-                            for r, (tag, conf) in zip(batch_records, predictions):
-                                if tag:
-                                    tags_to_save.append((r["folder_mode"], r["tweet_id"], r["num"], r["media_type"], tag))
+                            for r, (tag, _conf) in zip(batch_records, predictions):
+                                tags_to_save.append(
+                                    (r["folder_mode"], r["tweet_id"], r["num"], r["media_type"], tag or "")
+                                )
                             if tags_to_save:
                                 saved_count += store.save_ai_tags(tags_to_save)
                             batch_records.clear()
@@ -519,6 +546,8 @@ class LibraryRepository:
                 return saved_count
         except Exception:
             return 0
+        finally:
+            release_session()
 
     def clear_ai_tags(self, generation):
         request = self.current(generation)
@@ -975,9 +1004,12 @@ class LibraryController(QObject):
         self._repository.configure(request)
         if request is not None and (reload_authors or not self._authors_loaded or not self._hashtags_loaded or not self._user_tags_loaded):
             with self._condition:
-                self._pending.append(("authors", self._generation, self._selection_serial, ""))
-                self._pending.append(("hashtags", self._generation, self._selection_serial, ""))
-                self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
+                if reload_authors or not self._authors_loaded:
+                    self._pending.append(("authors", self._generation, self._selection_serial, ""))
+                if reload_authors or not self._hashtags_loaded:
+                    self._pending.append(("hashtags", self._generation, self._selection_serial, ""))
+                if reload_authors or not self._user_tags_loaded:
+                    self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
                 self._condition.notify()
         self.provider.clear_registry()
         self.model.search(str(self._generation))
@@ -1083,6 +1115,28 @@ class LibraryController(QObject):
         self.userTagFilterChanged.emit()
         self._refresh(reload_authors=False)
 
+    def _upsert_cached_user_tag(self, clean: str, delta: int = 1) -> None:
+        normalized: list[dict] = []
+        found = False
+        for item in self._user_tags:
+            if isinstance(item, dict):
+                t = str(item.get("tag", ""))
+                c = int(item.get("count", 0) or 0)
+            else:
+                t = str(item)
+                c = 1
+            if not t:
+                continue
+            if t == clean:
+                c = max(1, c + delta)
+                found = True
+            normalized.append({"tag": t, "count": c})
+        if not found:
+            normalized.append({"tag": clean, "count": max(1, delta)})
+        normalized.sort(key=lambda r: (-int(r.get("count", 0)), str(r.get("tag", ""))))
+        self._user_tags = normalized
+        self.userTagsChanged.emit()
+
     @Slot(str, result=int)
     def addTagToSelection(self, tag):
         if self._closed or not tag:
@@ -1090,15 +1144,9 @@ class LibraryController(QObject):
         clean = tag.strip().lstrip("#")
         if not clean:
             return 0
-        count = 0
-        for key in list(self._selection_keys):
-            if self._repository.add_tag(key, self._generation, clean):
-                count += 1
+        count = self._repository.add_tag_batch(list(self._selection_keys), self._generation, clean)
         if count:
-            if clean not in self._user_tags:
-                self._user_tags.append(clean)
-                self._user_tags.sort()
-                self.userTagsChanged.emit()
+            self._upsert_cached_user_tag(clean, delta=count)
             self._user_tags_loaded = False
             self._refresh(reload_authors=False, status=f"선택한 {count:,}개 사진에 #{clean} 태그를 추가했습니다.")
         return count
@@ -1219,13 +1267,15 @@ class LibraryController(QObject):
             return False
         ok = self._repository.add_tag(self.selectedKey, self._generation, clean)
         if ok:
-            tags = list(self._selected.get("tags", []))
+            tags = [t for t in self._selected.get("tags", []) if not (isinstance(t, dict) and t.get("tag") == clean)]
             tags.append({"tag": clean, "source": "user"})
+            tags.sort(key=lambda t: str(t.get("tag", "")) if isinstance(t, dict) else str(t))
             self._selected["tags"] = tags
-            if clean not in self._user_tags:
-                self._user_tags.append(clean)
-                self._user_tags.sort()
-                self.userTagsChanged.emit()
+            self._upsert_cached_user_tag(clean, delta=1)
+            self._user_tags_loaded = False
+            with self._condition:
+                self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
+                self._condition.notify()
             self.changed.emit()
         return ok
 
@@ -1529,20 +1579,12 @@ class LibraryController(QObject):
             self.aiScanningChanged.emit()
             self.aiScanProgress.emit(0, 0)
             self._busy = False
-            self._user_tags = []
             self._user_tags_loaded = False
-            with self._condition:
-                self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
-                self._condition.notify()
             self._refresh(reload_authors=False, status=message)
             return
         if action == "clear_ai_tags":
             self._busy = False
-            self._user_tags = []
             self._user_tags_loaded = False
-            with self._condition:
-                self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
-                self._condition.notify()
             self._refresh(reload_authors=False, status=message)
             return
         if serial != self._selection_serial:

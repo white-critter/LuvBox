@@ -23,11 +23,12 @@ from luvbox.clip_classifier import (
     classify_batch,
     classify_image,
     ensure_model,
+    get_session,
     is_available,
+    release_session,
     resolve_model_path,
 )
 from luvbox.history import HistoryStore
-from luvbox.preview import PHOTO_FORMATS
 from luvbox.settings import load_settings
 from luvbox.storage import resolve_storage
 
@@ -119,7 +120,7 @@ def main():
     print(f"Image Directory: {target_dir}")
 
     # Gather images
-    valid_exts = {f".{fmt.lower()}" for fmt in PHOTO_FORMATS}
+    valid_exts = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
     all_files = [p for p in target_dir.glob("*.*") if p.suffix.lower() in valid_exts]
     total_found = len(all_files)
     if total_found == 0:
@@ -134,22 +135,26 @@ def main():
     eval_count = len(sample_files)
     print(f"Testing on:      {eval_count:,} images (out of {total_found:,} available)\n")
 
+    sess = get_session(model_path)
     t_start = time.perf_counter()
     results: list[tuple[str | None, float]] = []
 
-    # Process in batches
-    num_batches = (eval_count + args.batch_size - 1) // args.batch_size
-    for b_idx in range(num_batches):
-        batch = sample_files[b_idx * args.batch_size : (b_idx + 1) * args.batch_size]
-        batch_res = classify_batch(batch, threshold=args.threshold, batch_size=args.batch_size)
-        results.extend(batch_res)
+    try:
+        # Process in batches
+        num_batches = (eval_count + args.batch_size - 1) // args.batch_size
+        for b_idx in range(num_batches):
+            batch = sample_files[b_idx * args.batch_size : (b_idx + 1) * args.batch_size]
+            batch_res = classify_batch(batch, threshold=args.threshold, batch_size=args.batch_size, session=sess)
+            results.extend(batch_res)
 
-        processed = len(results)
-        pct = (processed / eval_count) * 100
-        elapsed = time.perf_counter() - t_start
-        rate = processed / elapsed if elapsed > 0 else 0
-        sys.stdout.write(f"\rClassifying: {processed:,} / {eval_count:,} ({pct:5.1f}%) - {rate:5.1f} imgs/s")
-        sys.stdout.flush()
+            processed = len(results)
+            pct = (processed / eval_count) * 100
+            elapsed = time.perf_counter() - t_start
+            rate = processed / elapsed if elapsed > 0 else 0
+            sys.stdout.write(f"\rClassifying: {processed:,} / {eval_count:,} ({pct:5.1f}%) - {rate:5.1f} imgs/s")
+            sys.stdout.flush()
+    finally:
+        release_session()
 
     t_total = time.perf_counter() - t_start
     print()
@@ -163,10 +168,12 @@ def main():
 
     # Summary distribution
     counts = Counter()
+    conf_sums: dict[str, float] = {cat: 0.0 for cat in CATEGORY_NAMES}
     unclassified = 0
     for tag, conf in results:
         if tag:
             counts[tag] += 1
+            conf_sums[tag] = conf_sums.get(tag, 0.0) + conf
         else:
             unclassified += 1
 
@@ -176,8 +183,9 @@ def main():
     for cat in CATEGORY_NAMES:
         c = counts[cat]
         pct = (c / eval_count) * 100 if eval_count > 0 else 0
+        avg_conf = (conf_sums[cat] / c * 100) if c > 0 else 0.0
         bar = "█" * int(pct / 4)
-        print(f"  #{cat:8s}: {c:6,} ({pct:5.1f}%) {bar}")
+        print(f"  #{cat:8s}: {c:6,} ({pct:5.1f}% | avg conf: {avg_conf:5.1f}%) {bar}")
 
     unclass_pct = (unclassified / eval_count) * 100 if eval_count > 0 else 0
     print(f"  (미분류) : {unclassified:6,} ({unclass_pct:5.1f}%)")

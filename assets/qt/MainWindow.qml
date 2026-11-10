@@ -1224,6 +1224,24 @@ ApplicationWindow {
                             window.flashNotice("AI 자동분류를 시작합니다…")
                         }
                     }
+                    FlatButton {
+                        id: aiClearButton
+                        objectName: "galleryAiClear"
+                        visible: filterToggle.checked
+                        implicitHeight: 40
+                        width: implicitWidth
+                        height: implicitHeight
+                        text: "AI 태그 초기화"
+                        enabled: !!window.app && !window.app.library.busy && userTagFilter.tagRows.length > 0
+                        ToolTip.visible: hovered
+                        ToolTip.text: "수동으로 추가한 내 태그는 유지하고, AI 자동분류로 생성된 태그만 초기화합니다"
+                        onVisibleChanged: Qt.callLater(filterHost.layout)
+                        onWidthChanged: Qt.callLater(filterHost.layout)
+                        onClicked: {
+                            window.app.library.clearAiTags()
+                            window.flashNotice("AI 자동분류 태그를 초기화하는 중입니다…")
+                        }
+                    }
                     FlatCombo {
                         id: dateFieldChoice
                         objectName: "galleryDateField"
@@ -2006,6 +2024,8 @@ ApplicationWindow {
                             text: modelData
                             font.pixelSize: 11
                             color: "#8fd3a0"
+                            ToolTip.visible: hashMouse.containsMouse
+                            ToolTip.text: "해시태그 모아보기"
                         }
                         MouseArea {
                             id: hashMouse
@@ -2037,7 +2057,7 @@ ApplicationWindow {
                             spacing: 4
 
                             Label {
-                                text: (isAi ? "✨ " : "#") + (modelData.tag || "")
+                                text: (isAi ? "AI · #" : "#") + (modelData.tag || "")
                                 font.pixelSize: 11
                                 color: isAi ? "#9cd7ff" : "#d99fe6"
                                 ToolTip.visible: userTagMouse.containsMouse

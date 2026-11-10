@@ -42,6 +42,7 @@ class Features152Tests(unittest.TestCase):
             store.record_media("flat", {"tweet_id": "102", "num": 1, "type": "photo", "author": "artist"}, p2)
 
         repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
         repo.provider = self
         req = _Request(generation=1, account="offline", output_dir=str(self.paths.output_dir), separate_accounts=False)
         repo.configure(req)
@@ -79,6 +80,11 @@ class Features152Tests(unittest.TestCase):
         self.assertEqual(total, 1)
         self.assertEqual(rows[0]["key"], "g3_flat_102_1_photo")
 
+        # Batch tag addition
+        batch_added = repo.add_tag_batch(["g3_flat_101_1_photo", "g3_flat_102_1_photo"], 3, "batch_collection")
+        self.assertEqual(batch_added, 2)
+        self.assertIn("batch_collection", [t["tag"] for t in repo.user_tags(3)])
+
     def test_library_overview_statistics(self):
         with closing(HistoryStore.for_storage(self.paths)) as store:
             p1 = self.paths.output_dir / "user1_101_1.jpg"
@@ -91,6 +97,7 @@ class Features152Tests(unittest.TestCase):
                                         "date": datetime(2026, 9, 20, tzinfo=timezone.utc)}, p2)
 
         repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
         repo.provider = self
         req = _Request(generation=1, account="offline", output_dir=str(self.paths.output_dir), separate_accounts=False)
         repo.configure(req)
@@ -116,6 +123,7 @@ class Features152Tests(unittest.TestCase):
             store.record_tweets([("501", "Great artwork! #art #digital", ["#art", "#digital"])])
 
         repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
         repo.provider = self
         req = _Request(generation=1, account="offline", output_dir=str(self.paths.output_dir), separate_accounts=False)
         repo.configure(req)
@@ -160,6 +168,7 @@ class Features152Tests(unittest.TestCase):
         self.assertLessEqual(dist, 4)
 
         repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
         repo.provider = self
         req = _Request(generation=1, account="offline", output_dir=str(self.paths.output_dir), separate_accounts=False)
         repo.configure(req)

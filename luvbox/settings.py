@@ -21,7 +21,7 @@ CONFLICT_HELP = ("이전 이름의 데이터 폴더(XlikeSaver)가 다시 생겼
 # to it again: logs, its last scheduled outcome, the window's acknowledgement
 # of that outcome (and their interrupted temporary files) and rebuildable caches.
 _LEFTOVER_NAMES = frozenset({"logs", "last-scheduled.json", "last-scheduled-seen", "cache",
-                             "request-protection", "thumbnails"})
+                             "request-protection", "thumbnails", "models"})
 
 
 class AppDataError(OSError):

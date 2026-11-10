@@ -14,11 +14,15 @@ directly into this module, requiring zero tokenizer and zero text model at runti
 from __future__ import annotations
 
 import base64
+import gc
 import hashlib
 import os
 from pathlib import Path
+import tempfile
 import threading
 from typing import Sequence
+import urllib.parse
+import urllib.request
 import warnings
 
 import numpy as np
@@ -39,6 +43,7 @@ MODEL_FILENAME = "clip_vit_b32_vision.onnx"
 MODEL_URL = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx"
 MODEL_SHA256 = "583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299"
 MODEL_SIZE = 89117001
+MAX_DOWNLOAD = 120 * 1024 * 1024
 
 CATEGORIES = [
     {"id": "illustration", "name": "일러스트"},
@@ -56,9 +61,36 @@ _CATEGORY_EMBEDDINGS: np.ndarray | None = None
 
 CLIP_MEAN = np.array([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
 CLIP_STD = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
+_CLIP_SCALE = (1.0 / (255.0 * CLIP_STD)).astype(np.float32)
+_CLIP_OFFSET = (-CLIP_MEAN / CLIP_STD).astype(np.float32)
 
 _SESSION_LOCK = threading.Lock()
 _SESSION: ort.InferenceSession | None = None
+_VERIFIED_MODEL_SIG: tuple[str, int, int] | None = None
+
+
+def _is_link(path: Path) -> bool:
+    try:
+        return path.is_symlink() or getattr(path, "is_junction", lambda: False)()
+    except OSError:
+        return True
+
+
+def _ensure_safe_parent_dirs(destination: Path) -> None:
+    """Reject symlinks or junctions anywhere in the target path hierarchy."""
+    for candidate in (destination, *destination.parents):
+        if _is_link(candidate):
+            raise ValueError("Unsafe symlink or junction in model destination path")
+
+
+class _HttpsOnlyRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Allow only HTTPS redirects during model weight downloads."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlsplit(newurl)
+        if parsed.scheme.lower() != "https" or not parsed.netloc:
+            raise urllib.error.URLError("Refusing non-HTTPS redirect during model download")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def get_category_embeddings() -> np.ndarray:
@@ -89,32 +121,112 @@ def resolve_model_path() -> Path:
     bundled = bundled_model_path()
     if bundled.is_file() and is_model_ready(bundled):
         return bundled
-    cache_path = default_cache_dir() / MODEL_FILENAME
-    return cache_path
+    return default_cache_dir() / MODEL_FILENAME
 
 
 def is_model_ready(path: Path | None = None) -> bool:
-    """Verify that the ONNX model exists and matches the expected size and SHA-256."""
-    target = path or resolve_model_path()
+    """Verify that the ONNX model exists and matches the expected size and SHA-256.
+
+    Caches the verified (resolved_path, size, mtime_ns) tuple so batch inference
+    does not re-hash the 89 MB file on every batch.
+    """
+    global _VERIFIED_MODEL_SIG
+    target = path if path is not None else (
+        bundled_model_path() if bundled_model_path().is_file() else default_cache_dir() / MODEL_FILENAME
+    )
     try:
-        if not target.is_file():
+        if not _safe_local_file(target):
             return False
-        if target.stat().st_size != MODEL_SIZE:
+        st = target.stat()
+        if st.st_size != MODEL_SIZE:
             return False
+        sig = (str(target.resolve()), st.st_size, st.st_mtime_ns)
+        if _VERIFIED_MODEL_SIG == sig:
+            return True
         h = hashlib.sha256()
         with target.open("rb") as f:
             while chunk := f.read(1024 * 1024):
                 h.update(chunk)
-        return h.hexdigest().lower() == MODEL_SHA256.lower()
+        if h.hexdigest().lower() == MODEL_SHA256.lower():
+            _VERIFIED_MODEL_SIG = sig
+            return True
+        return False
     except OSError:
         return False
+
+
+verify_file_hash = is_model_ready
 
 
 def is_available() -> bool:
     """Check if onnxruntime is installed and the model is ready for inference."""
     if not _ONNXRUNTIME_AVAILABLE:
         return False
+    if _SESSION is not None:
+        return True
     return is_model_ready()
+
+
+def download_model(destination: Path | None = None, progress_callback=None) -> Path:
+    """Download model with HTTPS enforcement, bounded size, SHA-256 verification, and atomic replace."""
+    if destination is None:
+        destination = default_cache_dir() / MODEL_FILENAME
+    _ensure_safe_parent_dirs(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_safe_parent_dirs(destination)
+    destination = destination.resolve()
+
+    if is_model_ready(destination):
+        return destination
+
+    temp_dir = destination.parent
+    hasher = hashlib.sha256()
+    bytes_downloaded = 0
+    tmp_path: Path | None = None
+
+    try:
+        with tempfile.NamedTemporaryFile(dir=temp_dir, prefix="clip_download_", suffix=".tmp", delete=False) as tmp_file:
+            tmp_path = Path(tmp_file.name)
+            opener = urllib.request.build_opener(_HttpsOnlyRedirectHandler())
+            req = urllib.request.Request(
+                MODEL_URL,
+                headers={"User-Agent": "LuvBox/1.6 (Windows; Local CLIP Model Fetcher)"},
+            )
+            with opener.open(req, timeout=30) as response:
+                content_length = response.headers.get("Content-Length")
+                total_size = int(content_length) if content_length and content_length.isdigit() else MODEL_SIZE
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    bytes_downloaded += len(chunk)
+                    if bytes_downloaded > MAX_DOWNLOAD:
+                        raise ValueError(f"Download exceeded maximum safe size ({MAX_DOWNLOAD} bytes)")
+                    hasher.update(chunk)
+                    tmp_file.write(chunk)
+                    if progress_callback:
+                        progress_callback(bytes_downloaded, total_size)
+            tmp_file.flush()
+            os.fsync(tmp_file.fileno())
+
+        # File handle is now closed (required on Windows before atomic os.replace).
+        digest = hasher.hexdigest().lower()
+        if digest != MODEL_SHA256.lower():
+            raise ValueError(f"SHA-256 hash mismatch: expected {MODEL_SHA256}, got {digest}")
+        if bytes_downloaded != MODEL_SIZE:
+            raise ValueError(f"File size mismatch: expected {MODEL_SIZE}, got {bytes_downloaded}")
+
+        _ensure_safe_parent_dirs(destination)
+        os.replace(str(tmp_path), str(destination))
+        is_model_ready(destination)
+        return destination
+    except Exception:
+        if tmp_path is not None and tmp_path.is_file():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
 
 
 def ensure_model(destination: Path | None = None, progress_callback=None) -> Path:
@@ -122,17 +234,16 @@ def ensure_model(destination: Path | None = None, progress_callback=None) -> Pat
     target = destination or resolve_model_path()
     if is_model_ready(target):
         return target
-    from tools.clip.download import download_model
     return download_model(target, progress_callback=progress_callback)
 
 
 def get_session(model_path: Path | None = None) -> ort.InferenceSession | None:
     """Return or initialize a cached onnxruntime InferenceSession."""
     global _SESSION
-    if _SESSION is not None:
+    if _SESSION is not None and model_path is None:
         return _SESSION
     with _SESSION_LOCK:
-        if _SESSION is not None:
+        if _SESSION is not None and model_path is None:
             return _SESSION
         if not _ONNXRUNTIME_AVAILABLE:
             return None
@@ -142,8 +253,20 @@ def get_session(model_path: Path | None = None) -> ort.InferenceSession | None:
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = min(4, os.cpu_count() or 1)
-        _SESSION = ort.InferenceSession(str(target), opts, providers=["CPUExecutionProvider"])
-        return _SESSION
+        opts.enable_cpu_mem_arena = False
+        sess = ort.InferenceSession(str(target), opts, providers=["CPUExecutionProvider"])
+        if model_path is None:
+            _SESSION = sess
+        return sess
+
+
+def release_session() -> None:
+    """Release the cached ONNX InferenceSession to free memory when idle."""
+    global _SESSION
+    with _SESSION_LOCK:
+        if _SESSION is not None:
+            _SESSION = None
+            gc.collect()
 
 
 def preprocess_image(image_path: Path | str) -> np.ndarray | None:
@@ -158,22 +281,33 @@ def preprocess_image(image_path: Path | str) -> np.ndarray | None:
                 return None
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
-                if img.width * img.height > MAX_PIXELS:
+                if img.width <= 0 or img.height <= 0 or img.width * img.height > MAX_PIXELS:
                     return None
                 transposed = ImageOps.exif_transpose(img)
                 try:
-                    converted = transposed.convert("RGB")
-                    w, h = converted.size
-                    scale = 224 / min(w, h)
-                    nw, nh = int(round(w * scale)), int(round(h * scale))
-                    resized = converted.resize((nw, nh), Image.Resampling.BILINEAR)
-                    left = (nw - 224) // 2
-                    top = (nh - 224) // 2
-                    cropped = resized.crop((left, top, left + 224, top + 224))
-                    arr = np.array(cropped, dtype=np.float32) / 255.0
-                    arr = (arr - CLIP_MEAN) / CLIP_STD
-                    arr = np.transpose(arr, (2, 0, 1))
-                    return arr
+                    w, h = transposed.size
+                    if w <= 0 or h <= 0:
+                        return None
+                    short = min(w, h)
+                    left = (w - short) * 0.5
+                    top = (h - short) * 0.5
+                    rgb = transposed if transposed.mode == "RGB" else transposed.convert("RGB")
+                    try:
+                        cropped = rgb.resize(
+                            (224, 224),
+                            Image.Resampling.BILINEAR,
+                            box=(left, top, left + short, top + short),
+                        )
+                        try:
+                            arr = np.array(cropped, dtype=np.float32)
+                        finally:
+                            cropped.close()
+                    finally:
+                        if rgb is not transposed:
+                            rgb.close()
+                    arr *= _CLIP_SCALE
+                    arr += _CLIP_OFFSET
+                    return np.ascontiguousarray(np.transpose(arr, (2, 0, 1)))
                 finally:
                     if transposed is not img:
                         transposed.close()
@@ -193,8 +327,10 @@ def classify_batch(
     If image fails to load or top confidence < threshold, category_name is None.
     """
     results: list[tuple[str | None, float]] = [(None, 0.0)] * len(image_paths)
-    if not image_paths or not is_available():
+    if not image_paths:
         return results
+    batch_size = max(1, min(int(batch_size), 128))
+    threshold = float(threshold)
 
     sess = session or get_session()
     if sess is None:

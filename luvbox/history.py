@@ -2060,13 +2060,42 @@ class HistoryStore:
             return True
 
     @_safe
+    def add_tags_batch(self, identities: list[tuple], tag: str, source: str = "user") -> int:
+        tag = tag.strip().lstrip("#")
+        if not identities or not tag or len(tag) > 50 or not self._has_table("media_tags"):
+            return 0
+        now = _now()
+        rows = [(ident[0], ident[1], ident[2], ident[3], tag, source, now) for ident in identities]
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                rows
+            )
+        return len(rows)
+
+    @_safe
     def remove_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str) -> bool:
         tag = tag.strip().lstrip("#")
+        if not tag:
+            return False
         with self._db:
+            row = self._db.execute(
+                "SELECT source FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
+                (folder_mode, tweet_id, num, media_type, tag),
+            ).fetchone()
             cur = self._db.execute(
                 "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
                 (folder_mode, tweet_id, num, media_type, tag)
             )
+            if cur.rowcount > 0 and row is not None and row["source"] == "ai":
+                # Keep an empty AI evaluation marker so incremental scans do not
+                # re-apply a tag that the user explicitly removed.
+                self._db.execute(
+                    "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                    (folder_mode, tweet_id, num, media_type, "", "ai", _now()),
+                )
             return cur.rowcount > 0
 
     @_safe
@@ -2075,7 +2104,7 @@ class HistoryStore:
             return []
         rows = self._read_rows(
             "SELECT tag, source, created_at FROM media_tags "
-            "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? ORDER BY created_at ASC",
+            "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag != '' ORDER BY created_at ASC",
             (folder_mode, tweet_id, num, media_type)
         )
         return [{"tag": row["tag"], "source": row["source"]} for row in rows]
@@ -2085,14 +2114,14 @@ class HistoryStore:
         if not self._has_table("media_tags"):
             return []
         rows = self._read_rows(
-            "SELECT tag, COUNT(*) AS count FROM media_tags GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?",
+            "SELECT tag, COUNT(*) AS count FROM media_tags WHERE tag != '' GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?",
             (limit,)
         )
         return [{"tag": row["tag"], "count": row["count"]} for row in rows]
 
     @_safe
     def unclassified_photo_records(self, limit: int | None = None) -> list[dict]:
-        """Return active photo records that have not yet been tagged by AI (source='ai')."""
+        """Return active photo records that have not yet been evaluated by AI (source='ai')."""
         if not self._has_table("media_tags"):
             return []
         query = (
@@ -2109,21 +2138,34 @@ class HistoryStore:
 
     @_safe
     def save_ai_tags(self, tags: list[tuple]) -> int:
-        """Save AI classification tags.
+        """Save AI classification tags and mark evaluated items.
 
-        tags is a list of (folder_mode, tweet_id, num, media_type, tag)
+        tags is a list of (folder_mode, tweet_id, num, media_type, tag).
+        When tag is empty or None, a sentinel row (tag='', source='ai') is saved
+        so incremental scans do not repeatedly re-evaluate low-confidence images.
+        Returns the count of non-empty tags applied.
         """
         if not tags or not self._has_table("media_tags"):
             return 0
         now = _now()
-        rows = [(t[0], t[1], t[2], t[3], t[4], "ai", now) for t in tags]
+        rows = []
+        applied = 0
+        for t in tags:
+            clean_tag = (t[4] or "").strip().lstrip("#")
+            if len(clean_tag) > 50:
+                continue
+            if clean_tag:
+                applied += 1
+            rows.append((t[0], t[1], t[2], t[3], clean_tag, "ai", now))
+        if not rows:
+            return 0
         with self._db:
             self._db.executemany(
                 "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
                 "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
                 rows
             )
-        return len(rows)
+        return applied
 
     @_safe
     def clear_ai_tags(self) -> int:
@@ -2131,8 +2173,11 @@ class HistoryStore:
         if not self._has_table("media_tags"):
             return 0
         with self._db:
-            cur = self._db.execute("DELETE FROM media_tags WHERE source = 'ai'")
-            return cur.rowcount
+            visible_count = self._db.execute(
+                "SELECT COUNT(*) FROM media_tags WHERE source = 'ai' AND tag != ''"
+            ).fetchone()[0]
+            self._db.execute("DELETE FROM media_tags WHERE source = 'ai'")
+            return int(visible_count)
 
     @_safe
     def ai_tag_stats(self) -> dict[str, int]:
@@ -2140,7 +2185,7 @@ class HistoryStore:
         if not self._has_table("media_tags"):
             return {}
         rows = self._read_rows(
-            "SELECT tag, COUNT(*) AS count FROM media_tags WHERE source = 'ai' GROUP BY tag ORDER BY count DESC, tag ASC"
+            "SELECT tag, COUNT(*) AS count FROM media_tags WHERE source = 'ai' AND tag != '' GROUP BY tag ORDER BY count DESC, tag ASC"
         )
         return {r["tag"]: r["count"] for r in rows}
 
