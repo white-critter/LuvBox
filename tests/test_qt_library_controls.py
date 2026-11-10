@@ -177,6 +177,20 @@ class LibraryControlsTests(unittest.TestCase):
         self.assertEqual(self.library.selectedCount, 0)
         self.assertEqual(self.library.selectedKeys, [])
 
+    def test_cancel_ai_scan_sets_cancel_event_and_updates_status(self):
+        self.library._exclusive = "ai"
+        self.library._ai_scanning = True
+        self.library.cancelAiScan()
+        self.assertTrue(self.repository._ai_cancel.is_set())
+        self.assertIn("중단", self.library.status)
+
+    def test_toggle_favorite_filter(self):
+        self.assertFalse(self.library.filterFavoriteOnly)
+        self.library.setFavoriteOnly(True)
+        self.assertTrue(self.library.filterFavoriteOnly)
+        self.library.setFavoriteOnly(False)
+        self.assertFalse(self.library.filterFavoriteOnly)
+
 
 if __name__ == "__main__":
     unittest.main()

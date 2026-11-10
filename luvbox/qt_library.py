@@ -212,6 +212,7 @@ class LibraryRepository:
         self._cursor_offset = 0
         self._scan_note = ""
         self._duplicate_cancel = Event()
+        self._ai_cancel = Event()
         self.provider = None
 
     def configure(self, request):
@@ -250,6 +251,12 @@ class LibraryRepository:
         if not self.same_catalog(epoch):
             return None
         return self.current()
+
+    def cancel_ai_scan(self):
+        self._ai_cancel.set()
+
+    def cancel_duplicate_scan(self):
+        self._duplicate_cancel.set()
 
     def read(self, token, offset, limit):
         request = self.current()
@@ -678,11 +685,21 @@ class LibraryRepository:
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
+        from .duplicates import ScanCancelled
         from .clip_classifier import (
             categories_from_embeddings, classify_detailed, encode_skip_signature, ensure_model, get_session,
             is_available, release_session,
         )
         import numpy as np
+
+        saved_count = 0
+
+        def check_cancel():
+            if self._ai_cancel.is_set():
+                kept = f" 이미 분류된 {saved_count:,}장은 유지됩니다." if saved_count else ""
+                raise ScanCancelled(f"AI 자동분류를 중단했습니다.{kept}")
+            if self._catalog_request(generation, epoch) is None:
+                raise ScanCancelled(_CATALOG_MOVED)
 
         def score_chunk(chunk):
             vectors = []
@@ -727,6 +744,7 @@ class LibraryRepository:
                 skipped_unreadable = 0
                 record_count = len(records)
                 for idx, rec in enumerate(records):
+                    check_cancel()
                     if self._catalog_request(generation, epoch) is None:
                         return 0
                     if status_callback and record_count and (idx % 200 == 0 or idx == record_count - 1):
@@ -771,6 +789,7 @@ class LibraryRepository:
                 processed_relabel = 0
                 if relabel_count:
                     for chunk in store.iter_embeddings_without_labels(64):
+                        check_cancel()
                         if self._catalog_request(generation, epoch) is None:
                             return saved_count
                         saved_count += score_chunk(chunk)
@@ -801,6 +820,7 @@ class LibraryRepository:
                     taught_encoded = False
 
                     for idx, (rec, path) in enumerate(valid_items):
+                        check_cancel()
                         if self._catalog_request(generation, epoch) is None:
                             return saved_count
                         batch_records.append(rec)
@@ -1767,7 +1787,16 @@ class LibraryController(QObject):
 
     @Slot(result=bool)
     def scanAiTags(self):
+        if not self._exclusive and hasattr(self._repository, "_ai_cancel"):
+            self._repository._ai_cancel.clear()
         return self._begin_exclusive("ai", "scan_ai_tags", "AI 자동분류 준비 중…")
+
+    @Slot()
+    def cancelAiScan(self):
+        if self._exclusive == "ai" and hasattr(self._repository, "_ai_cancel"):
+            self._repository._ai_cancel.set()
+            self._status = "AI 자동분류를 중단하는 중… 현재 묶음 처리가 끝나면 멈춥니다."
+            self.changed.emit()
 
     @Slot(result=bool)
     def clearAiTags(self):

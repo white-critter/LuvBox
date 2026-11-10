@@ -244,7 +244,7 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6, *, check_ca
                         v1, idx1 = bucket[i]
                         for j in range(i + 1, m):
                             v2, idx2 = bucket[j]
-                            if find(idx1) == find(idx2):
+                            if v1 == v2 or find(idx1) == find(idx2):
                                 continue
                             if (v1 ^ v2).bit_count() <= max_distance:
                                 union(idx1, idx2)
@@ -255,7 +255,7 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6, *, check_ca
                     check_cancel()
                 for j in range(i + 1, len(unique_dhashes)):
                     v2, idx2 = unique_dhashes[j]
-                    if find(idx1) == find(idx2):
+                    if v1 == v2 or find(idx1) == find(idx2):
                         continue
                     if (v1 ^ v2).bit_count() <= max_distance:
                         union(idx1, idx2)

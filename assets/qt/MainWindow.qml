@@ -1449,6 +1449,13 @@ ApplicationWindow {
                         Accessible.name: "중복 검사 중단"
                         onClicked: if (window.app) window.app.library.cancelDuplicateScan()
                     }
+                    FlatButton {
+                        objectName: "cancelAiScanButton"
+                        text: "분류 중단"
+                        visible: window.app && window.app.library.aiScanning
+                        Accessible.name: "AI 분류 중단"
+                        onClicked: if (window.app) window.app.library.cancelAiScan()
+                    }
                 }
                 Label {
                     objectName: "galleryManagementMessage"
@@ -1878,6 +1885,20 @@ ApplicationWindow {
         }
     }
     Shortcut {
+        sequence: "B"
+        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app
+        onActivated: {
+            window.app.library.setFavoriteOnly(!window.app.library.filterFavoriteOnly)
+        }
+    }
+    Shortcut {
+        sequence: "S"
+        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app && !statisticsDialog.visible
+        onActivated: {
+            statisticsDialog.open()
+        }
+    }
+    Shortcut {
         sequence: "Escape"
         enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app && window.app.library.selectedCount > 0
         onActivated: {
@@ -1976,6 +1997,23 @@ ApplicationWindow {
             enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.mediaType === "video"
                 && selectedMedia.videoSource && selectedMedia.ready
             onActivated: selectedMedia.muted = !selectedMedia.muted
+        }
+        Shortcut {
+            sequence: "Delete"
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && !!window.app && !!window.app.library.selectedKey
+            onActivated: {
+                if (window.app.library.filesLocked) {
+                    window.flashNotice(window.app.library.holdReason)
+                    return
+                }
+                if (window.app.busy) {
+                    window.flashNotice("작업이 끝난 뒤 휴지통으로 이동할 수 있습니다.")
+                    return
+                }
+                if (!window.app.library.selectedMissing) {
+                    window.app.management.prepareDelete([window.app.library.selectedKey])
+                }
+            }
         }
         onAboutToShow: {
             detailsVisible = false

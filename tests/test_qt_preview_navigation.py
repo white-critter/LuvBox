@@ -32,6 +32,8 @@ class PagedRepository:
         self.block_selection = ""
         self.missing = set()
         self.calls = []
+        self._duplicate_cancel = Event()
+        self._ai_cancel = Event()
 
     def configure(self, request):
         with self.lock:

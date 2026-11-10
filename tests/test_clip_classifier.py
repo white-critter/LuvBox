@@ -666,6 +666,31 @@ class ScanShortcutTests(unittest.TestCase):
                     store._db.execute("UPDATE media SET path='' WHERE tweet_id='901'")
                 self.assertEqual(store.ai_tag_stats(), {"인물": 1})
 
+    def test_scan_ai_tags_cancellation(self):
+        from unittest.mock import patch
+        from contextlib import closing
+        from luvbox.storage import resolve_storage
+        from luvbox.qt_library import LibraryRepository, _Request
+        from luvbox.duplicates import ScanCancelled
+
+        with tempfile.TemporaryDirectory() as td:
+            paths = resolve_storage(Path(td) / "RepoCancel", "offline")
+            with closing(HistoryStore.for_storage(paths)) as store:
+                p1 = paths.output_dir / "u_201_1.jpg"
+                Image.new("RGB", (32, 32), color="green").save(p1)
+                store.record_media("flat", {"tweet_id": "201", "num": 1, "type": "photo", "author": "u"}, p1)
+
+            repo = LibraryRepository()
+            self.addCleanup(repo.configure, None)
+            req = _Request(generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False)
+            repo.configure(req)
+
+            # Trigger cancel before/during scan
+            repo.cancel_ai_scan()
+            with self.assertRaises(ScanCancelled) as ctx:
+                repo.scan_ai_tags(1)
+            self.assertIn("중단", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

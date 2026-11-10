@@ -2789,29 +2789,16 @@ class HistoryStore:
             "AND m.num=h.num AND m.media_type=h.media_type "
             f"{fav_join}"
             "WHERE m.path!='' AND h.cluster_id>0 "
-            "ORDER BY h.cluster_id"
+            "ORDER BY h.cluster_id ASC, favorite DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"
         )
         copies: list[tuple] = []
-        group: list[dict] = []
-        current = None
-
-        def flush(items: list[dict]) -> None:
-            if len(items) < 2:
-                return
-            items.sort(key=lambda row: (
-                int(row["favorite"] or 0), int(row["filesize"] or 0), str(row["tweet_id"]), int(row["num"])
-            ), reverse=True)
-            for row in items[1:]:
-                copies.append((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
-
+        current_cluster = None
         for row in rows:
             cluster_id = row["cluster_id"]
-            if current != cluster_id:
-                flush(group)
-                group = []
-                current = cluster_id
-            group.append(row)
-        flush(group)
+            if cluster_id != current_cluster:
+                current_cluster = cluster_id
+            else:
+                copies.append((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
         return copies
 
     @_safe
