@@ -10,6 +10,7 @@ Dialog {
     signal authorSelected(string author)
     signal aiCategorySelected(string category)
     signal userTagSelected(string tag)
+    signal duplicateSelected()
     title: "라이브러리 통계 요약"
     modal: true
     focus: true
@@ -96,10 +97,10 @@ Dialog {
             width: statsFlick.width - (statsFlick.needsScroll ? 12 : 0)
             spacing: 16
 
-        // Metric summary cards. Two columns on a narrow dialog so the counts stay readable.
+        // Metric summary cards. Responsive columns so the counts stay readable.
         GridLayout {
             Layout.fillWidth: true
-            columns: statsFlick.width < 640 ? 2 : 4
+            columns: statsFlick.width < 500 ? 2 : (statsFlick.width < 800 ? 3 : 5)
             columnSpacing: 10
             rowSpacing: 10
 
@@ -212,6 +213,46 @@ Dialog {
                         elide: Text.ElideRight
                         width: Math.min(parent.width, implicitWidth)
                         horizontalAlignment: Text.AlignHCenter
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 72
+                color: dupHover.containsMouse && dialog.stats && dialog.stats.duplicates > 0 ? "#251c1e" : "#1b1b1b"
+                radius: 10
+                border.width: 1
+                border.color: dialog.stats && dialog.stats.duplicates > 0 ? (dupHover.containsMouse ? "#d93645" : "#4a282d") : "#2e2e2e"
+
+                MouseArea {
+                    id: dupHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: dialog.stats && dialog.stats.duplicates > 0 ? Qt.PointingHandCursor : Qt.ArrowCursor
+                    onClicked: {
+                        if (dialog.stats && dialog.stats.duplicates > 0) {
+                            dialog.duplicateSelected()
+                            dialog.close()
+                        }
+                    }
+                }
+
+                Column {
+                    anchors.centerIn: parent
+                    spacing: 4
+                    Label {
+                        text: "중복 사진"
+                        font.pixelSize: 12
+                        color: "#999999"
+                        anchors.horizontalCenter: parent.horizontalCenter
+                    }
+                    Label {
+                        text: dialog.stats && dialog.stats.duplicates !== undefined ? Number(dialog.stats.duplicates).toLocaleString() + "개" : "…"
+                        font.pixelSize: 18
+                        font.bold: true
+                        color: dialog.stats && dialog.stats.duplicates > 0 ? "#ff8791" : "#f4f1f1"
+                        anchors.horizontalCenter: parent.horizontalCenter
                     }
                 }
             }

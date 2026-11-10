@@ -169,5 +169,14 @@ class LibraryControlsTests(unittest.TestCase):
         self.assertNotIn("저장하지 못했습니다", self.library.status)
 
 
+    def test_clear_selection_resets_selected_keys_and_status(self):
+        keys = [row["key"] for row in self.library.model._rows]
+        self.library.selectLoaded()
+        self.assertGreater(self.library.selectedCount, 0)
+        self.library.clearSelection()
+        self.assertEqual(self.library.selectedCount, 0)
+        self.assertEqual(self.library.selectedKeys, [])
+
+
 if __name__ == "__main__":
     unittest.main()

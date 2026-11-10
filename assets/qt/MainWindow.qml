@@ -956,7 +956,13 @@ ApplicationWindow {
                         width: implicitWidth
                         checkable: true
                         checked: window.app ? window.app.library.filterDuplicateOnly : false
-                        text: checked ? "중복 해제" : "중복 사진"
+                        text: {
+                            const count = window.app ? window.app.library.duplicateCount : 0
+                            if (checked) {
+                                return count > 0 ? "중복 해제 (" + count.toLocaleString() + ")" : "중복 해제"
+                            }
+                            return count > 0 ? "중복 사진 (" + count.toLocaleString() + ")" : "중복 사진"
+                        }
                         tone: checked ? "primary" : "quiet"
                         Accessible.name: "중복 사진 필터"
                         ToolTip.visible: hovered
@@ -1855,6 +1861,27 @@ ApplicationWindow {
         onActivated: {
             search.forceActiveFocus()
             search.selectAll()
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+A"
+        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app
+        onActivated: {
+            window.app.library.selectLoaded()
+        }
+    }
+    Shortcut {
+        sequence: "D"
+        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app
+        onActivated: {
+            window.app.library.setDuplicateOnly(!window.app.library.filterDuplicateOnly)
+        }
+    }
+    Shortcut {
+        sequence: "Escape"
+        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app && window.app.library.selectedCount > 0
+        onActivated: {
+            window.app.library.clearSelection()
         }
     }
     Shortcut {
@@ -2767,6 +2794,13 @@ ApplicationWindow {
             window.currentScreen = 1
             window.applyFilters({ userTag: tag })
             window.flashNotice("#" + tag + " 내 태그 모아보기를 적용했습니다.")
+        }
+        onDuplicateSelected: {
+            window.currentScreen = 1
+            if (window.app && !window.app.library.filterDuplicateOnly) {
+                window.app.library.setDuplicateOnly(true)
+            }
+            window.flashNotice("중복 사진 모아보기를 적용했습니다.")
         }
     }
 

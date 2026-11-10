@@ -382,6 +382,7 @@ class LibraryRepository:
                 st = ov.get("stats", {})
                 ai_stats = store.ai_tag_stats() if hasattr(store, "ai_tag_stats") else {}
                 user_tag_list = store.user_tags(limit=15) if hasattr(store, "user_tags") else []
+                dup_count = store.duplicate_counts() if hasattr(store, "duplicate_counts") else 0
                 return {
                     "files": ov.get("files", 0),
                     "posts": ov.get("posts", 0),
@@ -390,6 +391,7 @@ class LibraryRepository:
                     "photo": ov.get("photo", 0),
                     "video": ov.get("video", 0),
                     "animated_gif": ov.get("animated_gif", 0),
+                    "duplicates": dup_count,
                     "authors": st.get("authors", []),
                     "monthly": [{"month": m[0], "count": m[1]} for m in st.get("months", {}).get("posted", [])],
                     "ai_categories": [{"category": k, "count": v} for k, v in ai_stats.items()],

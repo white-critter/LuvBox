@@ -244,6 +244,8 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6, *, check_ca
                         v1, idx1 = bucket[i]
                         for j in range(i + 1, m):
                             v2, idx2 = bucket[j]
+                            if find(idx1) == find(idx2):
+                                continue
                             if (v1 ^ v2).bit_count() <= max_distance:
                                 union(idx1, idx2)
                 shift += width
@@ -253,6 +255,8 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6, *, check_ca
                     check_cancel()
                 for j in range(i + 1, len(unique_dhashes)):
                     v2, idx2 = unique_dhashes[j]
+                    if find(idx1) == find(idx2):
+                        continue
                     if (v1 ^ v2).bit_count() <= max_distance:
                         union(idx1, idx2)
 
@@ -263,7 +267,15 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6, *, check_ca
     groups: list[list[dict]] = []
     for group in clusters_by_root.values():
         if len(group) >= 2:
-            group.sort(key=lambda x: (bool(x.get("favorite")), x.get("filesize") or 0), reverse=True)
+            group.sort(
+                key=lambda x: (
+                    bool(x.get("favorite")),
+                    x.get("filesize") or 0,
+                    str(x.get("tweet_id") or x.get("key") or ""),
+                    int(x.get("num") or 0),
+                ),
+                reverse=True,
+            )
             groups.append(group)
 
     return groups

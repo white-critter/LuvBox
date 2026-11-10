@@ -366,6 +366,58 @@ class DuplicateTests(unittest.TestCase):
             cluster_duplicates([{"key": str(i), "dhash": f"{i:016x}"} for i in range(200)], check_cancel=cancel)
         self.assertEqual(len(calls), 3)
 
+    def test_cluster_duplicates_tie_breaker_deterministic(self):
+        items = [
+            {"key": "k_1", "dhash": "0000000000000001", "filesize": 100, "favorite": False, "tweet_id": "100", "num": 1},
+            {"key": "k_2", "dhash": "0000000000000001", "filesize": 100, "favorite": False, "tweet_id": "200", "num": 1},
+            {"key": "k_3", "dhash": "0000000000000001", "filesize": 100, "favorite": True, "tweet_id": "050", "num": 1},
+        ]
+        # Favorited item must be first; then higher tweet_id among identical size/fav
+        clusters = cluster_duplicates(items, max_distance=1)
+        self.assertEqual(len(clusters), 1)
+        group = clusters[0]
+        self.assertEqual(group[0]["key"], "k_3")
+        self.assertEqual(group[1]["key"], "k_2")
+        self.assertEqual(group[2]["key"], "k_1")
+
+    def test_duplicate_copy_identities_left_join_preserves_favorites(self):
+        p1 = self.create_image("c1.jpg", "blue")
+        p2 = self.create_image("c2.jpg", "blue")
+        self.store.record_media("flat", {"tweet_id": "301", "num": 1, "type": "photo"}, p1)
+        self.store.record_media("flat", {"tweet_id": "302", "num": 1, "type": "photo"}, p2)
+        h1 = compute_dhash(p1)
+        self.store.save_image_hashes([
+            ("flat", "301", 1, "photo", 1000, "h1", h1),
+            ("flat", "302", 1, "photo", 2000, "h1", h1),
+        ])
+        self.store.save_clusters([[("flat", "301", 1, "photo"), ("flat", "302", 1, "photo")]])
+        # 301 is smaller (1000 vs 2000), but if favorited, it must be kept as primary copy
+        self.store.toggle_favorite("flat", "301", 1, "photo")
+        copies = self.store.duplicate_copy_identities()
+        self.assertEqual(copies, [("flat", "302", 1, "photo")])
+
+    def test_overview_includes_duplicate_count(self):
+        paths = resolve_storage(self.root / "LikesOverview", "offline")
+        with closing(HistoryStore.for_storage(paths)) as store:
+            p1 = paths.output_dir / "user_401_1.jpg"
+            p2 = paths.output_dir / "user_402_1.jpg"
+            im = Image.new("RGB", (60, 60), color="blue")
+            im.save(p1)
+            im.save(p2)
+            store.record_media("flat", {"tweet_id": "401", "num": 1, "type": "photo", "author": "user"}, p1)
+            store.record_media("flat", {"tweet_id": "402", "num": 1, "type": "photo", "author": "user"}, p2)
+            dh = compute_dhash(p1)
+            store.save_image_hashes([
+                ("flat", "401", 1, "photo", p1.stat().st_size, "hash", dh),
+                ("flat", "402", 1, "photo", p2.stat().st_size, "hash", dh),
+            ])
+            store.save_clusters([[("flat", "401", 1, "photo"), ("flat", "402", 1, "photo")]])
+
+            repo = LibraryRepository()
+            repo.configure(_Request(1, "offline", str(paths.output_dir), False))
+            ov = repo.overview(1)
+            self.assertEqual(ov.get("duplicates"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

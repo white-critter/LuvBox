@@ -2743,11 +2743,11 @@ class HistoryStore:
         # reset too; otherwise readers see incomplete groups or wrong copies.
         with self._db:
             self._db.execute("UPDATE image_hashes SET cluster_id=0 WHERE cluster_id!=0")
-            for i in range(0, len(updates), 1000):
+            if updates:
                 self._db.executemany(
                     "UPDATE image_hashes SET cluster_id=? "
                     "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                    updates[i:i + 1000]
+                    updates
                 )
         return len(updates)
 
@@ -2774,18 +2774,20 @@ class HistoryStore:
         """
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return None
-        favorite_sql = (
-            "EXISTS (SELECT 1 FROM favorites f WHERE f.folder_mode=h.folder_mode "
-            "AND f.tweet_id=h.tweet_id AND f.num=h.num AND f.media_type=h.media_type)"
-            if self._has_table("favorites") else "0"
+        has_fav = self._has_table("favorites")
+        fav_join = (
+            "LEFT JOIN favorites f ON f.folder_mode=h.folder_mode AND f.tweet_id=h.tweet_id "
+            "AND f.num=h.num AND f.media_type=h.media_type " if has_fav else ""
         )
+        fav_col = "CASE WHEN f.created_at IS NOT NULL THEN 1 ELSE 0 END AS favorite" if has_fav else "0 AS favorite"
         rows = self._read_rows(
             "SELECT h.folder_mode AS folder_mode, h.tweet_id AS tweet_id, h.num AS num, "
             "h.media_type AS media_type, h.filesize AS filesize, h.cluster_id AS cluster_id, "
-            f"{favorite_sql} AS favorite "
+            f"{fav_col} "
             "FROM image_hashes h "
             "JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
             "AND m.num=h.num AND m.media_type=h.media_type "
+            f"{fav_join}"
             "WHERE m.path!='' AND h.cluster_id>0 "
             "ORDER BY h.cluster_id"
         )
