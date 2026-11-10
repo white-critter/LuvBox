@@ -1206,6 +1206,24 @@ ApplicationWindow {
                             currentIndex = Qt.binding(function() { return userTagFilter.userTagIndex() })
                         }
                     }
+                    FlatButton {
+                        id: aiClassifyButton
+                        objectName: "galleryAiClassify"
+                        visible: filterToggle.checked
+                        implicitHeight: 40
+                        width: implicitWidth
+                        height: implicitHeight
+                        text: window.app && window.app.library.aiScanning ? "AI 분류 중…" : "AI 자동분류"
+                        enabled: !!window.app && !window.app.library.busy
+                        ToolTip.visible: hovered
+                        ToolTip.text: "로컬 AI(CLIP)로 사진을 일러스트, 동물, 인물, 짤 등으로 자동 분류합니다"
+                        onVisibleChanged: Qt.callLater(filterHost.layout)
+                        onWidthChanged: Qt.callLater(filterHost.layout)
+                        onClicked: {
+                            window.app.library.scanAiTags()
+                            window.flashNotice("AI 자동분류를 시작합니다…")
+                        }
+                    }
                     FlatCombo {
                         id: dateFieldChoice
                         objectName: "galleryDateField"
@@ -1314,7 +1332,7 @@ ApplicationWindow {
                 }
                 RowLayout {
                     Layout.fillWidth: true
-                    visible: (window.app && window.app.library.status.length > 0) || (window.app && window.app.library.duplicateProgressTotal > 0)
+                    visible: (window.app && window.app.library.status.length > 0) || (window.app && (window.app.library.duplicateProgressTotal > 0 || window.app.library.aiProgressTotal > 0))
                     spacing: 8
                     Label {
                         Layout.fillWidth: true
@@ -1326,10 +1344,10 @@ ApplicationWindow {
                     ProgressBar {
                         Layout.preferredWidth: 160
                         Layout.preferredHeight: 6
-                        visible: window.app && window.app.library.busy && window.app.library.duplicateProgressTotal > 0
+                        visible: window.app && window.app.library.busy && (window.app.library.duplicateProgressTotal > 0 || window.app.library.aiProgressTotal > 0)
                         from: 0
-                        to: window.app && window.app.library.duplicateProgressTotal > 0 ? window.app.library.duplicateProgressTotal : 1
-                        value: window.app ? window.app.library.duplicateProgressCurrent : 0
+                        to: (window.app && window.app.library.aiProgressTotal > 0) ? window.app.library.aiProgressTotal : (window.app && window.app.library.duplicateProgressTotal > 0 ? window.app.library.duplicateProgressTotal : 1)
+                        value: (window.app && window.app.library.aiProgressTotal > 0) ? window.app.library.aiProgressCurrent : (window.app ? window.app.library.duplicateProgressCurrent : 0)
                     }
                 }
                 Label {
@@ -2005,10 +2023,11 @@ ApplicationWindow {
                 Repeater {
                     model: window.app ? window.app.library.selectedTags : []
                     delegate: Rectangle {
-                        color: userTagMouse.containsMouse ? "#35243a" : "#281c2c"
+                        readonly property bool isAi: modelData.source === "ai"
+                        color: userTagMouse.containsMouse ? (isAi ? "#1a3550" : "#35243a") : (isAi ? "#13253a" : "#281c2c")
                         radius: 6
                         border.width: 1
-                        border.color: "#4a2a50"
+                        border.color: isAi ? "#2b5680" : "#4a2a50"
                         implicitWidth: userTagRow.implicitWidth + 10
                         implicitHeight: 22
 
@@ -2018,9 +2037,11 @@ ApplicationWindow {
                             spacing: 4
 
                             Label {
-                                text: "#" + (modelData.tag || "")
+                                text: (isAi ? "✨ " : "#") + (modelData.tag || "")
                                 font.pixelSize: 11
-                                color: "#d99fe6"
+                                color: isAi ? "#9cd7ff" : "#d99fe6"
+                                ToolTip.visible: userTagMouse.containsMouse
+                                ToolTip.text: isAi ? "AI 자동분류 태그 (클릭하여 필터링)" : "사용자 태그 (클릭하여 필터링)"
                                 MouseArea {
                                     id: userTagMouse
                                     anchors.fill: parent
@@ -2039,6 +2060,8 @@ ApplicationWindow {
                                 leftPadding: 3
                                 rightPadding: 3
                                 color: removeMouse.containsMouse ? "#ff8791" : "#b9afb1"
+                                ToolTip.visible: removeMouse.containsMouse
+                                ToolTip.text: "태그 삭제"
                                 MouseArea {
                                     id: removeMouse
                                     anchors.fill: parent

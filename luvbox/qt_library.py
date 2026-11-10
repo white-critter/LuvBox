@@ -468,6 +468,68 @@ class LibraryRepository:
         except Exception:
             return 0
 
+    def scan_ai_tags(self, generation, progress_callback=None):
+        request = self.current(generation)
+        if request is None:
+            return 0
+        from .clip_classifier import classify_batch, ensure_model, is_available
+        if not is_available():
+            try:
+                ensure_model()
+            except Exception:
+                return 0
+        try:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                store._folder_cache = {}
+                records = store.unclassified_photo_records()
+                total_records = len(records)
+                if total_records == 0:
+                    return 0
+                if progress_callback:
+                    progress_callback(0, total_records)
+
+                batch_records = []
+                batch_paths = []
+                saved_count = 0
+                batch_size = 16
+
+                for idx, rec in enumerate(records):
+                    if self.current(generation) is None:
+                        return saved_count
+                    path = self._path(store, rec)
+                    if path is not None and path.is_file():
+                        batch_records.append(rec)
+                        batch_paths.append(path)
+
+                    if len(batch_paths) >= batch_size or idx == total_records - 1:
+                        if batch_paths:
+                            predictions = classify_batch(batch_paths, batch_size=batch_size)
+                            tags_to_save = []
+                            for r, (tag, conf) in zip(batch_records, predictions):
+                                if tag:
+                                    tags_to_save.append((r["folder_mode"], r["tweet_id"], r["num"], r["media_type"], tag))
+                            if tags_to_save:
+                                saved_count += store.save_ai_tags(tags_to_save)
+                            batch_records.clear()
+                            batch_paths.clear()
+
+                        if progress_callback and (idx % 8 == 0 or idx == total_records - 1):
+                            progress_callback(idx + 1, total_records)
+
+                return saved_count
+        except Exception:
+            return 0
+
+    def clear_ai_tags(self, generation):
+        request = self.current(generation)
+        if request is None:
+            return 0
+        try:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                return store.clear_ai_tags()
+        except Exception:
+            return 0
+
     def duplicate_copy_keys(self, generation):
         request = self.current(generation)
         if request is None:
@@ -595,6 +657,8 @@ class LibraryController(QObject):
     duplicateFilterChanged = Signal()
     duplicateCountChanged = Signal()
     duplicateScanProgress = Signal(int, int)
+    aiScanProgress = Signal(int, int)
+    aiScanningChanged = Signal()
     statisticsLoaded = Signal(object)
     shutdownFinished = Signal()
     _delivered = Signal(object)
@@ -626,6 +690,9 @@ class LibraryController(QObject):
         self._duplicate_count = 0
         self._dup_current = 0
         self._dup_total = 0
+        self._ai_scanning = False
+        self._ai_current = 0
+        self._ai_total = 0
         self._date_field = "posted"
         self._date_from = self._date_to = ""
         self._selection_mode = False
@@ -718,6 +785,18 @@ class LibraryController(QObject):
     @Property(int, notify=duplicateScanProgress)
     def duplicateProgressTotal(self):
         return self._dup_total
+
+    @Property(bool, notify=aiScanningChanged)
+    def aiScanning(self):
+        return self._ai_scanning
+
+    @Property(int, notify=aiScanProgress)
+    def aiProgressCurrent(self):
+        return self._ai_current
+
+    @Property(int, notify=aiScanProgress)
+    def aiProgressTotal(self):
+        return self._ai_total
 
     @Property(bool, notify=changed)
     def selectedIsFavorite(self):
@@ -1059,6 +1138,32 @@ class LibraryController(QObject):
             self._condition.notify()
         self.changed.emit()
 
+    @Slot()
+    def scanAiTags(self):
+        if self._closed or self._busy:
+            return
+        self._busy = True
+        self._ai_scanning = True
+        self._ai_current = 0
+        self._ai_total = 0
+        self._status = "AI 자동분류 준비 중…"
+        self.aiScanningChanged.emit()
+        with self._condition:
+            self._pending.append(("scan_ai_tags", self._generation, self._selection_serial, ""))
+            self._condition.notify()
+        self.changed.emit()
+
+    @Slot()
+    def clearAiTags(self):
+        if self._closed or self._busy:
+            return
+        self._busy = True
+        self._status = "AI 자동분류 태그를 초기화하는 중…"
+        with self._condition:
+            self._pending.append(("clear_ai_tags", self._generation, self._selection_serial, ""))
+            self._condition.notify()
+        self.changed.emit()
+
     @Slot(result=int)
     def selectDuplicateCopies(self):
         if self._closed:
@@ -1341,6 +1446,16 @@ class LibraryController(QObject):
                     count = self._repository.scan_duplicates(generation, progress_callback=on_progress)
                     selection = count
                     message = f"중복·유사 사진 {count:,}개를 발견했습니다." if count else "중복·유사 사진이 없습니다."
+                elif action == "scan_ai_tags":
+                    def on_ai_progress(cur, tot):
+                        self._delivered.emit((generation, serial, "ai_scan_progress", (cur, tot), f"AI 자동분류 중… ({cur:,} / {tot:,})"))
+                    count = self._repository.scan_ai_tags(generation, progress_callback=on_ai_progress)
+                    selection = count
+                    message = f"AI 자동분류 완료: 사진 {count:,}장에 태그를 적용했습니다." if count else "새로 분류할 사진이 없거나 분류가 완료되었습니다."
+                elif action == "clear_ai_tags":
+                    count = self._repository.clear_ai_tags(generation)
+                    selection = count
+                    message = f"AI 자동분류 태그 {count:,}개를 초기화했습니다."
                 elif action == "select":
                     selection = self._repository.selected(key, generation)
                     if selection is None:
@@ -1367,6 +1482,14 @@ class LibraryController(QObject):
             self._dup_total = tot
             self._status = message
             self.duplicateScanProgress.emit(curr, tot)
+            self.changed.emit()
+            return
+        if action == "ai_scan_progress":
+            curr, tot = selection
+            self._ai_current = curr
+            self._ai_total = tot
+            self._status = message
+            self.aiScanProgress.emit(curr, tot)
             self.changed.emit()
             return
         if action == "authors":
@@ -1397,6 +1520,29 @@ class LibraryController(QObject):
             self.duplicateCountChanged.emit()
             self.duplicateScanProgress.emit(0, 0)
             self._busy = False
+            self._refresh(reload_authors=False, status=message)
+            return
+        if action == "scan_ai_tags":
+            self._ai_scanning = False
+            self._ai_current = 0
+            self._ai_total = 0
+            self.aiScanningChanged.emit()
+            self.aiScanProgress.emit(0, 0)
+            self._busy = False
+            self._user_tags = []
+            self._user_tags_loaded = False
+            with self._condition:
+                self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
+                self._condition.notify()
+            self._refresh(reload_authors=False, status=message)
+            return
+        if action == "clear_ai_tags":
+            self._busy = False
+            self._user_tags = []
+            self._user_tags_loaded = False
+            with self._condition:
+                self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
+                self._condition.notify()
             self._refresh(reload_authors=False, status=message)
             return
         if serial != self._selection_serial:

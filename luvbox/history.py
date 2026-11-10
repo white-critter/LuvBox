@@ -429,6 +429,7 @@ class HistoryStore:
                     PRIMARY KEY(folder_mode, tweet_id, num, media_type, tag)
                 );
                 CREATE INDEX IF NOT EXISTS media_tags_lookup ON media_tags(tag);
+                CREATE INDEX IF NOT EXISTS media_tags_source ON media_tags(source);
                 CREATE TABLE IF NOT EXISTS image_hashes (
                     folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
                     media_type TEXT NOT NULL, filesize INTEGER NOT NULL,
@@ -2088,6 +2089,60 @@ class HistoryStore:
             (limit,)
         )
         return [{"tag": row["tag"], "count": row["count"]} for row in rows]
+
+    @_safe
+    def unclassified_photo_records(self, limit: int | None = None) -> list[dict]:
+        """Return active photo records that have not yet been tagged by AI (source='ai')."""
+        if not self._has_table("media_tags"):
+            return []
+        query = (
+            "SELECT folder_mode, tweet_id, num, media_type, path, filename "
+            "FROM media WHERE media_type='photo' AND path != '' "
+            "AND NOT EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
+            "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
+            "AND media_tags.media_type=media.media_type AND media_tags.source='ai') "
+            "ORDER BY rowid ASC"
+        )
+        if limit is not None and limit > 0:
+            query += f" LIMIT {int(limit)}"
+        return self._read_rows(query)
+
+    @_safe
+    def save_ai_tags(self, tags: list[tuple]) -> int:
+        """Save AI classification tags.
+
+        tags is a list of (folder_mode, tweet_id, num, media_type, tag)
+        """
+        if not tags or not self._has_table("media_tags"):
+            return 0
+        now = _now()
+        rows = [(t[0], t[1], t[2], t[3], t[4], "ai", now) for t in tags]
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                rows
+            )
+        return len(rows)
+
+    @_safe
+    def clear_ai_tags(self) -> int:
+        """Remove only AI-generated tags (source='ai'), preserving user tags."""
+        if not self._has_table("media_tags"):
+            return 0
+        with self._db:
+            cur = self._db.execute("DELETE FROM media_tags WHERE source = 'ai'")
+            return cur.rowcount
+
+    @_safe
+    def ai_tag_stats(self) -> dict[str, int]:
+        """Return count of items per tag where source='ai'."""
+        if not self._has_table("media_tags"):
+            return {}
+        rows = self._read_rows(
+            "SELECT tag, COUNT(*) AS count FROM media_tags WHERE source = 'ai' GROUP BY tag ORDER BY count DESC, tag ASC"
+        )
+        return {r["tag"]: r["count"] for r in rows}
 
     @_safe
     def save_image_hashes(self, hashes: list[tuple]) -> int:

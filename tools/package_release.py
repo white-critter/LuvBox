@@ -49,6 +49,7 @@ SOURCE_FILES = (
     "THIRD_PARTY_NOTICES.md", "LuvBox.code-workspace",
     "tools/exiftool/download.py", "tools/package_release.py", "tools/check_build_inputs.py", "tools/build_snapshot.py",
     "tools/benchmark_history.py", "tools/benchmark_preview.py",
+    "tools/bench_clip.py", "tools/clip/download.py", "tools/clip/README.md",
     "tests/browser_bridge_extension_harness.js",
     "tools/ffmpeg/build.py", "tools/ffmpeg/README.md", "tools/ffmpeg/manifest.json",
     "tools/ffmpeg/configure-flags.json", "tools/ffmpeg/build-info.txt", "tools/ffmpeg/LICENSE.LGPLv2.1.txt",

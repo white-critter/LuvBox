@@ -4,6 +4,8 @@ charset-normalizer==3.5.2
 gallery_dl==1.32.15
 idna==3.20
 imageio-ffmpeg==0.6.0
+numpy==2.5.4
+onnxruntime==1.31.1
 packaging==26.3
 pefile==2024.8.26
 Pillow==13.0.0

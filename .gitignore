@@ -20,6 +20,7 @@ cookies*.txt
 !.env.example
 tools/exiftool/*
 !tools/exiftool/download.py
+tools/clip/runtime/
 tools/ffmpeg/*.tar.xz
 tools/qt/sources/
 tools/qt/notices/

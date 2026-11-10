@@ -1,3 +1,5 @@
 gallery-dl==1.32.15
 Pillow==13.0.0
+numpy==2.5.4
+onnxruntime==1.31.1
 -r requirements-qt.txt
