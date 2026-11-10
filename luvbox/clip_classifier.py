@@ -316,18 +316,61 @@ def preprocess_image(image_path: Path | str) -> np.ndarray | None:
         return None
 
 
-def classify_batch(
+def _transient_io(exc: OSError) -> bool:
+    """Sharing, permission, and disappearance should be tried again next time."""
+    if isinstance(exc, FileNotFoundError):
+        return True
+    winerror = getattr(exc, "winerror", None)
+    if winerror in {5, 32, 33}:
+        return True
+    return exc.errno in {1, 11, 13, 16}
+
+
+def encode_skip_signature(image_path: Path | str) -> tuple[int, int] | None:
+    """Return ``(size, mtime_ns)`` when this file cannot be encoded until it changes.
+
+    A locked or missing file returns None so the next scan tries again. A file
+    that opens and is still not a usable photo is safe to skip.
+    """
+    path = Path(image_path)
+    if not _safe_local_file(path):
+        return None
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    signature = (int(info.st_size), int(info.st_mtime_ns))
+    if info.st_size > MAX_RASTER_BYTES:
+        return signature
+    try:
+        _prepare_decoders(False)
+        with path.open("rb") as source, warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
+                if img.width <= 0 or img.height <= 0 or img.width * img.height > MAX_PIXELS:
+                    return signature
+    except (Image.UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return signature
+    except OSError as exc:
+        return None if _transient_io(exc) else signature
+    except Exception:
+        return None
+    return None
+
+
+def classify_detailed(
     image_paths: Sequence[Path | str],
     threshold: float = 0.45,
     batch_size: int = 16,
     session: ort.InferenceSession | None = None,
-) -> list[tuple[str | None, float]]:
-    """Classify a list of image paths into (category_name, confidence).
+) -> list[tuple[str | None, float, np.ndarray | None]]:
+    """Classify images and keep the normalized image embedding.
 
-    Returns [(category_name, confidence), ...] matching image_paths length.
-    If image fails to load or top confidence < threshold, category_name is None.
+    Each item is ``(category_name, confidence, embedding)``. The category is
+    ``None`` when the image cannot be read or the top score is below ``threshold``.
+    The embedding is 512-d float32 and L2-normalized, or ``None`` when encoding fails.
     """
-    results: list[tuple[str | None, float]] = [(None, 0.0)] * len(image_paths)
+    results: list[tuple[str | None, float, np.ndarray | None]] = [(None, 0.0, None)] * len(image_paths)
     if not image_paths:
         return results
     batch_size = max(1, min(int(batch_size), 128))
@@ -371,12 +414,132 @@ def classify_batch(
         for i, global_idx in enumerate(valid_indices):
             best_cat_idx = int(np.argmax(probs[i]))
             best_conf = float(probs[i, best_cat_idx])
+            vector = np.ascontiguousarray(embeds[i], dtype=np.float32)
             if best_conf >= threshold:
-                results[global_idx] = (CATEGORY_NAMES[best_cat_idx], best_conf)
+                results[global_idx] = (CATEGORY_NAMES[best_cat_idx], best_conf, vector)
             else:
-                results[global_idx] = (None, best_conf)
+                results[global_idx] = (None, best_conf, vector)
 
     return results
+
+
+def classify_batch(
+    image_paths: Sequence[Path | str],
+    threshold: float = 0.45,
+    batch_size: int = 16,
+    session: ort.InferenceSession | None = None,
+) -> list[tuple[str | None, float]]:
+    """Classify a list of image paths into (category_name, confidence)."""
+    detailed = classify_detailed(image_paths, threshold=threshold, batch_size=batch_size, session=session)
+    return [(name, confidence) for name, confidence, _embedding in detailed]
+
+
+def categories_from_embeddings(
+    embeddings: np.ndarray,
+    threshold: float = 0.45,
+) -> list[tuple[str | None, float]]:
+    """Score stored image embeddings with the baked category text.
+
+    ``embeddings`` is one 512-d vector or an ``(n, 512)`` matrix of the same
+    L2-normalized features ``classify_detailed`` stores. This does not load the
+    vision model. A score below ``threshold`` yields category ``None``.
+    """
+    matrix = np.asarray(embeddings, dtype=np.float32)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(1, -1)
+    if matrix.ndim != 2 or matrix.shape[1] != 512 or matrix.shape[0] == 0:
+        return []
+    threshold = float(threshold)
+    logits = (matrix @ get_category_embeddings().T) * 100.0
+    logits -= np.max(logits, axis=-1, keepdims=True)
+    exp_logits = np.exp(logits)
+    probs = exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)
+    best = np.argmax(probs, axis=-1)
+    scored: list[tuple[str | None, float]] = []
+    for row, index in enumerate(best):
+        confidence = float(probs[row, int(index)])
+        name = CATEGORY_NAMES[int(index)] if confidence >= threshold else None
+        scored.append((name, confidence))
+    return scored
+
+
+def neighbor_threshold(count: int) -> float:
+    """How close a photo must be before a taught example may relabel it.
+
+    One example only matches near-duplicates. More confirmed examples of the
+    same category lower the bar slightly, and it never falls below 0.86.
+    """
+    count = max(1, int(count))
+    return 0.86 + 0.08 / (count ** 0.5)
+
+
+def neighbor_decisions(
+    embeddings: np.ndarray,
+    groups: dict[str, np.ndarray],
+) -> list[tuple[str, float] | None]:
+    """Score many embeddings at once. See ``neighbor_decision`` for the rule.
+
+    One matrix product per taught category replaces a Python loop over photos.
+    """
+    matrix = np.asarray(embeddings, dtype=np.float32)
+    if matrix.ndim == 1:
+        matrix = matrix.reshape(1, -1)
+    if matrix.ndim != 2 or matrix.shape[1] != 512 or matrix.shape[0] == 0 or not groups:
+        return []
+    count = matrix.shape[0]
+    best_sim = np.full(count, -1.0, dtype=np.float64)
+    second_sim = np.full(count, -1.0, dtype=np.float64)
+    best_count = np.zeros(count, dtype=np.int32)
+    best_name = [""] * count
+    for name, group in groups.items():
+        if group is None or len(group) == 0:
+            continue
+        block = np.asarray(group, dtype=np.float32)
+        if block.ndim == 1:
+            block = block.reshape(1, -1)
+        if block.ndim != 2 or block.shape[1] != 512:
+            continue
+        row_max = np.max(matrix @ block.T, axis=1).astype(np.float64, copy=False)
+        better = row_max > best_sim
+        second_sim = np.where(better, best_sim, np.maximum(second_sim, row_max))
+        if np.any(better):
+            label = str(name)
+            for index in np.flatnonzero(better):
+                best_name[int(index)] = label
+        best_count = np.where(better, int(block.shape[0]), best_count)
+        best_sim = np.where(better, row_max, best_sim)
+    scored: list[tuple[str, float] | None] = []
+    for index in range(count):
+        taught = int(best_count[index])
+        top = float(best_sim[index])
+        second = float(second_sim[index])
+        if taught == 0 or top < neighbor_threshold(taught):
+            scored.append(None)
+            continue
+        if second >= 0 and top < second + 0.02:
+            scored.append(None)
+            continue
+        scored.append((best_name[index], top))
+    return scored
+
+
+def neighbor_decision(
+    embedding: np.ndarray,
+    groups: dict[str, np.ndarray],
+) -> tuple[str, float] | None:
+    """Return ``(category, similarity)`` when a taught example is close enough.
+
+    ``groups`` maps a category name, or ``""`` for "none of these", to a
+    normalized ``(n, 512)`` matrix. ``None`` means no taught example is close
+    enough to override the zero-shot label.
+    """
+    if embedding is None or not groups:
+        return None
+    vector = np.asarray(embedding, dtype=np.float32).reshape(-1)
+    if vector.shape != (512,):
+        return None
+    scored = neighbor_decisions(vector, groups)
+    return scored[0] if scored else None
 
 
 def classify_image(

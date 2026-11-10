@@ -70,6 +70,11 @@ class ManagementController(QObject):
     @Slot("QVariantList")
     def prepareDelete(self, keys):
         if self.locked or self._mutating or self._closing or not keys: return
+        if getattr(self._library, "filesLocked", False):
+            self._error = self._library.holdReason or "라이브러리 작업이 끝난 뒤 휴지통으로 이동할 수 있습니다."
+            self._status = ""
+            self.changed.emit()
+            return
         self._mutating = True
         self._stop.clear()
         self._error = ""

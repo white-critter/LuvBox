@@ -66,6 +66,8 @@ _MEDIA_READ_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS media_source_url_missing ON media(source_url) WHERE source_url=''",
 )
 _PERIOD_FIELDS = {"posted": "media.posted_at", "saved": "media.saved_at"}
+_AI_CATEGORIES = frozenset({"일러스트", "인물", "동물", "짤·텍스트", "풍경·배경"})
+_EMBEDDING_BYTES = 512 * 4
 # 'retry' runs download chosen missing files by tweet, not the Like list.
 _SCAN_MODES = {"full", "quick", "retry"}
 _DELETION_STATUSES = {"pending", "recycled", "failed", "cancelled", "interrupted"}
@@ -83,6 +85,17 @@ _DAMAGED_HELP = ("저장 기록 DB가 손상되어 기록 복구가 필요합니
                  "사진·영상과 중복 방지 기록은 그대로 있습니다.")
 # SQLITE_CORRUPT and SQLITE_NOTADB, including their extended codes.
 _DAMAGED_CODES = {11, 26}
+
+
+def _identity_chunks(identities, size=200):
+    """Yield ``(VALUES clause, params)`` for ``(folder, tweet, num, type)`` rows."""
+    items = list(identities)
+    for start in range(0, len(items), size):
+        chunk = items[start:start + size]
+        params = tuple(part for ident in chunk for part in tuple(ident)[:4])
+        if len(params) != len(chunk) * 4:
+            raise HistoryError(_HISTORY_HELP)
+        yield ",".join("(?,?,?,?)" for _ in chunk), params
 
 
 def _catalog_damage(error: sqlite3.DatabaseError, database=None) -> bool:
@@ -463,6 +476,24 @@ class HistoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS media_tags_lookup ON media_tags(tag);
                 CREATE INDEX IF NOT EXISTS media_tags_source ON media_tags(source);
+                CREATE INDEX IF NOT EXISTS media_tags_source_tag ON media_tags(source, tag);
+                CREATE TABLE IF NOT EXISTS ai_embeddings (
+                    folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                    media_type TEXT NOT NULL, embedding BLOB NOT NULL, confidence REAL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_mode, tweet_id, num, media_type)
+                );
+                CREATE TABLE IF NOT EXISTS ai_feedback (
+                    folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                    media_type TEXT NOT NULL, category TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_mode, tweet_id, num, media_type)
+                );
+                CREATE TABLE IF NOT EXISTS ai_unreadable (
+                    folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                    media_type TEXT NOT NULL, filesize INTEGER NOT NULL, mtime_ns INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_mode, tweet_id, num, media_type)
+                );
                 CREATE TABLE IF NOT EXISTS image_hashes (
                     folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
                     media_type TEXT NOT NULL, filesize INTEGER NOT NULL,
@@ -1824,7 +1855,8 @@ class HistoryStore:
 
     @staticmethod
     def _record_filter(media_type, query, period=None, author="", include_deleted=True, hashtag="",
-                       favorite_only=False, user_tag="", duplicate_only=False, *,
+                       favorite_only=False, user_tag="", duplicate_only=False,
+                       ai_category="", ai_origin="", *,
                        has_hashtags=True, has_favorites=True, has_media_tags=True, has_image_hashes=True,
                        has_cluster_id=True):
         """WHERE clause on media; ``period`` is (field, first day, last day).
@@ -1893,8 +1925,26 @@ class HistoryStore:
                 else:
                     clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
                                    "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
-                                   "AND media_tags.media_type=media.media_type AND media_tags.tag=?)")
+                                   "AND media_tags.media_type=media.media_type AND media_tags.source='user' "
+                                   "AND media_tags.tag=?)")
                     params.append(tag)
+        if ai_category:
+            if not isinstance(ai_category, str) or ai_category not in _AI_CATEGORIES or not has_media_tags:
+                clauses.append("0")
+            else:
+                origin = ai_origin if ai_origin in {"ai", "confirmed"} else ""
+                if origin:
+                    clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
+                                   "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
+                                   "AND media_tags.media_type=media.media_type AND media_tags.tag=? "
+                                   "AND media_tags.source=?)")
+                    params.extend((ai_category, origin))
+                else:
+                    clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
+                                   "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
+                                   "AND media_tags.media_type=media.media_type AND media_tags.tag=? "
+                                   "AND media_tags.source IN ('ai','confirmed'))")
+                    params.append(ai_category)
         if duplicate_only:
             if not has_image_hashes:
                 clauses.append("0")
@@ -1923,10 +1973,11 @@ class HistoryStore:
         return " WHERE " + " AND ".join(clauses) if clauses else "", params
 
     def _filter_clause(self, media_type, query, period=None, author="", include_deleted=True, hashtag="",
-                       favorite_only=False, user_tag="", duplicate_only=False):
+                       favorite_only=False, user_tag="", duplicate_only=False, ai_category="", ai_origin=""):
         return self._record_filter(
             media_type, query, period, author, include_deleted,
             hashtag=hashtag, favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
+            ai_category=ai_category, ai_origin=ai_origin,
             has_hashtags=self._has_column("tweets", "hashtags"),
             has_favorites=self._has_table("favorites"),
             has_media_tags=self._has_table("media_tags"),
@@ -1937,15 +1988,16 @@ class HistoryStore:
     @_safe
     def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None,
                 author="", include_deleted=True, after=None, hashtag="", favorite_only=False, user_tag="",
-                duplicate_only=False) -> list[dict]:
+                duplicate_only=False, ai_category="", ai_origin="") -> list[dict]:
         if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
                 isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
                 media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS or
                 not isinstance(hashtag, str) or type(favorite_only) is not bool or not isinstance(user_tag, str) or
-                type(duplicate_only) is not bool):
+                type(duplicate_only) is not bool or not isinstance(ai_category, str) or not isinstance(ai_origin, str)):
             raise HistoryError(_HISTORY_HELP)
         where, params = self._filter_clause(media_type, query, period, author, include_deleted, hashtag=hashtag,
-                                            favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only)
+                                            favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
+                                            ai_category=ai_category, ai_origin=ai_origin)
         extra, extra_params = _after_clause(order, after)
         if extra:
             # A cursor replaces OFFSET. Inserts at the front of a newest-first
@@ -1979,18 +2031,20 @@ class HistoryStore:
     @_safe
     def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None,
                     author="", include_deleted=True, after=None, hashtag="", favorite_only=False, user_tag="",
-                    duplicate_only=False) -> dict:
+                    duplicate_only=False, ai_category="", ai_origin="") -> dict:
         if after is not None and page != 0:
             raise HistoryError(_HISTORY_HELP)
         where, params = self._filter_clause(media_type, query, period, author, include_deleted, hashtag=hashtag,
-                                            favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only)
+                                            favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
+                                            ai_category=ai_category, ai_origin=ai_origin)
         # Only a text search reads tweets; the joins never change the count.
         return self._page((_JOINED if query or hashtag else "media") + where, params, page, page_size,
                           lambda limit, offset: self.records(limit, offset, media_type, query,
                                                              order=order, period=period, author=author,
                                                              include_deleted=include_deleted, after=after,
                                                              hashtag=hashtag, favorite_only=favorite_only,
-                                                             user_tag=user_tag, duplicate_only=duplicate_only))
+                                                             user_tag=user_tag, duplicate_only=duplicate_only,
+                                                             ai_category=ai_category, ai_origin=ai_origin))
 
     @_safe
     def authors(self, *, include_deleted=False) -> list[dict]:
@@ -2073,6 +2127,21 @@ class HistoryStore:
         return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]) for r in rows}
 
     @_safe
+    def favorite_identities_among(self, identities) -> set[tuple]:
+        """Favorites among one page, instead of every starred item in the catalog."""
+        if not identities or not self._has_table("favorites"):
+            return set()
+        found = set()
+        for clause, params in _identity_chunks(identities):
+            rows = self._read_rows(
+                "SELECT folder_mode, tweet_id, num, media_type FROM favorites "
+                f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})",
+                params,
+            )
+            found.update((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows)
+        return found
+
+    @_safe
     def add_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str, source: str = "user") -> bool:
         tag = _normalize_tag(tag)
         if not tag or len(tag) > 50:
@@ -2145,7 +2214,7 @@ class HistoryStore:
             "SELECT media_tags.tag AS tag, COUNT(*) AS count FROM media_tags "
             "JOIN media ON media.folder_mode=media_tags.folder_mode AND media.tweet_id=media_tags.tweet_id "
             "AND media.num=media_tags.num AND media.media_type=media_tags.media_type "
-            "WHERE media_tags.tag != '' AND media.path != '' "
+            "WHERE media_tags.tag != '' AND media_tags.source='user' AND media.path != '' "
             "GROUP BY media_tags.tag ORDER BY count DESC, media_tags.tag ASC LIMIT ?",
             (limit,)
         )
@@ -2161,7 +2230,10 @@ class HistoryStore:
             "FROM media WHERE media_type='photo' AND path != '' "
             "AND NOT EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
             "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
-            "AND media_tags.media_type=media.media_type AND media_tags.source='ai') "
+            "AND media_tags.media_type=media.media_type AND media_tags.source IN ('ai','confirmed')) "
+            "AND NOT EXISTS (SELECT 1 FROM ai_feedback WHERE ai_feedback.folder_mode=media.folder_mode "
+            "AND ai_feedback.tweet_id=media.tweet_id AND ai_feedback.num=media.num "
+            "AND ai_feedback.media_type=media.media_type) "
             "ORDER BY rowid ASC"
         )
         if limit is not None and limit > 0:
@@ -2198,6 +2270,356 @@ class HistoryStore:
                 rows
             )
         return applied
+
+    @_safe
+    def photos_without_embeddings(self) -> list[dict]:
+        """Active photos that do not yet have a stored CLIP embedding."""
+        if not self._has_table("ai_embeddings"):
+            return self.photo_records_for_scan()
+        return self._read_rows(
+            "SELECT folder_mode, tweet_id, num, media_type, path, filename "
+            "FROM media WHERE media_type='photo' AND path != '' "
+            "AND NOT EXISTS (SELECT 1 FROM ai_embeddings e WHERE e.folder_mode=media.folder_mode "
+            "AND e.tweet_id=media.tweet_id AND e.num=media.num AND e.media_type=media.media_type) "
+            "ORDER BY rowid ASC"
+        )
+
+    def _unlabeled_embedding_sql(self) -> str:
+        """Photos that have a CLIP embedding but no AI evaluation.
+
+        Clearing AI tags removes that evaluation. A manual removal leaves an
+        empty ``source='ai'`` row, and a taught photo has feedback. Neither matches.
+        """
+        feedback = ""
+        if self._has_table("ai_feedback"):
+            feedback = (
+                "AND NOT EXISTS (SELECT 1 FROM ai_feedback f WHERE f.folder_mode=e.folder_mode "
+                "AND f.tweet_id=e.tweet_id AND f.num=e.num AND f.media_type=e.media_type) "
+            )
+        tags = ""
+        if self._has_table("media_tags"):
+            tags = (
+                "AND NOT EXISTS (SELECT 1 FROM media_tags t WHERE t.folder_mode=e.folder_mode "
+                "AND t.tweet_id=e.tweet_id AND t.num=e.num AND t.media_type=e.media_type "
+                "AND t.source='ai') "
+            )
+        return (
+            "FROM ai_embeddings e "
+            "JOIN media m ON m.folder_mode=e.folder_mode AND m.tweet_id=e.tweet_id "
+            "AND m.num=e.num AND m.media_type=e.media_type "
+            "WHERE m.media_type='photo' AND m.path != '' "
+            + feedback + tags
+        )
+
+    @_safe
+    def count_embeddings_without_labels(self) -> int:
+        if not self._has_table("ai_embeddings"):
+            return 0
+        row = self._db.execute("SELECT COUNT(*) " + self._unlabeled_embedding_sql()).fetchone()
+        return int(row[0] or 0) if row else 0
+
+    def iter_embeddings_without_labels(self, batch: int = 256):
+        """Yield unlabeled embeddings in rowid order without holding the whole table.
+
+        Callers that already hold the catalog lock iterate this directly. It is
+        not wrapped, so a failed read surfaces to that caller.
+        """
+        if not self._has_table("ai_embeddings"):
+            return
+        batch = max(1, min(int(batch), 1000))
+        last = 0
+        columns = (
+            "SELECT e.folder_mode AS folder_mode, e.tweet_id AS tweet_id, e.num AS num, "
+            "e.media_type AS media_type, e.embedding AS embedding, e.confidence AS confidence, "
+            "m.rowid AS rowid "
+        )
+        while True:
+            rows = self._read_rows(
+                columns + self._unlabeled_embedding_sql() + " AND m.rowid>? ORDER BY m.rowid ASC LIMIT ?",
+                (last, batch),
+            )
+            if not rows:
+                return
+            last = int(rows[-1]["rowid"])
+            yield rows
+
+    @_safe
+    def embeddings_without_labels(self) -> list[dict]:
+        """Active photos that have a CLIP embedding but no AI evaluation."""
+        rows = []
+        for batch in self.iter_embeddings_without_labels():
+            for row in batch:
+                row.pop("rowid", None)
+                rows.append(row)
+        return rows
+
+    @_safe
+    def photo_rows_for_identities(self, identities) -> dict[tuple, dict]:
+        """Active photo rows for the requested identities, without reading the whole library."""
+        found = {}
+        if not identities:
+            return found
+        for clause, params in _identity_chunks(identities):
+            rows = self._read_rows(
+                "SELECT folder_mode, tweet_id, num, media_type, path, filename FROM media "
+                "WHERE media_type='photo' AND path != '' "
+                f"AND (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})",
+                params,
+            )
+            for row in rows:
+                found[(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])] = row
+        return found
+
+    @_safe
+    def embeddings_for(self, identities) -> dict:
+        """Stored CLIP embeddings for the requested identities only."""
+        found = {}
+        if not identities or not self._has_table("ai_embeddings"):
+            return found
+        for clause, params in _identity_chunks(identities):
+            rows = self._read_rows(
+                "SELECT folder_mode, tweet_id, num, media_type, embedding, confidence FROM ai_embeddings "
+                f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})",
+                params,
+            )
+            for row in rows:
+                blob = row["embedding"]
+                if isinstance(blob, memoryview):
+                    blob = blob.tobytes()
+                if isinstance(blob, (bytes, bytearray)) and len(blob) == _EMBEDDING_BYTES:
+                    found[(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])] = (
+                        bytes(blob), row["confidence"],
+                    )
+        return found
+
+    @_safe
+    def feedback_count(self) -> int:
+        if not self._has_table("ai_feedback"):
+            return 0
+        row = self._db.execute("SELECT COUNT(*) FROM ai_feedback").fetchone()
+        return int(row[0] or 0) if row else 0
+
+    @_safe
+    def unreadable_signatures(self) -> dict[tuple, tuple[int, int]]:
+        """``(size, mtime_ns)`` of photos that could not be encoded until the file changes."""
+        if not self._has_table("ai_unreadable"):
+            return {}
+        rows = self._read_rows(
+            "SELECT folder_mode, tweet_id, num, media_type, filesize, mtime_ns FROM ai_unreadable"
+        )
+        return {
+            (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]): (
+                int(row["filesize"]), int(row["mtime_ns"]),
+            )
+            for row in rows
+        }
+
+    @_safe
+    def remember_unreadable(self, rows: list[tuple]) -> int:
+        """rows are (folder_mode, tweet_id, num, media_type, filesize, mtime_ns)."""
+        if not rows or not self._has_table("ai_unreadable"):
+            return 0
+        now = _now()
+        stored = []
+        for row in rows:
+            try:
+                size = int(row[4])
+                mtime_ns = int(row[5])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if size < 0 or mtime_ns < 0:
+                continue
+            stored.append((row[0], row[1], row[2], row[3], size, mtime_ns, now))
+        if not stored:
+            return 0
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO ai_unreadable(folder_mode, tweet_id, num, media_type, filesize, mtime_ns, updated_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
+                "filesize=excluded.filesize, mtime_ns=excluded.mtime_ns, updated_at=excluded.updated_at",
+                stored,
+            )
+        return len(stored)
+
+    @_safe
+    def forget_unreadable(self, identities) -> int:
+        if not identities or not self._has_table("ai_unreadable"):
+            return 0
+        removed = 0
+        with self._db:
+            for clause, params in _identity_chunks(identities):
+                cursor = self._db.execute(
+                    "DELETE FROM ai_unreadable WHERE (folder_mode, tweet_id, num, media_type) "
+                    f"IN (VALUES {clause})",
+                    params,
+                )
+                removed += int(cursor.rowcount or 0)
+        return removed
+
+    @_safe
+    def save_embeddings(self, rows: list[tuple]) -> int:
+        """rows are (folder_mode, tweet_id, num, media_type, embedding_bytes, confidence)."""
+        if not rows or not self._has_table("ai_embeddings"):
+            return 0
+        now = _now()
+        stored = []
+        for row in rows:
+            blob = row[4]
+            if not isinstance(blob, (bytes, bytearray)) or len(blob) != _EMBEDDING_BYTES:
+                continue
+            confidence = row[5]
+            if confidence is not None and not isinstance(confidence, (int, float)):
+                confidence = None
+            stored.append((row[0], row[1], row[2], row[3], bytes(blob), confidence, now))
+        if not stored:
+            return 0
+        with self._db:
+            self._db.executemany(
+                "INSERT INTO ai_embeddings(folder_mode, tweet_id, num, media_type, embedding, confidence, updated_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
+                "embedding=excluded.embedding, confidence=excluded.confidence, updated_at=excluded.updated_at",
+                stored,
+            )
+        return len(stored)
+
+    @_safe
+    def learning_state(self, *, include_embeddings: bool = True) -> tuple[dict, dict, dict]:
+        """Return ``(embeddings, feedback, estimated)``.
+
+        ``embeddings`` maps an identity to ``(bytes, confidence)``. ``feedback`` maps
+        an identity to the taught category (``""`` means none of the five).
+        ``estimated`` maps an identity to the current non-empty AI tag.
+        Pass ``include_embeddings=False`` when only the taught labels and current
+        tags are needed. A library with no teaching then skips the embedding blobs.
+        """
+        embeddings, feedback, estimated = {}, {}, {}
+        if include_embeddings and self._has_table("ai_embeddings"):
+            for row in self._read_rows(
+                "SELECT folder_mode, tweet_id, num, media_type, embedding, confidence FROM ai_embeddings"
+            ):
+                blob = row["embedding"]
+                if isinstance(blob, memoryview):
+                    blob = blob.tobytes()
+                if isinstance(blob, (bytes, bytearray)) and len(blob) == _EMBEDDING_BYTES:
+                    embeddings[(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])] = (
+                        bytes(blob), row["confidence"],
+                    )
+        if self._has_table("ai_feedback"):
+            for row in self._read_rows("SELECT folder_mode, tweet_id, num, media_type, category FROM ai_feedback"):
+                feedback[(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])] = row["category"] or ""
+        if self._has_table("media_tags"):
+            for row in self._read_rows(
+                "SELECT folder_mode, tweet_id, num, media_type, tag FROM media_tags WHERE source='ai'"
+            ):
+                ident = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                if row["tag"]:
+                    estimated[ident] = row["tag"]
+                elif ident not in estimated:
+                    estimated[ident] = ""
+        return embeddings, feedback, estimated
+
+    @_safe
+    def classification_of(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> dict:
+        """The category shown for one photo, and whether the user confirmed it."""
+        category, confirmed, confidence = "", False, None
+        if self._has_table("ai_feedback"):
+            row = self._db.execute(
+                "SELECT category FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                (folder_mode, tweet_id, num, media_type),
+            ).fetchone()
+            if row is not None:
+                category = row["category"] or ""
+                confirmed = True
+        if not confirmed and self._has_table("media_tags"):
+            row = self._db.execute(
+                "SELECT tag FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                "AND source='ai' AND tag != ''",
+                (folder_mode, tweet_id, num, media_type),
+            ).fetchone()
+            if row is not None:
+                category = row["tag"] or ""
+        if self._has_table("ai_embeddings"):
+            row = self._db.execute(
+                "SELECT confidence FROM ai_embeddings WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                (folder_mode, tweet_id, num, media_type),
+            ).fetchone()
+            if row is not None:
+                confidence = row["confidence"]
+        return {"category": category, "confirmed": confirmed, "confidence": confidence}
+
+    def _replace_estimated_label(self, folder_mode, tweet_id, num, media_type, tag: str) -> None:
+        self._db.execute(
+            "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND source='ai'",
+            (folder_mode, tweet_id, num, media_type),
+        )
+        self._db.execute(
+            "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+            (folder_mode, tweet_id, num, media_type, tag, "ai", _now()),
+        )
+
+    @_safe
+    def set_taught_categories(self, identities: list[tuple], category: str) -> int:
+        """Remember one category for each photo and show it as a confirmed label.
+
+        ``category`` is one of the five names, or ``""`` for none of them.
+        A free-form user tag with the same text is left as a user tag.
+        """
+        if category not in _AI_CATEGORIES and category != "":
+            return 0
+        if not identities or not self._has_table("ai_feedback"):
+            return 0
+        now = _now()
+        with self._db:
+            for folder_mode, tweet_id, num, media_type in identities:
+                self._db.execute(
+                    "INSERT INTO ai_feedback(folder_mode, tweet_id, num, media_type, category, updated_at) "
+                    "VALUES (?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
+                    "category=excluded.category, updated_at=excluded.updated_at",
+                    (folder_mode, tweet_id, num, media_type, category, now),
+                )
+                self._db.execute(
+                    "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND source IN ('ai','confirmed')",
+                    (folder_mode, tweet_id, num, media_type),
+                )
+                if category:
+                    self._db.execute(
+                        "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
+                        "source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
+                        (folder_mode, tweet_id, num, media_type, category, "confirmed", now),
+                    )
+                else:
+                    self._db.execute(
+                        "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                        (folder_mode, tweet_id, num, media_type, "", "confirmed", now),
+                    )
+        return len(identities)
+
+    @_safe
+    def replace_estimated_labels(self, labels: list[tuple]) -> int:
+        """labels are (folder_mode, tweet_id, num, media_type, tag). Skips taught photos."""
+        if not labels or not self._has_table("media_tags"):
+            return 0
+        feedback = set()
+        if self._has_table("ai_feedback"):
+            feedback = {
+                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                for row in self._read_rows("SELECT folder_mode, tweet_id, num, media_type FROM ai_feedback")
+            }
+        changed = 0
+        with self._db:
+            for folder_mode, tweet_id, num, media_type, tag in labels:
+                ident = (folder_mode, tweet_id, num, media_type)
+                if ident in feedback:
+                    continue
+                if tag not in _AI_CATEGORIES and tag != "":
+                    continue
+                self._replace_estimated_label(folder_mode, tweet_id, num, media_type, tag)
+                changed += 1
+        return changed
 
     @_safe
     def clear_ai_tags(self) -> int:
@@ -2273,23 +2695,25 @@ class HistoryStore:
     def save_clusters(self, clusters: list[list[tuple]]) -> int:
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return 0
+        updates = []
+        cluster_id = 1
+        for group in clusters:
+            if len(group) < 2:
+                continue
+            for ident in group:
+                updates.append((cluster_id, ident[0], ident[1], ident[2], ident[3]))
+            cluster_id += 1
+        # Commit the reset and each chunk on their own so a save in progress
+        # can write the catalog between them instead of waiting for every row.
         with self._db:
             self._db.execute("UPDATE image_hashes SET cluster_id=0")
-            updates = []
-            cluster_id = 1
-            for group in clusters:
-                if len(group) < 2:
-                    continue
-                for ident in group:
-                    updates.append((cluster_id, ident[0], ident[1], ident[2], ident[3]))
-                cluster_id += 1
-            if updates:
-                for i in range(0, len(updates), 1000):
-                    self._db.executemany(
-                        "UPDATE image_hashes SET cluster_id=? "
-                        "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                        updates[i:i + 1000]
-                    )
+        for i in range(0, len(updates), 1000):
+            with self._db:
+                self._db.executemany(
+                    "UPDATE image_hashes SET cluster_id=? "
+                    "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                    updates[i:i + 1000]
+                )
         return len(updates)
 
     @_safe

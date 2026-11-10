@@ -295,7 +295,8 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
         try:
             with connection:
                 for table in ("media", "runs", "catalog_meta", "likes", "tweets", "missing_choices",
-                              "deletion_items", "favorites", "media_tags", "image_hashes"):
+                              "deletion_items", "favorites", "media_tags", "image_hashes",
+                              "ai_embeddings", "ai_feedback", "ai_unreadable"):
                     target = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
                     rows = []
                     for source in sources:

@@ -13,6 +13,7 @@ from PIL import Image
 
 from luvbox.clip_classifier import (
     CATEGORY_NAMES,
+    categories_from_embeddings,
     classify_batch,
     classify_image,
     get_category_embeddings,
@@ -35,6 +36,24 @@ class TestClipClassifier(unittest.TestCase):
         for norm in norms:
             self.assertAlmostEqual(norm, 1.0, places=4)
         self.assertEqual(CATEGORY_NAMES, ["일러스트", "인물", "동물", "짤·텍스트", "풍경·배경"])
+        scored = categories_from_embeddings(embeds)
+        self.assertEqual([name for name, _confidence in scored], CATEGORY_NAMES)
+
+    def test_encode_skip_signature_keeps_real_photos(self):
+        from luvbox.clip_classifier import encode_skip_signature
+
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td)
+            good = folder / "ok.jpg"
+            bad = folder / "bad.jpg"
+            Image.new("RGB", (8, 8), color="blue").save(good)
+            bad.write_bytes(b"this is not a photo")
+            self.assertIsNone(encode_skip_signature(good))
+            signature = encode_skip_signature(bad)
+            self.assertEqual(signature, (bad.stat().st_size, bad.stat().st_mtime_ns))
+        blank = categories_from_embeddings(np.zeros(512, dtype=np.float32))
+        self.assertIsNone(blank[0][0])
+        self.assertLess(blank[0][1], 0.45)
 
     def test_model_resolution_and_signature_cache(self):
         path = resolve_model_path()
@@ -164,11 +183,11 @@ class TestHistoryStoreAiTags(unittest.TestCase):
         stats = self.store.ai_tag_stats()
         self.assertEqual(stats, {"일러스트": 1})
 
-        # 6. user_tags (combines all tags for gallery dropdown)
+        # 6. 내 태그는 직접 붙인 태그만 포함한다. AI 분류는 별도다.
         all_tags = self.store.user_tags()
         tag_names = {t["tag"] for t in all_tags}
         self.assertIn("내최애", tag_names)
-        self.assertIn("일러스트", tag_names)
+        self.assertNotIn("일러스트", tag_names)
 
         # 7. clear_ai_tags preserves user tag!
         cleared = self.store.clear_ai_tags()
@@ -204,7 +223,7 @@ class TestHistoryStoreAiTags(unittest.TestCase):
         # Sentinel '' must never appear in item_tags, user_tags, or ai_tag_stats
         self.assertEqual(self.store.item_tags("flat", "222", 1, "photo"), [])
         self.assertEqual(self.store.ai_tag_stats(), {"동물": 1})
-        self.assertEqual([t["tag"] for t in self.store.user_tags()], ["동물"])
+        self.assertEqual([t["tag"] for t in self.store.user_tags()], [])
 
         # User manually removes AI tag '동물' from p1 -> sentinel preserved so incremental scan won't re-add it
         self.assertTrue(self.store.remove_tag("flat", "111", 1, "photo", "동물"))
@@ -254,24 +273,126 @@ class TestHistoryStoreAiTags(unittest.TestCase):
             Image.new("RGB", (32, 32), color="blue").save(p1)
             store.record_media("flat", {"tweet_id": "101", "num": 1, "type": "photo", "author": "u"}, p1)
             store.save_ai_tags([("flat", "101", 1, "photo", "일러스트")])
+            store.save_embeddings([("flat", "101", 1, "photo", b"\0" * 2048, 0.8)])
 
         repo = LibraryRepository()
         self.addCleanup(repo.configure, None)
         req = _Request(generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False)
         repo.configure(req)
 
-        # 1. Fast path: 0 unclassified photos -> must not call get_session
+        # 1. Fast path: nothing left to encode -> must not call get_session
         with patch("luvbox.clip_classifier.get_session") as mock_sess:
             self.assertEqual(repo.scan_ai_tags(1), 0)
             mock_sess.assert_not_called()
 
-        # 2. Error reporting: clear AI tags so 1 photo is unclassified, then simulate session failure
+        # 2. Error reporting: drop the stored feature and the AI tag, then fail to start the engine
+        with closing(HistoryStore.for_storage(paths)) as store:
+            with store._db:
+                store._db.execute("DELETE FROM ai_embeddings")
         repo.clear_ai_tags(1)
         with patch("luvbox.clip_classifier.is_available", return_value=True), \
              patch("luvbox.clip_classifier.get_session", return_value=None):
             with self.assertRaises(RuntimeError) as ctx:
                 repo.scan_ai_tags(1)
             self.assertIn("AI 분류 엔진", str(ctx.exception))
+
+    def test_ai_progress_advances_each_batch_and_labels_are_stored(self):
+        from unittest.mock import patch
+        from contextlib import closing
+        from luvbox.storage import resolve_storage
+        from luvbox.qt_library import LibraryRepository, _Request
+
+        paths = resolve_storage(self.temp_dir / "ProgressScan", "offline")
+        with closing(HistoryStore.for_storage(paths)) as store:
+            for index in range(20):
+                image = paths.output_dir / f"u_{200 + index}_1.jpg"
+                Image.new("RGB", (16, 16), color="blue").save(image)
+                store.record_media(
+                    "flat",
+                    {"tweet_id": str(200 + index), "num": 1, "type": "photo", "author": "u"},
+                    image,
+                )
+
+        def fake_detailed(image_paths, threshold=0.45, batch_size=16, session=None):
+            vector = np.zeros(512, dtype=np.float32)
+            vector[0] = 1
+            return [("일러스트", 0.8, vector) for _path in image_paths]
+
+        progress = []
+        repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
+        repo.configure(_Request(generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False))
+        with patch("luvbox.clip_classifier.is_available", return_value=True), \
+             patch("luvbox.clip_classifier.get_session", return_value=object()), \
+             patch("luvbox.clip_classifier.classify_detailed", side_effect=fake_detailed), \
+             patch("luvbox.clip_classifier.release_session"):
+            applied = repo.scan_ai_tags(1, progress_callback=lambda cur, tot: progress.append((cur, tot)))
+        self.assertIn((16, 20), progress)
+        self.assertEqual(progress[-1], (20, 20))
+        self.assertEqual(applied, 20)
+        with closing(HistoryStore.for_storage(paths)) as store:
+            _embeddings, _feedback, estimated = store.learning_state()
+            self.assertEqual(len(_embeddings), 20)
+            self.assertEqual(sum(1 for tag in estimated.values() if tag == "일러스트"), 20)
+
+    def test_cleared_ai_tags_are_restored_from_stored_embeddings(self):
+        from contextlib import closing
+        from luvbox.storage import resolve_storage
+        from luvbox.qt_library import LibraryRepository, _Request
+
+        paths = resolve_storage(self.temp_dir / "RelabelScan", "offline")
+        illustration = np.ascontiguousarray(get_category_embeddings()[0])
+        blank = np.zeros(512, dtype=np.float32)
+        taught = np.zeros(512, dtype=np.float32)
+        taught[1] = 1
+        with closing(HistoryStore.for_storage(paths)) as store:
+            specs = [
+                ("1", illustration.tobytes()),
+                ("2", illustration.tobytes()),
+                ("3", blank.tobytes()),
+                ("4", illustration.tobytes()),
+                ("5", taught.tobytes()),
+            ]
+            with store._db:
+                for tweet_id, _blob in specs:
+                    store._db.execute(
+                        "INSERT INTO media(folder_mode, tweet_id, num, media_type, filename, path, status, "
+                        "record_source, updated_at) VALUES ('flat', ?, 1, 'photo', ?, ?, 'saved', 'download', "
+                        "'2026-11-10 10:00:00')",
+                        (tweet_id, f"p{tweet_id}.jpg", f"C:/test/p{tweet_id}.jpg"),
+                    )
+            store.save_embeddings([("flat", tweet_id, 1, "photo", blob, 0.8) for tweet_id, blob in specs])
+            store.save_ai_tags([("flat", "2", 1, "photo", "풍경")])
+            self.assertEqual(store.clear_ai_tags(), 1)
+            # A tag the user removed on purpose stays removed. Clearing the
+            # library is what makes a stored embedding eligible again.
+            store.save_ai_tags([("flat", "4", 1, "photo", "")])
+            self.assertEqual(store.set_taught_categories([("flat", "5", 1, "photo")], "인물"), 1)
+
+        progress = []
+        repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
+        repo.configure(_Request(
+            generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False,
+        ))
+        with patch("luvbox.clip_classifier.get_session", side_effect=AssertionError("vision model")), \
+             patch("luvbox.clip_classifier.release_session"):
+            applied = repo.scan_ai_tags(1, progress_callback=lambda cur, tot: progress.append((cur, tot)))
+        self.assertEqual(applied, 2)
+        self.assertIn((0, 3), progress)
+        self.assertEqual(progress[-1], (3, 3))
+        self.assertLess(progress[0][0], progress[-1][0])
+        with closing(HistoryStore.for_storage(paths)) as store:
+            self.assertEqual(store.classification_of("flat", "1", 1, "photo")["category"], "일러스트")
+            self.assertEqual(store.classification_of("flat", "2", 1, "photo")["category"], "일러스트")
+            self.assertFalse(store.classification_of("flat", "2", 1, "photo")["confirmed"])
+            self.assertEqual(store.classification_of("flat", "3", 1, "photo")["category"], "")
+            self.assertEqual(store.item_tags("flat", "4", 1, "photo"), [])
+            self.assertEqual(store.classification_of("flat", "4", 1, "photo")["category"], "")
+            taught_label = store.classification_of("flat", "5", 1, "photo")
+            self.assertEqual(taught_label["category"], "인물")
+            self.assertTrue(taught_label["confirmed"])
+            self.assertEqual(len(store.embeddings_without_labels()), 0)
 
     def test_scan_ai_inference_error_does_not_mark_photos_classified(self):
         from unittest.mock import patch
@@ -291,7 +412,7 @@ class TestHistoryStoreAiTags(unittest.TestCase):
         repo.configure(req)
         with patch("luvbox.clip_classifier.is_available", return_value=True), \
              patch("luvbox.clip_classifier.get_session", return_value=object()), \
-             patch("luvbox.clip_classifier.classify_batch", side_effect=RuntimeError("inference failed")), \
+             patch("luvbox.clip_classifier.classify_detailed", side_effect=RuntimeError("inference failed")), \
              patch("luvbox.clip_classifier.release_session") as release:
             with self.assertRaises(RuntimeError) as ctx:
                 repo.scan_ai_tags(1)
@@ -308,6 +429,211 @@ class TestHistoryStoreAiTags(unittest.TestCase):
             ["배경화면"],
         )
         self.assertFalse(self.store.add_tag("flat", "111", 1, "photo", "\n\t"))
+
+
+class FeedbackLearningTests(unittest.TestCase):
+    def test_one_taught_example_relabels_only_a_near_copy(self):
+        from luvbox.clip_classifier import neighbor_decision, neighbor_threshold
+        from luvbox.qt_library import _propagate_neighbors
+
+        self.assertGreater(neighbor_threshold(1), neighbor_threshold(25))
+        person = np.zeros(512, dtype=np.float32)
+        person[0] = 1
+        other = np.zeros(512, dtype=np.float32)
+        other[1] = 1
+        groups = {"인물": np.stack([person])}
+        self.assertEqual(neighbor_decision(person, groups)[0], "인물")
+        self.assertIsNone(neighbor_decision(other, groups))
+
+        with tempfile.TemporaryDirectory() as td:
+            store = HistoryStore(Path(td))
+            blob = person.tobytes()
+            far = other.tobytes()
+            store.save_embeddings([
+                ("flat", "1", 1, "photo", blob, 0.9),
+                ("flat", "2", 1, "photo", blob, 0.4),
+                ("flat", "3", 1, "photo", far, 0.4),
+            ])
+            store.save_ai_tags([
+                ("flat", "2", 1, "photo", "풍경"),
+                ("flat", "3", 1, "photo", "풍경"),
+            ])
+            self.assertEqual(store.set_taught_categories([("flat", "1", 1, "photo")], "인물"), 1)
+            self.assertEqual(_propagate_neighbors(store), 1)
+            taught = store.classification_of("flat", "1", 1, "photo")
+            near = store.classification_of("flat", "2", 1, "photo")
+            far_photo = store.classification_of("flat", "3", 1, "photo")
+            self.assertTrue(taught["confirmed"])
+            self.assertEqual(taught["category"], "인물")
+            self.assertEqual(near["category"], "인물")
+            self.assertFalse(near["confirmed"])
+            self.assertEqual(far_photo["category"], "풍경")
+            self.assertEqual(store.user_tags(), [])
+            store.close()
+
+    def test_neighbor_batch_matches_single_decision(self):
+        from luvbox.clip_classifier import neighbor_decision, neighbor_decisions
+
+        person = np.zeros(512, dtype=np.float32)
+        person[0] = 1
+        other = np.zeros(512, dtype=np.float32)
+        other[1] = 1
+        groups = {"인물": np.stack([person]), "": np.stack([other])}
+        rows = np.stack([person, other, np.zeros(512, dtype=np.float32)])
+        batched = neighbor_decisions(rows, groups)
+        for row, decision in zip(rows, batched):
+            single = neighbor_decision(row, groups)
+            if decision is None:
+                self.assertIsNone(single)
+            else:
+                self.assertEqual(decision[0], single[0])
+                self.assertAlmostEqual(decision[1], single[1], places=5)
+        self.assertEqual(batched[0][0], "인물")
+        self.assertEqual(batched[1][0], "")
+        self.assertIsNone(batched[2])
+
+
+class ScanShortcutTests(unittest.TestCase):
+    def test_unreadable_file_is_not_opened_again_until_it_changes(self):
+        import os
+        from contextlib import closing
+        from unittest.mock import patch
+        from luvbox.qt_library import LibraryRepository, _Request
+        from luvbox.storage import resolve_storage
+
+        paths = resolve_storage(Path(tempfile.mkdtemp()) / "Unread", "offline")
+        with closing(HistoryStore.for_storage(paths)) as store:
+            bad = paths.output_dir / "u_401_1.jpg"
+            bad.write_bytes(b"this is not a photo")
+            store.record_media("flat", {"tweet_id": "401", "num": 1, "type": "photo", "author": "u"}, bad)
+        repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
+        repo.configure(_Request(
+            generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False,
+        ))
+        with patch("luvbox.clip_classifier.is_available", return_value=True), \
+             patch("luvbox.clip_classifier.get_session", return_value=object()) as session, \
+             patch("luvbox.clip_classifier.release_session"):
+            self.assertEqual(repo.scan_ai_tags(1), 0)
+            self.assertEqual(session.call_count, 1)
+            self.assertIn("읽을 수 없는 사진", repo._scan_note)
+            self.assertEqual(repo.scan_ai_tags(1), 0)
+            self.assertEqual(session.call_count, 1)
+            os.utime(bad, ns=(200_000_000_000, 200_000_000_000))
+            self.assertEqual(repo.scan_ai_tags(1), 0)
+            self.assertEqual(session.call_count, 2)
+
+    def test_locked_file_is_retried(self):
+        from contextlib import closing
+        from unittest.mock import patch
+        from luvbox.qt_library import LibraryRepository, _Request
+        from luvbox.storage import resolve_storage
+
+        paths = resolve_storage(Path(tempfile.mkdtemp()) / "Locked", "offline")
+        with closing(HistoryStore.for_storage(paths)) as store:
+            bad = paths.output_dir / "u_402_1.jpg"
+            bad.write_bytes(b"this is not a photo")
+            store.record_media("flat", {"tweet_id": "402", "num": 1, "type": "photo", "author": "u"}, bad)
+        repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
+        repo.configure(_Request(
+            generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False,
+        ))
+        with patch("luvbox.clip_classifier.is_available", return_value=True), \
+             patch("luvbox.clip_classifier.get_session", return_value=object()) as session, \
+             patch("luvbox.clip_classifier.release_session"), \
+             patch("luvbox.clip_classifier.encode_skip_signature", return_value=None):
+            repo.scan_ai_tags(1)
+            repo.scan_ai_tags(1)
+        self.assertEqual(session.call_count, 2)
+        with closing(HistoryStore.for_storage(paths)) as store:
+            self.assertEqual(store.unreadable_signatures(), {})
+
+    def test_teach_uses_the_selected_rows_and_reports_progress(self):
+        from contextlib import closing
+        from unittest.mock import patch
+        from luvbox.qt_library import LibraryRepository, _Request
+        from luvbox.storage import resolve_storage
+
+        paths = resolve_storage(Path(tempfile.mkdtemp()) / "Teach", "offline")
+        vector = np.zeros(512, dtype=np.float32)
+        vector[0] = 1
+        with closing(HistoryStore.for_storage(paths)) as store:
+            image = paths.output_dir / "u_403_1.jpg"
+            Image.new("RGB", (8, 8), color="red").save(image)
+            store.record_media("flat", {"tweet_id": "403", "num": 1, "type": "photo", "author": "u"}, image)
+            store.save_embeddings([("flat", "403", 1, "photo", vector.tobytes(), 0.9)])
+            for index in range(30):
+                store._db.execute(
+                    "INSERT INTO media(folder_mode, tweet_id, num, media_type, filename, path, status, "
+                    "record_source, updated_at) VALUES ('flat', ?, 1, 'photo', ?, ?, 'saved', 'download', ?)",
+                    (str(500 + index), f"extra{index}.jpg", f"C:/unused/{index}.jpg", "2026-11-10 10:00:00"),
+                )
+            store._db.commit()
+        repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
+        repo.configure(_Request(
+            generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False,
+        ))
+        progress = []
+        with patch.object(HistoryStore, "photo_records_for_scan", side_effect=AssertionError("full photo scan")):
+            taught, propagated = repo.teach_labels(
+                1, [("flat", "403", 1, "photo")], "인물",
+                progress_callback=lambda current, total: progress.append((current, total)),
+            )
+        self.assertEqual((taught, propagated), (1, 0))
+        self.assertEqual(progress[0], (0, 1))
+        self.assertEqual(progress[-1], (1, 1))
+        with closing(HistoryStore.for_storage(paths)) as store:
+            learned = store.classification_of("flat", "403", 1, "photo")
+            self.assertEqual(learned["category"], "인물")
+            self.assertTrue(learned["confirmed"])
+
+    def test_merge_and_rebuild_keep_embeddings_and_teaching(self):
+        import sqlite3
+        from contextlib import closing
+        from luvbox.recovery import rebuild_history
+        from luvbox.storage import _merge_history
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = HistoryStore(root / "src")
+            blob = bytes([index % 251 for index in range(2048)])
+            source.save_embeddings([("flat", "1", 1, "photo", blob, 0.5)])
+            source.set_taught_categories([("flat", "1", 1, "photo")], "동물")
+            self.assertEqual(source.remember_unreadable([("flat", "2", 1, "photo", 12, 99)]), 1)
+            with source._db:
+                source._db.execute(
+                    "UPDATE ai_embeddings SET updated_at=? WHERE tweet_id='1'",
+                    ("2026-11-10T12:00:00+09:00",),
+                )
+            source.close()
+            target = HistoryStore(root / "dst")
+            older = b"\x02" * 2048
+            target.save_embeddings([("flat", "1", 1, "photo", older, 0.1)])
+            with target._db:
+                target._db.execute(
+                    "UPDATE ai_embeddings SET updated_at=? WHERE tweet_id='1'",
+                    ("2020-01-01T00:00:00+09:00",),
+                )
+            target.close()
+            with closing(sqlite3.connect(root / "dst" / ".luvbox-history.sqlite3")) as dst, \
+                 closing(sqlite3.connect(root / "src" / ".luvbox-history.sqlite3")) as src:
+                with dst:
+                    _merge_history(dst, src)
+            with closing(HistoryStore(root / "dst")) as merged:
+                embeddings, feedback, _estimated = merged.learning_state()
+                self.assertEqual(embeddings[("flat", "1", 1, "photo")][0], blob)
+                self.assertEqual(feedback[("flat", "1", 1, "photo")], "동물")
+                self.assertEqual(merged.unreadable_signatures()[("flat", "2", 1, "photo")], (12, 99))
+            rebuilt_dir = root / "rebuilt"
+            rebuilt_dir.mkdir()
+            rebuild_history(root / "src" / ".luvbox-history.sqlite3", rebuilt_dir / ".luvbox-history.sqlite3")
+            with closing(HistoryStore(rebuilt_dir)) as rebuilt:
+                embeddings, feedback, _estimated = rebuilt.learning_state()
+                self.assertEqual(embeddings[("flat", "1", 1, "photo")][0], blob)
+                self.assertEqual(feedback[("flat", "1", 1, "photo")], "동물")
+                self.assertEqual(rebuilt.unreadable_signatures()[("flat", "2", 1, "photo")], (12, 99))
 
 
 if __name__ == "__main__":

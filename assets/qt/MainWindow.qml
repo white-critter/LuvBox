@@ -333,6 +333,16 @@ ApplicationWindow {
         noticeTimer.restart()
     }
 
+    function teachCategory(category, selection) {
+        if (!app)
+            return
+        const started = selection ? app.library.teachSelection(category) : app.library.teachSelected(category)
+        if (started) {
+            const name = category.length ? category : "어느 쪽도 아님"
+            flashNotice(name + " 분류를 저장하는 중입니다. 매우 닮은 사진도 함께 바뀝니다.")
+        }
+    }
+
     Timer {
         id: noticeTimer
         interval: 3500
@@ -967,20 +977,22 @@ ApplicationWindow {
                         ToolTip.visible: hovered
                         ToolTip.text: "저장된 사진들의 해시를 비교해 중복 사진을 찾습니다"
                         onClicked: {
-                            window.app.library.scanDuplicates()
-                            window.flashNotice("중복 이미지를 검사하는 중입니다…")
+                            if (window.app.library.scanDuplicates())
+                                window.flashNotice("중복 검사를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
                         }
                     }
                     FlatButton {
                         id: selectDuplicatesButton
                         objectName: "gallerySelectDuplicates"
                         visible: !!window.app && window.app.library.filterDuplicateOnly
-                        enabled: !!window.app && !window.app.library.busy && window.galleryModel.count > 0
+                        enabled: !!window.app && !window.app.library.copiesLocked && window.galleryModel.count > 0
+                        ToolTip.visible: hovered
+                        ToolTip.text: window.app && window.app.library.copiesLocked
+                            ? window.app.library.holdReason
+                            : "가장 화질이 좋거나 즐겨찾기한 원본 1장씩만 남기고 나머지 사본을 선택합니다"
                         implicitHeight: 40
                         width: implicitWidth
                         text: "사본 일괄 선택"
-                        ToolTip.visible: hovered
-                        ToolTip.text: "가장 화질이 좋거나 즐겨찾기한 원본 1장씩만 남기고 나머지 사본을 선택합니다"
                         onClicked: {
                             const count = window.app.library.selectDuplicateCopies()
                             if (count > 0)
@@ -1213,6 +1225,48 @@ ApplicationWindow {
                             currentIndex = Qt.binding(function() { return userTagFilter.userTagIndex() })
                         }
                     }
+                    FlatCombo {
+                        id: aiLabelFilter
+                        objectName: "galleryAiLabelFilter"
+                        visible: filterToggle.checked
+                        minimumPopupWidth: 220
+                        implicitHeight: 40
+                        implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                        width: Math.min(240, Math.max(150, implicitContentWidth + leftPadding + rightPadding))
+                        height: implicitHeight
+                        onVisibleChanged: Qt.callLater(filterHost.layout)
+                        onWidthChanged: Qt.callLater(filterHost.layout)
+                        Accessible.name: "AI 분류 선택"
+                        textRole: "label"
+                        valueRole: "value"
+                        model: {
+                            const items = [{ label: "AI 분류 전체", value: "|" }]
+                            const names = window.app ? window.app.library.aiCategories : []
+                            for (let i = 0; i < names.length; i++) {
+                                items.push({ label: names[i] + " · 추정", value: names[i] + "|ai" })
+                                items.push({ label: names[i] + " · 확정", value: names[i] + "|confirmed" })
+                            }
+                            return items
+                        }
+                        function aiIndex() {
+                            if (!window.app)
+                                return 0
+                            const wanted = window.app.library.filterAiCategory + "|" + window.app.library.filterAiOrigin
+                            for (let i = 0; i < model.length; i++) {
+                                if (model[i].value === wanted)
+                                    return i
+                            }
+                            return 0
+                        }
+                        currentIndex: aiIndex()
+                        displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].label : "AI 분류 전체"
+                        onActivated: index => {
+                            const value = index > 0 && model[index] ? String(model[index].value) : "|"
+                            const parts = value.split("|")
+                            window.app.library.setAiFilter(parts[0] || "", parts[1] || "")
+                            currentIndex = Qt.binding(function() { return aiLabelFilter.aiIndex() })
+                        }
+                    }
                     FlatButton {
                         id: aiClassifyButton
                         objectName: "galleryAiClassify"
@@ -1227,8 +1281,8 @@ ApplicationWindow {
                         onVisibleChanged: Qt.callLater(filterHost.layout)
                         onWidthChanged: Qt.callLater(filterHost.layout)
                         onClicked: {
-                            window.app.library.scanAiTags()
-                            window.flashNotice("AI 자동분류를 시작합니다…")
+                            if (window.app.library.scanAiTags())
+                                window.flashNotice("AI 자동분류를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
                         }
                     }
                     FlatButton {
@@ -1241,7 +1295,9 @@ ApplicationWindow {
                         text: "AI 태그 초기화"
                         enabled: !!window.app && !window.app.library.busy
                         ToolTip.visible: hovered
-                        ToolTip.text: "수동으로 추가한 내 태그는 유지하고, AI 자동분류로 생성된 태그만 초기화합니다"
+                        ToolTip.text: window.app && window.app.library.holdReason
+                            ? window.app.library.holdReason
+                            : "수동으로 추가한 내 태그는 유지하고, AI 자동분류로 생성된 태그만 초기화합니다"
                         onVisibleChanged: Qt.callLater(filterHost.layout)
                         onWidthChanged: Qt.callLater(filterHost.layout)
                         onClicked: aiClearConfirm.open()
@@ -1364,12 +1420,20 @@ ApplicationWindow {
                         color: window.noticeColor
                     }
                     ProgressBar {
+                        objectName: "galleryWorkProgress"
                         Layout.preferredWidth: 160
                         Layout.preferredHeight: 6
-                        visible: window.app && window.app.library.busy && (window.app.library.duplicateProgressTotal > 0 || window.app.library.aiProgressTotal > 0)
+                        readonly property bool aiWork: window.app && window.app.library.aiProgressTotal > 0
+                        readonly property bool duplicateWork: window.app && window.app.library.duplicateProgressTotal > 0
+                        readonly property bool preparingAi: window.app && window.app.library.aiScanning && !aiWork && !duplicateWork
+                        visible: window.app && window.app.library.busy && (aiWork || duplicateWork || preparingAi)
+                        indeterminate: preparingAi
                         from: 0
-                        to: (window.app && window.app.library.aiProgressTotal > 0) ? window.app.library.aiProgressTotal : (window.app && window.app.library.duplicateProgressTotal > 0 ? window.app.library.duplicateProgressTotal : 1)
-                        value: (window.app && window.app.library.aiProgressTotal > 0) ? window.app.library.aiProgressCurrent : (window.app ? window.app.library.duplicateProgressCurrent : 0)
+                        to: aiWork ? window.app.library.aiProgressTotal
+                            : (duplicateWork ? window.app.library.duplicateProgressTotal : 1)
+                        value: aiWork ? window.app.library.aiProgressCurrent
+                            : (window.app ? window.app.library.duplicateProgressCurrent : 0)
+                        Accessible.name: "작업 진행"
                     }
                 }
                 Label {
@@ -1402,9 +1466,22 @@ ApplicationWindow {
                         onClicked: window.app.library.selectLoaded()
                     }
                     FlatButton {
+                        objectName: "galleryTeachSelected"
+                        text: "분류 가르치기"
+                        enabled: window.app && !window.app.library.tagsLocked && !window.app.library.filesLocked
+                            && window.app.library.selectedCount > 0
+                        ToolTip.visible: hovered
+                        ToolTip.text: window.app && window.app.library.holdReason
+                            ? window.app.library.holdReason
+                            : "선택한 사진을 하나의 AI 분류로 가르칩니다. 매우 닮은 사진도 함께 바뀝니다."
+                        onClicked: teachPopup.open()
+                    }
+                    FlatButton {
                         objectName: "galleryAddTagSelected"
                         text: "태그 추가"
-                        enabled: window.app && !window.app.busy && window.app.library.selectedCount > 0
+                        enabled: window.app && !window.app.busy && !window.app.library.tagsLocked && window.app.library.selectedCount > 0
+                        ToolTip.visible: hovered && window.app && window.app.library.tagsLocked
+                        ToolTip.text: window.app ? window.app.library.holdReason : ""
                         onClicked: tagBatchPopup.open()
                     }
                     FlatButton {
@@ -1415,7 +1492,9 @@ ApplicationWindow {
                     FlatButton {
                         objectName: "galleryRecycleSelected"
                         text: "휴지통으로"
-                        enabled: window.app && !window.app.busy && window.app.library.selectedCount > 0
+                        enabled: window.app && !window.app.busy && !window.app.library.filesLocked && window.app.library.selectedCount > 0
+                        ToolTip.visible: hovered && window.app && window.app.library.filesLocked
+                        ToolTip.text: window.app ? window.app.library.holdReason : ""
                         onClicked: window.app.management.prepareDelete(window.app.library.selectedKeys)
                     }
                 }
@@ -1510,6 +1589,10 @@ ApplicationWindow {
                         window.stopWheel()
                         if (!window.app)
                             return
+                        if (window.app.library.filesLocked) {
+                            window.flashNotice(window.app.library.holdReason)
+                            return
+                        }
                         if (window.app.busy) {
                             window.flashNotice("작업이 끝난 뒤 휴지통으로 이동할 수 있습니다.")
                             return
@@ -1644,9 +1727,15 @@ ApplicationWindow {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onPressed: window.stopWheel()
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
                                 onClicked: mouse => {
                                     gallery.currentIndex = tile.index
                                     gallery.forceActiveFocus()
+                                    if (mouse.button === Qt.RightButton) {
+                                        teachMenu.targetKey = tile.key
+                                        teachMenu.popup()
+                                        return
+                                    }
                                     if (window.app && (window.app.library.selectionMode || (mouse.modifiers & Qt.ControlModifier)))
                                         window.app.library.toggleSelection(tile.key)
                                 }
@@ -1900,7 +1989,9 @@ ApplicationWindow {
                 FlatButton {
                     objectName: "previewRecycle"
                     text: "휴지통으로"
-                    enabled: window.app && !window.app.busy && !window.app.library.selectedMissing
+                    enabled: window.app && !window.app.busy && !window.app.library.filesLocked && !window.app.library.selectedMissing
+                    ToolTip.visible: hovered && window.app && window.app.library.filesLocked
+                    ToolTip.text: window.app ? window.app.library.holdReason : ""
                     onClicked: {
                         const key = window.app.library.selectedKey
                         selectedMedia.release()
@@ -2064,7 +2155,8 @@ ApplicationWindow {
                 Repeater {
                     model: window.app ? window.app.library.selectedTags : []
                     delegate: Rectangle {
-                        readonly property bool isAi: modelData.source === "ai"
+                        readonly property bool isConfirmed: modelData.source === "confirmed"
+                        readonly property bool isAi: modelData.source === "ai" || isConfirmed
                         color: userTagMouse.containsMouse ? (isAi ? "#1a3550" : "#35243a") : (isAi ? "#13253a" : "#281c2c")
                         radius: 6
                         border.width: 1
@@ -2078,23 +2170,28 @@ ApplicationWindow {
                             spacing: 4
 
                             Label {
-                                text: (isAi ? "AI · #" : "#") + (modelData.tag || "")
+                                text: (isConfirmed ? "확정 · #" : (modelData.source === "ai" ? "AI · #" : "#")) + (modelData.tag || "")
                                 font.pixelSize: 11
                                 color: isAi ? "#9cd7ff" : "#d99fe6"
                                 ToolTip.visible: userTagMouse.containsMouse
-                                ToolTip.text: isAi ? "AI 자동분류 태그 (클릭하여 필터링)" : "사용자 태그 (클릭하여 필터링)"
+                                ToolTip.text: isConfirmed ? "내가 가르친 분류 (클릭하여 필터링)"
+                                    : (modelData.source === "ai" ? "AI 자동분류 태그 (클릭하여 필터링)" : "사용자 태그 (클릭하여 필터링)")
                                 MouseArea {
                                     id: userTagMouse
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
                                     hoverEnabled: true
                                     onClicked: {
-                                        window.applyFilters({ userTag: modelData.tag })
+                                        if (modelData.source === "ai" || modelData.source === "confirmed")
+                                            window.app.library.setAiFilter(modelData.tag, modelData.source === "confirmed" ? "confirmed" : "ai")
+                                        else
+                                            window.applyFilters({ userTag: modelData.tag })
                                         previewDialog.close()
                                     }
                                 }
                             }
                             Label {
+                                visible: !isAi
                                 text: "×"
                                 font.pixelSize: 13
                                 font.bold: true
@@ -2108,6 +2205,7 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
                                     hoverEnabled: true
+                                    enabled: !window.app || !window.app.library.tagsLocked
                                     onClicked: {
                                         window.app.library.removeSelectedTag(modelData.tag)
                                     }
@@ -2135,20 +2233,66 @@ ApplicationWindow {
                             event.accepted = true
                         }
                         onAccepted: {
-                            if (cleanTag.length > 0) {
-                                window.app.library.addSelectedTag(cleanTag)
+                            if (cleanTag.length > 0 && window.app.library.addSelectedTag(cleanTag))
                                 text = ""
-                            }
                         }
                     }
                     FlatButton {
                         text: "+ 태그"
                         implicitHeight: 22
                         font.pixelSize: 11
-                        enabled: inlineTagField.cleanTag.length > 0
+                        enabled: inlineTagField.cleanTag.length > 0 && (!window.app || !window.app.library.tagsLocked)
+                        ToolTip.visible: hovered && window.app && window.app.library.tagsLocked
+                        ToolTip.text: window.app ? window.app.library.holdReason : ""
                         onClicked: {
-                            window.app.library.addSelectedTag(inlineTagField.cleanTag)
-                            inlineTagField.text = ""
+                            if (window.app && window.app.library.addSelectedTag(inlineTagField.cleanTag))
+                                inlineTagField.text = ""
+                        }
+                    }
+                    Label {
+                        visible: {
+                            if (!window.app || window.app.library.selectedMediaType !== "photo")
+                                return false
+                            return window.app.library.selectedAiConfirmed || window.app.library.selectedAiCategory.length > 0
+                        }
+                        text: {
+                            if (!window.app)
+                                return ""
+                            const library = window.app.library
+                            if (library.selectedAiConfirmed && library.selectedAiCategory.length)
+                                return library.selectedAiCategory + " · 확정"
+                            if (library.selectedAiConfirmed)
+                                return "분류 없음 · 확정"
+                            return "AI " + library.selectedAiCategory
+                                + (library.selectedAiConfidence.length ? " " + library.selectedAiConfidence : "")
+                        }
+                        color: window.mutedColor
+                        font.pixelSize: 11
+                    }
+                    FlatButton {
+                        text: "맞아요"
+                        implicitHeight: 22
+                        font.pixelSize: 11
+                        visible: !!window.app && window.app.library.selectedAiCategory.length > 0 && !window.app.library.selectedAiConfirmed
+                        enabled: !!window.app && !window.app.library.tagsLocked
+                        onClicked: {
+                            if (window.app)
+                                window.teachCategory(window.app.library.selectedAiCategory, false)
+                        }
+                    }
+                    FlatButton {
+                        text: "분류 고치기"
+                        implicitHeight: 22
+                        font.pixelSize: 11
+                        visible: !!window.app && window.app.library.selectedMediaType === "photo"
+                        enabled: !!window.app && !window.app.library.tagsLocked
+                        ToolTip.visible: hovered
+                        ToolTip.text: "다섯 분류 중 하나로 가르치거나, 어느 쪽도 아니라고 지정합니다"
+                        onClicked: {
+                            if (!window.app)
+                                return
+                            teachMenu.targetKey = window.app.library.selectedKey
+                            teachMenu.popup()
                         }
                     }
                 }
@@ -2603,6 +2747,83 @@ ApplicationWindow {
     }
 
     Popup {
+        id: teachPopup
+        objectName: "teachPopup"
+        parent: Overlay.overlay
+        modal: true
+        focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        anchors.centerIn: parent
+        width: 320
+        height: 380
+        padding: 16
+        background: Rectangle { color: "#141414"; radius: 12; border.width: 1; border.color: "#2a2a2a" }
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+            Label {
+                text: "선택한 사진을 이 분류로 가르칩니다."
+                color: "#f4f1f1"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+            }
+            Repeater {
+                model: window.app ? window.app.library.aiCategories : []
+                delegate: FlatButton {
+                    required property string modelData
+                    Layout.fillWidth: true
+                    text: modelData
+                    enabled: window.app && !window.app.library.tagsLocked
+                    onClicked: {
+                        window.teachCategory(modelData, true)
+                        teachPopup.close()
+                    }
+                }
+            }
+            FlatButton {
+                Layout.fillWidth: true
+                text: "어느 쪽도 아님"
+                enabled: window.app && !window.app.library.tagsLocked
+                onClicked: {
+                    window.teachCategory("", true)
+                    teachPopup.close()
+                }
+            }
+        }
+    }
+
+    Menu {
+        id: teachMenu
+        property string targetKey: ""
+        Instantiator {
+            model: window.app ? window.app.library.aiCategories : []
+            MenuItem {
+                required property string modelData
+                text: modelData
+                onTriggered: {
+                    if (window.app && window.app.library.selectionMode && window.app.library.selectedCount > 1
+                            && window.app.library.isSelected(teachMenu.targetKey))
+                        window.teachCategory(modelData, true)
+                    else if (window.app)
+                        window.app.library.teachOne(teachMenu.targetKey, modelData)
+                }
+            }
+            onObjectAdded: (index, object) => teachMenu.insertItem(index, object)
+            onObjectRemoved: (index, object) => teachMenu.removeItem(object)
+        }
+        MenuItem {
+            text: "어느 쪽도 아님"
+            onTriggered: {
+                if (window.app && window.app.library.selectionMode && window.app.library.selectedCount > 1
+                        && window.app.library.isSelected(teachMenu.targetKey))
+                    window.teachCategory("", true)
+                else if (window.app)
+                    window.app.library.teachOne(teachMenu.targetKey, "")
+            }
+        }
+    }
+
+    Popup {
         id: tagBatchPopup
         objectName: "tagBatchPopup"
         parent: Overlay.overlay
@@ -2638,8 +2859,7 @@ ApplicationWindow {
                 maximumLength: 50
                 placeholderText: "태그 이름 입력"
                 onAccepted: {
-                    if (cleanTag.length > 0) {
-                        window.app.library.addTagToSelection(cleanTag)
+                    if (cleanTag.length > 0 && window.app.library.addTagToSelection(cleanTag) > 0) {
                         text = ""
                         tagBatchPopup.close()
                     }
@@ -2655,11 +2875,12 @@ ApplicationWindow {
                 FlatButton {
                     text: "추가"
                     tone: "primary"
-                    enabled: batchTagInput.cleanTag.length > 0
+                    enabled: batchTagInput.cleanTag.length > 0 && (!window.app || !window.app.library.tagsLocked)
                     onClicked: {
-                        window.app.library.addTagToSelection(batchTagInput.cleanTag)
-                        batchTagInput.text = ""
-                        tagBatchPopup.close()
+                        if (window.app.library.addTagToSelection(batchTagInput.cleanTag) > 0) {
+                            batchTagInput.text = ""
+                            tagBatchPopup.close()
+                        }
                     }
                 }
             }

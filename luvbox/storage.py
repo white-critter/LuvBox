@@ -870,6 +870,44 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                     (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
                      row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
                      row.get("updated_at") or ""))
+    if "ai_embeddings" in source_tables:
+        _prepare_table(target, source, "ai_embeddings")
+        for row in _rows(source, "ai_embeddings"):
+            blob = row.get("embedding")
+            if isinstance(blob, memoryview):
+                blob = blob.tobytes()
+            if not isinstance(blob, (bytes, bytearray)) or len(blob) != 2048:
+                continue
+            target.execute(
+                "INSERT INTO ai_embeddings(folder_mode,tweet_id,num,media_type,embedding,confidence,updated_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                "embedding=excluded.embedding,confidence=excluded.confidence,updated_at=excluded.updated_at "
+                "WHERE excluded.updated_at>ai_embeddings.updated_at",
+                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], bytes(blob),
+                 row.get("confidence"), row.get("updated_at") or ""),
+            )
+    if "ai_feedback" in source_tables:
+        _prepare_table(target, source, "ai_feedback")
+        for row in _rows(source, "ai_feedback"):
+            target.execute(
+                "INSERT INTO ai_feedback(folder_mode,tweet_id,num,media_type,category,updated_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                "category=excluded.category,updated_at=excluded.updated_at "
+                "WHERE excluded.updated_at>ai_feedback.updated_at",
+                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
+                 row.get("category") or "", row.get("updated_at") or ""),
+            )
+    if "ai_unreadable" in source_tables:
+        _prepare_table(target, source, "ai_unreadable")
+        for row in _rows(source, "ai_unreadable"):
+            target.execute(
+                "INSERT INTO ai_unreadable(folder_mode,tweet_id,num,media_type,filesize,mtime_ns,updated_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                "filesize=excluded.filesize,mtime_ns=excluded.mtime_ns,updated_at=excluded.updated_at "
+                "WHERE excluded.updated_at>ai_unreadable.updated_at",
+                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
+                 row.get("filesize") or 0, row.get("mtime_ns") or 0, row.get("updated_at") or ""),
+            )
     if "missing_choices" in source_tables:
         # Keep or download again: the later choice wins across PCs.
         _prepare_table(target, source, "missing_choices")
