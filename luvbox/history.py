@@ -319,16 +319,29 @@ def _exact_duplicate_exists(alias: str) -> str:
     )
 
 
-def _duplicate_predicate(alias: str, *, has_cluster: bool) -> str:
-    """True when a hash row is in a saved cluster, otherwise an exact twin.
+def _cluster_duplicate_exists(alias: str) -> str:
+    """Correlated check that another active photo shares the same saved cluster_id."""
+    return (
+        f"{alias}.cluster_id > 0 AND EXISTS (SELECT 1 FROM image_hashes h2 "
+        "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
+        "AND m2.num=h2.num AND m2.media_type=h2.media_type "
+        f"WHERE h2.cluster_id={alias}.cluster_id AND m2.path!='' "
+        f"AND NOT (h2.folder_mode={alias}.folder_mode AND h2.tweet_id={alias}.tweet_id "
+        f"AND h2.num={alias}.num AND h2.media_type={alias}.media_type))"
+    )
 
-    SQLite evaluates CASE branches in order, so a stored cluster id does not
-    also run the exact-hash lookup.
+
+def _duplicate_predicate(alias: str, *, has_cluster: bool) -> str:
+    """True when a hash row shares a saved cluster or an exact twin with another active photo.
+
+    SQLite evaluates CASE branches in order, so a stored cluster id uses the
+    cluster index and does not run the unclustered exact-hash lookup.
     """
     exact = _exact_duplicate_exists(alias)
     if not has_cluster:
         return exact
-    return f"(CASE WHEN {alias}.cluster_id > 0 THEN 1 WHEN {exact} THEN 1 ELSE 0 END)=1"
+    cluster = _cluster_duplicate_exists(alias)
+    return f"(CASE WHEN {cluster} THEN 1 WHEN {alias}.cluster_id = 0 AND {exact} THEN 1 ELSE 0 END)=1"
 
 
 def _author_fields(value) -> tuple[str, str]:
@@ -1779,6 +1792,10 @@ class HistoryStore:
                     self._db.execute(
                         "DELETE FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
                         (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
+                if self._has_table("ai_unreadable"):
+                    self._db.execute(
+                        "DELETE FROM ai_unreadable WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                        (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
         for identity in identities:
             self._db.execute(
                 "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,?,?) "
@@ -2547,17 +2564,6 @@ class HistoryStore:
                 confidence = row["confidence"]
         return {"category": category, "confirmed": confirmed, "confidence": confidence}
 
-    def _replace_estimated_label(self, folder_mode, tweet_id, num, media_type, tag: str) -> None:
-        self._db.execute(
-            "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND source='ai'",
-            (folder_mode, tweet_id, num, media_type),
-        )
-        self._db.execute(
-            "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
-            (folder_mode, tweet_id, num, media_type, tag, "ai", _now()),
-        )
-
     @_safe
     def set_taught_categories(self, identities: list[tuple], category: str) -> int:
         """Remember one category for each photo and show it as a confirmed label.
@@ -2570,32 +2576,34 @@ class HistoryStore:
         if not identities or not self._has_table("ai_feedback"):
             return 0
         now = _now()
+        ident_rows = [(folder_mode, tweet_id, num, media_type) for folder_mode, tweet_id, num, media_type in identities]
+        feedback_rows = [(f, t, n, m, category, now) for f, t, n, m in ident_rows]
+        tag_rows = [(f, t, n, m, category or "", "confirmed", now) for f, t, n, m in ident_rows]
         with self._db:
-            for folder_mode, tweet_id, num, media_type in identities:
-                self._db.execute(
-                    "INSERT INTO ai_feedback(folder_mode, tweet_id, num, media_type, category, updated_at) "
-                    "VALUES (?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
-                    "category=excluded.category, updated_at=excluded.updated_at",
-                    (folder_mode, tweet_id, num, media_type, category, now),
+            self._db.executemany(
+                "INSERT INTO ai_feedback(folder_mode, tweet_id, num, media_type, category, updated_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
+                "category=excluded.category, updated_at=excluded.updated_at",
+                feedback_rows,
+            )
+            self._db.executemany(
+                "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                "AND source IN ('ai','confirmed')",
+                ident_rows,
+            )
+            if category:
+                self._db.executemany(
+                    "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
+                    "source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
+                    tag_rows,
                 )
-                self._db.execute(
-                    "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-                    "AND source IN ('ai','confirmed')",
-                    (folder_mode, tweet_id, num, media_type),
+            else:
+                self._db.executemany(
+                    "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                    tag_rows,
                 )
-                if category:
-                    self._db.execute(
-                        "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
-                        "source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
-                        (folder_mode, tweet_id, num, media_type, category, "confirmed", now),
-                    )
-                else:
-                    self._db.execute(
-                        "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
-                        (folder_mode, tweet_id, num, media_type, "", "confirmed", now),
-                    )
         return len(identities)
 
     @_safe
@@ -2610,15 +2618,30 @@ class HistoryStore:
                 for row in self._read_rows("SELECT folder_mode, tweet_id, num, media_type FROM ai_feedback")
             }
         changed = 0
+        final_by_ident: dict[tuple, str] = {}
+        for folder_mode, tweet_id, num, media_type, tag in labels:
+            ident = (folder_mode, tweet_id, num, media_type)
+            if ident in feedback:
+                continue
+            if tag not in _AI_CATEGORIES and tag != "":
+                continue
+            final_by_ident[ident] = tag
+            changed += 1
+        if not final_by_ident:
+            return 0
+        now = _now()
+        delete_rows = list(final_by_ident.keys())
+        insert_rows = [(*ident, tag, "ai", now) for ident, tag in final_by_ident.items()]
         with self._db:
-            for folder_mode, tweet_id, num, media_type, tag in labels:
-                ident = (folder_mode, tweet_id, num, media_type)
-                if ident in feedback:
-                    continue
-                if tag not in _AI_CATEGORIES and tag != "":
-                    continue
-                self._replace_estimated_label(folder_mode, tweet_id, num, media_type, tag)
-                changed += 1
+            self._db.executemany(
+                "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND source='ai'",
+                delete_rows,
+            )
+            self._db.executemany(
+                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                insert_rows,
+            )
         return changed
 
     @_safe
@@ -2635,11 +2658,15 @@ class HistoryStore:
 
     @_safe
     def ai_tag_stats(self) -> dict[str, int]:
-        """Return count of items per tag where source='ai'."""
+        """Return count of active items per AI/confirmed tag."""
         if not self._has_table("media_tags"):
             return {}
         rows = self._read_rows(
-            "SELECT tag, COUNT(*) AS count FROM media_tags WHERE source = 'ai' AND tag != '' GROUP BY tag ORDER BY count DESC, tag ASC"
+            "SELECT media_tags.tag AS tag, COUNT(*) AS count FROM media_tags "
+            "JOIN media ON media.folder_mode=media_tags.folder_mode AND media.tweet_id=media_tags.tweet_id "
+            "AND media.num=media_tags.num AND media.media_type=media_tags.media_type "
+            "WHERE media_tags.source IN ('ai', 'confirmed') AND media_tags.tag != '' AND media.path != '' "
+            "GROUP BY media_tags.tag ORDER BY count DESC, media_tags.tag ASC"
         )
         return {r["tag"]: r["count"] for r in rows}
 

@@ -360,6 +360,16 @@ class LibraryRepository:
         except Exception:
             return []
 
+    def duplicate_counts(self, generation=None):
+        request = self.current(generation)
+        if request is None:
+            return 0
+        try:
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                return store.duplicate_counts() if hasattr(store, "duplicate_counts") else 0
+        except Exception:
+            return 0
+
     def overview(self, generation=None):
         request = self.current(generation)
         if request is None:
@@ -368,6 +378,8 @@ class LibraryRepository:
             with closing(_ReadOnlyHistory(request.location())) as store:
                 ov = store.overview(verify_files=False, top=10, include_missing=False)
                 st = ov.get("stats", {})
+                ai_stats = store.ai_tag_stats() if hasattr(store, "ai_tag_stats") else {}
+                user_tag_list = store.user_tags(limit=15) if hasattr(store, "user_tags") else []
                 return {
                     "files": ov.get("files", 0),
                     "posts": ov.get("posts", 0),
@@ -378,6 +390,8 @@ class LibraryRepository:
                     "animated_gif": ov.get("animated_gif", 0),
                     "authors": st.get("authors", []),
                     "monthly": [{"month": m[0], "count": m[1]} for m in st.get("months", {}).get("posted", [])],
+                    "ai_categories": [{"category": k, "count": v} for k, v in ai_stats.items()],
+                    "user_tags": user_tag_list,
                 }
         except Exception:
             return {}
@@ -573,7 +587,7 @@ class LibraryRepository:
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
-        from .duplicates import compute_dhash, compute_file_hash, cluster_duplicates
+        from .duplicates import compute_image_hashes, cluster_duplicates
         try:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 store._folder_cache = {}
@@ -584,6 +598,7 @@ class LibraryRepository:
                 total_records = len(records)
                 new_hashes = []
                 stale_hashes = []
+                active_hashes = {}
                 if progress_callback:
                     progress_callback(0, total_records)
                 for idx, rec in enumerate(records):
@@ -602,10 +617,11 @@ class LibraryRepository:
                     except OSError:
                         continue
                     if ident in cached and cached[ident][0] == sz and (cached[ident][1] or cached[ident][2]):
+                        active_hashes[ident] = cached[ident]
                         continue
-                    fhash = compute_file_hash(path)
-                    dh = compute_dhash(path)
+                    fhash, dh = compute_image_hashes(path)
                     if fhash or dh:
+                        active_hashes[ident] = (sz, fhash, dh)
                         new_hashes.append((*ident, sz, fhash, dh))
                         if len(new_hashes) >= 100:
                             store.save_image_hashes(new_hashes)
@@ -614,13 +630,12 @@ class LibraryRepository:
                     store.delete_image_hashes(stale_hashes)
                 if new_hashes:
                     store.save_image_hashes(new_hashes)
-                hashes = store.get_image_hashes()
                 favs = store.favorite_identities()
                 items = [
                     {"key": f"g{generation}_{k[0]}_{k[1]}_{k[2]}_{k[3]}",
                      "ident": k, "filesize": v[0], "file_hash": v[1], "dhash": v[2],
                      "favorite": k in favs}
-                    for k, v in hashes.items()
+                    for k, v in active_hashes.items()
                 ]
                 clusters = cluster_duplicates(items, max_distance=4)
                 cluster_idents = [[x["ident"] for x in group] for group in clusters]
@@ -756,6 +771,7 @@ class LibraryRepository:
                     batch_size = 16
                     encode_total = len(valid_items)
                     newly_unreadable = 0
+                    taught_encoded = False
 
                     for idx, (rec, path) in enumerate(valid_items):
                         if self._catalog_request(generation, epoch) is None:
@@ -782,6 +798,8 @@ class LibraryRepository:
                                 if vector is not None:
                                     embed_rows.append((*ident, vector.tobytes(), confidence))
                                     forget.append(ident)
+                                    if ident in feedback:
+                                        taught_encoded = True
                                 else:
                                     signature = encode_skip_signature(path_item)
                                     if signature is not None:
@@ -808,10 +826,13 @@ class LibraryRepository:
                             if progress_callback:
                                 progress_callback(processed, grand)
                     remember_note(skipped_unreadable + newly_unreadable)
+                else:
+                    taught_encoded = False
 
-                if status_callback and feedback:
-                    status_callback("비슷한 사진에 분류를 맞추는 중…")
-                saved_count += _propagate_neighbors(store)
+                if taught_encoded:
+                    if status_callback and feedback:
+                        status_callback("비슷한 사진에 분류를 맞추는 중…")
+                    saved_count += _propagate_neighbors(store)
                 return saved_count
         except RuntimeError:
             raise
@@ -1436,6 +1457,8 @@ class LibraryController(QObject):
                     self._interactive.append(("hashtags", self._generation, self._selection_serial, ""))
                 if reload_authors or not self._user_tags_loaded:
                     self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
+                if reload_authors:
+                    self._interactive.append(("duplicate_counts", self._generation, self._selection_serial, ""))
                 self._condition.notify_all()
         self.provider.clear_registry()
         self.model.search(str(self._generation))
@@ -2006,6 +2029,9 @@ class LibraryController(QObject):
             elif action == "user_tags":
                 reader = getattr(self._repository, "user_tags", None)
                 selection = reader(generation) if callable(reader) else []
+            elif action == "duplicate_counts":
+                reader = getattr(self._repository, "duplicate_counts", None)
+                selection = reader(generation) if callable(reader) else 0
             elif action == "statistics":
                 reader = getattr(self._repository, "overview", None)
                 selection = reader(generation) if callable(reader) else {}
@@ -2116,6 +2142,8 @@ class LibraryController(QObject):
         except Exception:
             if action in {"authors", "hashtags", "user_tags"}:
                 selection = []
+            elif action == "duplicate_counts":
+                selection = 0
             elif action == "statistics":
                 selection = {}
             else:
@@ -2208,6 +2236,13 @@ class LibraryController(QObject):
             self.userTagsChanged.emit()
             self.changed.emit()
             return
+        if action == "duplicate_counts":
+            count = int(selection) if isinstance(selection, int) else 0
+            if count != self._duplicate_count:
+                self._duplicate_count = count
+                self.duplicateCountChanged.emit()
+                self.changed.emit()
+            return
         if action == "statistics":
             self.statisticsLoaded.emit(selection if isinstance(selection, dict) else {})
             return
@@ -2250,6 +2285,8 @@ class LibraryController(QObject):
                     t for t in self._selected.get("tags", [])
                     if not (isinstance(t, dict) and t.get("source") == "ai")
                 ]
+            if self._ai_category and self._ai_origin == "ai":
+                self._ai_category = self._ai_origin = ""
             if isinstance(selection, tuple) and len(selection) == 2:
                 _count, remaining = selection
                 self._user_tags = list(remaining) if isinstance(remaining, (list, tuple)) else []

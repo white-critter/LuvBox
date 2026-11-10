@@ -203,6 +203,43 @@ class DuplicateTests(unittest.TestCase):
         group = [("flat", "501", 1, "photo"), ("flat", "502", 1, "photo")]
         saved = self.store.save_clusters([group])
         self.assertEqual(saved, 2)
+        # Because 502 has path='', the single remaining active member 501 in cluster 1 is not a duplicate
+        self.assertEqual(self.store.duplicate_counts(), 0)
+        self.assertEqual(self.store.record_page(0, 10, "all", "", duplicate_only=True)["total"], 0)
+
+    def test_compute_image_hashes_and_pigeonhole_bucketing(self):
+        import random
+        from luvbox.duplicates import compute_image_hashes
+
+        img_path = self.create_image("single_pass.jpg", "red", draw_rect=True)
+        fhash, dhash = compute_image_hashes(img_path)
+        self.assertEqual(fhash, compute_file_hash(img_path))
+        self.assertEqual(dhash, compute_dhash(img_path))
+
+        bad_path = self.root / "not_an_image.jpg"
+        bad_path.write_bytes(b"not a valid raster image")
+        bad_fhash, bad_dhash = compute_image_hashes(bad_path)
+        self.assertEqual(bad_fhash, compute_file_hash(bad_path))
+        self.assertEqual(bad_dhash, "")
+
+        rng = random.Random(12345)
+        base_hashes = [rng.getrandbits(64) for _ in range(120)]
+        items = [
+            {"key": f"k{i}", "file_hash": f"fh{i}", "dhash": f"{h:016x}", "filesize": 1000 + i}
+            for i, h in enumerate(base_hashes)
+        ]
+        # Add 10 near-duplicates within Hamming distance 3
+        for i in range(10):
+            near = base_hashes[i] ^ 0b10101  # 3 bits flipped
+            items.append({"key": f"near{i}", "file_hash": f"fhn{i}", "dhash": f"{near:016x}", "filesize": 500})
+
+        clusters_d4 = cluster_duplicates(items, max_distance=4)
+        clusters_d8 = cluster_duplicates(items, max_distance=8)  # fallback path
+        self.assertEqual(len(clusters_d4), 10)
+        self.assertGreaterEqual(len(clusters_d8), 10)
+        for grp in clusters_d4:
+            keys = {x["key"] for x in grp}
+            self.assertEqual(len(keys), 2)
 
 
 if __name__ == "__main__":

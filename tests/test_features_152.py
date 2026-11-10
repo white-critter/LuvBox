@@ -216,6 +216,32 @@ class Features152Tests(unittest.TestCase):
         self.assertEqual(dummy._user_tag, "")
         self.assertEqual(dummy.userTagFilterChanged.count, 1)
 
+    def test_overview_includes_ai_categories_and_user_tags_and_repo_duplicate_counts(self):
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            p1 = self.paths.output_dir / "u1_701_1.jpg"
+            p2 = self.paths.output_dir / "u1_702_1.jpg"
+            im = Image.new("RGB", (48, 48), color="navy")
+            im.save(p1)
+            im.save(p2)
+            store.record_media("flat", {"tweet_id": "701", "num": 1, "type": "photo", "author": "u1"}, p1)
+            store.record_media("flat", {"tweet_id": "702", "num": 1, "type": "photo", "author": "u1"}, p2)
+            store.add_tag("flat", "701", 1, "photo", "배경화면", source="user")
+            store.save_ai_tags([("flat", "701", 1, "photo", "일러스트")])
+            store.set_taught_categories([("flat", "702", 1, "photo")], "인물")
+
+        repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
+        repo.provider = self
+        req = _Request(generation=1, account="offline", output_dir=str(self.paths.output_dir), separate_accounts=False)
+        repo.configure(req)
+
+        self.assertEqual(repo.scan_duplicates(1), 2)
+        self.assertEqual(repo.duplicate_counts(1), 2)
+
+        stats = repo.overview(1)
+        self.assertEqual({c["category"]: c["count"] for c in stats["ai_categories"]}, {"일러스트": 1, "인물": 1})
+        self.assertEqual(stats["user_tags"], [{"tag": "배경화면", "count": 1}])
+
 
 if __name__ == "__main__":
     unittest.main()

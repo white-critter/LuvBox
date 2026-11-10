@@ -39,7 +39,7 @@ ApplicationWindow {
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
         folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
         runHistoryDialog.visible || unsavedDialog.visible || datePickerPopup.visible || statisticsDialog.visible ||
-        tagBatchPopup.visible
+        tagBatchPopup.visible || aiClearConfirm.visible || teachPopup.visible
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
     color: "#101010"
     palette.window: color
@@ -1243,6 +1243,7 @@ ApplicationWindow {
                             const items = [{ label: "AI 분류 전체", value: "|" }]
                             const names = window.app ? window.app.library.aiCategories : []
                             for (let i = 0; i < names.length; i++) {
+                                items.push({ label: names[i] + " · 전체", value: names[i] + "|" })
                                 items.push({ label: names[i] + " · 추정", value: names[i] + "|ai" })
                                 items.push({ label: names[i] + " · 확정", value: names[i] + "|confirmed" })
                             }
@@ -2743,6 +2744,17 @@ ApplicationWindow {
             window.currentScreen = 1
             window.applyFilters({ author: author })
             window.flashNotice("@" + author + " 작성자 모아보기를 적용했습니다.")
+        }
+        onAiCategorySelected: category => {
+            window.currentScreen = 1
+            if (window.app)
+                window.app.library.setAiFilter(category, "")
+            window.flashNotice("AI 분류 " + category + " 모아보기를 적용했습니다.")
+        }
+        onUserTagSelected: tag => {
+            window.currentScreen = 1
+            window.applyFilters({ userTag: tag })
+            window.flashNotice("#" + tag + " 내 태그 모아보기를 적용했습니다.")
         }
     }
 

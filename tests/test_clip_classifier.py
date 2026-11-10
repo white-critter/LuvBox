@@ -635,6 +635,37 @@ class ScanShortcutTests(unittest.TestCase):
                 self.assertEqual(feedback[("flat", "1", 1, "photo")], "동물")
                 self.assertEqual(rebuilt.unreadable_signatures()[("flat", "2", 1, "photo")], (12, 99))
 
+    def test_ai_tag_stats_and_replace_estimated_labels_batch(self):
+        from contextlib import closing
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            with closing(HistoryStore(root)) as store:
+                with store._db:
+                    store._db.execute(
+                        "INSERT INTO media(folder_mode, tweet_id, num, media_type, filename, path, status, record_source, updated_at) "
+                        "VALUES ('flat', '901', 1, 'photo', 'p1.jpg', 'C:/test/p1.jpg', 'saved', 'download', '2026-11-10')"
+                    )
+                    store._db.execute(
+                        "INSERT INTO media(folder_mode, tweet_id, num, media_type, filename, path, status, record_source, updated_at) "
+                        "VALUES ('flat', '902', 1, 'photo', 'p2.jpg', 'C:/test/p2.jpg', 'saved', 'download', '2026-11-10')"
+                    )
+                # Duplicate identity in one batch: last label wins
+                changed = store.replace_estimated_labels([
+                    ("flat", "901", 1, "photo", "일러스트"),
+                    ("flat", "901", 1, "photo", "동물"),
+                ])
+                self.assertEqual(changed, 2)
+                self.assertEqual(store.classification_of("flat", "901", 1, "photo")["category"], "동물")
+
+                # Taught category is included in ai_tag_stats
+                store.set_taught_categories([("flat", "902", 1, "photo")], "인물")
+                self.assertEqual(store.ai_tag_stats(), {"동물": 1, "인물": 1})
+
+                # Deleted media (path='') is excluded from ai_tag_stats
+                with store._db:
+                    store._db.execute("UPDATE media SET path='' WHERE tweet_id='901'")
+                self.assertEqual(store.ai_tag_stats(), {"인물": 1})
+
 
 if __name__ == "__main__":
     unittest.main()

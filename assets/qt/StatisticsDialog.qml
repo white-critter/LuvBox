@@ -8,6 +8,8 @@ Dialog {
     property var app: null
     property var stats: ({})
     signal authorSelected(string author)
+    signal aiCategorySelected(string category)
+    signal userTagSelected(string tag)
     title: "라이브러리 통계 요약"
     modal: true
     focus: true
@@ -406,6 +408,99 @@ Dialog {
                             text: dialog.stats && dialog.stats.files !== undefined ? "월별 기록이 없습니다." : "통계를 불러오는 중…"
                             color: "#777777"
                             font.pixelSize: 13
+                        }
+                    }
+                }
+            }
+        }
+
+        // AI classification & user tag breakdown (shown when classified photos or user tags exist)
+        Rectangle {
+            objectName: "statsAiCategoriesCard"
+            Layout.fillWidth: true
+            visible: !!(dialog.stats && dialog.stats.ai_categories && dialog.stats.ai_categories.length > 0)
+            implicitHeight: aiCategoriesColumn.implicitHeight + 24
+            color: "#181818"
+            radius: 10
+            border.width: 1
+            border.color: "#262626"
+
+            ColumnLayout {
+                id: aiCategoriesColumn
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 12
+                spacing: 8
+
+                Label {
+                    text: "AI 분류 현황"
+                    font.pixelSize: 14
+                    font.bold: true
+                    color: "#f4f1f1"
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Repeater {
+                        model: dialog.stats && dialog.stats.ai_categories ? dialog.stats.ai_categories : []
+                        delegate: FlatButton {
+                            implicitHeight: 30
+                            font.pixelSize: 12
+                            text: (modelData.category || "") + " (" + Number(modelData.count || 0).toLocaleString() + ")"
+                            onClicked: {
+                                if (modelData && modelData.category) {
+                                    dialog.aiCategorySelected(modelData.category)
+                                    dialog.close()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            objectName: "statsUserTagsCard"
+            Layout.fillWidth: true
+            visible: !!(dialog.stats && dialog.stats.user_tags && dialog.stats.user_tags.length > 0)
+            implicitHeight: userTagsColumn.implicitHeight + 24
+            color: "#181818"
+            radius: 10
+            border.width: 1
+            border.color: "#262626"
+
+            ColumnLayout {
+                id: userTagsColumn
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 12
+                spacing: 8
+
+                Label {
+                    text: "상위 내 태그"
+                    font.pixelSize: 14
+                    font.bold: true
+                    color: "#f4f1f1"
+                }
+
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Repeater {
+                        model: dialog.stats && dialog.stats.user_tags ? dialog.stats.user_tags : []
+                        delegate: FlatButton {
+                            implicitHeight: 30
+                            font.pixelSize: 12
+                            text: "#" + (modelData.tag || "") + " (" + Number(modelData.count || 0).toLocaleString() + ")"
+                            onClicked: {
+                                if (modelData && modelData.tag) {
+                                    dialog.userTagSelected(modelData.tag)
+                                    dialog.close()
+                                }
+                            }
                         }
                     }
                 }

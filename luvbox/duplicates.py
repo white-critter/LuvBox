@@ -39,10 +39,19 @@ def compute_dhash(image_path: Path | str, hash_size: int = 8) -> str:
     if not _safe_local_file(path):
         return ""
     try:
-        _prepare_decoders(False)
-        with path.open("rb") as source, warnings.catch_warnings():
+        with path.open("rb") as source:
             if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
                 return ""
+            return _dhash_from_stream(source, hash_size=hash_size)
+    except OSError:
+        return ""
+
+
+def _dhash_from_stream(source, hash_size: int = 8) -> str:
+    """Decode an open, size-checked binary stream and return its 16-hex dHash."""
+    try:
+        _prepare_decoders(False)
+        with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
                 if img.width * img.height > MAX_PIXELS:
@@ -64,9 +73,6 @@ def compute_dhash(image_path: Path | str, hash_size: int = 8) -> str:
         decimal = 0
         for bit in diff:
             decimal = (decimal << 1) | bit
-        # For solid color images (where all adjacent differences are False),
-        # mix in the mean luminance across all 8 bytes so different solid colors
-        # don't falsely match across 56 leading zero bits.
         if decimal == 0 and pixels:
             lum = sum(pixels) // len(pixels)
             decimal = sum(lum << (8 * i) for i in range(8))
@@ -91,6 +97,28 @@ def compute_file_hash(file_path: Path | str) -> str:
         return h.hexdigest()
     except OSError:
         return ""
+
+
+def compute_image_hashes(file_path: Path | str, hash_size: int = 8) -> tuple[str, str]:
+    """Compute ``(file_hash, dhash)`` in a single file open."""
+    if type(hash_size) is not int or not 4 <= hash_size <= 16:
+        return compute_file_hash(file_path), ""
+    path = Path(file_path)
+    if not _safe_local_file(path):
+        return "", ""
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as source:
+            if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
+                return "", ""
+            while chunk := source.read(65536):
+                h.update(chunk)
+            fhash = h.hexdigest()
+            source.seek(0)
+            dhash = _dhash_from_stream(source, hash_size=hash_size)
+        return fhash, dhash
+    except OSError:
+        return "", ""
 
 
 def hamming_distance(hex1: str, hex2: str) -> int:
@@ -160,7 +188,10 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[lis
             else:
                 by_dhash[dh] = idx
 
-    # 3. Near matches across distinct dhash buckets when max_distance > 0
+    # 3. Near matches across distinct dhash buckets when max_distance > 0.
+    # For max_distance <= 7, partitioning the 64-bit hash into (max_distance + 1)
+    # disjoint bit slices guarantees by the pigeonhole principle that any two
+    # hashes within Hamming distance <= max_distance share at least one slice.
     if max_distance > 0 and len(by_dhash) > 1:
         unique_dhashes = []
         for dh, idx in by_dhash.items():
@@ -168,11 +199,32 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[lis
                 unique_dhashes.append((int(dh, 16), idx))
             except ValueError:
                 continue
-        for i, (v1, idx1) in enumerate(unique_dhashes):
-            for j in range(i + 1, len(unique_dhashes)):
-                v2, idx2 = unique_dhashes[j]
-                if (v1 ^ v2).bit_count() <= max_distance:
-                    union(idx1, idx2)
+        if 1 <= max_distance <= 7 and len(unique_dhashes) > 64:
+            slice_count = max_distance + 1
+            shift = 0
+            for s in range(slice_count):
+                width = (64 // slice_count) + (1 if s < (64 % slice_count) else 0)
+                mask = (1 << width) - 1
+                buckets: dict[int, list[tuple[int, int]]] = {}
+                for val, idx in unique_dhashes:
+                    buckets.setdefault((val >> shift) & mask, []).append((val, idx))
+                for bucket in buckets.values():
+                    m = len(bucket)
+                    if m < 2:
+                        continue
+                    for i in range(m - 1):
+                        v1, idx1 = bucket[i]
+                        for j in range(i + 1, m):
+                            v2, idx2 = bucket[j]
+                            if (v1 ^ v2).bit_count() <= max_distance:
+                                union(idx1, idx2)
+                shift += width
+        else:
+            for i, (v1, idx1) in enumerate(unique_dhashes):
+                for j in range(i + 1, len(unique_dhashes)):
+                    v2, idx2 = unique_dhashes[j]
+                    if (v1 ^ v2).bit_count() <= max_distance:
+                        union(idx1, idx2)
 
     clusters_by_root: dict[int, list[dict]] = {}
     for idx, item in enumerate(valid):

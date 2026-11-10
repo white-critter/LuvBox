@@ -200,9 +200,29 @@ class Cache:
         """Which of these identities already have a preview."""
         if self._db is None:
             return set()
-        found = {key for key in identities if self._db.execute(
-            "SELECT 1 FROM previews WHERE tweet_id=? AND num=? AND media_type=? AND " + _VALID_IMAGE,
-            (*key, _MAX_IMAGE_BYTES)).fetchone()}
+        items = [tuple(key) for key in identities]
+        if not items:
+            return set()
+        if len(items) == 1:
+            key = items[0]
+            row = self._db.execute(
+                "SELECT 1 FROM previews WHERE tweet_id=? AND num=? AND media_type=? AND " + _VALID_IMAGE,
+                (*key, _MAX_IMAGE_BYTES)).fetchone()
+            found = {key} if row else set()
+        else:
+            found = set()
+            for start in range(0, len(items), 200):
+                chunk = items[start:start + 200]
+                clause = ",".join("(?,?,?)" for _ in chunk)
+                params = [part for key in chunk for part in key]
+                params.append(_MAX_IMAGE_BYTES)
+                rows = self._db.execute(
+                    f"SELECT tweet_id, num, media_type FROM previews "
+                    f"WHERE (tweet_id, num, media_type) IN (VALUES {clause}) AND " + _VALID_IMAGE,
+                    params,
+                ).fetchall()
+                for row in rows:
+                    found.add((row[0], int(row[1]), row[2]))
         _note(self.path, found)
         return found
 
@@ -214,6 +234,32 @@ class Cache:
         if not row:
             return None
         return row[0]
+
+    def get_many(self, keys) -> dict[tuple, bytes]:
+        if self._db is None:
+            return {}
+        valid = []
+        for key in keys:
+            try:
+                valid.append(identity(*key))
+            except (TypeError, ValueError):
+                continue
+        if not valid:
+            return {}
+        found = {}
+        for start in range(0, len(valid), 200):
+            chunk = valid[start:start + 200]
+            clause = ",".join("(?,?,?)" for _ in chunk)
+            params = [part for key in chunk for part in key]
+            params.append(_MAX_IMAGE_BYTES)
+            rows = self._db.execute(
+                f"SELECT tweet_id, num, media_type, image FROM previews "
+                f"WHERE (tweet_id, num, media_type) IN (VALUES {clause}) AND " + _VALID_IMAGE,
+                params,
+            ).fetchall()
+            for row in rows:
+                found[(row[0], int(row[1]), row[2])] = row[3]
+        return found
 
     def put(self, key, image) -> None:
         if self._db is None:
@@ -351,7 +397,7 @@ def preview_data_urls(account: str, identities) -> dict:
         if not keys:
             return found
         with closing(Cache(account, create=False)) as cache:
-            blobs = {key: cache.get(key) for key in keys}
+            blobs = cache.get_many(keys)
         for key, blob in blobs.items():
             if not blob:
                 continue
