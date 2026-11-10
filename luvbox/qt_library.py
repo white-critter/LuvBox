@@ -503,9 +503,12 @@ class LibraryRepository:
                 if not records:
                     return 0
                 valid_items = []
-                for rec in records:
+                record_count = len(records)
+                for idx, rec in enumerate(records):
                     if self.current(generation) is None:
                         return 0
+                    if status_callback and (idx % 200 == 0 or idx == record_count - 1):
+                        status_callback(f"분류할 사진을 확인하는 중… ({idx + 1:,} / {record_count:,})")
                     path = self._path(store, rec)
                     if path is not None and path.is_file():
                         valid_items.append((rec, path))
@@ -543,7 +546,15 @@ class LibraryRepository:
 
                     if len(batch_paths) >= batch_size or idx == total_records - 1:
                         if batch_paths:
-                            predictions = classify_batch(batch_paths, batch_size=batch_size, session=sess)
+                            try:
+                                predictions = classify_batch(batch_paths, batch_size=batch_size, session=sess)
+                            except Exception as exc:
+                                kept = f"이미 분류된 {saved_count:,}장은 유지되며, " if saved_count else ""
+                                raise RuntimeError(
+                                    "AI 분류 중 일부 사진을 처리하지 못했습니다. "
+                                    + kept
+                                    + "다시 실행하면 남은 사진부터 이어서 분류합니다."
+                                ) from exc
                             tags_to_save = []
                             for r, (tag, _conf) in zip(batch_records, predictions):
                                 tags_to_save.append(
@@ -560,8 +571,10 @@ class LibraryRepository:
                 return saved_count
         except RuntimeError:
             raise
-        except Exception:
-            return 0
+        except Exception as exc:
+            raise RuntimeError(
+                "AI 자동분류를 끝내지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요."
+            ) from exc
         finally:
             release_session()
 
@@ -579,9 +592,12 @@ class LibraryRepository:
         request = self.current(generation)
         if request is None:
             return []
-        from .duplicates import cluster_duplicates
         try:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                stored = store.duplicate_copy_identities() if hasattr(store, "duplicate_copy_identities") else None
+                if stored is not None:
+                    return [f"g{generation}_{item[0]}_{item[1]}_{item[2]}_{item[3]}" for item in stored]
+                from .duplicates import cluster_duplicates
                 hashes = store.get_image_hashes()
                 favs = store.favorite_identities()
                 items = [

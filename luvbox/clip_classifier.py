@@ -28,6 +28,7 @@ import warnings
 import numpy as np
 from PIL import Image, ImageOps
 
+from . import __version__
 from .duplicates import _safe_local_file
 from .preview import MAX_PIXELS, MAX_RASTER_BYTES, PHOTO_FORMATS, _BoundedRasterReader, _prepare_decoders
 
@@ -190,7 +191,7 @@ def download_model(destination: Path | None = None, progress_callback=None) -> P
             opener = urllib.request.build_opener(_HttpsOnlyRedirectHandler())
             req = urllib.request.Request(
                 MODEL_URL,
-                headers={"User-Agent": "LuvBox/1.6 (Windows; Local CLIP Model Fetcher)"},
+                headers={"User-Agent": f"LuvBox/{__version__} (Windows; Local CLIP Model Fetcher)"},
             )
             with opener.open(req, timeout=30) as response:
                 content_length = response.headers.get("Content-Length")
@@ -353,30 +354,27 @@ def classify_batch(
             continue
 
         input_arr = np.stack(valid_tensors, axis=0)
-        try:
-            outputs = sess.run(None, {"pixel_values": input_arr})
-            embeds = outputs[0]
-            norms = np.linalg.norm(embeds, axis=-1, keepdims=True)
-            norms = np.maximum(norms, 1e-12)
-            embeds = embeds / norms
+        outputs = sess.run(None, {"pixel_values": input_arr})
+        embeds = outputs[0]
+        norms = np.linalg.norm(embeds, axis=-1, keepdims=True)
+        norms = np.maximum(norms, 1e-12)
+        embeds = embeds / norms
 
-            sims = embeds @ category_embeds.T
+        sims = embeds @ category_embeds.T
 
-            # Softmax with logit scale 100.0 (CLIP standard)
-            logits = sims * 100.0
-            max_logits = np.max(logits, axis=-1, keepdims=True)
-            exp_logits = np.exp(logits - max_logits)
-            probs = exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)
+        # Softmax with logit scale 100.0 (CLIP standard)
+        logits = sims * 100.0
+        max_logits = np.max(logits, axis=-1, keepdims=True)
+        exp_logits = np.exp(logits - max_logits)
+        probs = exp_logits / np.sum(exp_logits, axis=-1, keepdims=True)
 
-            for i, global_idx in enumerate(valid_indices):
-                best_cat_idx = int(np.argmax(probs[i]))
-                best_conf = float(probs[i, best_cat_idx])
-                if best_conf >= threshold:
-                    results[global_idx] = (CATEGORY_NAMES[best_cat_idx], best_conf)
-                else:
-                    results[global_idx] = (None, best_conf)
-        except Exception:
-            pass
+        for i, global_idx in enumerate(valid_indices):
+            best_cat_idx = int(np.argmax(probs[i]))
+            best_conf = float(probs[i, best_cat_idx])
+            if best_conf >= threshold:
+                results[global_idx] = (CATEGORY_NAMES[best_cat_idx], best_conf)
+            else:
+                results[global_idx] = (None, best_conf)
 
     return results
 

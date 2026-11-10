@@ -98,6 +98,13 @@ class FavoritesAndTagsTests(unittest.TestCase):
         self.assertEqual(landscape_page["total"], 1)
         self.assertEqual(landscape_page["rows"][0]["tweet_id"], "201")
 
+        # A file that is no longer in the library must not keep the tag in the filter list.
+        with self.store._db:
+            self.store._db.execute("UPDATE media SET path='' WHERE tweet_id='202'")
+        visible = {t["tag"]: t["count"] for t in self.store.user_tags()}
+        self.assertEqual(visible.get("배경화면"), 1)
+        self.assertEqual(visible.get("풍경"), 1)
+
         # Remove tag
         self.assertTrue(self.store.remove_tag("flat", "201", 1, "photo", "풍경"))
         tags_201_after = self.store.item_tags("flat", "201", 1, "photo")

@@ -190,8 +190,9 @@ def scene():
 
             assert inside("galleryFilterToggle", "galleryFilterBar")
             assert inside("galleryFilterReset", "galleryFilterBar")
-            names = ("galleryAuthorFilter", "galleryDateField", "galleryDateFrom", "galleryDateTo",
-                     "galleryFilterToggle", "galleryFilterReset")
+            names = ("galleryAuthorFilter", "galleryHashtagFilter", "galleryUserTagFilter",
+                     "galleryAiClassify", "galleryAiClear", "galleryDateField", "galleryDateFrom",
+                     "galleryDateTo", "galleryFilterToggle", "galleryFilterReset")
             placed = []
             for name in names:
                 item = find(name)
@@ -225,6 +226,21 @@ def scene():
                     open_grid, find("galleryGrid").property("height"), open_bar)
             click("galleryFilterToggle")
             wait(lambda: find("galleryAuthorFilter").property("visible"), "filter reopened")
+            assert find("galleryHashtagFilter").property("displayText") == "해시태그"
+            stats = find("statisticsDialog")
+            invoke(stats, "open")
+            wait(lambda: stats.property("visible"), "statistics dialog")
+            assert 0 <= stats.property("x") and stats.property("width") <= width - 16, (width, stats.property("width"))
+            assert 0 <= stats.property("y") and stats.property("height") <= height - 16, (height, stats.property("height"))
+            invoke(stats, "close")
+            wait(lambda: not stats.property("visible"), "statistics closed")
+            click("galleryAiClear")
+            confirm = find("aiClearConfirm")
+            wait(lambda: confirm.property("visible"), "ai clear confirmation")
+            assert confirm.property("width") + confirm.property("x") <= width
+            assert confirm.property("height") + confirm.property("y") <= height
+            QTest.keyClick(window, Qt.Key.Key_Escape)
+            wait(lambda: not confirm.property("visible"), "ai clear cancelled")
             date_from, date_to = find("galleryDateFrom"), find("galleryDateTo")
             picker = find("galleryDatePickerPopup")
             # A date is applied the moment it is chosen: Space opens the calendar, a day closes it.

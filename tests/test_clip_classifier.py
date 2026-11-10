@@ -217,6 +217,15 @@ class TestHistoryStoreAiTags(unittest.TestCase):
         self.assertEqual(len(self.store.unclassified_photo_records()), 2)
 
     def test_add_tags_batch_and_model_cache(self):
+        with self.store._db:
+            self.store._db.execute(
+                "INSERT INTO media(folder_mode, tweet_id, num, media_type, filename, path, status, record_source, updated_at) "
+                "VALUES ('flat', '111', 1, 'photo', 'p1.jpg', 'C:/test/p1.jpg', 'saved', 'download', '2026-11-10 10:00:00')"
+            )
+            self.store._db.execute(
+                "INSERT INTO media(folder_mode, tweet_id, num, media_type, filename, path, status, record_source, updated_at) "
+                "VALUES ('flat', '222', 1, 'photo', 'p2.jpg', 'C:/test/p2.jpg', 'saved', 'download', '2026-11-10 10:01:00')"
+            )
         added = self.store.add_tags_batch([
             ("flat", "111", 1, "photo"),
             ("flat", "222", 1, "photo"),
@@ -263,6 +272,42 @@ class TestHistoryStoreAiTags(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 repo.scan_ai_tags(1)
             self.assertIn("AI 분류 엔진", str(ctx.exception))
+
+    def test_scan_ai_inference_error_does_not_mark_photos_classified(self):
+        from unittest.mock import patch
+        from contextlib import closing
+        from luvbox.storage import resolve_storage
+        from luvbox.qt_library import LibraryRepository, _Request
+
+        paths = resolve_storage(self.temp_dir / "InferFail", "offline")
+        with closing(HistoryStore.for_storage(paths)) as store:
+            p1 = paths.output_dir / "u_301_1.jpg"
+            Image.new("RGB", (32, 32), color="red").save(p1)
+            store.record_media("flat", {"tweet_id": "301", "num": 1, "type": "photo", "author": "u"}, p1)
+
+        repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
+        req = _Request(generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False)
+        repo.configure(req)
+        with patch("luvbox.clip_classifier.is_available", return_value=True), \
+             patch("luvbox.clip_classifier.get_session", return_value=object()), \
+             patch("luvbox.clip_classifier.classify_batch", side_effect=RuntimeError("inference failed")), \
+             patch("luvbox.clip_classifier.release_session") as release:
+            with self.assertRaises(RuntimeError) as ctx:
+                repo.scan_ai_tags(1)
+            self.assertIn("이어서 분류", str(ctx.exception))
+            release.assert_called()
+        with closing(HistoryStore.for_storage(paths)) as store:
+            self.assertEqual(len(store.unclassified_photo_records()), 1)
+            self.assertEqual(store.item_tags("flat", "301", 1, "photo"), [])
+
+    def test_tag_text_drops_control_characters(self):
+        self.assertTrue(self.store.add_tag("flat", "111", 1, "photo", "배경\n화면\t"))
+        self.assertEqual(
+            [t["tag"] for t in self.store.item_tags("flat", "111", 1, "photo")],
+            ["배경화면"],
+        )
+        self.assertFalse(self.store.add_tag("flat", "111", 1, "photo", "\n\t"))
 
 
 if __name__ == "__main__":

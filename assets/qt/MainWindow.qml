@@ -1118,7 +1118,7 @@ ApplicationWindow {
                         height: implicitHeight
                         onVisibleChanged: Qt.callLater(filterHost.layout)
                         onWidthChanged: Qt.callLater(filterHost.layout)
-                        displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].value : "전체 태그"
+                        displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].value : "해시태그"
                         Accessible.name: "해시태그 선택"
                         textRole: "label"
                         valueRole: "value"
@@ -1130,7 +1130,7 @@ ApplicationWindow {
                             return rows ? rows : []
                         }
                         model: {
-                            const items = [{ label: "전체 태그", value: "" }]
+                            const items = [{ label: "해시태그 전체", value: "" }]
                             let found = !hashtagFilter.applied.length
                             for (let i = 0; i < hashtagRows.length; i++) {
                                 const row = hashtagRows[i]
@@ -1244,10 +1244,7 @@ ApplicationWindow {
                         ToolTip.text: "수동으로 추가한 내 태그는 유지하고, AI 자동분류로 생성된 태그만 초기화합니다"
                         onVisibleChanged: Qt.callLater(filterHost.layout)
                         onWidthChanged: Qt.callLater(filterHost.layout)
-                        onClicked: {
-                            window.app.library.clearAiTags()
-                            window.flashNotice("AI 자동분류 태그를 초기화하는 중입니다…")
-                        }
+                        onClicked: aiClearConfirm.open()
                     }
                     FlatCombo {
                         id: dateFieldChoice
@@ -2530,6 +2527,67 @@ ApplicationWindow {
         id: runHistoryDialog
         parent: Overlay.overlay
         app: window.app
+    }
+
+    Dialog {
+        id: aiClearConfirm
+        objectName: "aiClearConfirm"
+        parent: Overlay.overlay
+        modal: true
+        focus: true
+        title: "AI 태그를 초기화할까요?"
+        closePolicy: Popup.CloseOnEscape
+        width: Math.min(460, parent ? Math.max(280, parent.width - 48) : 460)
+        height: Math.min(220, parent ? Math.max(180, parent.height - 48) : 220)
+        x: parent ? Math.round((parent.width - width) / 2) : 0
+        y: parent ? Math.round((parent.height - height) / 2) : 0
+        padding: 20
+        background: Rectangle {
+            color: "#141414"
+            radius: 16
+            border.width: 1
+            border.color: "#2a2a2a"
+        }
+        header: Label {
+            width: aiClearConfirm.width
+            text: aiClearConfirm.title
+            leftPadding: 20
+            rightPadding: 20
+            topPadding: 16
+            bottomPadding: 4
+            font.pixelSize: 18
+            color: "#f4f1f1"
+            wrapMode: Text.Wrap
+        }
+        onOpened: aiClearCancel.forceActiveFocus()
+        contentItem: Label {
+            text: "자동분류로 붙은 AI 태그만 지웁니다. 직접 추가한 태그와 사진 파일은 그대로 둡니다."
+            wrapMode: Text.Wrap
+            color: "#b9afb1"
+            textFormat: Text.PlainText
+        }
+        footer: DialogButtonBox {
+            background: null
+            FlatButton {
+                objectName: "aiClearConfirmButton"
+                text: "AI 태그 초기화"
+                tone: "primary"
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
+            }
+            FlatButton {
+                id: aiClearCancel
+                objectName: "aiClearCancelButton"
+                text: "취소"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            }
+            onAccepted: {
+                if (window.app && !window.app.library.busy) {
+                    window.app.library.clearAiTags()
+                    window.flashNotice("AI 자동분류 태그를 초기화하는 중입니다…")
+                }
+            }
+            onRejected: aiClearConfirm.close()
+        }
     }
 
     StatisticsDialog {

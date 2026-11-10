@@ -78,13 +78,28 @@ Dialog {
         }
     }
 
-    contentItem: ColumnLayout {
-        spacing: 16
+    contentItem: Flickable {
+        id: statsFlick
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        contentWidth: width
+        readonly property bool needsScroll: statsColumn.implicitHeight > height + 1
+        contentHeight: statsColumn.implicitHeight
+        ScrollBar.vertical: ScrollBar {
+            policy: statsFlick.needsScroll ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+        }
 
-        // Metric summary cards
-        RowLayout {
+        ColumnLayout {
+            id: statsColumn
+            width: statsFlick.width - (statsFlick.needsScroll ? 12 : 0)
+            spacing: 16
+
+        // Metric summary cards. Two columns on a narrow dialog so the counts stay readable.
+        GridLayout {
             Layout.fillWidth: true
-            spacing: 10
+            columns: statsFlick.width < 640 ? 2 : 4
+            columnSpacing: 10
+            rowSpacing: 10
 
             Rectangle {
                 Layout.fillWidth: true
@@ -200,11 +215,13 @@ Dialog {
             }
         }
 
-        // Two columns: Authors & Monthly trend
-        RowLayout {
+        // Authors and the monthly chart sit side by side until the dialog is narrow.
+        GridLayout {
             Layout.fillWidth: true
-            Layout.fillHeight: true
-            spacing: 16
+            columns: statsFlick.width < 640 ? 1 : 2
+            columnSpacing: 16
+            rowSpacing: 16
+            Layout.preferredHeight: statsFlick.width < 640 ? 420 : Math.max(200, statsFlick.height - 130)
 
             // Authors section
             Rectangle {
@@ -370,7 +387,7 @@ Dialog {
                                     height: parent.height
                                     width: Math.max(4, Math.round(parent.width * ((modelData.count || 0) / monthlyList.maxCount)))
                                     radius: 4
-                                    color: "#5b4570"
+                                    color: "#d93645"
                                 }
                             }
 
@@ -393,6 +410,7 @@ Dialog {
                     }
                 }
             }
+        }
         }
     }
 

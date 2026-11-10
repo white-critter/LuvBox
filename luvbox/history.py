@@ -285,6 +285,39 @@ def _clean_text(value, limit=2000) -> str:
     return "".join(char for char in value[:limit] if ord(char) >= 32 and ord(char) != 127)
 
 
+def _normalize_tag(tag) -> str:
+    """Strip a leading # and ASCII control characters from a stored tag."""
+    if not isinstance(tag, str):
+        return ""
+    cleaned = "".join(char for char in tag.strip().lstrip("#") if ord(char) >= 32 and ord(char) != 127)
+    return cleaned.strip()
+
+
+def _exact_duplicate_exists(alias: str) -> str:
+    """Correlated exact-hash twin check. ``alias`` is a fixed SQL identifier."""
+    return (
+        "EXISTS (SELECT 1 FROM image_hashes h2 "
+        "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
+        "AND m2.num=h2.num AND m2.media_type=h2.media_type "
+        f"WHERE m2.path!='' AND (({alias}.dhash!='' AND h2.dhash={alias}.dhash) "
+        f"OR ({alias}.file_hash!='' AND h2.file_hash={alias}.file_hash)) "
+        f"AND NOT (h2.folder_mode={alias}.folder_mode AND h2.tweet_id={alias}.tweet_id "
+        f"AND h2.num={alias}.num AND h2.media_type={alias}.media_type))"
+    )
+
+
+def _duplicate_predicate(alias: str, *, has_cluster: bool) -> str:
+    """True when a hash row is in a saved cluster, otherwise an exact twin.
+
+    SQLite evaluates CASE branches in order, so a stored cluster id does not
+    also run the exact-hash lookup.
+    """
+    exact = _exact_duplicate_exists(alias)
+    if not has_cluster:
+        return exact
+    return f"(CASE WHEN {alias}.cluster_id > 0 THEN 1 WHEN {exact} THEN 1 ELSE 0 END)=1"
+
+
 def _author_fields(value) -> tuple[str, str]:
     """Only gallery-dl's tweet author is authoritative, never its `user`."""
     if not isinstance(value, dict):
@@ -1866,17 +1899,10 @@ class HistoryStore:
             if not has_image_hashes:
                 clauses.append("0")
             else:
-                cluster_cond = "h1.cluster_id > 0 OR " if has_cluster_id else ""
                 clauses.append("media.path!='' AND EXISTS (SELECT 1 FROM image_hashes h1 "
                                "WHERE h1.folder_mode=media.folder_mode AND h1.tweet_id=media.tweet_id "
-                               "AND h1.num=media.num AND h1.media_type=media.media_type "
-                               f"AND ({cluster_cond}EXISTS (SELECT 1 FROM image_hashes h2 "
-                               "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
-                               "AND m2.num=h2.num AND m2.media_type=h2.media_type "
-                               "WHERE m2.path!='' AND ((h1.dhash!='' AND h2.dhash=h1.dhash) "
-                               "OR (h1.file_hash!='' AND h2.file_hash=h1.file_hash)) "
-                               "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id "
-                               "AND h2.num=h1.num AND h2.media_type=h1.media_type))))")
+                               "AND h1.num=media.num AND h1.media_type=media.media_type AND "
+                               + _duplicate_predicate("h1", has_cluster=has_cluster_id) + ")")
         if author:
             if not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author):
                 raise HistoryError(_HISTORY_HELP)
@@ -2048,7 +2074,7 @@ class HistoryStore:
 
     @_safe
     def add_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str, source: str = "user") -> bool:
-        tag = tag.strip().lstrip("#")
+        tag = _normalize_tag(tag)
         if not tag or len(tag) > 50:
             return False
         with self._db:
@@ -2062,7 +2088,7 @@ class HistoryStore:
 
     @_safe
     def add_tags_batch(self, identities: list[tuple], tag: str, source: str = "user") -> int:
-        tag = tag.strip().lstrip("#")
+        tag = _normalize_tag(tag)
         if not identities or not tag or len(tag) > 50 or not self._has_table("media_tags"):
             return 0
         now = _now()
@@ -2078,7 +2104,7 @@ class HistoryStore:
 
     @_safe
     def remove_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str) -> bool:
-        tag = tag.strip().lstrip("#")
+        tag = _normalize_tag(tag)
         if not tag:
             return False
         with self._db:
@@ -2116,7 +2142,11 @@ class HistoryStore:
         if not self._has_table("media_tags"):
             return []
         rows = self._read_rows(
-            "SELECT tag, COUNT(*) AS count FROM media_tags WHERE tag != '' GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?",
+            "SELECT media_tags.tag AS tag, COUNT(*) AS count FROM media_tags "
+            "JOIN media ON media.folder_mode=media_tags.folder_mode AND media.tweet_id=media_tags.tweet_id "
+            "AND media.num=media_tags.num AND media.media_type=media_tags.media_type "
+            "WHERE media_tags.tag != '' AND media.path != '' "
+            "GROUP BY media_tags.tag ORDER BY count DESC, media_tags.tag ASC LIMIT ?",
             (limit,)
         )
         return [{"tag": row["tag"], "count": row["count"]} for row in rows]
@@ -2153,7 +2183,7 @@ class HistoryStore:
         rows = []
         applied = 0
         for t in tags:
-            clean_tag = (t[4] or "").strip().lstrip("#")
+            clean_tag = _normalize_tag(t[4] or "")
             if len(clean_tag) > 50:
                 continue
             if clean_tag:
@@ -2268,19 +2298,60 @@ class HistoryStore:
         if not self._has_table("image_hashes"):
             return 0
         has_cluster = self._has_column("image_hashes", "cluster_id")
-        cluster_cond = "h1.cluster_id > 0 OR " if has_cluster else ""
         row = self._db.execute(
             "SELECT COUNT(*) FROM image_hashes h1 "
             "JOIN media m1 ON m1.folder_mode=h1.folder_mode AND m1.tweet_id=h1.tweet_id "
             "AND m1.num=h1.num AND m1.media_type=h1.media_type "
-            f"WHERE m1.path!='' AND ({cluster_cond}EXISTS ("
-            "SELECT 1 FROM image_hashes h2 "
-            "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
-            "AND m2.num=h2.num AND m2.media_type=h2.media_type "
-            "WHERE m2.path!='' AND ((h1.dhash!='' AND h2.dhash=h1.dhash) OR (h1.file_hash!='' AND h2.file_hash=h1.file_hash)) "
-            "AND NOT (h2.folder_mode=h1.folder_mode AND h2.tweet_id=h1.tweet_id AND h2.num=h1.num AND h2.media_type=h1.media_type)))"
+            "WHERE m1.path!='' AND " + _duplicate_predicate("h1", has_cluster=has_cluster)
         ).fetchone()
         return row[0] if row else 0
+
+    @_safe
+    def duplicate_copy_identities(self) -> list[tuple] | None:
+        """Copies from the last scan, leaving the favorite or largest file in each cluster.
+
+        Returns an empty list when the last scan stored no clusters. Returns None
+        only when this catalog has no cluster column, so the caller can fall back.
+        """
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
+            return None
+        favorite_sql = (
+            "EXISTS (SELECT 1 FROM favorites f WHERE f.folder_mode=h.folder_mode "
+            "AND f.tweet_id=h.tweet_id AND f.num=h.num AND f.media_type=h.media_type)"
+            if self._has_table("favorites") else "0"
+        )
+        rows = self._read_rows(
+            "SELECT h.folder_mode AS folder_mode, h.tweet_id AS tweet_id, h.num AS num, "
+            "h.media_type AS media_type, h.filesize AS filesize, h.cluster_id AS cluster_id, "
+            f"{favorite_sql} AS favorite "
+            "FROM image_hashes h "
+            "JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
+            "AND m.num=h.num AND m.media_type=h.media_type "
+            "WHERE m.path!='' AND h.cluster_id>0 "
+            "ORDER BY h.cluster_id"
+        )
+        copies: list[tuple] = []
+        group: list[dict] = []
+        current = None
+
+        def flush(items: list[dict]) -> None:
+            if len(items) < 2:
+                return
+            items.sort(key=lambda row: (
+                int(row["favorite"] or 0), int(row["filesize"] or 0), str(row["tweet_id"]), int(row["num"])
+            ), reverse=True)
+            for row in items[1:]:
+                copies.append((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
+
+        for row in rows:
+            cluster_id = row["cluster_id"]
+            if current != cluster_id:
+                flush(group)
+                group = []
+                current = cluster_id
+            group.append(row)
+        flush(group)
+        return copies
 
     @_safe
     def run_page(self, page=0, page_size=100) -> dict:

@@ -114,7 +114,9 @@ class DuplicateTests(unittest.TestCase):
         self.assertEqual(count, 2)
 
         # Get copy keys (should pick 1 duplicate to discard, keep 1 primary)
-        copy_keys = repo.duplicate_copy_keys(1)
+        from unittest.mock import patch
+        with patch("luvbox.duplicates.cluster_duplicates", side_effect=AssertionError("reclustering")):
+            copy_keys = repo.duplicate_copy_keys(1)
         self.assertEqual(len(copy_keys), 1)
         self.assertTrue("201" in copy_keys[0] or "202" in copy_keys[0])
 
