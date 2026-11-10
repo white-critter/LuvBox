@@ -1375,13 +1375,13 @@ class HistoryStore:
         return self._summary(*self._file_snapshot(verify_files=verify_files))
 
     @_safe
-    def overview(self, *, verify_files: bool = True, top: int | None = 20) -> dict:
+    def overview(self, *, verify_files: bool = True, top: int | None = 20, include_missing: bool = True) -> dict:
         """Summary, charts and missing files share one snapshot, even during downloads."""
         with self._read_snapshot():
             rows, files, matched, found = self._file_snapshot(verify_files=verify_files)
             result = self._summary(rows, files, matched, found)
             result["stats"] = self._statistics(files, top)
-            result["missing"] = self._missing(rows, found)
+            result["missing"] = self._missing(rows, found) if include_missing else []
         return result
 
     @_safe
@@ -2054,7 +2054,8 @@ class HistoryStore:
         with self._db:
             self._db.execute(
                 "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
+                "source=CASE WHEN excluded.source='user' THEN 'user' ELSE media_tags.source END",
                 (folder_mode, tweet_id, num, media_type, tag, source, _now())
             )
             return True
@@ -2069,7 +2070,8 @@ class HistoryStore:
         with self._db:
             self._db.executemany(
                 "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
+                "source=CASE WHEN excluded.source='user' THEN 'user' ELSE media_tags.source END",
                 rows
             )
         return len(rows)

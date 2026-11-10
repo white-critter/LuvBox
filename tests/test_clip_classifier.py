@@ -224,6 +224,46 @@ class TestHistoryStoreAiTags(unittest.TestCase):
         self.assertEqual(added, 2)
         self.assertEqual(self.store.user_tags(), [{"tag": "배치태그", "count": 2}])
 
+    def test_user_tag_upgrades_ai_tag_source(self):
+        self.store.save_ai_tags([("flat", "111", 1, "photo", "동물")])
+        self.assertEqual(self.store.item_tags("flat", "111", 1, "photo"), [{"tag": "동물", "source": "ai"}])
+        # User explicitly adds the same tag -> promoted to 'user' and preserved on clear_ai_tags()
+        self.store.add_tag("flat", "111", 1, "photo", "동물", source="user")
+        self.assertEqual(self.store.item_tags("flat", "111", 1, "photo"), [{"tag": "동물", "source": "user"}])
+        self.store.clear_ai_tags()
+        self.assertEqual(self.store.item_tags("flat", "111", 1, "photo"), [{"tag": "동물", "source": "user"}])
+
+    def test_scan_ai_tags_fast_path_and_error_reporting(self):
+        from unittest.mock import patch
+        from contextlib import closing
+        from luvbox.storage import resolve_storage
+        from luvbox.qt_library import LibraryRepository, _Request
+
+        paths = resolve_storage(self.temp_dir / "RepoScan", "offline")
+        with closing(HistoryStore.for_storage(paths)) as store:
+            p1 = paths.output_dir / "u_101_1.jpg"
+            Image.new("RGB", (32, 32), color="blue").save(p1)
+            store.record_media("flat", {"tweet_id": "101", "num": 1, "type": "photo", "author": "u"}, p1)
+            store.save_ai_tags([("flat", "101", 1, "photo", "일러스트")])
+
+        repo = LibraryRepository()
+        self.addCleanup(repo.configure, None)
+        req = _Request(generation=1, account="offline", output_dir=str(paths.output_dir), separate_accounts=False)
+        repo.configure(req)
+
+        # 1. Fast path: 0 unclassified photos -> must not call get_session
+        with patch("luvbox.clip_classifier.get_session") as mock_sess:
+            self.assertEqual(repo.scan_ai_tags(1), 0)
+            mock_sess.assert_not_called()
+
+        # 2. Error reporting: clear AI tags so 1 photo is unclassified, then simulate session failure
+        repo.clear_ai_tags(1)
+        with patch("luvbox.clip_classifier.is_available", return_value=True), \
+             patch("luvbox.clip_classifier.get_session", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                repo.scan_ai_tags(1)
+            self.assertIn("AI 분류 엔진", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

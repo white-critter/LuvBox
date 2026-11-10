@@ -38,7 +38,8 @@ ApplicationWindow {
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
         folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
-        runHistoryDialog.visible || unsavedDialog.visible || datePickerPopup.visible || statisticsDialog.visible
+        runHistoryDialog.visible || unsavedDialog.visible || datePickerPopup.visible || statisticsDialog.visible ||
+        tagBatchPopup.visible
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
     color: "#101010"
     palette.window: color
@@ -303,6 +304,12 @@ ApplicationWindow {
         if (!app)
             return
         const library = app.library
+        const hasAdvancedChange = changes.author !== undefined || changes.dateField !== undefined
+            || changes.from !== undefined || changes.to !== undefined || changes.hashtag !== undefined
+        if (changes.userTag !== undefined && !hasAdvancedChange) {
+            library.setUserTag(changes.userTag)
+            return
+        }
         const author = changes.author !== undefined ? changes.author : library.filterAuthor
         const dateField = changes.dateField !== undefined ? changes.dateField : library.dateField
         let from = changes.from !== undefined ? changes.from : library.dateFrom
@@ -1232,7 +1239,7 @@ ApplicationWindow {
                         width: implicitWidth
                         height: implicitHeight
                         text: "AI 태그 초기화"
-                        enabled: !!window.app && !window.app.library.busy && userTagFilter.tagRows.length > 0
+                        enabled: !!window.app && !window.app.library.busy
                         ToolTip.visible: hovered
                         ToolTip.text: "수동으로 추가한 내 태그는 유지하고, AI 자동분류로 생성된 태그만 초기화합니다"
                         onVisibleChanged: Qt.callLater(filterHost.layout)
@@ -1773,6 +1780,7 @@ ApplicationWindow {
         objectName: "previewDialog"
         parent: Overlay.overlay
         property bool detailsVisible: false
+        readonly property bool textInputFocused: bodyText.activeFocus || inlineTagField.activeFocus
         title: "미리보기"
         anchors.centerIn: parent
         width: Math.max(0, parent.width - 24)
@@ -1784,17 +1792,23 @@ ApplicationWindow {
         // Keep navigation in this popup's scope, including toolbar focus.
         Shortcut {
             sequence: "Left"
-            enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canPrevious
-            onActivated: window.app.library.previousItem()
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && window.app && window.app.library.canPrevious
+            onActivated: {
+                inlineTagField.text = ""
+                window.app.library.previousItem()
+            }
         }
         Shortcut {
             sequence: "Right"
-            enabled: previewDialog.visible && !bodyText.activeFocus && window.app && window.app.library.canNext
-            onActivated: window.app.library.nextItem()
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && window.app && window.app.library.canNext
+            onActivated: {
+                inlineTagField.text = ""
+                window.app.library.nextItem()
+            }
         }
         Shortcut {
             sequence: "F"
-            enabled: previewDialog.visible && !bodyText.activeFocus && !!window.app
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && !!window.app
             onActivated: {
                 const fav = window.app.library.toggleSelectedFavorite()
                 window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")
@@ -1802,46 +1816,50 @@ ApplicationWindow {
         }
         Shortcut {
             sequence: "+"
-            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canZoomIn
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.canZoomIn
             onActivated: selectedMedia.zoomIn()
         }
         Shortcut {
             sequence: "="
-            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canZoomIn
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.canZoomIn
             onActivated: selectedMedia.zoomIn()
         }
         Shortcut {
             sequence: "-"
-            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canZoomOut
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.canZoomOut
             onActivated: selectedMedia.zoomOut()
         }
         Shortcut {
             sequence: "0"
-            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.ready
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.ready
             onActivated: selectedMedia.fit()
         }
         Shortcut {
             sequence: "1"
-            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.canActualSize
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.canActualSize
             onActivated: selectedMedia.actualSize()
         }
         Shortcut {
             sequence: "m"
-            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.mediaType === "video"
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.mediaType === "video"
                 && selectedMedia.videoSource && selectedMedia.ready
             onActivated: selectedMedia.muted = !selectedMedia.muted
         }
         Shortcut {
             sequence: "Shift+M"
-            enabled: previewDialog.visible && !bodyText.activeFocus && selectedMedia.mediaType === "video"
+            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.mediaType === "video"
                 && selectedMedia.videoSource && selectedMedia.ready
             onActivated: selectedMedia.muted = !selectedMedia.muted
         }
         onAboutToShow: {
             detailsVisible = false
+            inlineTagField.text = ""
             window.stopWheel()
         }
-        onClosed: selectedMedia.release()
+        onClosed: {
+            inlineTagField.text = ""
+            selectedMedia.release()
+        }
         background: Rectangle {
             color: "#141414"
             radius: 16
@@ -1940,7 +1958,10 @@ ApplicationWindow {
                     enabled: window.app && window.app.library.canPrevious
                     ToolTip.visible: hovered && enabled
                     ToolTip.text: "이전 미디어 (←)"
-                    onClicked: window.app.library.previousItem()
+                    onClicked: {
+                        inlineTagField.text = ""
+                        window.app.library.previousItem()
+                    }
                 }
                 FlatButton {
                     objectName: "previewNextButton"
@@ -1948,7 +1969,10 @@ ApplicationWindow {
                     enabled: window.app && window.app.library.canNext
                     ToolTip.visible: hovered && enabled
                     ToolTip.text: "다음 미디어 (→)"
-                    onClicked: window.app.library.nextItem()
+                    onClicked: {
+                        inlineTagField.text = ""
+                        window.app.library.nextItem()
+                    }
                 }
                 PreviewZoomControls { preview: selectedMedia }
             }
@@ -2101,13 +2125,21 @@ ApplicationWindow {
                     visible: !!window.app && !!window.app.library.selectedKey
                     FlatField {
                         id: inlineTagField
+                        objectName: "inlineTagField"
+                        readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
                         implicitHeight: 22
-                        Layout.preferredWidth: 90
+                        Layout.preferredWidth: 96
+                        maximumLength: 50
                         placeholderText: "새 태그"
                         font.pixelSize: 11
+                        Keys.onEscapePressed: event => {
+                            text = ""
+                            focus = false
+                            event.accepted = true
+                        }
                         onAccepted: {
-                            if (text.trim().length > 0) {
-                                window.app.library.addSelectedTag(text.trim())
+                            if (cleanTag.length > 0) {
+                                window.app.library.addSelectedTag(cleanTag)
                                 text = ""
                             }
                         }
@@ -2116,9 +2148,9 @@ ApplicationWindow {
                         text: "+ 태그"
                         implicitHeight: 22
                         font.pixelSize: 11
-                        enabled: inlineTagField.text.trim().length > 0
+                        enabled: inlineTagField.cleanTag.length > 0
                         onClicked: {
-                            window.app.library.addSelectedTag(inlineTagField.text.trim())
+                            window.app.library.addSelectedTag(inlineTagField.cleanTag)
                             inlineTagField.text = ""
                         }
                     }
@@ -2505,6 +2537,11 @@ ApplicationWindow {
         objectName: "statisticsDialog"
         parent: Overlay.overlay
         app: window.app
+        onAuthorSelected: author => {
+            window.currentScreen = 1
+            window.applyFilters({ author: author })
+            window.flashNotice("@" + author + " 작성자 모아보기를 적용했습니다.")
+        }
     }
 
     Popup {
@@ -2537,11 +2574,14 @@ ApplicationWindow {
             }
             FlatField {
                 id: batchTagInput
+                objectName: "batchTagInput"
+                readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
                 Layout.fillWidth: true
+                maximumLength: 50
                 placeholderText: "태그 이름 입력"
                 onAccepted: {
-                    if (text.trim().length > 0) {
-                        window.app.library.addTagToSelection(text.trim())
+                    if (cleanTag.length > 0) {
+                        window.app.library.addTagToSelection(cleanTag)
                         text = ""
                         tagBatchPopup.close()
                     }
@@ -2557,9 +2597,9 @@ ApplicationWindow {
                 FlatButton {
                     text: "추가"
                     tone: "primary"
-                    enabled: batchTagInput.text.trim().length > 0
+                    enabled: batchTagInput.cleanTag.length > 0
                     onClicked: {
-                        window.app.library.addTagToSelection(batchTagInput.text.trim())
+                        window.app.library.addTagToSelection(batchTagInput.cleanTag)
                         batchTagInput.text = ""
                         tagBatchPopup.close()
                     }

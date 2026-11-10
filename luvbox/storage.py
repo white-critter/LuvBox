@@ -839,10 +839,13 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                 (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row.get("created_at") or ""))
     if "media_tags" in source_tables:
         _prepare_table(target, source, "media_tags")
+        if "source" not in _columns(target, "media_tags"):
+            target.execute("ALTER TABLE media_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
         for row in _rows(source, "media_tags"):
             target.execute(
-                "INSERT OR IGNORE INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO UPDATE SET "
+                "source=CASE WHEN excluded.source='user' THEN 'user' ELSE media_tags.source END",
                 (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], row["tag"],
                  row.get("source") or "user", row.get("created_at") or ""))
     if "image_hashes" in source_tables:

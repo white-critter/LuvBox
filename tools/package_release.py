@@ -71,6 +71,7 @@ DEPENDENCIES = (
     "pyinstaller", "pyinstaller-hooks-contrib", "altgraph", "packaging", "pefile",
     "pywin32-ctypes", "setuptools",
     "PySide6", "PySide6_Essentials", "PySide6_Addons", "shiboken6",
+    "onnxruntime", "numpy",
 )
 EXCLUDED_QT_COMPONENTS = {
     "qt6quick3dutils.dll", "qt6virtualkeyboard.dll", "qt6pdf.dll", "qt6pdfwidgets.dll",

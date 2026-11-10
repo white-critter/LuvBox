@@ -186,6 +186,36 @@ class Features152Tests(unittest.TestCase):
         # Larger filesize (601) is preserved as primary; 602 is the copy
         self.assertIn("602", copy_keys[0])
 
+    def test_cached_user_tag_decrement_and_removal(self):
+        from luvbox.qt_library import LibraryController
+
+        class _DummyController:
+            _user_tags = []
+            _user_tag = ""
+            class _Sig:
+                def __init__(self):
+                    self.count = 0
+                def emit(self):
+                    self.count += 1
+            userTagsChanged = _Sig()
+            userTagFilterChanged = _Sig()
+
+        dummy = _DummyController()
+        LibraryController._upsert_cached_user_tag(dummy, "풍경", delta=2)
+        LibraryController._upsert_cached_user_tag(dummy, "인물", delta=1)
+        self.assertEqual(dummy._user_tags, [{"tag": "풍경", "count": 2}, {"tag": "인물", "count": 1}])
+
+        # Decrement 풍경 from 2 -> 1
+        LibraryController._upsert_cached_user_tag(dummy, "풍경", delta=-1)
+        self.assertEqual(dummy._user_tags, [{"tag": "인물", "count": 1}, {"tag": "풍경", "count": 1}])
+
+        # Set active filter to 인물 and remove its last occurrence -> removed from list & filter reset
+        dummy._user_tag = "인물"
+        LibraryController._upsert_cached_user_tag(dummy, "인물", delta=-1)
+        self.assertEqual(dummy._user_tags, [{"tag": "풍경", "count": 1}])
+        self.assertEqual(dummy._user_tag, "")
+        self.assertEqual(dummy.userTagFilterChanged.count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

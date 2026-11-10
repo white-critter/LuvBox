@@ -234,8 +234,8 @@ class LibraryRepository:
             return {}
         try:
             with closing(_ReadOnlyHistory(request.location())) as store:
-                ov = store.overview(verify_files=False, top=10)
-                st = store.statistics(top=10)
+                ov = store.overview(verify_files=False, top=10, include_missing=False)
+                st = ov.get("stats", {})
                 return {
                     "files": ov.get("files", 0),
                     "posts": ov.get("posts", 0),
@@ -491,26 +491,42 @@ class LibraryRepository:
         except Exception:
             return 0
 
-    def scan_ai_tags(self, generation, progress_callback=None):
+    def scan_ai_tags(self, generation, progress_callback=None, status_callback=None):
         request = self.current(generation)
         if request is None:
             return 0
         from .clip_classifier import classify_batch, ensure_model, get_session, is_available, release_session
-        if not is_available():
-            try:
-                ensure_model()
-            except Exception:
-                return 0
         try:
-            sess = get_session()
-            if sess is None:
-                return 0
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 store._folder_cache = {}
                 records = store.unclassified_photo_records()
-                total_records = len(records)
+                if not records:
+                    return 0
+                valid_items = []
+                for rec in records:
+                    if self.current(generation) is None:
+                        return 0
+                    path = self._path(store, rec)
+                    if path is not None and path.is_file():
+                        valid_items.append((rec, path))
+                total_records = len(valid_items)
                 if total_records == 0:
                     return 0
+
+                if not is_available():
+                    try:
+                        def on_dl(dl_bytes, tot_bytes):
+                            if status_callback and tot_bytes:
+                                status_callback(
+                                    f"AI 분류 모델 내려받는 중… ({dl_bytes / (1024 * 1024):.1f} / {tot_bytes / (1024 * 1024):.1f} MB)"
+                                )
+                        ensure_model(progress_callback=on_dl)
+                    except Exception as exc:
+                        raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 확인해 주세요.") from exc
+
+                sess = get_session()
+                if sess is None:
+                    raise RuntimeError("AI 분류 엔진을 시작하지 못했습니다. 프로그램 파일을 확인해 주세요.")
                 if progress_callback:
                     progress_callback(0, total_records)
 
@@ -519,13 +535,11 @@ class LibraryRepository:
                 saved_count = 0
                 batch_size = 16
 
-                for idx, rec in enumerate(records):
+                for idx, (rec, path) in enumerate(valid_items):
                     if self.current(generation) is None:
                         return saved_count
-                    path = self._path(store, rec)
-                    if path is not None and path.is_file():
-                        batch_records.append(rec)
-                        batch_paths.append(path)
+                    batch_records.append(rec)
+                    batch_paths.append(path)
 
                     if len(batch_paths) >= batch_size or idx == total_records - 1:
                         if batch_paths:
@@ -544,6 +558,8 @@ class LibraryRepository:
                             progress_callback(idx + 1, total_records)
 
                 return saved_count
+        except RuntimeError:
+            raise
         except Exception:
             return 0
         finally:
@@ -1128,13 +1144,19 @@ class LibraryController(QObject):
             if not t:
                 continue
             if t == clean:
-                c = max(1, c + delta)
                 found = True
+                new_c = c + delta
+                if new_c <= 0:
+                    continue
+                c = new_c
             normalized.append({"tag": t, "count": c})
-        if not found:
-            normalized.append({"tag": clean, "count": max(1, delta)})
+        if not found and delta > 0:
+            normalized.append({"tag": clean, "count": delta})
         normalized.sort(key=lambda r: (-int(r.get("count", 0)), str(r.get("tag", ""))))
         self._user_tags = normalized
+        if self._user_tag == clean and delta < 0 and not any(r.get("tag") == clean for r in normalized):
+            self._user_tag = ""
+            self.userTagFilterChanged.emit()
         self.userTagsChanged.emit()
 
     @Slot(str, result=int)
@@ -1265,13 +1287,18 @@ class LibraryController(QObject):
         clean = tag.strip().lstrip("#")
         if not clean:
             return False
+        had_tag = any(
+            (t.get("tag") if isinstance(t, dict) else str(t)) == clean
+            for t in self._selected.get("tags", [])
+        )
         ok = self._repository.add_tag(self.selectedKey, self._generation, clean)
         if ok:
             tags = [t for t in self._selected.get("tags", []) if not (isinstance(t, dict) and t.get("tag") == clean)]
             tags.append({"tag": clean, "source": "user"})
             tags.sort(key=lambda t: str(t.get("tag", "")) if isinstance(t, dict) else str(t))
             self._selected["tags"] = tags
-            self._upsert_cached_user_tag(clean, delta=1)
+            if not had_tag:
+                self._upsert_cached_user_tag(clean, delta=1)
             self._user_tags_loaded = False
             with self._condition:
                 self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
@@ -1290,6 +1317,7 @@ class LibraryController(QObject):
         if ok:
             tags = [t for t in self._selected.get("tags", []) if t.get("tag") != clean]
             self._selected["tags"] = tags
+            self._upsert_cached_user_tag(clean, delta=-1)
             self._user_tags_loaded = False
             with self._condition:
                 self._pending.append(("user_tags", self._generation, self._selection_serial, ""))
@@ -1499,13 +1527,24 @@ class LibraryController(QObject):
                 elif action == "scan_ai_tags":
                     def on_ai_progress(cur, tot):
                         self._delivered.emit((generation, serial, "ai_scan_progress", (cur, tot), f"AI 자동분류 중… ({cur:,} / {tot:,})"))
-                    count = self._repository.scan_ai_tags(generation, progress_callback=on_ai_progress)
-                    selection = count
-                    message = f"AI 자동분류 완료: 사진 {count:,}장에 태그를 적용했습니다." if count else "새로 분류할 사진이 없거나 분류가 완료되었습니다."
+                    def on_ai_status(msg):
+                        self._delivered.emit((generation, serial, "ai_scan_progress", (0, 0), msg))
+                    try:
+                        count = self._repository.scan_ai_tags(
+                            generation,
+                            progress_callback=on_ai_progress,
+                            status_callback=on_ai_status,
+                        )
+                        selection = count
+                        message = f"AI 자동분류 완료: 사진 {count:,}장에 태그를 적용했습니다." if count else "새로 분류할 사진이 없거나 분류가 완료되었습니다."
+                    except RuntimeError as exc:
+                        selection = None
+                        message = str(exc)
                 elif action == "clear_ai_tags":
                     count = self._repository.clear_ai_tags(generation)
-                    selection = count
-                    message = f"AI 자동분류 태그 {count:,}개를 초기화했습니다."
+                    remaining = self._repository.user_tags(generation)
+                    selection = (count, remaining)
+                    message = f"AI 자동분류 태그 {count:,}개를 초기화했습니다." if count else "초기화할 AI 자동분류 태그가 없습니다."
                 elif action == "select":
                     selection = self._repository.selected(key, generation)
                     if selection is None:
@@ -1579,12 +1618,34 @@ class LibraryController(QObject):
             self.aiScanningChanged.emit()
             self.aiScanProgress.emit(0, 0)
             self._busy = False
+            if selection is None:
+                self._status = message
+                self.changed.emit()
+                return
             self._user_tags_loaded = False
             self._refresh(reload_authors=False, status=message)
             return
         if action == "clear_ai_tags":
             self._busy = False
-            self._user_tags_loaded = False
+            if self._selected and "tags" in self._selected:
+                self._selected["tags"] = [
+                    t for t in self._selected.get("tags", [])
+                    if not (isinstance(t, dict) and t.get("source") == "ai")
+                ]
+            if isinstance(selection, tuple) and len(selection) == 2:
+                _count, remaining = selection
+                self._user_tags = list(remaining) if isinstance(remaining, (list, tuple)) else []
+                self._user_tags_loaded = True
+                self.userTagsChanged.emit()
+                remaining_names = {
+                    (str(item.get("tag", "")) if isinstance(item, dict) else str(item))
+                    for item in self._user_tags
+                }
+                if self._user_tag and self._user_tag not in remaining_names:
+                    self._user_tag = ""
+                    self.userTagFilterChanged.emit()
+            else:
+                self._user_tags_loaded = False
             self._refresh(reload_authors=False, status=message)
             return
         if serial != self._selection_serial:

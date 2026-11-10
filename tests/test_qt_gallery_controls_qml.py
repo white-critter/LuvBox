@@ -414,8 +414,17 @@ def scene():
         invoke(preview_dialog, "open")
         wait(lambda: preview_dialog.property("visible"), "open missing preview dialog")
         assert find("previewMissingBox").property("visible"), "preview missing placeholder should be visible"
+        inline_tag = find("inlineTagField")
+        inline_tag.setProperty("text", "###")
+        assert inline_tag.property("cleanTag") == "", "hashes-only tag must normalize to empty"
+        inline_tag.setProperty("text", "#풍경")
+        assert inline_tag.property("cleanTag") == "풍경", "tag prefix stripped cleanly"
+        invoke(inline_tag, "forceActiveFocus")
+        settle()
+        assert preview_dialog.property("textInputFocused") is True, "inlineTagField focus blocks preview shortcuts"
         invoke(preview_dialog, "close")
         wait(lambda: not preview_dialog.property("visible"), "close missing preview dialog")
+        assert inline_tag.property("text") == "", "closing preview clears inlineTagField"
         click("gallerySelectionToggle")
         click("gallerySelectLoaded")
         assert controller.library.selectedCount == 4

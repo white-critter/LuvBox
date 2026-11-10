@@ -7,6 +7,7 @@ Dialog {
     objectName: "statisticsDialog"
     property var app: null
     property var stats: ({})
+    signal authorSelected(string author)
     title: "라이브러리 통계 요약"
     modal: true
     focus: true
@@ -22,6 +23,16 @@ Dialog {
     x: parent ? Math.max(0, Math.round((parent.width - width) / 2)) : 0
     y: parent ? Math.max(0, Math.round((parent.height - height) / 2)) : 0
     padding: 20
+
+    function syncContent() {
+        if (!contentItem)
+            return
+        contentItem.width = availableWidth
+        contentItem.height = availableHeight
+    }
+
+    onWidthChanged: syncContent()
+    onHeightChanged: syncContent()
 
     background: Rectangle {
         color: "#141414"
@@ -54,6 +65,7 @@ Dialog {
     }
 
     onAboutToShow: {
+        syncContent()
         stats = {}
         if (app && app.library)
             app.library.requestStatistics()
@@ -225,7 +237,9 @@ Dialog {
                         ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                         delegate: Rectangle {
-                            width: ListView.view ? ListView.view.width : 0
+                            width: ListView.view
+                                ? Math.max(0, ListView.view.width - (ListView.view.contentHeight > ListView.view.height ? 12 : 0))
+                                : 0
                             height: 36
                             color: authorHover.containsMouse ? "#242424" : "transparent"
                             radius: 6
@@ -270,8 +284,8 @@ Dialog {
                                     implicitHeight: 26
                                     font.pixelSize: 11
                                     onClicked: {
-                                        if (window && typeof window.applyFilters === "function") {
-                                            window.applyFilters({ author: modelData.author })
+                                        if (modelData && modelData.author) {
+                                            dialog.authorSelected(modelData.author)
                                             dialog.close()
                                         }
                                     }
@@ -333,7 +347,9 @@ Dialog {
                         }
 
                         delegate: RowLayout {
-                            width: ListView.view ? ListView.view.width : 0
+                            width: ListView.view
+                                ? Math.max(0, ListView.view.width - (ListView.view.contentHeight > ListView.view.height ? 12 : 0))
+                                : 0
                             height: 28
                             spacing: 8
 

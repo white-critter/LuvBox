@@ -162,6 +162,27 @@ class FavoritesAndTagsTests(unittest.TestCase):
             self.assertEqual([t["tag"] for t in rebuilt_store.item_tags("flat", "501", 1, "photo")], ["best"])
             self.assertIn(("flat", "501", 1, "photo"), rebuilt_store.get_image_hashes())
 
+        # 3. Test _merge_history when both target and source have pre-1.6.0 media_tags without 'source' column
+        legacy_a = self.root / "legacy_a.sqlite3"
+        legacy_b = self.root / "legacy_b.sqlite3"
+        legacy_schema = (
+            "CREATE TABLE media_tags ("
+            "folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL, "
+            "media_type TEXT NOT NULL, tag TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT '', "
+            "PRIMARY KEY (folder_mode, tweet_id, num, media_type, tag))"
+        )
+        with closing(sqlite3.connect(legacy_a)) as db_a, closing(sqlite3.connect(legacy_b)) as db_b:
+            with db_a:
+                db_a.execute(legacy_schema)
+                db_a.execute("INSERT INTO media_tags VALUES ('flat','701',1,'photo','풍경','2026-11-09')")
+            with db_b:
+                db_b.execute(legacy_schema)
+                db_b.execute("INSERT INTO media_tags VALUES ('flat','702',1,'photo','인물','2026-11-09')")
+            with db_a:
+                _merge_history(db_a, db_b)
+            rows = db_a.execute("SELECT tweet_id, tag, source FROM media_tags ORDER BY tweet_id").fetchall()
+            self.assertEqual(rows, [("701", "풍경", "user"), ("702", "인물", "user")])
+
 
 if __name__ == "__main__":
     unittest.main()
