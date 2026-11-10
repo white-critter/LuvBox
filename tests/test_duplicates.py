@@ -174,6 +174,34 @@ class DuplicateTests(unittest.TestCase):
         self.assertEqual(len(copy_keys), 2)
         self.assertTrue(all("402" not in k for k in copy_keys))
 
+    def test_photo_records_for_scan_and_chunked_save(self):
+        p1 = self.create_image("s_501_1.jpg", "red")
+        p2 = self.create_image("s_502_1.jpg", "blue")
+        self.store.record_media("flat", {"tweet_id": "501", "num": 1, "type": "photo", "author": "a"}, p1)
+        self.store.record_media("flat", {"tweet_id": "502", "num": 1, "type": "photo", "author": "b"}, p2)
+
+        # photo_records_for_scan should return both active photos
+        records = self.store.photo_records_for_scan()
+        self.assertEqual(len(records), 2)
+        self.assertEqual({r["tweet_id"] for r in records}, {"501", "502"})
+        self.assertTrue(all(r["media_type"] == "photo" and r["path"] for r in records))
+
+        # Deleted item (path='') should be excluded
+        with self.store._db:
+            self.store._db.execute("UPDATE media SET path='' WHERE tweet_id='502'")
+        records_after = self.store.photo_records_for_scan()
+        self.assertEqual(len(records_after), 1)
+        self.assertEqual(records_after[0]["tweet_id"], "501")
+
+        # save_clusters with multiple groups
+        self.store.save_image_hashes([
+            ("flat", "501", 1, "photo", 100, "h1", "0000000000000001"),
+            ("flat", "502", 1, "photo", 100, "h2", "0000000000000002"),
+        ])
+        group = [("flat", "501", 1, "photo"), ("flat", "502", 1, "photo")]
+        saved = self.store.save_clusters([group])
+        self.assertEqual(saved, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

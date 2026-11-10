@@ -417,10 +417,14 @@ class LibraryRepository:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 store._folder_cache = {}
                 cached = store.get_image_hashes()
-                records = store.records(limit=10000, media_type="photo", include_deleted=False)
+                records = (store.photo_records_for_scan()
+                           if hasattr(store, "photo_records_for_scan")
+                           else store.records(limit=10000, media_type="photo", include_deleted=False))
                 total_records = len(records)
                 new_hashes = []
                 stale_hashes = []
+                if progress_callback:
+                    progress_callback(0, total_records)
                 for idx, rec in enumerate(records):
                     if self.current(generation) is None:
                         return 0

@@ -2034,7 +2034,10 @@ ApplicationWindow {
                             }
                             Label {
                                 text: "×"
-                                font.pixelSize: 12
+                                font.pixelSize: 13
+                                font.bold: true
+                                leftPadding: 3
+                                rightPadding: 3
                                 color: removeMouse.containsMouse ? "#ff8791" : "#b9afb1"
                                 MouseArea {
                                     id: removeMouse
@@ -2467,9 +2470,14 @@ ApplicationWindow {
         parent: Overlay.overlay
         modal: true
         focus: true
+        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         anchors.centerIn: parent
         width: 320
         padding: 16
+        onOpened: {
+            batchTagInput.text = ""
+            batchTagInput.forceActiveFocus()
+        }
         background: Rectangle {
             color: "#1a1a1a"
             radius: 12

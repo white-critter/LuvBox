@@ -2130,6 +2130,14 @@ class HistoryStore:
                 for r in rows}
 
     @_safe
+    def photo_records_for_scan(self) -> list[dict]:
+        """Lightweight scan list of all active photo records without joins or limit caps."""
+        return self._read_rows(
+            "SELECT folder_mode, tweet_id, num, media_type, path, filename, filesize "
+            "FROM media WHERE media_type='photo' AND path != '' ORDER BY rowid ASC"
+        )
+
+    @_safe
     def save_clusters(self, clusters: list[list[tuple]]) -> int:
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return 0
@@ -2144,11 +2152,12 @@ class HistoryStore:
                     updates.append((cluster_id, ident[0], ident[1], ident[2], ident[3]))
                 cluster_id += 1
             if updates:
-                self._db.executemany(
-                    "UPDATE image_hashes SET cluster_id=? "
-                    "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                    updates
-                )
+                for i in range(0, len(updates), 1000):
+                    self._db.executemany(
+                        "UPDATE image_hashes SET cluster_id=? "
+                        "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                        updates[i:i + 1000]
+                    )
         return len(updates)
 
     @_safe

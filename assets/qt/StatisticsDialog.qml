@@ -161,6 +161,7 @@ Dialog {
                 border.color: "#2e2e2e"
                 Column {
                     anchors.centerIn: parent
+                    width: Math.min(parent.width - 12, implicitWidth)
                     spacing: 4
                     Label {
                         text: "미디어 구성"
@@ -179,6 +180,9 @@ Dialog {
                         font.pixelSize: 12
                         color: "#88b0ea"
                         anchors.horizontalCenter: parent.horizontalCenter
+                        elide: Text.ElideRight
+                        width: Math.min(parent.width, implicitWidth)
+                        horizontalAlignment: Text.AlignHCenter
                     }
                 }
             }
@@ -358,7 +362,7 @@ Dialog {
                                 text: Number(modelData.count || 0).toLocaleString() + "개"
                                 font.pixelSize: 12
                                 color: "#f4f1f1"
-                                Layout.preferredWidth: 48
+                                Layout.preferredWidth: Math.max(54, implicitWidth)
                                 horizontalAlignment: Text.AlignRight
                             }
                         }

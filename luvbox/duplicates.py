@@ -162,11 +162,16 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6) -> list[lis
 
     # 3. Near matches across distinct dhash buckets when max_distance > 0
     if max_distance > 0 and len(by_dhash) > 1:
-        unique_dhashes = list(by_dhash.items())
-        for i, (dh1, idx1) in enumerate(unique_dhashes):
+        unique_dhashes = []
+        for dh, idx in by_dhash.items():
+            try:
+                unique_dhashes.append((int(dh, 16), idx))
+            except ValueError:
+                continue
+        for i, (v1, idx1) in enumerate(unique_dhashes):
             for j in range(i + 1, len(unique_dhashes)):
-                dh2, idx2 = unique_dhashes[j]
-                if hamming_distance(dh1, dh2) <= max_distance:
+                v2, idx2 = unique_dhashes[j]
+                if (v1 ^ v2).bit_count() <= max_distance:
                     union(idx1, idx2)
 
     clusters_by_root: dict[int, list[dict]] = {}
