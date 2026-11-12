@@ -133,8 +133,10 @@ def main(argv=None):
     if options.action == "record":
         record()
     else:
-        executable = ROOT / "release" / f"LuvBox-{__version__}" / f"LuvBox-{__version__}.exe"
-        seal(executable)
+        # The application folder PyInstaller made; the launcher packs it afterwards.
+        from tools.build_launcher import APPLICATION, INNER_NAME
+
+        seal(ROOT / APPLICATION / INNER_NAME)
     print(f"Build input record {options.action} complete.")
 
 

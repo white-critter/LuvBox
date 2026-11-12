@@ -175,6 +175,30 @@ class BuildInputPackagingTests(unittest.TestCase):
         self.assertIn("--specpath build\\spec", build)
         self.assertIn("tools/build_snapshot.py", package_release.SOURCE_FILES)
 
+    def test_build_packs_one_program_after_the_seal_and_checks_that_exact_file(self):
+        root = Path(__file__).resolve().parents[1]
+        build = (root / "build.ps1").read_text(encoding="utf-8-sig")
+        seal = build.index("'tools\\build_snapshot.py' 'seal'")
+        pack = build.index("'tools\\build_launcher.py'")
+        startup = build.index("'tools\\check_qt_startup.py' $single")
+        download = build.index("'tools\\check_download_startup.py' $single")
+        publish = build.rindex("'tools\\package_release.py'")
+        self.assertLess(seal, pack)
+        self.assertLess(pack, startup)
+        self.assertLess(startup, download)
+        self.assertLess(download, publish)
+        # PyInstaller's folder is an intermediate under build/, never a release file.
+        self.assertIn("--name LuvBox `", build)
+        self.assertIn("--distpath build\\app", build)
+        self.assertNotIn("--distpath release", build)
+        # The checks unpack into a folder of their own, removed afterwards.
+        self.assertIn('"build\\startup-check-$version"', build)
+        for name in ("tools/build_launcher.py", "tools/launcher/Launcher.cs", "tools/launcher/app.manifest",
+                     "tools/launcher/splash.ini", "tools/draw_splash.py", "assets/splash/card.png",
+                     "assets/splash/glow.png", "assets/splash/mark.png"):
+            self.assertIn(name, package_release.SOURCE_FILES)
+            self.assertTrue((root / name).is_file(), name)
+
     def test_package_refuses_missing_pinned_inputs_before_prepare_or_output(self):
         with tempfile.TemporaryDirectory(prefix="luvbox-package-preflight-") as folder:
             root = Path(folder)
@@ -196,7 +220,7 @@ class StartupReportPackagingTests(unittest.TestCase):
         root = patch.object(package_release, "ROOT", self.root)
         root.start()
         self.addCleanup(root.stop)
-        self.executable = self.root / "LuvBox-test.exe"
+        self.executable = self.root / "LuvBox.exe"
         self.executable.write_bytes(b"synthetic frozen executable")
         self.report_path = self.root / "build" / f"qt-startup-{package_release.__version__}.json"
         self.report_path.parent.mkdir()
@@ -206,6 +230,7 @@ class StartupReportPackagingTests(unittest.TestCase):
         report = {
             "ok": True,
             "frozen": True,
+            "launcher": True,
             "isolated": True,
             "window_visible": True,
             "window_exposed": True,
@@ -222,7 +247,7 @@ class StartupReportPackagingTests(unittest.TestCase):
         }
         report.update(changes)
         self.report_path.write_text(json.dumps(report), encoding="utf-8")
-        download = {"ok": True, "frozen": True, "isolated": True, "managed_cookies": True,
+        download = {"ok": True, "frozen": True, "launcher": True, "isolated": True, "managed_cookies": True,
                     "authentication_or_network": False, "prepared_requests": 1,
                     "extractor": "TwitterLikesExtractor", "version": package_release.__version__,
                     "executable_sha256": hashlib.sha256(self.executable.read_bytes()).hexdigest()}
@@ -237,8 +262,10 @@ class StartupReportPackagingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "startup check before packaging"):
             package_release._require_startup_report(self.executable)
 
-    def test_failed_or_unfrozen_startup_report_blocks_packaging(self):
-        for changes in ({"ok": False}, {"frozen": False}):
+    def test_failed_unfrozen_or_directly_started_report_blocks_packaging(self):
+        # "launcher": False is a check of the unpacked program alone, which
+        # proves nothing about the single file that is published.
+        for changes in ({"ok": False}, {"frozen": False}, {"launcher": False}):
             with self.subTest(changes=changes):
                 self.write_report(**changes)
                 with self.assertRaisesRegex(ValueError, "did not pass"):
@@ -278,7 +305,7 @@ class StartupReportPackagingTests(unittest.TestCase):
     def test_direct_packaging_rejects_a_legacy_summary_without_lifecycle_results(self):
         self.write_report()
         report = json.loads(self.report_path.read_text(encoding="utf-8"))
-        report = {name: report[name] for name in ("ok", "frozen", "version", "executable_sha256")}
+        report = {name: report[name] for name in ("ok", "frozen", "launcher", "version", "executable_sha256")}
         self.report_path.write_text(json.dumps(report), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "did not pass"):
             package_release._require_startup_report(self.executable)
@@ -290,7 +317,7 @@ class StartupReportPackagingTests(unittest.TestCase):
             package_release._require_startup_report(self.executable)
 
     def test_failed_or_stale_download_report_blocks_direct_packaging(self):
-        for change in ({"ok": False}, {"authentication_or_network": True},
+        for change in ({"ok": False}, {"launcher": False}, {"authentication_or_network": True},
                        {"prepared_requests": True}, {"version": "0.0.0"},
                        {"executable_sha256": "another executable"}):
             with self.subTest(change=change):
@@ -310,7 +337,7 @@ class ReleaseManifestTests(unittest.TestCase):
         root.start()
         self.addCleanup(root.stop)
         self.name = "LuvBox-test"
-        self.application = self.root / "release" / self.name
+        self.application = self.root / "build" / "app" / self.name
         self.application.mkdir(parents=True)
         self.toc = self.root / "build" / "onedir" / self.name / "COLLECT-00.toc"
         self.toc.parent.mkdir(parents=True)

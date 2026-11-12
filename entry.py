@@ -14,8 +14,11 @@ def _check_download_start() -> dict:
     builds must exercise those too, without reading a real saved connection.
     """
     from luvbox import __version__
+    from luvbox.launcher import launcher_path
 
     report = {"ok": False, "version": __version__, "frozen": bool(getattr(sys, "frozen", False)),
+              # Started by LuvBox.exe (the launcher), as a release is, not directly.
+              "launcher": launcher_path() is not None,
               "isolated": True, "authentication_or_network": False,
               "managed_cookies": False, "prepared_requests": 0}
 

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -21,7 +22,7 @@ class DownloadStartupGateTests(unittest.TestCase):
         self.destination = self.root / "reports" / "download.json"
 
     def report(self):
-        return {"ok": True, "frozen": True, "isolated": True, "managed_cookies": True,
+        return {"ok": True, "frozen": True, "launcher": True, "isolated": True, "managed_cookies": True,
                 "authentication_or_network": False, "prepared_requests": 1,
                 "extractor": "TwitterLikesExtractor", "version": gate.__version__}
 
@@ -30,7 +31,9 @@ class DownloadStartupGateTests(unittest.TestCase):
             self.assertFalse(self.destination.exists())
             self.assertEqual(arguments, [str(self.executable.resolve()), "--download-smoke",
                                          str(self.destination.resolve())])
-            self.assertEqual(options["timeout"], 30)
+            self.assertEqual(options["timeout"], 240)
+            self.assertNotEqual(options["env"]["LOCALAPPDATA"], os.environ.get("LOCALAPPDATA"))
+            self.assertEqual(options["env"]["LUVBOX_LAUNCHER_SILENT"], "1")
             self.destination.write_text(json.dumps(report), encoding="utf-8")
             return subprocess.CompletedProcess(arguments, code, b"", b"")
         return run
@@ -42,7 +45,7 @@ class DownloadStartupGateTests(unittest.TestCase):
         self.assertEqual(report, json.loads(self.destination.read_text(encoding="utf-8")))
 
     def test_incomplete_or_nonzero_result_cannot_be_bound(self):
-        changes = [{name: False} for name in ("ok", "frozen", "isolated", "managed_cookies")]
+        changes = [{name: False} for name in ("ok", "frozen", "launcher", "isolated", "managed_cookies")]
         changes += [{"authentication_or_network": True}, {"prepared_requests": True},
                     {"error": "OSError"}, {"initialization_error": {"type": "FileNotFoundError"}},
                     {"extractor": "FakeExtractor"}, {"version": "0.0.0"}, {}]

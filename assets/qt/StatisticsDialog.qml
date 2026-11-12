@@ -299,7 +299,7 @@ Dialog {
                             Label {
                                 anchors.centerIn: parent
                                 visible: authorList.count === 0
-                                text: dialog.loaded ? "작성자 기록이 없습니다." : (dialog.problem.length ? "" : "통계를 불러오는 중…")
+                                text: dialog.loaded ? "아직 작성자 기록이 없어요" : (dialog.problem.length ? "" : "통계를 불러오는 중")
                                 color: "#777777"
                                 font.pixelSize: 13
                             }
@@ -390,7 +390,7 @@ Dialog {
                             Label {
                                 anchors.centerIn: parent
                                 visible: monthlyList.count === 0
-                                text: dialog.loaded ? "월별 기록이 없습니다." : (dialog.problem.length ? "" : "통계를 불러오는 중…")
+                                text: dialog.loaded ? "아직 월별 기록이 없어요" : (dialog.problem.length ? "" : "통계를 불러오는 중")
                                 color: "#777777"
                                 font.pixelSize: 13
                             }

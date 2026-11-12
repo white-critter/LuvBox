@@ -6,7 +6,7 @@ This inventory covers the Windows Qt Quick runtime bundled with LuvBox 1.2.0. It
 
 Run `.venv\Scripts\python.exe tools\qt\prepare_sources.py` from the project root. `build.ps1` also runs this source-preparation step. Missing archives are downloaded from the official URLs pinned in `sources.json`; existing archives are reused only after their SHA256 matches. FFmpeg and zlib are additionally matched to the SHA1 values in Qt's tagged Windows provisioning recipes. The acquisition limit is 200 MiB total and 64 MiB per archive.
 
-- Generated upstream source archives: `tools/qt/sources/`, included in the release ZIP as `source/tools/qt/sources/`.
+- Generated upstream source archives: `tools/qt/sources/`, included in each release's `LuvBox-<version>-source-licenses.zip` (published beside `LuvBox.exe`) as `source/tools/qt/sources/`.
 - Generated original license, copyright, notice, `LICENSES/`, `REUSE.toml` and `qt_attribution.json` files: `tools/qt/notices/`, included as `licenses/Qt-upstream/<component>/<original-relative-path>`.
 - Tracked acquisition script, pinned manifest, this inventory and the application build hooks: included under `source/` in the ZIP.
 
@@ -57,9 +57,9 @@ The optional `opengl32sw.dll` Mesa/LLVM software OpenGL runtime is also excluded
 
 ## Distribution handoff
 
-Qt6Core uses the unversioned ICU API provided by supported Windows installations. Build analysis puts System32 first so unrelated PATH tools cannot substitute a versioned Poppler ICU. Packaging rejects `icuuc.dll` and `icudt78.dll` from the application bundle; Windows system ICU is not redistributed. The build also requires an isolated native-window startup from the exact frozen executable before creating its ZIP.
+Qt6Core uses the unversioned ICU API provided by supported Windows installations. Build analysis puts System32 first so unrelated PATH tools cannot substitute a versioned Poppler ICU. Packaging rejects `icuuc.dll` and `icudt78.dll` from the application bundle; Windows system ICU is not redistributed. The build also requires an isolated native-window startup from the exact `LuvBox.exe` that ships before it makes the release files.
 
-The sources and original notices above are locally supplied with the ZIP, rather than left as an unspecified future download. For public distribution, retain them with the same binary release, preserve the dependency license choices and user library-replacement/source rights, and publish matching source access alongside the binary download. This inventory does not certify every third-party legal obligation or replace review of the applicable original terms. Revisit it when updating PySide/Qt, changing codec options or adding a new runtime module; a new version requires new source archives and hashes.
+The sources and original notices above are supplied in the same release as the program (the source-licenses ZIP), rather than left as an unspecified future download. For public distribution, retain them with the same binary release, preserve the dependency license choices and user library-replacement/source rights, and publish matching source access alongside the binary download. This inventory does not certify every third-party legal obligation or replace review of the applicable original terms. Revisit it when updating PySide/Qt, changing codec options or adding a new runtime module; a new version requires new source archives and hashes.
 
 Official references:
 

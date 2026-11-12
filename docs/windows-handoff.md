@@ -49,26 +49,25 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 
 미리보기 확인: 갤러리 사진과 저장 전 확인창이 앱 창을 넓게 사용하는지 확인합니다. **창 최대화 / 창 복원**은 앱 전체 크기를 바꾸며, 갤러리 **본문 보기 / 본문 접기**는 사진 아래 게시물 본문을 펼치고 접습니다. 작은 창에서도 닫기·저장·건너뛰기 동작이 보여야 합니다.
 
-## EXE·ZIP 빌드
+## EXE 빌드
 
 ```powershell
 .\build.ps1
 ```
 
-이 스크립트는 고정 입력을 확인하고 앱을 빌드한 뒤 실제 frozen EXE에 다음 검사를 수행합니다.
+이 스크립트는 고정 입력을 확인하고 앱을 빌드해 실행기와 함께 `LuvBox.exe` 하나로 묶은 뒤, 그 파일을 실행기부터 실행해 다음 검사를 수행합니다.
 
 - Qt 네이티브 창, 갤러리 썸네일·사진 미리보기, 설정·연결창과 종료.
 - 실제 X 추출기의 SSL·쿠키 초기화와 네트워크 없는 첫 요청 준비.
 
-둘 중 하나라도 실패하면 ZIP을 만들지 않습니다. `tools/check_qt_startup.py`와 `tools/check_download_startup.py`가 남긴 버전·EXE SHA-256 보고서는 직접 패키징에도 필요합니다.
+둘 중 하나라도 실패하면 배포 파일을 만들지 않습니다. `tools/check_qt_startup.py`와 `tools/check_download_startup.py`가 남긴 버전·EXE SHA-256 보고서는 직접 패키징에도 필요합니다. 검사는 실행기가 `build/startup-check-<버전>`에 풀도록 실행하므로 이 PC의 실제 LuvBox 데이터는 쓰지 않습니다.
 
-산출물:
+산출물(이름은 [개발 안내](development.md)의 현재 버전 기준):
 
-- `release/LuvBox-1.3.0/LuvBox-1.3.0.exe`
-- 같은 폴더의 `_internal/`
-- `release/LuvBox-1.3.0.zip`
-- `release/SHA256-1.3.0.txt`
+- `release/LuvBox.exe`: 이 파일 하나로 실행
+- `release/SHA256-<버전>.txt`
+- `release/LuvBox-<버전>-source-licenses.zip`: 소스·라이선스·사용 안내
 
-ZIP의 EXE·소스·라이선스와 체크섬을 확인하고 새 경로에 풀어 실행합니다. EXE만 옮기지 않습니다. ZIP의 소스에는 사용자 설정·세션·쿠키·미디어·기록 DB가 없어야 합니다. Qt/PySide6와 재생 구성요소의 소스·고지는 [Qt 배포 자료](../tools/qt/README.md)를 함께 보관합니다.
+`LuvBox.exe`의 체크섬을 확인하고, 한글·공백이 있는 폴더에 두고 실행해 봅니다. 처음 실행은 앱을 `%LOCALAPPDATA%\LuvBox\app\<버전>\`에 한 번 풉니다. 소스 ZIP에는 사용자 설정·세션·쿠키·미디어·기록 DB가 없어야 합니다. Qt/PySide6와 재생 구성요소의 소스·고지는 [Qt 배포 자료](../tools/qt/README.md)를 같은 릴리스에 함께 올립니다.
 
 최종 실행·검사 수·배포 결과는 [검증 기록](verification.md)에 갱신합니다. 이전 검증 문서는 당시 버전의 기록으로 보존하며 현재 실행 결과로 대신하지 않습니다.

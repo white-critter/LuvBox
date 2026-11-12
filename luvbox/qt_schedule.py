@@ -11,7 +11,7 @@ from .settings import app_directory
 
 
 _MESSAGES = {
-    "refresh": "예약 정보를 확인하는 중입니다.",
+    "refresh": "예약 정보를 확인하는 중",
     "create": "자동 저장 예약을 만드는 중입니다.",
     "update": "자동 저장 시간을 변경하는 중입니다.",
     "remove": "자동 저장 예약을 제거하는 중입니다.",
@@ -117,9 +117,9 @@ class ScheduleController(QObject):
     @Property(str, notify=changed)
     def summary(self):
         if not self._known:
-            return "예약 정보를 다시 확인해 주세요." if self._error else "자동 저장 예약을 확인하는 중입니다."
+            return "예약 정보를 다시 확인해 주세요." if self._error else "자동 저장 예약을 확인하는 중"
         if not self.registered:
-            return "자동 저장 예약이 없습니다."
+            return "아직 자동 저장 예약이 없어요"
         schedule_time = "매일 " + self.time if self.time else "실행 시각 확인 필요"
         state = "실행 중" if self.running else "사용 중" if self.enabled else "사용 안 함"
         version = "현재 버전" if self.current else "이전 버전"

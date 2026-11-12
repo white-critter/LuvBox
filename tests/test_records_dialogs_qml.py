@@ -225,7 +225,7 @@ def scene():
                 reveal(find(name))
                 assert find(name).property("visible"), name
             assert "(2)" in find("preferencesUnsavedButton").property("text")
-            assert "예약이 없습니다" in find("preferencesScheduleSummary").property("text")
+            assert "예약이 없어요" in find("preferencesScheduleSummary").property("text")
             shot(f"{tag}-settings-advanced")
             # While a save runs the records stay readable; only the changeable options are locked.
             controller._download._running = True
@@ -362,7 +362,7 @@ def scene():
             click("preferencesScheduleButton")
             schedule = find("scheduleDialog")
             wait(lambda: schedule.property("visible"), "schedule dialog")
-            assert "예약이 없습니다" in find("scheduleSummary").property("text")
+            assert "예약이 없어요" in find("scheduleSummary").property("text")
             save = find("scheduleSaveButton")
             reveal(save)
             shot(f"{tag}-schedule")

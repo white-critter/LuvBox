@@ -1,5 +1,6 @@
 """A release cannot pair a stale executable with newly edited project sources."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,8 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from tools import build_snapshot, package_release
+from luvbox import launcher, updater
+from tools import build_launcher, build_snapshot, package_release
 
 
 class BuildSnapshotTests(unittest.TestCase):
@@ -31,13 +33,28 @@ class BuildSnapshotTests(unittest.TestCase):
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("original project input", encoding="utf-8")
-        self.executable = self.root / "release" / "LuvBox-test.exe"
-        self.executable.parent.mkdir()
+        self.executable = self.root / "build" / "app" / "LuvBox" / "LuvBox.exe"
+        self.executable.parent.mkdir(parents=True)
         self.executable.write_bytes(b"synthetic frozen executable")
+        self.single = self.root / "build" / "single" / "LuvBox.exe"
 
     def complete_build(self):
         build_snapshot.record(self.root)
         build_snapshot.seal(self.executable, self.root)
+
+    def pack_single(self):
+        """The one program a build makes from the application folder (a stand-in launcher in front)."""
+        files = build_launcher.application_files(self.executable.parent)
+        self.single.parent.mkdir(parents=True, exist_ok=True)
+        archive = self.single.with_suffix(".zip")
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as output:
+            for name, path in files:
+                output.write(path, name)
+        payload = archive.read_bytes()
+        archive.unlink()
+        program = b"MZ" + b"stand-in launcher".ljust(8190, b"\0")
+        self.single.write_bytes(program + payload + launcher.make_footer(
+            len(program), len(payload), hashlib.sha256(payload).digest(), build_snapshot.__version__))
 
     def test_unchanged_completed_build_can_be_packaged(self):
         self.complete_build()
@@ -61,11 +78,8 @@ class BuildSnapshotTests(unittest.TestCase):
             build_snapshot.seal(self.executable, self.root)
 
     def test_direct_packaging_refuses_stale_executable_before_startup_or_archive(self):
-        name = f"LuvBox-{build_snapshot.__version__}"
-        self.executable = self.root / "release" / name / f"{name}.exe"
-        self.executable.parent.mkdir()
-        self.executable.write_bytes(b"synthetic frozen executable")
         self.complete_build()
+        self.pack_single()
         (self.root / "luvbox/core.py").write_text("new code with the same version", encoding="utf-8")
         with patch.object(package_release, "ROOT", self.root), \
                 patch.object(package_release, "require_inputs"), \
@@ -74,13 +88,9 @@ class BuildSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "sources, build inputs or dependencies changed"):
                 package_release.package()
         startup.assert_not_called()
-        self.assertFalse((self.root / "release" / f"{name}.zip").exists())
+        self.assertEqual(list((self.root / "release").iterdir()), [])
 
-    def test_changes_during_compression_preserve_previous_zip_and_remove_staging(self):
-        name = f"LuvBox-{build_snapshot.__version__}"
-        self.executable = self.root / "release" / name / f"{name}.exe"
-        self.executable.parent.mkdir()
-        self.executable.write_bytes(b"synthetic frozen executable")
+    def redistribution_fixture(self):
         runtime = self.executable.parent / "_internal/Qt6Core.dll"
         runtime.parent.mkdir()
         runtime.write_bytes(b"built runtime input")
@@ -94,38 +104,99 @@ class BuildSnapshotTests(unittest.TestCase):
             path = self.root / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"synthetic redistribution material")
-        destination = self.root / "release" / f"{name}.zip"
-        checksums = self.root / "release" / f"SHA256-{build_snapshot.__version__}.txt"
         distribution = SimpleNamespace(_path=self.root / "metadata",
                                        locate_file=lambda _: self.root / "gallery_dl")
+        return runtime, manifest, distribution
+
+    def packaging(self, manifest, distribution):
+        patches = (patch.object(package_release, "ROOT", self.root),
+                   patch.object(package_release, "require_inputs"),
+                   patch.object(package_release.subprocess, "run"),
+                   patch.object(package_release, "_require_startup_report"),
+                   patch.object(package_release, "_collect_manifest", return_value=manifest),
+                   patch.object(package_release, "_runtime_files", return_value=[]),
+                   patch.object(package_release, "qt_source_files", return_value=[]),
+                   patch.object(package_release.importlib.metadata, "distribution", return_value=distribution))
+        for item in patches:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_a_release_is_the_three_files_an_installed_version_looks_for(self):
+        _runtime, manifest, distribution = self.redistribution_fixture()
+        self.complete_build()
+        self.pack_single()
+        self.packaging(manifest, distribution)
+        package_release.package()
+        version = build_snapshot.__version__
+        release = self.root / "release"
+        # Literal names: an installed 1.8.0 asks GitHub for exactly these.
+        self.assertEqual(sorted(path.name for path in release.iterdir()),
+                         sorted(["LuvBox.exe", f"SHA256-{version}.txt", f"LuvBox-{version}-source-licenses.zip"]))
+        self.assertEqual((release / "LuvBox.exe").read_bytes(), self.single.read_bytes())
+        text = (release / f"SHA256-{version}.txt").read_bytes().decode("ascii")
+        rows = updater.parse_checksums(text)
+        self.assertEqual(rows["LuvBox.exe"], hashlib.sha256(self.single.read_bytes()).hexdigest())
+        self.assertEqual(rows[f"LuvBox-{version}-source-licenses.zip"],
+                         hashlib.sha256((release / f"LuvBox-{version}-source-licenses.zip").read_bytes()).hexdigest())
+        self.assertEqual(text.count("\n"), 2)
+        self.assertNotIn("\r", text)
+        with zipfile.ZipFile(release / f"LuvBox-{version}-source-licenses.zip") as archive:
+            names = archive.namelist()
+        # Sources, notices and the guide; the application itself is only in LuvBox.exe.
+        self.assertIn("사용안내.txt", names)
+        self.assertIn("LICENSE", names)
+        self.assertIn("source/entry.py", names)
+        self.assertFalse(any(name.endswith((".exe", ".dll")) for name in names))
+
+    def test_a_program_that_does_not_hold_the_checked_application_is_not_published(self):
+        _runtime, manifest, distribution = self.redistribution_fixture()
+        self.complete_build()
+        self.pack_single()
+        packed = self.single.read_bytes()
+        # Rebuilt from another folder: the same version, one file different.
+        (self.executable.parent / "_internal/Qt6Core.dll").write_bytes(b"another runtime input")
+        self.pack_single()
+        other = self.single.read_bytes()
+        (self.executable.parent / "_internal/Qt6Core.dll").write_bytes(b"built runtime input")
+        self.assertNotEqual(packed, other)
+        self.packaging(manifest, distribution)
+        with self.assertRaisesRegex(ValueError, "does not hold the built application"):
+            package_release.package()
+        self.single.write_bytes(self.executable.read_bytes())
+        with self.assertRaisesRegex(ValueError, "not built for this version"):
+            package_release.package()
+        self.assertEqual(list((self.root / "release").iterdir()), [])
+
+    def test_changes_during_compression_preserve_previous_release_and_remove_staging(self):
+        runtime, manifest, distribution = self.redistribution_fixture()
+        self.complete_build()
+        self.pack_single()
+        version = build_snapshot.__version__
+        release = self.root / "release"
+        release.mkdir()
+        previous = {release / "LuvBox.exe": b"previous complete program",
+                    release / f"LuvBox-{version}-source-licenses.zip": b"previous complete sources",
+                    release / f"SHA256-{version}.txt": b"previous checksums"}
+        self.packaging(manifest, distribution)
         write = zipfile.ZipFile.write
         for changed in (self.root / "luvbox/core.py", runtime):
             with self.subTest(changed=changed.name):
-                self.complete_build()
                 original = changed.read_bytes()
-                destination.write_bytes(b"previous complete release")
-                checksums.write_bytes(b"previous checksums")
+                for path, data in previous.items():
+                    path.write_bytes(data)
 
                 def edit_during_write(archive, filename, arcname=None, **kwargs):
                     result = write(archive, filename, arcname, **kwargs)
-                    if Path(filename) == self.executable:
+                    if Path(filename) == self.root / "LICENSE":
                         changed.write_bytes(b"edited while ZIP compression is running")
                     return result
 
-                with patch.object(package_release, "ROOT", self.root), \
-                        patch.object(package_release, "require_inputs"), \
-                        patch.object(package_release.subprocess, "run"), \
-                        patch.object(package_release, "_require_startup_report"), \
-                        patch.object(package_release, "_collect_manifest", return_value=manifest), \
-                        patch.object(package_release, "_runtime_files", return_value=[]), \
-                        patch.object(package_release, "qt_source_files", return_value=[]), \
-                        patch.object(package_release.importlib.metadata, "distribution", return_value=distribution), \
-                        patch.object(zipfile.ZipFile, "write", edit_during_write):
+                with patch.object(zipfile.ZipFile, "write", edit_during_write):
                     with self.assertRaisesRegex(ValueError, "rebuild"):
                         package_release.package()
-                self.assertEqual(destination.read_bytes(), b"previous complete release")
-                self.assertEqual(checksums.read_bytes(), b"previous checksums")
-                self.assertEqual(list(destination.parent.glob(".release-*.zip")), [])
+                for path, data in previous.items():
+                    self.assertEqual(path.read_bytes(), data)
+                self.assertEqual(list(release.glob(".release-*")), [])
                 changed.write_bytes(original)
 
     def test_new_python_module_and_dependency_version_are_detected(self):

@@ -222,7 +222,11 @@ def _fixture(directory):
 def run(destination):
     destination = Path(destination).resolve()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    from .launcher import launcher_path
+
     report = {"ok": False, "version": __version__, "frozen": bool(getattr(sys, "frozen", False)),
+              # Started by LuvBox.exe (the launcher), as a release is, not directly.
+              "launcher": launcher_path() is not None,
               "stage": "qt-import", "isolated": True, "native_scheduler_access": False,
               "authentication_or_network": False}
     previous_environment = {name: os.environ.get(name) for name in ("LOCALAPPDATA", "APPDATA", "QT_QPA_PLATFORM")}

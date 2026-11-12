@@ -1,4 +1,4 @@
-# LuvBox 1.7.0 개발 안내
+# LuvBox 1.8.0 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -34,7 +34,9 @@ Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사�
 | `activity.py`, `run_history.py`, `unsaved.py`, `qt_records.py` | 실행 결과 기록부, 실행 기록 병합 조회, 저장 못 한 미디어 기록부와 설정 › 고급의 목록·다시 저장 |
 | `preview.py`, `thumbcache.py`, `media.py` | 로컬 미리보기·캐시와 GIF 변환 |
 | `metadata.py`, `process_limits.py`, `protection.py` | 출처·작성자 기록, 외부 도구 제한과 X 요청 보호 |
-| `selftest.py`, `qt_smoke.py`, `tools/check_*startup.py`, `tools/package_release.py` | 격리 검사와 소스·라이선스 배포 패키징 |
+| `tools/launcher/Launcher.cs`, `tools/build_launcher.py`, `launcher.py`, `tools/draw_splash.py`, `assets/splash/` | `LuvBox.exe` 실행기(한 번 풀기·시작 화면), 한 파일로 묶기와 꼬리표 형식, 시작 화면 그림 |
+| `updater.py`, `qt_updater.py`, `assets/qt/UpdateNotice.qml` | 최신 릴리스 확인, 받기·검증·교체, 알림과 설정의 업데이트 항목 |
+| `selftest.py`, `qt_smoke.py`, `tools/check_*startup.py`, `tools/package_release.py` | 격리 검사와 배포 파일(단일 EXE·체크섬·소스·라이선스 ZIP) 만들기 |
 
 Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트워크 작업은 작업 스레드나 별도 worker에서 처리하고, 신호·큐·JSON 메시지로 결과를 전달합니다. 이전 작업의 썸네일 결과는 generation으로 구분하며, 진행 이벤트는 제어 이벤트의 순서를 보존하면서 합칩니다. 종료 시 실행 중인 작업과 파일 핸들을 정리합니다.
 
@@ -60,9 +62,36 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 
 휠·버튼 확대/축소, 드래그 이동, 화면 맞춤과 지원하는 정지 사진의 원본 배율을 제공합니다. 이전·다음은 현재 검색·정렬 순서를 따르고 끝에서 순환하지 않습니다. 입력란의 방향키를 가로채지 않으며 새 파일·닫기·숨김에서 확대·이동을 초기화합니다. 저장 화면의 자세히 보기는 최근 실제 저장 파일의 첫 프레임·작성자·본문·게시 시각·원문을 표시합니다. 숨겨진 동안 디코딩하지 않고 현재 요청 하나와 가장 최근 대기 하나만 유지하며 추가 X 요청을 보내지 않습니다.
 
+## 단일 EXE와 실행기
+
+릴리스는 `LuvBox.exe` 하나입니다. 구성은 `실행기 프로그램 + 앱 폴더의 ZIP + 84바이트 꼬리표`이고, 꼬리표(`luvbox/launcher.py`의 `FOOTER`)에 ZIP의 위치·길이·SHA-256과 버전이 있습니다. 실행기(`tools/launcher/Launcher.cs`)는 Windows에 들어 있는 C# 컴파일러(`Framework64\v4.0.30319\csc.exe`, C# 5)로 빌드하므로 그 문법만 쓰고, 실행에는 Windows 10·11의 .NET Framework 4.x를 씁니다. PyInstaller의 한 파일 방식은 실행할 때마다 266MB를 임시 폴더에 다시 풀어 시작이 4.4초에서 8.8초로 늘어 쓰지 않습니다.
+
+- **시작**: 꼬리표의 해시와 `%LOCALAPPDATA%\LuvBox\app\<버전>\.luvbox-app`에 적힌 해시가 같고 그 폴더에 `LuvBox.exe`가 있으면 바로 실행합니다. 이때는 ZIP을 읽거나 해시하지 않습니다. 아니면 ZIP의 SHA-256을 확인하고 `app\.new-…` 임시 폴더에 푼 뒤 폴더 이름을 `<버전>`으로 바꿉니다. 확인부터 풀기까지 같은 파일 핸들을 쓰기 금지로 열어 둡니다. 풀기는 최대 4개 스레드로 합니다.
+- **동시 실행**: `app\.lock`을 독점으로 열어 한 번만 풉니다. 기다린 쪽은 끝난 결과를 그대로 씁니다.
+- **경로와 링크**: ZIP 항목 이름은 상위 폴더(`..`)·절대 경로·드라이브·`:`·역슬래시·예약 이름·끝의 점과 공백을 거부하고, 풀 위치가 임시 폴더 안인지 다시 확인합니다. `LuvBox`, `app`, 버전 폴더가 링크(junction 등)면 중단합니다. `tools/build_launcher.py`도 묶기 전에 같은 규칙과 링크·hardlink를 검사하고, 앱 안의 가장 긴 상대 경로를 140자로 제한합니다(Windows의 260자 한도).
+- **정리**: 새 버전을 풀고 나면 지금 버전과 바로 이전 버전만 남깁니다. 실행기가 남긴 표시(`.luvbox-app`)가 있는 버전 폴더만 지우며, 실행 중인 버전은 폴더 이름을 바꿀 수 없어 그대로 남습니다.
+- **인자와 종료 코드**: 인자가 없으면 시작 화면을 보이고, 앱 창이 처음 그려졌다는 신호(`LUVBOX_READY_EVENT` 이름의 이벤트)를 받으면 끝납니다. 인자가 있으면(`--run-saved`, `--self-test`, `--download-smoke`, `--qt-smoke` 등) 화면 없이 명령줄을 고치지 않고 넘기고 앱의 종료 코드를 돌려줍니다. 실행기 자신의 실패는 70~76입니다(70 앱 없음, 71 손상, 72 풀기 실패, 73 링크된 폴더, 74 다른 실행기를 기다리다 시간 초과, 75 시작 실패, 76 같은 버전 실행 중). 안내 창은 일반 실행과 예약 실행에서만 띄웁니다.
+- **예약 작업이 등록하는 경로**: 앱은 실행기 경로를 `LUVBOX_LAUNCHER` 환경 변수로 받고(`launcher.launcher_path()`), 자동 저장 예약은 이 경로와 `--run-saved`를 등록합니다(`scheduled.launch_parts`). `sys.executable`은 버전마다 바뀌는 풀린 사본이고, 실행기 경로는 업데이트가 같은 자리에서 파일만 바꾸므로 그대로입니다. 저장 worker는 지금처럼 `sys.executable`(풀린 사본)을 직접 실행합니다. 풀린 사본을 실행기 없이 직접 실행하면 이전처럼 `sys.executable`을 씁니다.
+- **작업 표시줄**: 창을 고정하면 실행기가 고정되도록 창에 다시 시작 명령을 적어 둡니다(`launcher.mark_window`). 실행기와 앱은 같은 AppUserModelID를 써서 한 단추로 묶입니다.
+- **검사할 때**: 실행기는 `LOCALAPPDATA` 환경 변수를 먼저 보므로 임시 폴더로 바꿔 실행합니다. `LUVBOX_LAUNCHER_SILENT=1`은 안내 창 없이 종료 코드만 돌려줍니다. `tests/test_launcher.py`가 실제 실행기를 컴파일해 작은 대역 앱으로 첫 실행 풀기·재실행·손상 거부·인자와 종료 코드·동시 실행·이전 버전 정리·링크 거부를 끝까지 실행합니다.
+
+### 시작 화면과 문구
+
+시작 화면의 그림 세 장은 `tools/draw_splash.py`가 그리고(`assets/splash/`), 문구와 위치는 `tools/launcher/splash.ini` 한 곳에 있습니다. 실행기가 글자·진행 막대·버전을 직접 그립니다. 문구는 지금 일어나는 일을 한 줄로 말하고(“보관함을 여는 중”), 덧붙이는 말은 짧은 해요체로 씁니다(“한 번만 걸려요”). 앱 안의 빈 화면과 불러오는 화면도 같은 말투입니다(“아직 사진이 없어요 · 저장 화면에서 좋아요를 담아 보세요”). 오류·확인·진행 안내는 기존처럼 원인과 할 일을 분명히 적습니다.
+
+## 업데이트
+
+`luvbox/updater.py`가 GitHub의 최신 릴리스 설명을 읽어 버전을 숫자로 비교하고, 사람이 **업데이트**를 누를 때만 `LuvBox.exe`와 `SHA256-<버전>.txt`를 받습니다. 받은 파일의 SHA-256이 체크섬 파일의 `LuvBox.exe` 줄과 같고 파일 꼬리표의 버전이 그 릴리스와 같을 때만 실행기 자리에 둡니다. 교체는 실행기와 같은 폴더에 복사 → 기존 파일을 `LuvBox.exe.old`로 이름 변경 → 새 파일을 제자리로 이름 변경이며, 마지막 단계가 실패하면 되돌립니다. 남은 `.old`는 다음 시작 때 실행기가 지웁니다. 실행 중인 앱은 자기 버전 폴더에서 돌고 있어 영향을 받지 않고, 다시 시작하면 새 실행기가 새 버전을 풀어 실행합니다.
+
+- 자동 확인은 패키지된 앱에서만, 시작할 때 하루에 한 번입니다. 소스 실행과 시작 검사, 테스트는 스스로 GitHub에 접속하지 않습니다.
+- 요청에는 고정 User-Agent(`LuvBox-Updater`)와 Accept만 넣습니다. 받는 주소는 버전에서 직접 만들고, 리다이렉트는 HTTPS의 `github.com`·`*.githubusercontent.com`만 따릅니다.
+- 릴리스에 `LuvBox.exe`나 체크섬 파일이 없으면 받기 대신 릴리스 페이지를 열게 안내합니다. 실행기 없이 실행한 경우도 같습니다.
+- 알림의 변경 사항은 릴리스 설명에서 가져옵니다. 제목에 ‘변경’이 들어간 항목(‘주요 변경 사항’) 아래의 맨 위 목록을 최대 8줄까지 보여 주므로 릴리스 설명은 이 형식을 유지합니다.
+- **릴리스 첨부 이름과 체크섬 형식은 설치된 버전과의 약속입니다.** `LuvBox.exe`, `SHA256-<버전>.txt`(`<소문자 64자리 해시><공백 두 칸><파일 이름>` 줄), `LuvBox-<버전>-source-licenses.zip`을 `updater.release_assets`·`format_checksums`가 정하고 패키징이 그대로 쓰며, `tests/test_release_contract.py`가 글자 그대로 고정합니다. 바꾸면 이미 설치된 버전이 다음 릴리스를 받지 못합니다.
+
 ## 데이터와 인증 호환성
 
-설정·암호화 세션·기록·백업·미리보기는 `%LOCALAPPDATA%\LuvBox`에 있습니다. 1.7.0은 설정 파일에 창 크기·위치(`window`)를, 기록 DB의 `catalog_meta`에 중복 묶음 방식(`duplicate_rule`) 한 줄을 더합니다. 표 구조는 바꾸지 않으며 이전 버전은 두 값을 무시합니다. 1.6.9·1.6.10은 설정 파일에 갤러리 썸네일 크기(`gallery_density`, 0·1·2)만 더하며 기록 DB 구조는 바꾸지 않습니다. 이전 버전은 이 값을 무시하고 보존합니다. 미디어 저장 폴더의 `.luvbox` 사본과 이전 파일명·archive·암호화 형식·예약 이름을 계속 인식합니다. UI 변경을 이유로 기존 파일·DB·계정을 초기화하지 않습니다. 폴더 이전의 명시적 승인 경로를 보존하고, 다른 PC의 기록 사본이 주장하는 외부 경로에 관리 권한을 부여하지 않습니다.
+설정·암호화 세션·기록·백업·미리보기는 `%LOCALAPPDATA%\LuvBox`에 있습니다. 1.8.0은 설정 파일에 업데이트 확인 값(`update_check`, `update_checked_at`, `update_found`)을 더하고, 같은 폴더 아래에 `app`(실행기가 풀어 둔 앱)과 `updates`(받는 중인 파일)를 씁니다. 기록 DB는 바꾸지 않으며 이전 버전은 이 값을 무시합니다. 이전 이름(XlikeSaver)의 데이터 폴더가 남아 있고 LuvBox 폴더가 없거나 비어 있으면 실행기가 `app`을 만들기 전에 앱과 같은 방식으로 폴더 이름을 바꿉니다. 그러지 않으면 앱이 두 폴더가 모두 쓰이는 것으로 보고 멈춥니다. 1.7.0은 설정 파일에 창 크기·위치(`window`)를, 기록 DB의 `catalog_meta`에 중복 묶음 방식(`duplicate_rule`) 한 줄을 더합니다. 표 구조는 바꾸지 않으며 이전 버전은 두 값을 무시합니다. 1.6.9·1.6.10은 설정 파일에 갤러리 썸네일 크기(`gallery_density`, 0·1·2)만 더하며 기록 DB 구조는 바꾸지 않습니다. 이전 버전은 이 값을 무시하고 보존합니다. 미디어 저장 폴더의 `.luvbox` 사본과 이전 파일명·archive·암호화 형식·예약 이름을 계속 인식합니다. UI 변경을 이유로 기존 파일·DB·계정을 초기화하지 않습니다. 폴더 이전의 명시적 승인 경로를 보존하고, 다른 PC의 기록 사본이 주장하는 외부 경로에 관리 권한을 부여하지 않습니다.
 
 계정은 브라우저 확장의 코드·계정 확인 후 승인하거나 토큰을 직접 입력해 연결합니다. 수동 토큰 보관은 X 인증 성공을 뜻하지 않습니다. 토큰·쿠키·브라우저 프로필·사용자 DB를 로그·Git·배포 파일에 넣지 않습니다. 계정 연결과 Qt 설정 변경은 Windows 경로별 mutex와 원자적 파일 교체로 보호합니다. 설정 읽기에 실패하면 변경 저장을 중단해 기존 파일을 보존합니다.
 
@@ -99,19 +128,19 @@ New-Item -ItemType Directory -Force '.test-output' | Out-Null
 .\build.ps1
 ```
 
-`build.ps1`은 고정 입력·ExifTool·FFmpeg와 Qt 원본 소스·라이선스를 준비하고 PyInstaller 폴더형 앱을 만듭니다. Windows System32를 우선해 잘못된 ICU DLL 수집을 막습니다. 빌드 Python이 요구하는 선택적 SSL 보조 파일은 해당 정책을 보존한 채 동봉합니다.
+`build.ps1`은 고정 입력·ExifTool·FFmpeg와 Qt 원본 소스·라이선스를 준비하고 PyInstaller 폴더형 앱(`build/app/LuvBox/`)을 만든 뒤, `tools/build_launcher.py`로 실행기를 컴파일해 그 폴더를 `build/single/LuvBox.exe` 하나로 묶습니다. Windows System32를 우선해 잘못된 ICU DLL 수집을 막습니다. 빌드 Python이 요구하는 선택적 SSL 보조 파일은 해당 정책을 보존한 채 동봉합니다.
 
 Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합니다. 패키징도 COLLECT의 원본 경로와 실제 번들 바이트를 대조하므로 PATH에 있는 다른 도구의 같은 이름 DLL이나 교체된 파일을 거부합니다.
 
-실제 EXE의 Qt 창·갤러리·미리보기·설정·연결창·종료 검사와 오프라인 저장 시작 검사를 모두 통과해야 ZIP을 만듭니다. 직접 패키징도 현재 버전과 EXE SHA-256에 일치하는 두 검사 보고서를 요구합니다. EXE·`_internal`·동봉 소스·라이선스를 함께 유지합니다. Qt와 미디어 구성요소의 버전별 원본 자료는 [Qt 소스 안내](../tools/qt/README.md), [FFmpeg 안내](../tools/ffmpeg/README.md)를 따릅니다. 검사 실패를 피하려고 입력 체크섬·TLS 검증·패키징 허용 목록을 완화하지 않습니다.
+묶은 `LuvBox.exe`를 실행기부터 시작하는 Qt 창·갤러리·미리보기·설정·연결창·종료 검사와 오프라인 저장 시작 검사를 모두 통과해야 배포 파일을 만듭니다. 두 검사는 `build/startup-check-<버전>` 폴더를 `LOCALAPPDATA`로 주어 실행하므로 개발자의 실제 LuvBox 데이터에는 풀지 않고, 둘째 검사는 첫째가 풀어 둔 사본을 다시 씁니다. 직접 패키징도 현재 버전과 그 `LuvBox.exe`의 SHA-256에 일치하고 실행기를 거쳤다고 적힌 두 검사 보고서를 요구하며, `LuvBox.exe` 안의 ZIP이 봉인한 앱 폴더와 파일 하나하나 같은지 대조합니다. 소스와 라이선스는 EXE에 넣지 않고 같은 릴리스의 ZIP으로 제공합니다. Qt DLL은 풀린 폴더에 따로 남아 교체할 수 있습니다. Qt와 미디어 구성요소의 버전별 원본 자료는 [Qt 소스 안내](../tools/qt/README.md), [FFmpeg 안내](../tools/ffmpeg/README.md)를 따릅니다. 검사 실패를 피하려고 입력 체크섬·TLS 검증·패키징 허용 목록을 완화하지 않습니다.
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox-1.7.0/`, `release/LuvBox-1.7.0.zip`, `release/SHA256-1.7.0.txt`입니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.8.0.txt`, `release/LuvBox-1.8.0-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
-릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다).
+릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 
-`tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
+`tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·실행기 소스·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 
 설정 › 고급은 단일 일일 예약 생성·시간 변경·해제, 모든 계정의 실행 기록, 저장 못 한 미디어 목록을 제공하고, 갤러리는 작성자 드롭다운·달력 날짜 필터와 휴지통 이동을 제공합니다. 작성자·날짜 필터는 바꾸는 즉시 적용됩니다.
 

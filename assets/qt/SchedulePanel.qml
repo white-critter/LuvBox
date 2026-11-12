@@ -43,7 +43,7 @@ ColumnLayout {
     Label {
         objectName: "scheduleSummary"
         Layout.fillWidth: true
-        text: panel.schedule ? panel.schedule.summary : "예약 정보를 확인하는 중입니다."
+        text: panel.schedule ? panel.schedule.summary : "예약 정보를 확인하는 중"
         textFormat: Text.PlainText
         font.bold: true
         wrapMode: Text.WordWrap

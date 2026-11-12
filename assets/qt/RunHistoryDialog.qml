@@ -204,7 +204,7 @@ Dialog {
                 objectName: "runHistoryEmpty"
                 anchors.centerIn: parent
                 visible: list.count === 0 && dialog.records && !dialog.records.runBusy && !dialog.records.runError.length
-                text: "아직 실행 기록이 없습니다."
+                text: "아직 실행 기록이 없어요 · 저장하면 여기에 남아요"
                 color: "#b9afb1"
             }
             Column {

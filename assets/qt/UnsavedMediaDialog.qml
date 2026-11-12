@@ -372,7 +372,7 @@ Dialog {
                 objectName: "unsavedEmpty"
                 anchors.centerIn: parent
                 visible: list.count === 0 && !!dialog.records && !dialog.records.unsavedBusy && !dialog.records.unsavedError.length
-                text: dialog.excludedView ? "직접 제외한 미디어가 없습니다." : "저장하지 못한 미디어가 없습니다."
+                text: dialog.excludedView ? "직접 제외한 미디어가 없어요" : "저장하지 못한 미디어가 없어요 · 모두 잘 담겼어요"
                 color: "#b9afb1"
             }
             Column {

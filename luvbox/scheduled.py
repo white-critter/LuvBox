@@ -1,12 +1,17 @@
 """Unattended save with the app's saved settings, for Windows Task Scheduler.
 
-`LuvBox-<version>.exe --run-saved` checks only new likes (quick scan) and falls back
+`LuvBox.exe --run-saved` checks only new likes (quick scan) and falls back
 to a complete scan by itself when the previous run did not finish. It uses the
 encrypted managed connection. Output
 goes to a log file because a windowed executable has no console.
 
 The app registers the daily task itself (Windows' ScheduledTasks module), so
 it can also run on battery and catch up after the PC was off at that time.
+
+The task runs the launcher (the LuvBox.exe the person keeps), not the copy the
+launcher unpacked for one version: an update replaces the launcher in place,
+so the same task keeps working and runs the new version. The launcher passes
+`--run-saved` through and returns this program's exit code.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .file_mutex import replace_file
+from .launcher import program_path, spawn_detached
 from .settings import AppDataError, app_directory, load_settings
 
 
@@ -51,7 +57,8 @@ def last_run_path() -> Path:
 def launch_parts() -> tuple[str, str]:
     """The program and arguments Task Scheduler runs for this installation."""
     if getattr(sys, "frozen", False):
-        return sys.executable, "--run-saved"
+        # The launcher's path stays the same across updates; this program's does not.
+        return program_path(), "--run-saved"
     executable = Path(sys.executable)
     windowless = executable.with_name("pythonw.exe")
     entry = Path(__file__).resolve().parents[1] / "entry.py"
@@ -61,7 +68,7 @@ def launch_parts() -> tuple[str, str]:
 def app_command() -> list[str]:
     """Open the normal app window."""
     if getattr(sys, "frozen", False):
-        return [sys.executable]
+        return [program_path()]
     program, _ = launch_parts()
     return [program, str(Path(__file__).resolve().parents[1] / "entry.py")]
 
@@ -347,7 +354,7 @@ def _notify_failure(outcome: dict) -> None:
         dialog.setDefaultButton(close_button)
         dialog.exec()
         if dialog.clickedButton() is open_button:
-            subprocess.Popen(app_command(), close_fds=True, creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+            spawn_detached(app_command())
     except Exception:
         pass
 

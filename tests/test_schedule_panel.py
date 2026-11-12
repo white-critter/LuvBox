@@ -99,7 +99,7 @@ ApplicationWindow {
     save = root.findChild(QObject, "scheduleSaveButton")
     refresh = root.findChild(QObject, "scheduleRefreshButton")
     assert panel.property("visible") and save.property("visible") and save.property("enabled")
-    assert "예약이 없습니다" in summary.property("text")
+    assert "예약이 없어요" in summary.property("text")
     blocking[0] = True
     assert controller.refresh()
     assert entered.wait(2)

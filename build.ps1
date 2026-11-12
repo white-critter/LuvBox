@@ -19,28 +19,33 @@ if ($LASTEXITCODE -ne 0 -or $version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { thr
 if ($LASTEXITCODE -ne 0) { throw 'README·사용 안내·개발 안내·변경 사항의 버전이 제품 버전과 다릅니다. 문서를 먼저 고친 뒤 다시 빌드하세요.' }
 & $taskPython 'tools\windows_version.py'
 if ($LASTEXITCODE -ne 0) { throw 'Windows 파일 버전 정보를 준비하지 못했습니다.' }
-$name = "LuvBox-$version"
-# A versioned name lets an older running build stay open. The same version
-# cannot be replaced while it runs, so stop with a clear message instead.
-$target = Join-Path $PSScriptRoot "release\$name\$name.exe"
-if (Test-Path -LiteralPath $target) {
-    try { [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None').Close() }
-    catch { throw "$name.exe가 실행 중이라 덮어쓸 수 없습니다. 프로그램을 닫고 다시 빌드하세요." }
+# The application is built as a folder (build\app\LuvBox), then packed with the
+# launcher into one program (build\single\LuvBox.exe) and, once that exact file
+# passed the startup checks, published as release\LuvBox.exe. None of the three
+# can be replaced while it runs, so stop with a clear message instead.
+$application = Join-Path $PSScriptRoot 'build\app\LuvBox\LuvBox.exe'
+$single = Join-Path $PSScriptRoot 'build\single\LuvBox.exe'
+foreach ($target in @($application, $single, (Join-Path $PSScriptRoot 'release\LuvBox.exe'))) {
+    if (Test-Path -LiteralPath $target) {
+        try { [System.IO.File]::Open($target, 'Open', 'ReadWrite', 'None').Close() }
+        catch { throw "LuvBox.exe가 실행 중이라 덮어쓸 수 없습니다. 프로그램을 닫고 다시 빌드하세요. ($target)" }
+    }
 }
 
 # Collect only application dependencies and our pinned metadata helper. Never
 # collect the workspace, saved settings, account records, or authentication.
-# A folder build keeps Qt DLLs replaceable; a one-file exe would extract its
-# runtime again on every launch, including each save's worker.
+# PyInstaller still makes a folder: the launcher unpacks it once per version, so
+# Qt DLLs stay replaceable on disk and no start pays to extract the runtime
+# again (a PyInstaller one-file program would, including each save's worker).
 $buildOriginalPath = $env:PATH
 & $taskPython 'tools\build_snapshot.py' 'record'
 if ($LASTEXITCODE -ne 0) { throw '빌드 입력 기록에 실패했습니다. 소스와 배포 입력을 확인하세요.' }
 try {
     $env:PATH = "$(Join-Path $env:SystemRoot 'System32');$buildOriginalPath"
-    & $taskPython -m PyInstaller --noconfirm --clean --windowed --onedir --name $name `
+    & $taskPython -m PyInstaller --noconfirm --clean --windowed --onedir --name LuvBox `
     --version-file "$PSScriptRoot\build\windows-version.txt" `
     --icon "$PSScriptRoot\assets\icons\luvbox.ico" --add-data "$PSScriptRoot\assets\icons;assets/icons" `
-    --distpath release --workpath build\onedir --specpath build\spec `
+    --distpath build\app --workpath build\onedir --specpath build\spec `
     --additional-hooks-dir "$PSScriptRoot\tools\pyinstaller" `
     --collect-all gallery_dl --exclude-module imageio_ffmpeg `
     --exclude-module tkinter --exclude-module _tkinter --exclude-module turtle `
@@ -82,14 +87,26 @@ finally {
 }
 & $taskPython 'tools\build_snapshot.py' 'seal'
 if ($LASTEXITCODE -ne 0) { throw '빌드 중 소스나 입력이 변경되었습니다. 다시 빌드하세요.' }
-& $taskPython 'tools\check_qt_startup.py' $target (Join-Path $PSScriptRoot "build\qt-startup-$version.json")
-if ($LASTEXITCODE -ne 0) { throw '실제 Qt EXE의 시작 점검에 실패했습니다. ZIP을 만들지 않습니다.' }
-& $taskPython 'tools\check_download_startup.py' $target (Join-Path $PSScriptRoot "build\download-startup-$version.json")
-if ($LASTEXITCODE -ne 0) { throw '실제 EXE의 오프라인 저장 시작 점검에 실패했습니다. ZIP을 만들지 않습니다.' }
+& $taskPython 'tools\build_launcher.py'
+if ($LASTEXITCODE -ne 0) { throw '실행기를 컴파일하거나 앱을 LuvBox.exe 하나로 묶지 못했습니다.' }
+# Both checks start the single program the way a person does. Its launcher
+# unpacks into this private folder, never into the developer's own LuvBox data;
+# the second check reuses the unpacked copy, as a second start would.
+$checkData = Join-Path $PSScriptRoot "build\startup-check-$version"
+if (Test-Path -LiteralPath $checkData) { Remove-Item -LiteralPath $checkData -Recurse -Force }
+try {
+    & $taskPython 'tools\check_qt_startup.py' $single (Join-Path $PSScriptRoot "build\qt-startup-$version.json") $checkData
+    if ($LASTEXITCODE -ne 0) { throw '실제 LuvBox.exe의 Qt 시작 점검에 실패했습니다. 배포 파일을 만들지 않습니다.' }
+    & $taskPython 'tools\check_download_startup.py' $single (Join-Path $PSScriptRoot "build\download-startup-$version.json") $checkData
+    if ($LASTEXITCODE -ne 0) { throw '실제 LuvBox.exe의 오프라인 저장 시작 점검에 실패했습니다. 배포 파일을 만들지 않습니다.' }
+}
+finally {
+    if (Test-Path -LiteralPath $checkData) { Remove-Item -LiteralPath $checkData -Recurse -Force }
+}
 & $taskPython 'tools\package_browser_extension.py'
 if ($LASTEXITCODE -ne 0) { throw '브라우저 확장 제출 자료 준비에 실패했습니다.' }
 & $taskPython 'tools\package_release.py'
-if ($LASTEXITCODE -ne 0) { throw '소스와 라이선스가 포함된 배포 ZIP 준비에 실패했습니다.' }
-Write-Host "빌드 완료: release\$name\$name.exe (같은 폴더의 _internal과 함께 실행)"
-Write-Host "배포 ZIP: release\$name.zip (사용 안내, 소스, 라이선스 포함)"
+if ($LASTEXITCODE -ne 0) { throw '배포 파일(LuvBox.exe, 체크섬, 소스·라이선스 ZIP) 준비에 실패했습니다.' }
+Write-Host "빌드 완료: release\LuvBox.exe (이 파일 하나로 실행)"
 Write-Host "체크섬: release\SHA256-$version.txt"
+Write-Host "소스·라이선스: release\LuvBox-$version-source-licenses.zip (사용 안내 포함)"

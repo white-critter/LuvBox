@@ -474,6 +474,15 @@ ApplicationWindow {
             Layout.fillWidth: true
         }
 
+        UpdateNotice {
+            id: updateNotice
+            Layout.fillWidth: true
+            app: window.app
+            // Closing the window remembers its size and ends every part; the
+            // launcher is started again only after that.
+            onRestartRequested: if (window.app && window.app.prepareRestart()) window.close()
+        }
+
         StackLayout {
             currentIndex: window.currentScreen
             Layout.fillWidth: true
@@ -1939,13 +1948,14 @@ ApplicationWindow {
                         visible: gallery.count === 0 && !window.galleryModel.busy && !window.galleryModel.error.length
                         text: {
                             if (window.app && window.app.library.filterDuplicateOnly && window.app.library.copiesLocked)
-                                return "중복 사진을 검사하고 있습니다. 완료되면 목록을 갱신합니다."
+                                return "중복 사진을 찾는 중 · 끝나면 여기에 모아 둘게요"
                             if (window.app && window.app.library.filterDuplicateOnly)
-                                return "발견된 중복 사진이 없습니다. 상단의 '중복 검사'를 눌러 검사해 보세요."
+                                return "중복 사진이 없어요 · 위의 ‘중복 검사’로 다시 찾아볼 수 있어요"
                             if (window.app && window.app.library.filterFavoriteOnly)
-                                return "즐겨찾기한 사진이 없습니다. 사진 우측 상단의 ★ 버튼이나 F 키로 추가해 보세요."
+                                return "아직 즐겨찾기가 없어요 · 사진의 ★이나 F 키로 담아 보세요"
                             return search.text.length || (window.app && (window.app.library.filterSummary.length > 0
-                                || mediaFilter.currentIndex > 0)) ? "필터에 맞는 사진이 없습니다." : "사진이 없습니다."
+                                || mediaFilter.currentIndex > 0)) ? "조건에 맞는 사진이 없어요"
+                                : "아직 사진이 없어요 · 저장 화면에서 좋아요를 담아 보세요"
                         }
                         width: Math.max(0, parent.width - 32)
                         horizontalAlignment: Text.AlignHCenter

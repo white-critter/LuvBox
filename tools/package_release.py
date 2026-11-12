@@ -1,4 +1,14 @@
-"""Package the explicit release allowlist, never personal account data."""
+"""Publish a release from the explicit allowlist, never personal account data.
+
+A release is three files in `release/`:
+
+    LuvBox.exe                           the launcher with the application appended
+    SHA256-<version>.txt                 checksums of the other two
+    LuvBox-<version>-source-licenses.zip corresponding sources, license texts, the guide
+
+Installed versions fetch the first two by exactly these names (luvbox/updater.py
+owns the names and the checksum format), so they are not this module's to change.
+"""
 
 import ast
 import hashlib
@@ -7,6 +17,7 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
+import shutil
 import stat
 import sys
 import subprocess
@@ -17,15 +28,20 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from luvbox import __version__  # noqa: E402
+from luvbox.updater import format_checksums, release_assets  # noqa: E402
 from tools.check_build_inputs import require_inputs  # noqa: E402
 from tools.qt.prepare_sources import release_files as qt_source_files
 from tools.check_download_startup import validate_report as validate_download_report
 from tools.check_qt_startup import validate_report as validate_qt_report
 from tools.build_snapshot import require_snapshot
+from tools import build_launcher
 
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
     "tools/draw_icon.py",
+    "tools/draw_splash.py", "tools/build_launcher.py", "tools/launcher/Launcher.cs", "tools/launcher/app.manifest",
+    "tools/launcher/splash.ini", "assets/splash/card.png", "assets/splash/glow.png", "assets/splash/mark.png",
+    "assets/splash/README.md",
     "entry.py", "setup.ps1", "build.ps1", "run.bat", "tools/windows_version.py", "tools/check_qt_startup.py", "tools/package_browser_extension.py", ".gitattributes", ".gitignore", "requirements.txt",
     "requirements-dev.txt", "requirements-lock.txt", "requirements-qt.txt", "README.md", "WINDOWS_CONTINUE.md", "LICENSE",
     "CHANGELOG.md", "tools/qt_gallery_preview.py",
@@ -132,7 +148,10 @@ def _python_materials(root: Path) -> list[tuple[Path, str]]:
 
 
 def _collect_manifest(toc: Path, application_name: str) -> dict[Path, Path]:
-    """Read PyInstaller's literal COLLECT tuple, without executing build code."""
+    """Read PyInstaller's literal COLLECT tuple, without executing build code.
+
+    `application_name` is the folder under build/app and the program's name in it.
+    """
     if not toc.is_relative_to(ROOT) or ".." in toc.relative_to(ROOT).parts:
         raise ValueError("Build manifest must be inside the project")
     for path in (toc, *toc.parents):
@@ -170,7 +189,7 @@ def _collect_manifest(toc: Path, application_name: str) -> dict[Path, Path]:
             if (kind != "BINARY" or not expected_ssl.is_file()
                     or Path(os.path.realpath(source)) != Path(os.path.realpath(expected_ssl))):
                 raise ValueError(f"Build manifest contains OpenSSL outside the build interpreter: {name}")
-            bundled_ssl = ROOT / "release" / application_name / "_internal" / parts[0]
+            bundled_ssl = ROOT / "build" / "app" / application_name / "_internal" / parts[0]
             project_file(bundled_ssl, ROOT)
             with expected_ssl.open("rb") as original, bundled_ssl.open("rb") as bundled:
                 if hashlib.file_digest(original, "sha256").digest() != hashlib.file_digest(bundled, "sha256").digest():
@@ -259,23 +278,24 @@ def _require_startup_report(executable: Path) -> None:
 
 
 def require_current_guides(root: Path, version: str) -> None:
-    """Refuse guides that still name another version's folder or program.
+    """Refuse guides that still name another version or the former ZIP layout.
 
-    The ZIP's top-level guide tells people which EXE to start. It shipped
-    naming an older version twice because nothing compared it with the build.
+    The guide tells people what to start. It shipped naming an older version
+    twice because nothing compared it with the build.
     """
     guide = (root / "docs" / "사용안내.txt").read_text(encoding="utf-8")
     development = (root / "docs" / "development.md").read_text(encoding="utf-8")
     readme = (root / "README.md").read_text(encoding="utf-8")
     changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
-    name = f"LuvBox-{version}"
+    program, checksums, sources = release_assets(version)
     latest = re.search(r"^## (\d+\.\d+\.\d+) ", changelog, re.MULTILINE)
     checks = (
         (guide.splitlines()[0].strip() == f"러브박스 (LuvBox) {version}", "docs/사용안내.txt 첫 줄"),
-        (f"{name} 폴더의 {name}.exe" in guide, "docs/사용안내.txt 실행 안내"),
-        (set(re.findall(r"LuvBox-(\d+\.\d+\.\d+)", guide)) == {version}, "docs/사용안내.txt 버전 이름"),
+        (f"{program}를 실행" in guide, "docs/사용안내.txt 실행 안내"),
+        (set(re.findall(r"(?:LuvBox|SHA256)-(\d+\.\d+\.\d+)", guide)) == {version}, "docs/사용안내.txt 버전 이름"),
         (development.splitlines()[0].strip() == f"# LuvBox {version} 개발 안내", "docs/development.md 제목"),
-        (set(re.findall(r"release/(?:LuvBox|SHA256)-(\d+\.\d+\.\d+)", development)) == {version},
+        (all(f"release/{name}" in development for name in (program, checksums, sources))
+         and set(re.findall(r"release/(?:LuvBox|SHA256)-(\d+\.\d+\.\d+)", development)) == {version},
          "docs/development.md 산출물 이름"),
         (readme.splitlines()[0].strip() == f"# 러브박스 (LuvBox) {version}", "README.md 제목"),
         (latest is not None and latest[1] == version, "CHANGELOG.md 최신 항목"),
@@ -285,6 +305,25 @@ def require_current_guides(root: Path, version: str) -> None:
         raise ValueError(f"Guides do not name version {version}: " + ", ".join(stale))
 
 
+def _require_same_application(program: Path, application: Path, application_files) -> None:
+    """The archive inside LuvBox.exe is exactly the checked application folder."""
+    footer = build_launcher.read_footer(program)
+    if footer is None or footer["version"] != __version__:
+        raise ValueError("The single program was not built for this version; rebuild with build.ps1")
+    packed = build_launcher.packed_files(program)
+    expected = {}
+    for path in application_files:
+        with path.open("rb") as stream:
+            expected[path.relative_to(application).as_posix()] = hashlib.file_digest(stream, "sha256").hexdigest()
+    if packed != expected:
+        raise ValueError("The single program does not hold the built application; rebuild with build.ps1")
+
+
+def _digest(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
 def package() -> None:
     require_inputs(ROOT)
     subprocess.run([sys.executable, str(ROOT / "tools/ffmpeg/build.py"), "--check"], check=True)
@@ -292,28 +331,31 @@ def package() -> None:
     if output.is_symlink() or getattr(output, "is_junction", lambda: False)():
         raise ValueError("Release directory must be inside the project")
     output.mkdir(exist_ok=True)
-    # Versioned names: a running older executable never blocks a new build.
-    # The application is a folder: the exe and its _internal runtime.
-    application = output / f"LuvBox-{__version__}"
-    executable = application / f"LuvBox-{__version__}.exe"
-    if not executable.is_file():
+    # PyInstaller's folder (the program and its _internal runtime) and the one
+    # file the launcher tool made from it. Only the latter is published.
+    application = ROOT / build_launcher.APPLICATION
+    executable = application / build_launcher.INNER_NAME
+    single = ROOT / build_launcher.SINGLE
+    if not executable.is_file() or not single.is_file():
         raise FileNotFoundError("Build the application first")
     require_snapshot(executable, ROOT)
-    _require_startup_report(executable)
+    _require_startup_report(single)
     manifest = _collect_manifest(ROOT / "build/onedir" / application.name / "COLLECT-00.toc", application.name)
     application_files = _verified_files(application, manifest)
+    _require_same_application(single, application, application_files)
     runtimes = {component: _runtime_files(manifest, component) for component in ("ffmpeg", "exiftool")}
     qt_materials = qt_source_files()
     source_files = project_source_files(ROOT)
     python_materials = _python_materials(ROOT)
-    destination = output / f"LuvBox-{__version__}.zip"
+    program_name, checksum_name, source_name = release_assets(__version__)
     descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".zip", dir=output)
     os.close(descriptor)
     staged = Path(filename)
+    descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".exe", dir=output)
+    os.close(descriptor)
+    staged_program = Path(filename)
     try:
         with zipfile.ZipFile(staged, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            for path in application_files:
-                archive.write(path, application.name + "/" + path.relative_to(application).as_posix())
             archive.write(ROOT / "docs" / "사용안내.txt", "사용안내.txt")
             archive.write(ROOT / "LICENSE", "LICENSE")
             archive.write(ROOT / "THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md")
@@ -353,19 +395,20 @@ def package() -> None:
             python_license = python_root / "LICENSE.txt"
             if python_license.is_file():
                 archive.write(python_license, "licenses/Python-LICENSE.txt")
+        shutil.copyfile(single, staged_program)
+        rows = [(_digest(staged_program), program_name), (_digest(staged), source_name)]
         # Compression can outlast a concurrent source edit or runtime rebuild.
-        # Keep the previous ZIP unless the exact sealed inputs still exist.
+        # Keep the previous release files unless the exact sealed inputs still
+        # exist and the copied program is still the one that was checked.
         require_snapshot(executable, ROOT)
-        os.replace(staged, destination)
+        _require_startup_report(staged_program)
+        os.replace(staged_program, output / program_name)
+        os.replace(staged, output / source_name)
     finally:
         staged.unlink(missing_ok=True)
-    rows = []
-    for path in (executable, destination):
-        with path.open("rb") as file:
-            digest = hashlib.file_digest(file, "sha256").hexdigest()
-        rows.append(f"{digest}  {path.name}")
-    (output / f"SHA256-{__version__}.txt").write_text("\n".join(rows) + "\n", encoding="utf-8")
-    print(f"Release {__version__}: {application.name}/{executable.name}, {destination.name}")
+        staged_program.unlink(missing_ok=True)
+    (output / checksum_name).write_text(format_checksums(rows), encoding="utf-8", newline="\n")
+    print(f"Release {__version__}: {program_name}, {checksum_name}, {source_name}")
 
 
 if __name__ == "__main__":

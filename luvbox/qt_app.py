@@ -22,6 +22,7 @@ from .qt_library import LibraryController
 from .qt_schedule import ScheduleController
 from .qt_management import ManagementController
 from .qt_records import RecordsController
+from .qt_updater import UpdateController
 from .qt_wheel import WheelInputFilter
 
 
@@ -111,6 +112,7 @@ class ApplicationController(QObject):
         self._records = RecordsController(self)
         self._records.setVideoLimit(self._preferences["max_video_mb"])
         self._schedule = ScheduleController(self)
+        self._updates = UpdateController(self, settings=self._settings, preferences=self._preferences)
         self._accounts.changed.connect(self._state_changed)
         self._accounts.accountChanged.connect(self._account_changed)
         self._download.changed.connect(self._state_changed)
@@ -129,6 +131,7 @@ class ApplicationController(QObject):
         self._schedule.shutdownFinished.connect(lambda: self._part_closed("schedule"))
         self._management.shutdownFinished.connect(lambda: self._part_closed("management"))
         self._records.shutdownFinished.connect(lambda: self._part_closed("records"))
+        self._updates.shutdownFinished.connect(lambda: self._part_closed("updates"))
         self._completed.connect(self._accept, Qt.ConnectionType.QueuedConnection)
         self._commands = Queue()
         self._io_thread = threading.Thread(target=self._work, name="qt-app-storage", daemon=True)
@@ -175,6 +178,22 @@ class ApplicationController(QObject):
     @Property(QObject, constant=True)
     def records(self):
         return self._records
+
+    @Property(QObject, constant=True)
+    def updates(self):
+        return self._updates
+
+    @Slot(result=bool)
+    def prepareRestart(self):
+        """The person chose to restart into the fetched version; the window then closes as usual.
+
+        Closing ends every part first. Only then, as the last thing this
+        process does, is the launcher started again (see `launch`).
+        """
+        if self._closing or self._download.running or self._updates.state != "ready":
+            return False
+        self._updates.confirm_restart()
+        return True
 
     @Property("QVariantMap", notify=preferencesChanged)
     def preferences(self):
@@ -833,6 +852,7 @@ class ApplicationController(QObject):
         self._schedule.shutdown()
         self._management.shutdown()
         self._records.shutdown()
+        self._updates.shutdown()
         self._close_timer.start()
         self.changed.emit()
 
@@ -841,7 +861,7 @@ class ApplicationController(QObject):
 
     def _finish_close(self):
         if self._shutdown_parts >= {"accounts", "download", "library", "browser_setup", "schedule", "management",
-                                     "records"}:
+                                     "records", "updates"}:
             if not self._io_shutdown_queued:
                 self._io_shutdown_queued = True
                 self._commands.put(("quit", None))
@@ -880,13 +900,38 @@ def _place_window(application, window, saved):
         window.showMaximized()
 
 
+class _FirstFrame(QObject):
+    """Tell the launcher's splash to go once the window has actually drawn."""
+
+    def __init__(self, window):
+        super().__init__(window)
+        self._window = window
+        self._seen = False
+        # The render thread emits this; the slot runs on the window's thread.
+        window.frameSwapped.connect(self._drawn, Qt.ConnectionType.QueuedConnection)
+
+    @Slot()
+    def _drawn(self):
+        from . import launcher
+
+        # Several frames can be queued before the first one is handled here.
+        if self._seen:
+            return
+        self._seen = True
+        self._window.frameSwapped.disconnect(self._drawn)
+        launcher.signal_ready()
+
+
 def launch(*, startup_probe=None):
     import sys
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
     from PySide6.QtWidgets import QApplication, QMessageBox
     from shiboken6 import delete
+    from . import launcher
 
+    # One taskbar button for the launcher's splash and this window.
+    launcher.set_process_identity()
     QQuickStyle.setStyle("Basic")
     application = QApplication(sys.argv)
     palette = QPalette()
@@ -939,6 +984,7 @@ def launch(*, startup_probe=None):
     except Exception:
         if startup_probe is not None:
             raise
+        launcher.signal_ready()
         QMessageBox.critical(None, "LuvBox", "기존 앱 데이터를 열지 못했습니다. 다른 LuvBox 창을 닫고 다시 실행해 주세요.")
         return 1
     wheel_input = WheelInputFilter()
@@ -956,15 +1002,33 @@ def launch(*, startup_probe=None):
         controller._library.provider = None
         delete(engine)
         if startup_probe is None:
+            launcher.signal_ready()
             QMessageBox.critical(None, "LuvBox", "화면을 열지 못했습니다. Qt 패키지와 앱 파일을 확인해 주세요.")
         return 1
     window = engine.rootObjects()[0]
+    first_frame = _FirstFrame(window)
+    program = launcher.launcher_path() if startup_probe is None else None
+    if program is not None:
+        # "Pin to taskbar" must pin the launcher, not this version's folder.
+        handle = int(window.winId())
+        launcher.mark_window(handle, program)
+        controller.shutdownFinished.connect(lambda: launcher.mark_window(handle, None))
     controller.shutdownFinished.connect(window.close)
     _place_window(application, window, {} if startup_probe is not None else controller.window_geometry())
     if startup_probe is not None:
         startup_probe.attach(application, controller, window)
+    elif getattr(sys, "frozen", False):
+        # Source runs and the isolated startup checks never contact GitHub by themselves.
+        controller.updates.startAutomaticCheck()
     result = application.exec()
     wheel_input.close()
     controller._library.provider = None
+    restart = controller.updates.restart_pending and launcher.launcher_path()
+    del first_frame
     delete(engine)
+    if restart:
+        try:
+            launcher.spawn_detached([str(restart)])
+        except OSError:
+            pass
     return result

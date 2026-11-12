@@ -6,6 +6,8 @@ Dialog {
     id: dialog
     objectName: "preferencesDialog"
     property var app: null
+    // Absent in previews of this dialog that carry no update controller.
+    readonly property var updates: app && app.updates ? app.updates : null
     readonly property var folderModes: [
         {label: "한 폴더에 저장", value: "flat"},
         {label: "작성자별 폴더", value: "author"},
@@ -240,6 +242,60 @@ Dialog {
                             }
                         }
                     }
+                }
+            }
+            ColumnLayout {
+                objectName: "preferencesUpdates"
+                Layout.fillWidth: true
+                Layout.topMargin: 6
+                spacing: 8
+                // Not locked while a save runs: checking for a release changes nothing a save reads.
+                visible: !!dialog.updates
+                enabled: !!dialog.updates && !dialog.app.closing
+                Label {
+                    text: "업데이트"
+                    font.bold: true
+                    font.pixelSize: 16
+                    textFormat: Text.PlainText
+                }
+                FlatSwitch {
+                    objectName: "updateAutoCheckSwitch"
+                    Layout.fillWidth: true
+                    text: "시작할 때 새 버전 확인 (하루 한 번)"
+                    checked: !!dialog.updates && dialog.updates.autoCheck
+                    onToggled: {
+                        dialog.updates.setAutoCheck(checked)
+                        checked = Qt.binding(function() { return !!dialog.updates && dialog.updates.autoCheck })
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+                    Label {
+                        objectName: "updateStatusLabel"
+                        Layout.fillWidth: true
+                        text: dialog.updates
+                            ? "지금 버전 " + dialog.updates.currentVersion + " · " + dialog.updates.status : ""
+                        color: dialog.updates && dialog.updates.state === "failed" ? "#ff8791" : palette.text
+                        opacity: dialog.updates && dialog.updates.state === "failed" ? 1 : 0.72
+                        textFormat: Text.PlainText
+                        wrapMode: Text.Wrap
+                    }
+                    FlatButton {
+                        objectName: "updateCheckButton"
+                        text: dialog.updates && dialog.updates.state === "checking" ? "확인하는 중" : "지금 확인"
+                        enabled: !!dialog.updates && !dialog.updates.busy && dialog.updates.state !== "ready"
+                        Accessible.name: "새 버전 지금 확인"
+                        onClicked: dialog.updates.checkNow()
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: "공개 릴리스 정보만 읽고, 이 PC나 계정에 관한 것은 보내지 않아요. 받기는 알림에서 직접 누를 때만 시작해요."
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 12
+                    opacity: 0.72
                 }
             }
             ColumnLayout {

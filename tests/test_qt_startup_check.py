@@ -17,7 +17,7 @@ class FrozenStartupCheckTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="luvbox-startup-check-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.executable = self.root / "LuvBox-test.exe"
+        self.executable = self.root / "LuvBox.exe"
         self.executable.write_bytes(b"synthetic frozen executable")
         self.destination = self.root / "reports" / "startup.json"
 
@@ -25,6 +25,7 @@ class FrozenStartupCheckTests(unittest.TestCase):
         return {
             "ok": True,
             "frozen": True,
+            "launcher": True,
             "isolated": True,
             "window_visible": True,
             "window_exposed": True,
@@ -51,9 +52,37 @@ class FrozenStartupCheckTests(unittest.TestCase):
             report = check_qt_startup.check(self.executable, self.destination)
         arguments, options = run.call_args
         self.assertEqual(arguments[0], [str(self.executable.resolve()), "--qt-smoke", str(self.destination.resolve())])
-        self.assertEqual(options["timeout"], 60)
+        # Long enough for the launcher to unpack the application first.
+        self.assertEqual(options["timeout"], 240)
         self.assertEqual(report["executable_sha256"], hashlib.sha256(self.executable.read_bytes()).hexdigest())
         self.assertEqual(json.loads(self.destination.read_text(encoding="utf-8")), report)
+
+    def test_the_launcher_unpacks_into_a_private_folder_never_the_developers_own(self):
+        seen = []
+
+        def run(arguments, **options):
+            seen.append(options["env"])
+            self.assertTrue(Path(options["env"]["LOCALAPPDATA"]).is_dir())
+            self.destination.write_text(json.dumps(self.complete_report()), encoding="utf-8")
+            return subprocess.CompletedProcess(arguments, 0, b"", b"")
+
+        real = os.environ.get("LOCALAPPDATA")
+        shared = self.root / "shared check data"
+        with patch.dict(os.environ, {"LUVBOX_LAUNCHER": "C:\\stale\\LuvBox.exe", "LUVBOX_READY_EVENT": "stale"}), \
+                patch.object(check_qt_startup.subprocess, "run", side_effect=run):
+            check_qt_startup.check(self.executable, self.destination)
+            check_qt_startup.check(self.executable, self.destination, shared)
+        private, given = seen
+        self.assertNotEqual(private["LOCALAPPDATA"], real)
+        # A folder of the check's own is removed again; a given one is kept for the next check.
+        self.assertFalse(Path(private["LOCALAPPDATA"]).exists())
+        self.assertEqual(Path(given["LOCALAPPDATA"]), shared.resolve())
+        self.assertTrue(shared.is_dir())
+        for environment in seen:
+            # No dialog can block an unattended build, and nothing of an outer launcher leaks in.
+            self.assertEqual(environment["LUVBOX_LAUNCHER_SILENT"], "1")
+            self.assertNotIn("LUVBOX_LAUNCHER", environment)
+            self.assertNotIn("LUVBOX_READY_EVENT", environment)
 
     def test_source_incomplete_or_error_reports_are_rejected(self):
         valid = self.complete_report()

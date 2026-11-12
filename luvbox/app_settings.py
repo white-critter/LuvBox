@@ -27,6 +27,9 @@ def default_settings() -> dict:
         "gallery_density": 1,
         # Last window size and place: {"width", "height", "x", "y", "maximized"}; empty until first closed.
         "window": {},
+        # Look for a newer release once a day at start; when that was last done (UTC, ISO 8601);
+        # and the newer release it found: {"version", "notes", "installable", "size"} or empty.
+        "update_check": True, "update_checked_at": "", "update_found": {},
     }
 
 

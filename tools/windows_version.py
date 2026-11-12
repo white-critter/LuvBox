@@ -30,7 +30,7 @@ def write():
                 StringStruct("FileDescription", "LuvBox"),
                 StringStruct("FileVersion", __version__),
                 StringStruct("InternalName", "LuvBox"),
-                StringStruct("OriginalFilename", f"LuvBox-{__version__}.exe"),
+                StringStruct("OriginalFilename", "LuvBox.exe"),
                 StringStruct("ProductName", "LuvBox"),
                 StringStruct("ProductVersion", __version__),
             ])]),

@@ -244,7 +244,10 @@ def _backend_checks():
 def run(destination, download_check):
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    from .launcher import launcher_path
+
     report = {"ok": False, "version": __version__, "frozen": bool(getattr(sys, "frozen", False)),
+              "launcher": launcher_path() is not None,
               "python": sys.version.split()[0], "isolated": True, "authentication_or_network": False}
     environment = {name: os.environ.get(name) for name in ("LOCALAPPDATA", "APPDATA")}
     try:
