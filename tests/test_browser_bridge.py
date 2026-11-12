@@ -19,7 +19,7 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from luvbox.browser_bridge import (BrowserBridge, BrowserBridgeError, _decrypt, _decrypt_progress,
-                                   _derive_key, _session, extension_directory)
+                                   _decode, _derive_key, _session, extension_directory)
 
 
 PAYLOAD = {"version": 1, "auth_token": "synthetic-bridge-token", "username": "Offline_User",
@@ -69,6 +69,14 @@ class BrowserBridgeTests(unittest.TestCase):
             return response.status, dict(response.getheaders()), response.read()
         finally:
             connection.close()
+
+    def test_base64url_decode_checks_alphabet_and_length(self):
+        self.assertEqual(len(_decode("-" * 8000, maximum=8000)), 6000)
+        for value in ("a.b", "a+", "a/", "a=", "a\n"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                _decode(value, maximum=8)
+        with self.assertRaises(ValueError):
+            _decode("a" * 9, maximum=8)
 
     def test_success_returns_account_without_saving_or_remote_requests(self):
         with patch("webbrowser.open", side_effect=AssertionError("unexpected browser open")):
