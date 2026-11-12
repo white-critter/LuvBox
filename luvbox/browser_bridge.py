@@ -36,7 +36,7 @@ _PROGRESS_STAGES = frozenset({"extension_ready", "checking_account", "login_requ
 _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
 _USER_ID = re.compile(r"[1-9][0-9]{0,31}\Z")
 _EXTENSION_HOST = re.compile(r"[a-zA-Z0-9-]{1,128}\Z")
-_BASE64URL = re.compile(r"[A-Za-z0-9_-]+\Z")
+_BASE64URL_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
 _PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>LuvBox · 브라우저 연결</title></head><body>
@@ -105,7 +105,8 @@ def _derive_key(secret: str, port: int, purpose: str, *, path: str = "/session")
 
 
 def _decode(value: object, *, maximum: int) -> bytes:
-    if not isinstance(value, str) or not 1 <= len(value) <= maximum or not _BASE64URL.fullmatch(value):
+    if (not isinstance(value, str) or not 1 <= len(value) <= maximum or
+            not all(char in _BASE64URL_CHARS for char in value)):
         raise ValueError("invalid encrypted bridge payload")
     return base64.b64decode(value + "=" * (-len(value) % 4), altchars=b"-_", validate=True)
 
