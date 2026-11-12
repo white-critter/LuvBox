@@ -307,13 +307,17 @@ def _normalize_tag(tag) -> str:
 
 
 def _exact_duplicate_exists(alias: str) -> str:
-    """Correlated exact-hash twin check. ``alias`` is a fixed SQL identifier."""
+    """Correlated exact-hash twin check. ``alias`` is a fixed SQL identifier.
+
+    Only the file hash counts. An equal perceptual hash used to count as well,
+    which listed different pictures that merely look alike once reduced.
+    """
     return (
         "EXISTS (SELECT 1 FROM image_hashes h2 "
         "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
         "AND m2.num=h2.num AND m2.media_type=h2.media_type "
-        f"WHERE m2.path!='' AND (({alias}.dhash!='' AND h2.dhash={alias}.dhash) "
-        f"OR ({alias}.file_hash!='' AND h2.file_hash={alias}.file_hash)) "
+        f"WHERE m2.path!='' AND {alias}.file_hash!='' AND h2.file_hash={alias}.file_hash "
+        f"AND h2.filesize={alias}.filesize "
         f"AND NOT (h2.folder_mode={alias}.folder_mode AND h2.tweet_id={alias}.tweet_id "
         f"AND h2.num={alias}.num AND h2.media_type={alias}.media_type))"
     )
@@ -2750,6 +2754,95 @@ class HistoryStore:
                     updates
                 )
         return len(updates)
+
+    @_safe
+    def duplicate_rule(self) -> str:
+        """How the stored groups were made: 'exact', 'near', or '' for groups from 1.6.x.
+
+        1.6.x grouped photos whose perceptual hashes were merely close. Those
+        groups are rebuilt from the stored file hashes the first time a newer
+        version reads them; no photo is opened for that.
+        """
+        row = self._db.execute("SELECT value FROM catalog_meta WHERE key='duplicate_rule'").fetchone()
+        return row[0] if row and row[0] in {"exact", "near"} else ""
+
+    @_safe
+    def set_duplicate_rule(self, rule: str) -> None:
+        if rule not in {"exact", "near"}:
+            raise HistoryError(_HISTORY_HELP)
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('duplicate_rule',?)", (rule,))
+
+    @_safe
+    def has_duplicate_groups(self) -> bool:
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
+            return False
+        return self._db.execute("SELECT 1 FROM image_hashes WHERE cluster_id>0 LIMIT 1").fetchone() is not None
+
+    @_safe
+    def regroup_exact_duplicates(self) -> int:
+        """Rebuild the groups from stored file hashes: same SHA-256 and size only."""
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
+            return 0
+        rows = self._read_rows(
+            "SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.filesize, h.file_hash "
+            "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
+            "AND m.num=h.num AND m.media_type=h.media_type "
+            "WHERE m.path!='' AND h.file_hash!='' ORDER BY h.file_hash, h.filesize")
+        groups: dict[tuple, list[tuple]] = {}
+        for row in rows:
+            groups.setdefault((row["file_hash"], row["filesize"]), []).append(
+                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
+        self.save_clusters([group for group in groups.values() if len(group) >= 2])
+        self.set_duplicate_rule("exact")
+        return self.duplicate_counts()
+
+    @_safe
+    def duplicate_page(self, page=0, page_size=100, media_type="all", query="", *, period=None, author="",
+                       hashtag="", favorite_only=False, user_tag="", ai_category="", ai_origin="") -> dict:
+        """Duplicates in group order: each group together, the photo to keep first.
+
+        Every row carries ``cluster_id``, ``cluster_rank`` (1 is the photo to
+        keep: a favorite, then the larger file) and ``cluster_size``. The
+        ranking counts every present member, so a filter that hides part of a
+        group does not promote a copy to "keep".
+        """
+        if (isinstance(page, bool) or not isinstance(page, int) or page < 0 or
+                isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000):
+            raise HistoryError(_HISTORY_HELP)
+        empty = {"rows": [], "total": 0, "page": 0, "pages": 0, "page_size": page_size}
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
+            return empty
+        where, params = self._filter_clause(media_type, query, period, author, False, hashtag=hashtag,
+                                            favorite_only=favorite_only, user_tag=user_tag,
+                                            ai_category=ai_category, ai_origin=ai_origin)
+        favorite = ("(SELECT 1 FROM favorites f WHERE f.folder_mode=h.folder_mode AND f.tweet_id=h.tweet_id "
+                    "AND f.num=h.num AND f.media_type=h.media_type) IS NOT NULL"
+                    if self._has_table("favorites") else "0")
+        ranked = (
+            "WITH ranked AS (SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id, "
+            f"ROW_NUMBER() OVER (PARTITION BY h.cluster_id ORDER BY {favorite} DESC, h.filesize DESC, "
+            "h.tweet_id DESC, h.num DESC) AS cluster_rank, "
+            "COUNT(*) OVER (PARTITION BY h.cluster_id) AS cluster_size "
+            "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
+            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND m.path!='') ")
+        source = ("FROM ranked JOIN media ON media.folder_mode=ranked.folder_mode AND media.tweet_id=ranked.tweet_id "
+                  "AND media.num=ranked.num AND media.media_type=ranked.media_type "
+                  "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
+                  "LEFT JOIN tweets ON tweets.tweet_id=media.tweet_id")
+        condition = (where + " AND " if where else " WHERE ") + "ranked.cluster_size>=2"
+        hashtags_col = "tweets.hashtags" if self._has_column("tweets", "hashtags") else "'' AS hashtags"
+        with self._read_snapshot():
+            total = self._db.execute(ranked + "SELECT COUNT(*) " + source + condition, params).fetchone()[0]
+            pages = (total + page_size - 1) // page_size
+            page = min(page, max(0, pages - 1))
+            rows = self._read_rows(
+                ranked + "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,"
+                + hashtags_col + ",ranked.cluster_id AS cluster_id,ranked.cluster_rank AS cluster_rank,"
+                "ranked.cluster_size AS cluster_size " + source + condition +
+                " ORDER BY ranked.cluster_id, ranked.cluster_rank LIMIT ? OFFSET ?",
+                (*params, page_size, page * page_size))
+        return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
     @_safe
     def duplicate_counts(self) -> int:

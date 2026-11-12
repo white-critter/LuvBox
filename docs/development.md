@@ -1,4 +1,4 @@
-# LuvBox 1.6.10 개발 안내
+# LuvBox 1.7.0 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -27,7 +27,8 @@ Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사�
 | `entry.py`, `luvbox/qt_app.py`, `assets/qt/` | 실행 진입점, Qt 앱 제어와 QML 화면 |
 | `qt_accounts.py`, `qt_browser_setup.py`, `browser_discovery.py`, `login.py`, `browser_bridge.py` | 연결 승인·확장 설치 안내·DPAPI 계정 보관 |
 | `qt_download.py`, `qt_saved_preview.py`, `download_service.py`, `core.py`, `review.py` | 저장 상태·선택적 첫 장면, 별도 worker와 IPC, 실제 다운로드와 저장 여부 확인 |
-| `qt_library.py`, `qt_gallery.py`, `qt_wheel.py`, `duplicates.py`, `clip_classifier.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력, 중복·유사 이미지 탐지, 로컬 AI CLIP 자동 분류 |
+| `qt_library.py`, `qt_gallery.py`, `qt_wheel.py`, `duplicates.py`, `clip_classifier.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력, 중복 탐지(완전 일치, 선택 시 픽셀 확인), 로컬 AI CLIP 자동 분류 |
+| `unsaved_preview.py` | 저장하지 못한 미디어의 작은 미리보기 한 장을 X 이미지 서버에서 받아 로컬 캐시에 보관 |
 | `app_settings.py`, `settings.py`, `file_mutex.py`, `qt_schedule.py`, `scheduled.py`, `activity.py` | 설정·일일 예약·수동/자동 실행 결과와 프로세스 간 변경 보호 |
 | `history.py`, `storage.py`, `recovery.py`, `deletion.py`, `recycling.py`, `qt_management.py` | 기록·갤러리 필터의 읽기, 경로 승인·이전·사본·복구와 휴지통 이동 |
 | `activity.py`, `run_history.py`, `unsaved.py`, `qt_records.py` | 실행 결과 기록부, 실행 기록 병합 조회, 저장 못 한 미디어 기록부와 설정 › 고급의 목록·다시 저장 |
@@ -39,13 +40,29 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 
 휴지통 이동이 끝나면 목록을 다시 읽지 않고 옮긴 행만 모델에서 뺍니다(`GalleryModel.removeKeys`, `LibraryController.removeDeleted`). 다음 페이지는 마지막으로 보인 행 뒤에서 이어지므로 저장소는 커서 앞의 행 수만 줄입니다(`LibraryRepository.forget`). 실패·미처리 파일이 있는 결과, 불러오는 중인 페이지, 중복 사진 보기, 32곳을 넘게 흩어진 선택은 이전처럼 전체를 다시 읽습니다. 폴더 전체 작업(자동분류·중복 검사·가르치기·AI 태그 초기화)이 끝날 때도 결과가 현재 필터를 바꾸는 경우에만 다시 읽고, 그 밖에는 열린 항목만 다시 조회합니다(`_settle`). 미리보기의 불러오는 표시는 열린 항목의 조회(`selectionBusy`)만 따르며 폴더 전체 작업의 `busy`와 구분합니다. 갤러리 썸네일 디코딩 작업 수는 논리 코어의 절반을 2~4개 범위로 씁니다.
 
+중복 묶음은 SHA-256과 크기가 같은 파일입니다(`duplicates.cluster_images`). `near`를 켜면 dHash가 4비트 이내인 후보를 32×32 RGB 축소본으로 비교해 평균 1%·99번째 백분위 6%·최대 15% 이내이고 가로세로 비율이 1% 이내일 때만 묶습니다. 평균만 보면 같은 틀에 글자만 다른 그림이 통과하므로 부분 차이를 함께 봅니다. 묶음을 만든 방식은 `catalog_meta`의 `duplicate_rule`(`exact`·`near`)에 남기며, 이 값이 없는 1.6.x 묶음은 처음 읽을 때 저장된 파일 해시로 다시 계산합니다(`HistoryStore.regroup_exact_duplicates`). 중복 보기는 `duplicate_page`가 묶음 순서로 읽고 남길 사진(즐겨찾기, 큰 파일 순)을 SQL에서 정하므로 필터가 묶음 일부를 가려도 사본이 남길 사진으로 바뀌지 않습니다.
+
+통계는 `statisticsLoaded = Signal("QVariantMap")`으로 보냅니다. `Signal(object)`로 보낸 dict는 QML에서 필드를 읽을 수 없어 1.6.x의 통계 창은 값을 표시하지 못했습니다. QML로 dict를 보내는 신호는 `QVariantMap`·`QVariantList`로 선언하고, 실제 QML에서 값이 보이는지 장면 테스트로 확인합니다.
+
+휠은 갤러리가 `GalleryWheel`(한 칸 ≈ 타일 높이의 0.6배, 최소 120px), 그 밖의 스크롤 영역이 `SmoothWheel`(120px)을 쓰며 둘 다 같은 방향으로 200ms 안에 이어지면 0.5씩 4배까지 빨라집니다. 새 스크롤 영역에는 `SmoothWheel { flickable: … }`을 넣습니다. 갤러리 그리드는 `interactive: false`이고 끌기는 `DragHandler`가 사각형 선택으로 처리합니다.
+
+### 기능을 바꿀 때 함께 볼 것
+
+새 기능이나 변경이 기존 기능의 전제를 바꾸는지 아래 짝을 확인하고, 바뀌면 같은 릴리즈에서 함께 고칩니다.
+
+- 목록에서 항목이 빠지거나 순서가 바뀌는 변경 ↔ 제자리 삭제(`removeDeleted`), 다음 페이지 커서, 미리보기 이전·다음, 여러 개 선택.
+- 사진의 분류·태그·중복 여부를 바꾸는 작업 ↔ 통계 창, AI 분류 메뉴의 개수, 중복 배지, 열려 있는 미리보기의 표시.
+- 저장 엔진이 미디어를 건너뛰거나 실패하는 경로 ↔ 저장 못 한 미디어 목록과 그 미리보기, 실행 기록의 개수, 전체 확인에서의 재방문.
+- 새 화면 요소(목록·팝업) ↔ 휠 처리기, 글자 단축키 차단(`modalOpen`·`listEngaged`), 앱을 닫을 때 닫는 창 목록, 단축키 안내.
+- QML로 넘기는 값의 자료형과 설정 키 ↔ 이전 버전이 읽어도 깨지지 않는지, 손상된 값의 기본값 복구.
+
 미리보기·저장 전 확인창은 부모 오버레이에서 24px 여백을 남기고 확장합니다. 헤더의 창 최대화·복원은 호스트 앱 창을 제어합니다. 갤러리 본문은 기본으로 접고 필요할 때 펼치며, 이미지 비율과 미디어 해제·저장 승인 순서는 유지합니다.
 
 휠·버튼 확대/축소, 드래그 이동, 화면 맞춤과 지원하는 정지 사진의 원본 배율을 제공합니다. 이전·다음은 현재 검색·정렬 순서를 따르고 끝에서 순환하지 않습니다. 입력란의 방향키를 가로채지 않으며 새 파일·닫기·숨김에서 확대·이동을 초기화합니다. 저장 화면의 자세히 보기는 최근 실제 저장 파일의 첫 프레임·작성자·본문·게시 시각·원문을 표시합니다. 숨겨진 동안 디코딩하지 않고 현재 요청 하나와 가장 최근 대기 하나만 유지하며 추가 X 요청을 보내지 않습니다.
 
 ## 데이터와 인증 호환성
 
-설정·암호화 세션·기록·백업·미리보기는 `%LOCALAPPDATA%\LuvBox`에 있습니다. 1.6.9·1.6.10은 설정 파일에 갤러리 썸네일 크기(`gallery_density`, 0·1·2)만 더하며 기록 DB 구조는 바꾸지 않습니다. 이전 버전은 이 값을 무시하고 보존합니다. 미디어 저장 폴더의 `.luvbox` 사본과 이전 파일명·archive·암호화 형식·예약 이름을 계속 인식합니다. UI 변경을 이유로 기존 파일·DB·계정을 초기화하지 않습니다. 폴더 이전의 명시적 승인 경로를 보존하고, 다른 PC의 기록 사본이 주장하는 외부 경로에 관리 권한을 부여하지 않습니다.
+설정·암호화 세션·기록·백업·미리보기는 `%LOCALAPPDATA%\LuvBox`에 있습니다. 1.7.0은 설정 파일에 창 크기·위치(`window`)를, 기록 DB의 `catalog_meta`에 중복 묶음 방식(`duplicate_rule`) 한 줄을 더합니다. 표 구조는 바꾸지 않으며 이전 버전은 두 값을 무시합니다. 1.6.9·1.6.10은 설정 파일에 갤러리 썸네일 크기(`gallery_density`, 0·1·2)만 더하며 기록 DB 구조는 바꾸지 않습니다. 이전 버전은 이 값을 무시하고 보존합니다. 미디어 저장 폴더의 `.luvbox` 사본과 이전 파일명·archive·암호화 형식·예약 이름을 계속 인식합니다. UI 변경을 이유로 기존 파일·DB·계정을 초기화하지 않습니다. 폴더 이전의 명시적 승인 경로를 보존하고, 다른 PC의 기록 사본이 주장하는 외부 경로에 관리 권한을 부여하지 않습니다.
 
 계정은 브라우저 확장의 코드·계정 확인 후 승인하거나 토큰을 직접 입력해 연결합니다. 수동 토큰 보관은 X 인증 성공을 뜻하지 않습니다. 토큰·쿠키·브라우저 프로필·사용자 DB를 로그·Git·배포 파일에 넣지 않습니다. 계정 연결과 Qt 설정 변경은 Windows 경로별 mutex와 원자적 파일 교체로 보호합니다. 설정 읽기에 실패하면 변경 저장을 중단해 기존 파일을 보존합니다.
 
@@ -90,7 +107,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox-1.6.10/`, `release/LuvBox-1.6.10.zip`, `release/SHA256-1.6.10.txt`입니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox-1.7.0/`, `release/LuvBox-1.7.0.zip`, `release/SHA256-1.7.0.txt`입니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다).
 

@@ -304,6 +304,7 @@ def _options_from_settings(settings: dict, full: bool):
         gif_size=settings.get("gif_size", "original"),
         # This worker is unattended; GUI confirmation preferences never apply.
         confirm_each=False,
+        unsaved_previews=True,
     ).validate()
 
 

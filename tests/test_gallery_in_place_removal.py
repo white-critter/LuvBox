@@ -172,7 +172,9 @@ class InPlaceRecycleTests(unittest.TestCase):
         self.assertEqual(self.library._generation, generation)
         self.assertEqual(self.keys(), [before[0], before[2], before[3], before[5]])
         self.assertEqual(self.library.selectedKeys, [])
-        self.assertEqual(self.library.selectedKey, "")
+        # The photo that took the opened one's place is opened at once, without waiting for the grid.
+        self.assertTrue(self.library.selectionBusy or self.library.selectedKey == before[5])
+        self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == before[5])
         self.assertEqual(self.library.model.total, 5)
         self.assertTrue(self.shell._gallery_dirty)
         self.assertFalse(self.library.canSelect(before[1]))
@@ -183,6 +185,31 @@ class InPlaceRecycleTests(unittest.TestCase):
         self.assertEqual(len(set(self.keys())), 5)
         self.assertEqual(self.keys()[:4], [before[0], before[2], before[3], before[5]])
         self.assertFalse(self.library.model.canFetchMore())
+
+    def test_removing_the_opened_photo_never_leaves_a_moment_with_nothing_selected(self):
+        # A preview closes itself when nothing is selected and nothing is loading. After a
+        # recycle that moment existed until the grid moved its highlight, and a count
+        # arriving in between closed the preview that had just come back.
+        before = self.keys()
+        self.library.selectItem(before[2])
+        self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == before[2])
+        states = []
+        self.library.changed.connect(
+            lambda: states.append(self.library.selectionBusy or bool(self.library.selectedKey)))
+        self.assertTrue(self.library.removeDeleted([before[2]]))
+        self.assertTrue(states and all(states), states)
+        self.assertTrue(self.library.selectionBusy)
+        self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == before[3])
+        self.assertTrue(all(states), states)
+        # The last photo hands over to the one before it; an emptied list has nothing to open.
+        last = self.keys()[-1]
+        self.library.selectItem(last)
+        self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == last)
+        self.assertTrue(self.library.removeDeleted([last]))
+        self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == self.keys()[-1])
+        self.assertTrue(self.library.removeDeleted(self.keys()))
+        self.assertEqual((self.library.selectedKey, self.library.selectionBusy, self.library.model.count),
+                         ("", False, 0))
 
     def test_a_remaining_tile_can_be_recycled_next_without_reselecting(self):
         before = self.keys()

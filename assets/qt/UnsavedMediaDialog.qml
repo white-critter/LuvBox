@@ -193,6 +193,7 @@ Dialog {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
+            SmoothWheel { flickable: list }
             spacing: 8
             model: dialog.records ? dialog.records.unsavedRows : []
             ScrollBar.vertical: ScrollBar { policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }

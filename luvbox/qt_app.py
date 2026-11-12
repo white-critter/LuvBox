@@ -180,6 +180,39 @@ class ApplicationController(QObject):
     def preferences(self):
         return {name: self._preferences[name] for name in _PUBLIC_PREFERENCES}
 
+    def window_geometry(self):
+        """The size and place the window had when it was last closed, or {}."""
+        saved = self._preferences.get("window")
+        if not isinstance(saved, dict):
+            return {}
+        result = {}
+        for name, low, high in (("width", 200, 20000), ("height", 200, 20000),
+                                ("x", -20000, 20000), ("y", -20000, 20000)):
+            value = saved.get(name)
+            if type(value) is int and low <= value <= high:
+                result[name] = value
+        if type(saved.get("maximized")) is bool:
+            result["maximized"] = saved["maximized"]
+        return result
+
+    @Slot(int, int, int, int, bool)
+    def rememberWindow(self, x, y, width, height, maximized):
+        """Keep the window's size and place for the next start. A maximized window keeps its earlier normal size."""
+        if any(type(value) is not int for value in (x, y, width, height)) or type(maximized) is not bool:
+            return
+        geometry = self.window_geometry()
+        if not maximized:
+            if not (200 <= width <= 20000 and 200 <= height <= 20000 and -20000 <= x <= 20000 and -20000 <= y <= 20000):
+                return
+            geometry.update(x=x, y=y, width=width, height=height)
+        geometry["maximized"] = maximized
+        if geometry == self._preferences.get("window"):
+            return
+        self._preferences["window"] = geometry
+        # Written on the storage thread like other preferences, but not as a
+        # pending change: closing must not wait on it or show "saving".
+        self._commands.put(("settings", (0, {"window": dict(geometry)})))
+
     @Property(str, notify=changed)
     def account(self):
         return self._account
@@ -544,7 +577,7 @@ class ApplicationController(QObject):
         options = JobOptions(**{name: snapshot[name] for name in (
             "account", "output_dir", "folder_mode", "scan_mode", "include_videos", "include_gifs",
             "max_video_mb", "separate_accounts", "gif_format", "gif_size", "confirm_each")},
-            targets=tuple(snapshot.get("targets", ()))).validate()
+            targets=tuple(snapshot.get("targets", ())), unsaved_previews=True).validate()
         destination = resolve_storage(options.output_dir, options.account, options.separate_accounts)
         locations = snapshot.get("record_locations", {})
         previous = locations.get(options.account) if isinstance(locations, dict) else None
@@ -819,6 +852,34 @@ class ApplicationController(QObject):
             self.shutdownFinished.emit()
 
 
+def _place_window(application, window, saved):
+    """Open at the last size and place when they still fit a connected screen."""
+    width = saved.get("width", window.width())
+    height = saved.get("height", window.height())
+    target = window.screen()
+    if "x" in saved and "y" in saved:
+        # Use the remembered place only while enough of the title bar is on a screen.
+        for screen in application.screens():
+            area = screen.availableGeometry()
+            if (area.left() - width + 120 <= saved["x"] <= area.right() - 120
+                    and area.top() <= saved["y"] <= area.bottom() - 80):
+                target = screen
+                break
+        else:
+            saved = {key: value for key, value in saved.items() if key not in ("x", "y")}
+    available = target.availableGeometry()
+    window.setWidth(min(width, max(window.minimumWidth(), available.width() - 24)))
+    window.setHeight(min(height, max(window.minimumHeight(), available.height() - 48)))
+    if "x" in saved and "y" in saved:
+        window.setX(saved["x"])
+        window.setY(saved["y"])
+    else:
+        window.setX(available.left() + max(0, (available.width() - window.width()) // 2))
+        window.setY(available.top() + max(0, (available.height() - window.height()) // 2))
+    if saved.get("maximized"):
+        window.showMaximized()
+
+
 def launch(*, startup_probe=None):
     import sys
     from PySide6.QtQml import QQmlApplicationEngine
@@ -899,9 +960,7 @@ def launch(*, startup_probe=None):
         return 1
     window = engine.rootObjects()[0]
     controller.shutdownFinished.connect(window.close)
-    available = window.screen().availableGeometry()
-    window.setWidth(min(window.width(), max(window.minimumWidth(), available.width() - 24)))
-    window.setHeight(min(window.height(), max(window.minimumHeight(), available.height() - 48)))
+    _place_window(application, window, {} if startup_probe is not None else controller.window_geometry())
     if startup_probe is not None:
         startup_probe.attach(application, controller, window)
     result = application.exec()

@@ -487,6 +487,9 @@ class GalleryModel(QAbstractListModel):
     ThumbReadyRole = KeyRole + 3
     ThumbMissingRole = KeyRole + 4
     FavoriteRole = KeyRole + 5
+    GroupRole = KeyRole + 6
+    KeeperRole = KeyRole + 7
+    DetailRole = KeyRole + 8
 
     def __init__(self, reader, *, provider=None, batch_size=200, parent=None):
         super().__init__(parent)
@@ -540,7 +543,8 @@ class GalleryModel(QAbstractListModel):
     def roleNames(self):
         return {self.KeyRole: b"key", self.CaptionRole: b"caption",
                 self.ThumbUrlRole: b"thumbUrl", self.ThumbReadyRole: b"thumbReady",
-                self.ThumbMissingRole: b"thumbMissing", self.FavoriteRole: b"favorite"}
+                self.ThumbMissingRole: b"thumbMissing", self.FavoriteRole: b"favorite",
+                self.GroupRole: b"group", self.KeeperRole: b"keeper", self.DetailRole: b"detail"}
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._rows)
@@ -554,14 +558,23 @@ class GalleryModel(QAbstractListModel):
         if role in (self.CaptionRole, Qt.ItemDataRole.DisplayRole):
             return row["caption"]
         if role == self.ThumbUrlRole:
-            return f"image://thumbs/{quote(row['key'], safe='')}?generation={self._generation}"
+            return self.thumb_url(row["key"])
         if role == self.ThumbReadyRole:
             return row["key"] in self._ready
         if role == self.ThumbMissingRole:
             return row["key"] in self._missing
         if role == self.FavoriteRole:
             return bool(row.get("favorite", False))
+        if role == self.GroupRole:
+            return row.get("group", 0)
+        if role == self.KeeperRole:
+            return bool(row.get("keeper", False))
+        if role == self.DetailRole:
+            return row.get("detail", "")
         return None
+
+    def thumb_url(self, key):
+        return f"image://thumbs/{quote(key, safe='')}?generation={self._generation}"
 
     def setFavorite(self, key, favorite):
         pos = self._positions.get(key)
@@ -670,9 +683,19 @@ class GalleryModel(QAbstractListModel):
                     caption = row.get("caption", "")
                     if not isinstance(key, str) or not _KEY.fullmatch(key) or not isinstance(caption, str):
                         raise ValueError("invalid gallery row")
-                    cleaned.append({"key": key, "caption": caption[:500],
-                                    "missing": bool(row.get("missing", False)),
-                                    "favorite": bool(row.get("favorite", False))})
+                    entry = {"key": key, "caption": caption[:500],
+                             "missing": bool(row.get("missing", False)),
+                             "favorite": bool(row.get("favorite", False))}
+                    # Duplicate view only: which group a row belongs to and whether it is the one to keep.
+                    group = row.get("group", 0)
+                    if type(group) is int and group > 0:
+                        size = row.get("group_size", 0)
+                        entry.update(group=group, keeper=bool(row.get("keeper", False)),
+                                     group_size=size if type(size) is int and size > 0 else 0)
+                    detail = row.get("detail", "")
+                    if isinstance(detail, str) and detail:
+                        entry["detail"] = detail[:80]
+                    cleaned.append(entry)
                 result = generation, offset, total, cleaned, ""
             except Exception:
                 result = generation, offset, 0, [], _READ_ERROR

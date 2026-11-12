@@ -50,6 +50,7 @@ _HOLD_REASON = {
 _CATALOG_MOVED = "저장 폴더가 바뀌어 작업을 멈췄습니다. 이미 처리한 내용은 유지됩니다."
 _TAG_LOCKED = "AI 작업이 끝난 뒤 태그를 바꿀 수 있습니다. 분류나 초기화가 끝나면 다시 시도해 주세요."
 _FAVORITE_ERROR = "즐겨찾기를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
+_STATISTICS_ERROR = "통계를 불러오지 못했습니다. 저장 폴더가 연결되어 있는지 확인한 뒤 다시 시도해 주세요."
 
 
 def _thumbnail_workers():
@@ -283,15 +284,24 @@ class LibraryRepository:
                 # Continue from the last row this view already accepted. An
                 # OFFSET would slide when a save inserts newer rows, and the
                 # next page would repeat keys until the gallery stopped.
-                after = self._cursor if offset and offset == self._cursor_offset else None
-                page = store.record_page(0 if after is not None else offset // limit, limit,
-                                         request.media_type, request.query,
-                                         order=request.order, author=request.author, include_deleted=False,
-                                         period=period, after=after, hashtag=request.hashtag,
-                                         favorite_only=request.favorite_only, user_tag=request.user_tag,
-                                         duplicate_only=request.duplicate_only,
-                                         ai_category=getattr(request, "ai_category", ""),
-                                         ai_origin=getattr(request, "ai_origin", ""))
+                grouped = request.duplicate_only and hasattr(store, "duplicate_page")
+                after = self._cursor if offset and offset == self._cursor_offset and not grouped else None
+                if grouped:
+                    # Each group together, the photo to keep first. The chosen sort order does not apply.
+                    page = store.duplicate_page(offset // limit, limit, request.media_type, request.query,
+                                                period=period, author=request.author, hashtag=request.hashtag,
+                                                favorite_only=request.favorite_only, user_tag=request.user_tag,
+                                                ai_category=getattr(request, "ai_category", ""),
+                                                ai_origin=getattr(request, "ai_origin", ""))
+                else:
+                    page = store.record_page(0 if after is not None else offset // limit, limit,
+                                             request.media_type, request.query,
+                                             order=request.order, author=request.author, include_deleted=False,
+                                             period=period, after=after, hashtag=request.hashtag,
+                                             favorite_only=request.favorite_only, user_tag=request.user_tag,
+                                             duplicate_only=request.duplicate_only,
+                                             ai_category=getattr(request, "ai_category", ""),
+                                             ai_origin=getattr(request, "ai_origin", ""))
                 idents = [
                     (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
                     for row in page["rows"]
@@ -328,8 +338,12 @@ class LibraryRepository:
                     elif kind != "ready":
                         caption += " · 파일 없음"
                     is_fav = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) in favs
-                    rows.append({"key": key, "caption": caption, "missing": kind != "ready",
-                                 "favorite": is_fav})
+                    entry = {"key": key, "caption": caption, "missing": kind != "ready", "favorite": is_fav}
+                    if grouped:
+                        size = stamp[2] if stamp is not None else row.get("filesize")
+                        entry.update(group=int(row.get("cluster_id") or 0), keeper=row.get("cluster_rank") == 1,
+                                     group_size=int(row.get("cluster_size") or 0), detail=_format_size(size))
+                    rows.append(entry)
                     last = row
                 if after is None and page["page"] * limit != offset:
                     return page["total"], []
@@ -342,7 +356,7 @@ class LibraryRepository:
                         return 0, []
                     for key, item in served.items():
                         self._served.setdefault(key, item)
-                    if last is not None:
+                    if last is not None and not grouped:
                         self._cursor = page_cursor(last, request.order)
                         self._cursor_offset = offset + len(rows)
                 return page["total"], rows
@@ -385,14 +399,38 @@ class LibraryRepository:
             return 0
         try:
             with closing(_ReadOnlyHistory(request.location())) as store:
-                return store.duplicate_counts() if hasattr(store, "duplicate_counts") else 0
+                stale = (hasattr(store, "duplicate_rule") and store.duplicate_rule() == ""
+                         and store.has_duplicate_groups())
+                if not stale:
+                    return store.duplicate_counts() if hasattr(store, "duplicate_counts") else 0
+            # 1.6.x grouped photos that only looked alike. Keep the identical files and drop the rest.
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                return store.regroup_exact_duplicates()
         except Exception:
             return 0
 
-    def overview(self, generation=None):
+    def ai_counts(self, generation=None):
+        """Photos per AI category, in the fixed category order, zero included."""
+        from .clip_classifier import CATEGORY_NAMES
         request = self.current(generation)
         if request is None:
-            return {}
+            return []
+        try:
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                found = store.ai_tag_stats() if hasattr(store, "ai_tag_stats") else {}
+        except Exception:
+            found = {}
+        return [{"category": name, "count": int(found.get(name, 0))} for name in CATEGORY_NAMES]
+
+    def overview(self, generation=None):
+        """Numbers for the statistics window.
+
+        A library with no records yet is empty, not an error. Any other
+        failure is raised so the window can say so instead of waiting forever.
+        """
+        request = self.current(generation)
+        if request is None:
+            return None
         try:
             with closing(_ReadOnlyHistory(request.location())) as store:
                 ov = store.overview(verify_files=False, top=10, include_missing=False)
@@ -401,21 +439,25 @@ class LibraryRepository:
                 user_tag_list = store.user_tags(limit=15) if hasattr(store, "user_tags") else []
                 dup_count = store.duplicate_counts() if hasattr(store, "duplicate_counts") else 0
                 return {
-                    "files": ov.get("files", 0),
-                    "posts": ov.get("posts", 0),
-                    "bytes": ov.get("bytes", 0),
-                    "formatted_bytes": _format_size(ov.get("bytes", 0)),
-                    "photo": ov.get("photo", 0),
-                    "video": ov.get("video", 0),
-                    "animated_gif": ov.get("animated_gif", 0),
-                    "duplicates": dup_count,
-                    "authors": st.get("authors", []),
+                    "files": int(ov.get("files", 0)),
+                    # Tweets that still have a file here, like the other cards.
+                    "posts": int(ov.get("current_posts", ov.get("posts", 0))),
+                    "bytes": int(ov.get("bytes", 0)),
+                    "formatted_bytes": _format_size(ov.get("bytes", 0)) or "0 B",
+                    "photo": int(ov.get("photo", 0)),
+                    "video": int(ov.get("video", 0)),
+                    "animated_gif": int(ov.get("animated_gif", 0)),
+                    "duplicates": int(dup_count),
+                    "authors": [{"author": str(row.get("author") or ""), "files": int(row.get("files") or 0)}
+                                for row in st.get("authors", [])],
                     "monthly": [{"month": m[0], "count": m[1]} for m in st.get("months", {}).get("posted", [])],
                     "ai_categories": [{"category": k, "count": v} for k, v in ai_stats.items()],
                     "user_tags": user_tag_list,
                 }
-        except Exception:
-            return {}
+        except FileNotFoundError:
+            return {"files": 0, "posts": 0, "bytes": 0, "formatted_bytes": "0 B", "photo": 0, "video": 0,
+                    "animated_gif": 0, "duplicates": 0, "authors": [], "monthly": [], "ai_categories": [],
+                    "user_tags": []}
 
     @staticmethod
     def _locate(store, row):
@@ -605,11 +647,17 @@ class LibraryRepository:
             return Thumbnail(None, "")
         return thumbnail(path, size)
 
-    def scan_duplicates(self, generation, progress_callback=None, epoch=None):
+    def scan_duplicates(self, generation, progress_callback=None, epoch=None, near=False, compare_callback=None):
+        """Find duplicate photos and store the groups.
+
+        Identical files always count. With ``near`` a photo saved again at
+        another size or quality counts too, after its pixels are compared.
+        ``compare_callback(done, total)`` reports those comparisons.
+        """
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
-        from .duplicates import compute_image_hashes, cluster_duplicates, image_signature, ScanCancelled
+        from .duplicates import compute_image_hashes, cluster_images, image_signature, ScanCancelled
 
         def check_cancel():
             if self._duplicate_cancel.is_set():
@@ -628,6 +676,7 @@ class LibraryRepository:
                 new_hashes = []
                 stale_hashes = []
                 active_hashes = {}
+                active_paths = {}
                 if progress_callback:
                     progress_callback(0, total_records)
                 for idx, rec in enumerate(records):
@@ -647,6 +696,7 @@ class LibraryRepository:
                         if ident in cached:
                             stale_hashes.append(ident)
                         continue
+                    active_paths[ident] = path
                     if ident in cached and cached[ident][3] == signature and (cached[ident][1] or cached[ident][2]):
                         active_hashes[ident] = cached[ident]
                         continue
@@ -673,15 +723,18 @@ class LibraryRepository:
                 items = [
                     {"key": f"g{generation}_{k[0]}_{k[1]}_{k[2]}_{k[3]}",
                      "ident": k, "filesize": v[0], "file_hash": v[1], "dhash": v[2],
-                     "favorite": k in favs}
+                     "favorite": k in favs, "path": active_paths.get(k)}
                     for k, v in active_hashes.items()
                 ]
                 if progress_callback:
                     progress_callback(total_records, total_records)
-                clusters = cluster_duplicates(items, max_distance=4, check_cancel=check_cancel)
+                clusters = cluster_images(items, near=bool(near), check_cancel=check_cancel,
+                                          progress=compare_callback)
                 cluster_idents = [[x["ident"] for x in group] for group in clusters]
                 check_cancel()
                 store.save_clusters(cluster_idents)
+                if hasattr(store, "set_duplicate_rule"):
+                    store.set_duplicate_rule("near" if near else "exact")
                 return store.duplicate_counts()
         except ScanCancelled:
             raise
@@ -1138,10 +1191,14 @@ class LibraryController(QObject):
     favoriteFilterChanged = Signal()
     duplicateFilterChanged = Signal()
     duplicateCountChanged = Signal()
+    duplicateGroupsChanged = Signal()
     duplicateScanProgress = Signal(int, int)
     aiScanProgress = Signal(int, int)
     aiScanningChanged = Signal()
-    statisticsLoaded = Signal(object)
+    aiCountsChanged = Signal()
+    # A map, not `object`: QML cannot read the fields of a Python object passed
+    # as `object`, which left the statistics window on "…" for good.
+    statisticsLoaded = Signal("QVariantMap")
     shutdownFinished = Signal()
     _delivered = Signal(object)
 
@@ -1177,6 +1234,10 @@ class LibraryController(QObject):
         self._dup_total = 0
         self._teach_request = None
         self._skipped_teach = 0
+        self._ai_counts = []
+        self._duplicate_near = False
+        self._duplicate_groups = []
+        self._statistics_wanted = False
         self._ai_scanning = False
         self._ai_current = 0
         self._ai_total = 0
@@ -1186,6 +1247,9 @@ class LibraryController(QObject):
         self._selection_keys = set()
         self._selected_keys_order = []
         self._selection_revision = 0
+        self._selection_anchor = ""
+        self._band_base = None
+        self._band_rect = None
         self._selected = {}
         self._selection_key = ""
         self._selection_serial = 0
@@ -1266,6 +1330,11 @@ class LibraryController(QObject):
         from .clip_classifier import CATEGORY_NAMES
         return list(CATEGORY_NAMES)
 
+    @Property("QVariantList", notify=aiCountsChanged)
+    def aiCategoryCounts(self):
+        """[{category, count}] for the AI menu; empty until the first read finishes."""
+        return [dict(item) for item in self._ai_counts]
+
     @Property("QVariantList", notify=userTagsChanged)
     def userTags(self):
         return self._user_tags.copy()
@@ -1281,6 +1350,50 @@ class LibraryController(QObject):
     @Property(int, notify=duplicateCountChanged)
     def duplicateCount(self):
         return self._duplicate_count
+
+    @Property("QVariantList", notify=duplicateGroupsChanged)
+    def duplicateGroups(self):
+        """Loaded duplicates as groups: [{group, size, items: [{key, caption, detail, thumbUrl, keeper, ...}]}]."""
+        return self._duplicate_groups
+
+    def _rebuild_duplicate_groups(self):
+        groups = []
+        if self._duplicate_only:
+            current = None
+            for row in self.model._rows:
+                group = row.get("group", 0)
+                if not group:
+                    continue
+                if current is None or current["group"] != group:
+                    current = {"group": group, "size": row.get("group_size", 0), "items": []}
+                    groups.append(current)
+                current["items"].append({
+                    "key": row["key"], "caption": row["caption"], "detail": row.get("detail", ""),
+                    "thumbUrl": self.model.thumb_url(row["key"]), "keeper": bool(row.get("keeper", False)),
+                    "favorite": bool(row.get("favorite", False)), "missing": bool(row.get("missing", False))})
+            for index, group in enumerate(groups):
+                group["number"] = index + 1
+        if groups != self._duplicate_groups:
+            self._duplicate_groups = groups
+            self.duplicateGroupsChanged.emit()
+
+    @Slot("QVariantList", result=int)
+    def addToSelection(self, keys):
+        """Select the given loaded tiles as well, for one duplicate group at a time."""
+        if self._closed:
+            return 0
+        wanted = [key for key in keys if isinstance(key, str) and key in self.model._keys]
+        added, _unavailable, _overflow = self._extend_selection(wanted, self._selection_keys)
+        return added
+
+    @Slot("QVariantList")
+    def removeFromSelection(self, keys):
+        if self._closed:
+            return
+        gone = {key for key in keys if isinstance(key, str)} & self._selection_keys
+        if gone:
+            self._selection_keys -= gone
+            self._batch_selection_changed()
 
     @Property(int, notify=duplicateScanProgress)
     def duplicateProgressCurrent(self):
@@ -1353,8 +1466,7 @@ class LibraryController(QObject):
         if self._user_tag:
             parts.append("내 태그 #" + self._user_tag)
         if self._ai_category:
-            origin = "확정" if self._ai_origin == "confirmed" else ("추정" if self._ai_origin == "ai" else "전체")
-            parts.append(f"AI 분류 {self._ai_category} · {origin}")
+            parts.append(f"AI 분류 {self._ai_category}")
         if self._favorite_only:
             parts.append("★ 즐겨찾기")
         if self._duplicate_only:
@@ -1494,6 +1606,8 @@ class LibraryController(QObject):
         self._selected = {}
         self._selection_key = ""
         self._navigation = None
+        self._selection_anchor = ""
+        self._band_base = None
         self.clearSelection()
         # A folder-wide scan keeps running while the grid reloads. Clearing the
         # flag here let a second scan start and left the first one's button stuck.
@@ -1536,6 +1650,12 @@ class LibraryController(QObject):
                     self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
                 if reload_authors:
                     self._interactive.append(("duplicate_counts", self._generation, self._selection_serial, ""))
+                    self._interactive.append(("ai_counts", self._generation, self._selection_serial, ""))
+                self._condition.notify_all()
+        if request is not None and self._statistics_wanted:
+            # The reload above emptied the queue; an open statistics window still waits.
+            with self._condition:
+                self._interactive.append(("statistics", self._generation, self._selection_serial, ""))
                 self._condition.notify_all()
         self.provider.clear_registry()
         self.model.search(str(self._generation))
@@ -1649,9 +1769,11 @@ class LibraryController(QObject):
     def setAiFilter(self, category, origin):
         from .clip_classifier import CATEGORY_NAMES
         category = category.strip() if isinstance(category, str) else ""
-        origin = origin if origin in {"ai", "confirmed"} else ""
+        # The screen shows one list per category. Estimated and taught photos
+        # are no longer split; the second argument stays for older callers.
+        origin = ""
         if category not in CATEGORY_NAMES:
-            category, origin = "", ""
+            category = ""
         if category == self._ai_category and origin == self._ai_origin:
             return
         self._ai_category, self._ai_origin = category, origin
@@ -1782,6 +1904,10 @@ class LibraryController(QObject):
     def requestStatistics(self):
         if self._closed:
             return
+        if not (self._account and self._output_dir):
+            self.statisticsLoaded.emit({"error": "저장할 계정과 폴더를 먼저 정해 주세요."})
+            return
+        self._statistics_wanted = True
         with self._condition:
             self._interactive.append(("statistics", self._generation, self._selection_serial, ""))
             self._condition.notify_all()
@@ -1803,10 +1929,14 @@ class LibraryController(QObject):
         self._refresh(reload_authors=False)
 
     @Slot(result=bool)
-    def scanDuplicates(self):
+    @Slot(bool, result=bool)
+    def scanDuplicates(self, near=False):
+        """Look for identical files; with ``near`` also the same photo at another size or quality."""
         if not self._exclusive and hasattr(self._repository, "_duplicate_cancel"):
             self._repository._duplicate_cancel.clear()
-        return self._begin_exclusive("duplicates", "scan_duplicates", "중복 이미지를 검사하는 중…")
+        if not self._exclusive:
+            self._duplicate_near = bool(near)
+        return self._begin_exclusive("duplicates", "scan_duplicates", "같은 사진을 찾는 중…")
 
     @Slot()
     def cancelDuplicateScan(self):
@@ -1885,6 +2015,8 @@ class LibraryController(QObject):
             self._selected["favorite"] = new_state
             self.changed.emit()
         self.model.setFavorite(key, new_state)
+        if self._duplicate_only:
+            self._refresh(reload_authors=False)
         return new_state
 
     @Slot(str, result=str)
@@ -1974,8 +2106,88 @@ class LibraryController(QObject):
         if self._status:
             self._status = ""
             self.changed.emit()
+        self._selection_anchor = key
         self._selection_mode = True
         self._batch_selection_changed()
+
+    @Slot(str)
+    def setSelectionAnchor(self, key):
+        """The tile a Shift+click measures its range from."""
+        if not self._closed and key in self.model._keys:
+            self._selection_anchor = key
+
+    def _extend_selection(self, keys, base):
+        """Selection = base plus the present files among keys, within the limit."""
+        chosen = set(base)
+        selectable, unavailable, _overflow = self._repository.selectable_keys(
+            [key for key in keys if key not in chosen])
+        room = max(0, MAX_SELECTION - len(chosen))
+        chosen.update(selectable[:room])
+        changed = chosen != self._selection_keys
+        self._selection_keys = chosen
+        if changed or not self._selection_mode:
+            self._selection_mode = True
+            self._batch_selection_changed()
+        return len(selectable[:room]), unavailable, len(selectable) > room
+
+    @Slot(str, result=int)
+    def selectRangeTo(self, key):
+        """Shift+click: add every loaded tile from the last clicked one to this one."""
+        if self._closed or key not in self.model._keys:
+            return 0
+        positions = self.model._positions
+        anchor = self._selection_anchor if self._selection_anchor in positions else (
+            self.selectedKey if self.selectedKey in positions else key)
+        first, last = sorted((positions[anchor], positions[key]))
+        keys = [self.model._rows[index]["key"] for index in range(first, last + 1)]
+        added, unavailable, overflow = self._extend_selection(keys, self._selection_keys)
+        notes = []
+        if unavailable:
+            notes.append(f"파일 없음·확인 불가 {unavailable:,}개는 제외했습니다.")
+        if overflow:
+            notes.append("한 번에 최대 2,000개를 선택할 수 있습니다.")
+        if notes or self._status:
+            self._status = " ".join(notes)
+            self.changed.emit()
+        return added
+
+    @Slot(bool)
+    def beginBandSelection(self, additive):
+        """Start a drag selection; with Ctrl held the earlier selection stays."""
+        if self._closed:
+            return
+        self._band_base = set(self._selection_keys) if additive else set()
+        self._band_rect = None
+
+    @Slot(int, int, int, int, int)
+    def bandSelect(self, row_first, row_last, column_first, column_last, columns):
+        """Select the tiles a dragged rectangle touches, given as grid rows and columns."""
+        if self._closed or self._band_base is None or columns < 1:
+            return
+        rect = (row_first, row_last, column_first, column_last, columns)
+        if rect == self._band_rect:
+            return
+        self._band_rect = rect
+        count = len(self.model._rows)
+        keys = []
+        for row in range(max(0, row_first), max(0, row_last) + 1):
+            start = row * columns
+            if start >= count:
+                break
+            for column in range(max(0, column_first), min(columns - 1, column_last) + 1):
+                index = start + column
+                if index < count:
+                    keys.append(self.model._rows[index]["key"])
+        self._extend_selection(keys, self._band_base)
+
+    @Slot()
+    def endBandSelection(self):
+        if self._band_base is None:
+            return
+        self._band_base = None
+        self._band_rect = None
+        if self._selection_keys:
+            self._selection_anchor = self._selected_keys_order[-1] if self._selected_keys_order else ""
 
     @Slot()
     def selectLoaded(self):
@@ -2033,22 +2245,32 @@ class LibraryController(QObject):
         if any(not isinstance(key, str) or not key.startswith(prefix) for key in keys):
             return False
         present = [key for key in dict.fromkeys(keys) if key in self.model._keys]
+        gone = set(present)
+        # Where the opened item sits now, counted in rows that will remain.
+        opened = self._selection_key or self.selectedKey
+        successor = None
+        if opened in gone:
+            position = self.model._positions.get(opened, 0)
+            successor = position - sum(1 for key in gone if self.model._positions[key] < position)
         if not present or not self.model.removeKeys(present):
             return False
         forget(present, self._generation)
-        gone = set(present)
         if self._selection_keys & gone:
             self._selection_keys -= gone
             self._batch_selection_changed()
-        if self._selection_key in gone or self.selectedKey in gone:
-            # The grid moves its highlight to the next tile and selects it.
+        if successor is not None:
+            # Open the photo that took the place at once. Waiting for the grid to
+            # move its highlight left a moment with nothing selected, and a count
+            # arriving in that moment closed a preview that had just come back.
             self._selection_serial += 1
             self._selected = {}
             self._selection_key = ""
             self._busy = False
+            if self.model._rows:
+                self.selectItem(self.model._rows[min(successor, len(self.model._rows) - 1)]["key"])
         # Counts beside the filters include the files that just left.
         with self._condition:
-            for action in ("authors", "hashtags", "user_tags", "duplicate_counts"):
+            for action in ("authors", "hashtags", "user_tags", "duplicate_counts", "ai_counts"):
                 self._interactive.append((action, self._generation, self._selection_serial, ""))
             self._condition.notify_all()
         self.changed.emit()
@@ -2117,6 +2339,7 @@ class LibraryController(QObject):
     def _model_changed(self):
         if self._closed:
             return
+        self._rebuild_duplicate_groups()
         pending = self._navigation
         if pending is not None and not self.model.busy:
             self._navigation = None
@@ -2181,14 +2404,25 @@ class LibraryController(QObject):
                 selection = reader(generation) if callable(reader) else 0
             elif action == "statistics":
                 reader = getattr(self._repository, "overview", None)
-                selection = reader(generation) if callable(reader) else {}
+                selection = reader(generation) if callable(reader) else None
+            elif action == "ai_counts":
+                reader = getattr(self._repository, "ai_counts", None)
+                selection = reader(generation) if callable(reader) else []
             elif action == "scan_duplicates":
                 def on_progress(cur, tot):
                     message = ("사진 비교·중복 묶음 정리 중…" if cur == tot else
                                f"사진 확인 중… ({cur:,} / {tot:,})")
                     self._emit(generation, serial, "scan_progress", (cur, tot), message, epoch)
+                def on_compare(cur, tot):
+                    self._emit(generation, serial, "scan_progress", (cur, tot + 1),
+                               f"화질만 다른 같은 사진인지 확인 중… ({cur:,} / {tot:,})", epoch)
+                near = bool(getattr(self, "_duplicate_near", False))
                 try:
-                    count = self._repository.scan_duplicates(generation, progress_callback=on_progress, epoch=epoch)
+                    if near:
+                        count = self._repository.scan_duplicates(generation, progress_callback=on_progress,
+                                                                 epoch=epoch, near=True, compare_callback=on_compare)
+                    else:
+                        count = self._repository.scan_duplicates(generation, progress_callback=on_progress, epoch=epoch)
                 except RuntimeError as exc:
                     selection, message = None, str(exc)
                 else:
@@ -2196,7 +2430,8 @@ class LibraryController(QObject):
                         selection, message = None, _CATALOG_MOVED
                     else:
                         selection = count
-                        message = f"중복·유사 사진 {count:,}개를 발견했습니다." if count else "중복·유사 사진이 없습니다."
+                        kind = "같은 사진(크기·화질만 다른 것 포함)" if near else "완전히 같은 사진"
+                        message = f"{kind} {count:,}장을 찾았습니다." if count else f"{kind}이 없습니다."
             elif action == "scan_ai_tags":
                 progress_state = {"cur": 0, "tot": 0}
                 def on_ai_progress(cur, tot):
@@ -2296,7 +2531,9 @@ class LibraryController(QObject):
             elif action == "duplicate_counts":
                 selection = 0
             elif action == "statistics":
-                selection = {}
+                selection = {"error": _STATISTICS_ERROR}
+            elif action == "ai_counts":
+                selection = []
             elif action == "reselect":
                 selection = None
             else:
@@ -2344,12 +2581,16 @@ class LibraryController(QObject):
         """
         if reload:
             self._refresh(reload_authors=False, status=message)
+            with self._condition:
+                self._interactive.append(("ai_counts", self._generation, self._selection_serial, ""))
+                self._condition.notify_all()
             return
         self._status = message
-        if not self._user_tags_loaded:
-            with self._condition:
+        with self._condition:
+            if not self._user_tags_loaded:
                 self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
-                self._condition.notify_all()
+            self._interactive.append(("ai_counts", self._generation, self._selection_serial, ""))
+            self._condition.notify_all()
         self._reselect()
         self.changed.emit()
 
@@ -2423,7 +2664,14 @@ class LibraryController(QObject):
                 self.changed.emit()
             return
         if action == "statistics":
-            self.statisticsLoaded.emit(selection if isinstance(selection, dict) else {})
+            self._statistics_wanted = False
+            self.statisticsLoaded.emit(selection if isinstance(selection, dict) else {"error": _STATISTICS_ERROR})
+            return
+        if action == "ai_counts":
+            counts = [dict(item) for item in selection if isinstance(item, dict)] if isinstance(selection, list) else []
+            if counts != self._ai_counts:
+                self._ai_counts = counts
+                self.aiCountsChanged.emit()
             return
         if action == "teach":
             self._teach_request = None

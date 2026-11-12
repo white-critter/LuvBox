@@ -11,8 +11,8 @@ ApplicationWindow {
     required property var galleryModel
     required property var wheelInputFilter
     property var appController: null
-    width: 1080
-    height: 760
+    width: 1280
+    height: 860
     minimumWidth: 680
     minimumHeight: 480
     // Grown only while a saved-file detail card needs more room than the current window.
@@ -43,8 +43,11 @@ ApplicationWindow {
     // A focused or open list takes letters for itself (jumping to "@bob" must not
     // toggle the favorites filter), so the single-letter shortcuts wait.
     readonly property bool listEngaged: [thumbSizeChoice, mediaFilter, orderChoice, authorFilter, hashtagFilter,
-                                         userTagFilter, aiLabelFilter, dateFieldChoice].some(
+                                         userTagFilter, dateFieldChoice].some(
         function(combo) { return combo.activeFocus || combo.popup.visible })
+    // Duplicates are reviewed group by group, not in the flat grid.
+    readonly property bool duplicateMode: !!app && app.library.filterDuplicateOnly
+    property bool duplicateNear: false
     readonly property bool letterKeysFree: currentScreen === 1 && !modalOpen && !search.activeFocus
         && !listEngaged && !!app
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
@@ -207,6 +210,11 @@ ApplicationWindow {
     onClosing: (close) => {
         if (app && !app.shutdownReady) {
             close.accepted = false
+            if (!app.closing) {
+                // The height grown for a saved-file card is temporary; keep the person's own.
+                const own = saveHeightExpanded && saveRestoreHeight >= minimumHeight ? saveRestoreHeight : height
+                app.rememberWindow(x, y, width, own, visibility === Window.Maximized || visibility === Window.FullScreen)
+            }
             app.requestClose()
         }
     }
@@ -948,6 +956,7 @@ ApplicationWindow {
                         id: orderChoice
                         visible: !!window.app
                         model: ["최근 저장", "최신 게시물", "오래된 게시물", "좋아요 순"]
+                        enabled: !window.duplicateMode
                         implicitWidth: 168
                         width: implicitWidth
                         height: implicitHeight
@@ -1007,10 +1016,31 @@ ApplicationWindow {
                         width: implicitWidth
                         text: "중복 검사"
                         ToolTip.visible: hovered
-                        ToolTip.text: "저장된 사진들의 해시를 비교해 중복 사진을 찾습니다"
+                        ToolTip.text: window.duplicateNear
+                            ? "완전히 같은 파일과, 크기·화질만 다르게 다시 저장된 같은 사진을 찾습니다"
+                            : "내용이 완전히 같은 파일만 찾습니다"
                         onClicked: {
-                            if (window.app.library.scanDuplicates())
+                            if (window.app.library.scanDuplicates(window.duplicateNear))
                                 window.flashNotice("중복 검사를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
+                        }
+                    }
+                    FlatButton {
+                        id: duplicateNearToggle
+                        objectName: "galleryDuplicateNear"
+                        visible: !!window.app && window.app.library.filterDuplicateOnly
+                        enabled: !!window.app && !window.app.library.busy
+                        implicitHeight: 40
+                        width: implicitWidth
+                        checkable: true
+                        checked: window.duplicateNear
+                        text: checked ? "✓ 화질만 다른 사진 포함" : "화질만 다른 사진 포함"
+                        tone: checked ? "primary" : "quiet"
+                        Accessible.name: "크기나 화질만 다른 같은 사진도 찾기"
+                        ToolTip.visible: hovered
+                        ToolTip.text: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 묶습니다. 두 사진의 화면을 직접 비교해 99% 이상 같을 때만 묶습니다."
+                        onClicked: {
+                            window.duplicateNear = !window.duplicateNear
+                            checked = Qt.binding(function() { return window.duplicateNear })
                         }
                     }
                     FlatButton {
@@ -1032,6 +1062,21 @@ ApplicationWindow {
                             else
                                 window.flashNotice(window.app.library.status)
                         }
+                    }
+                    FlatButton {
+                        id: aiMenuButton
+                        objectName: "galleryAiMenuButton"
+                        visible: !!window.app
+                        implicitHeight: 40
+                        width: implicitWidth
+                        readonly property string applied: window.app ? window.app.library.filterAiCategory : ""
+                        text: window.app && window.app.library.aiScanning ? "AI 분류 중…"
+                            : (applied.length ? "AI 분류: " + applied : "AI 분류")
+                        tone: applied.length ? "primary" : "quiet"
+                        Accessible.name: applied.length ? "AI 분류 " + applied + " 보는 중" : "AI 분류"
+                        ToolTip.visible: hovered && !aiMenu.visible
+                        ToolTip.text: "사진을 다섯 분류로 나눠 보고, 자동분류를 실행합니다"
+                        onClicked: aiMenu.popup(aiMenuButton, 0, aiMenuButton.height + 4)
                     }
                     FlatButton {
                         visible: !!window.app
@@ -1258,84 +1303,6 @@ ApplicationWindow {
                         }
                     }
                     FlatCombo {
-                        id: aiLabelFilter
-                        objectName: "galleryAiLabelFilter"
-                        visible: filterToggle.checked
-                        minimumPopupWidth: 220
-                        implicitHeight: 40
-                        implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
-                        width: Math.min(240, Math.max(150, implicitContentWidth + leftPadding + rightPadding))
-                        height: implicitHeight
-                        onVisibleChanged: Qt.callLater(filterHost.layout)
-                        onWidthChanged: Qt.callLater(filterHost.layout)
-                        Accessible.name: "AI 분류 선택"
-                        textRole: "label"
-                        valueRole: "value"
-                        model: {
-                            const items = [{ label: "AI 분류 전체", value: "|" }]
-                            const names = window.app ? window.app.library.aiCategories : []
-                            for (let i = 0; i < names.length; i++) {
-                                items.push({ label: names[i] + " · 전체", value: names[i] + "|" })
-                                items.push({ label: names[i] + " · 추정", value: names[i] + "|ai" })
-                                items.push({ label: names[i] + " · 확정", value: names[i] + "|confirmed" })
-                            }
-                            return items
-                        }
-                        function aiIndex() {
-                            if (!window.app)
-                                return 0
-                            const wanted = window.app.library.filterAiCategory + "|" + window.app.library.filterAiOrigin
-                            for (let i = 0; i < model.length; i++) {
-                                if (model[i].value === wanted)
-                                    return i
-                            }
-                            return 0
-                        }
-                        currentIndex: aiIndex()
-                        displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].label : "AI 분류 전체"
-                        onActivated: index => {
-                            const value = index > 0 && model[index] ? String(model[index].value) : "|"
-                            const parts = value.split("|")
-                            window.app.library.setAiFilter(parts[0] || "", parts[1] || "")
-                            currentIndex = Qt.binding(function() { return aiLabelFilter.aiIndex() })
-                        }
-                    }
-                    FlatButton {
-                        id: aiClassifyButton
-                        objectName: "galleryAiClassify"
-                        visible: filterToggle.checked
-                        implicitHeight: 40
-                        width: implicitWidth
-                        height: implicitHeight
-                        text: window.app && window.app.library.aiScanning ? "AI 분류 중…" : "AI 자동분류"
-                        enabled: !!window.app && !window.app.library.busy
-                        ToolTip.visible: hovered
-                        ToolTip.text: "로컬 AI(CLIP)로 사진을 일러스트, 동물, 인물, 짤 등으로 자동 분류합니다"
-                        onVisibleChanged: Qt.callLater(filterHost.layout)
-                        onWidthChanged: Qt.callLater(filterHost.layout)
-                        onClicked: {
-                            if (window.app.library.scanAiTags())
-                                window.flashNotice("AI 자동분류를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
-                        }
-                    }
-                    FlatButton {
-                        id: aiClearButton
-                        objectName: "galleryAiClear"
-                        visible: filterToggle.checked
-                        implicitHeight: 40
-                        width: implicitWidth
-                        height: implicitHeight
-                        text: "AI 태그 초기화"
-                        enabled: !!window.app && !window.app.library.busy
-                        ToolTip.visible: hovered
-                        ToolTip.text: window.app && window.app.library.holdReason
-                            ? window.app.library.holdReason
-                            : "수동으로 추가한 내 태그는 유지하고, AI 자동분류로 생성된 태그만 초기화합니다"
-                        onVisibleChanged: Qt.callLater(filterHost.layout)
-                        onWidthChanged: Qt.callLater(filterHost.layout)
-                        onClicked: aiClearConfirm.open()
-                    }
-                    FlatCombo {
                         id: dateFieldChoice
                         objectName: "galleryDateField"
                         visible: filterToggle.checked
@@ -1546,11 +1513,36 @@ ApplicationWindow {
                     }
                 }
 
+                Label {
+                    objectName: "duplicateGuide"
+                    Layout.fillWidth: true
+                    visible: window.duplicateMode
+                    text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’을 골라 휴지통으로 보내세요. "
+                        + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다."
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    color: window.mutedColor
+                }
+                DuplicateReview {
+                    id: duplicateReview
+                    objectName: "duplicateReview"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    visible: window.duplicateMode
+                    app: window.app
+                    galleryModel: window.galleryModel
+                    tileWidth: window.tileWidth
+                    onPreviewRequested: key => {
+                        window.app.library.selectItem(key)
+                        previewDialog.open()
+                    }
+                }
                 GridView {
                     id: gallery
                     objectName: "galleryGrid"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
+                    visible: !window.duplicateMode
                     clip: true
                     model: window.galleryModel
                     currentIndex: -1
@@ -1580,6 +1572,9 @@ ApplicationWindow {
                     cacheBuffer: cellHeight
                     reuseItems: true
                     boundsBehavior: Flickable.StopAtBounds
+                    // Dragging draws a selection rectangle, as in a file manager. The wheel,
+                    // the scrollbar and the keys scroll.
+                    interactive: false
                     keyNavigationEnabled: true
                     keyNavigationWraps: false
                     highlightMoveDuration: 0
@@ -1594,10 +1589,98 @@ ApplicationWindow {
                         objectName: "galleryWheel"
                         view: gallery
                         inputFilter: window.wheelInputFilter
+                        // About two notches a row of tiles, and more while the wheel keeps turning.
+                        notchPixels: Math.max(120, Math.round(gallery.cellHeight * 0.6))
                         enabled: window.currentScreen === 1 && !window.modalOpen && !datePickerPopup.visible
-                            && (!window.app || !window.app.closing)
+                            && !window.duplicateMode && (!window.app || !window.app.closing)
                     }
-                    onDraggingChanged: if (dragging) window.stopWheel()
+                    DragHandler {
+                        id: bandDrag
+                        objectName: "galleryBandDrag"
+                        target: null
+                        acceptedDevices: PointerDevice.Mouse
+                        acceptedButtons: Qt.LeftButton
+                        enabled: !!window.app && !window.modalOpen && !window.app.closing
+                        dragThreshold: 10
+                        property real startX: 0
+                        property real startY: 0
+                        property real currentX: 0
+                        property real currentY: 0
+                        // Ctrl or Shift held when the button went down adds to the selection,
+                        // even if the key is let go before the drag ends.
+                        property int pressModifiers: Qt.NoModifier
+                        onGrabChanged: (transition, point) => {
+                            if (transition === PointerDevice.GrabPassive)
+                                pressModifiers = centroid.modifiers
+                        }
+                        function update() {
+                            // The rectangle lives in content coordinates, so it grows while the grid scrolls under it.
+                            const top = Math.min(startY, currentY)
+                            const bottom = Math.max(startY, currentY)
+                            const left = Math.min(startX, currentX)
+                            const right = Math.max(startX, currentX)
+                            const columns = window.columnCount()
+                            window.app.library.bandSelect(
+                                Math.floor(Math.max(0, top) / gallery.cellHeight),
+                                Math.floor(Math.max(0, bottom) / gallery.cellHeight),
+                                Math.floor(Math.max(0, left) / gallery.cellWidth),
+                                Math.floor(Math.max(0, right) / gallery.cellWidth), columns)
+                        }
+                        function follow() {
+                            currentX = Math.max(0, Math.min(gallery.width, centroid.position.x))
+                            currentY = centroid.position.y + gallery.contentY - gallery.originY
+                            update()
+                        }
+                        onActiveChanged: {
+                            if (active) {
+                                window.stopWheel()
+                                startX = Math.max(0, Math.min(gallery.width, centroid.pressPosition.x))
+                                startY = centroid.pressPosition.y + gallery.contentY - gallery.originY
+                                const held = pressModifiers | centroid.modifiers
+                                window.app.library.beginBandSelection(
+                                    (held & (Qt.ControlModifier | Qt.ShiftModifier)) !== 0)
+                                follow()
+                            } else {
+                                window.app.library.endBandSelection()
+                            }
+                        }
+                        onCentroidChanged: if (active) follow()
+                    }
+                    Timer {
+                        // Near the top or bottom edge the grid scrolls and the rectangle keeps growing.
+                        interval: 30
+                        repeat: true
+                        running: bandDrag.active
+                        onTriggered: {
+                            const y = bandDrag.centroid.position.y
+                            let step = 0
+                            if (y < 28)
+                                step = -Math.min(48, 8 + (28 - y) * 0.6)
+                            else if (y > gallery.height - 28)
+                                step = Math.min(48, 8 + (y - (gallery.height - 28)) * 0.6)
+                            if (!step)
+                                return
+                            const minimum = gallery.originY
+                            const maximum = minimum + Math.max(0, gallery.contentHeight - gallery.height)
+                            const next = Math.max(minimum, Math.min(maximum, gallery.contentY + step))
+                            if (next !== gallery.contentY) {
+                                gallery.contentY = next
+                                bandDrag.follow()
+                            }
+                        }
+                    }
+                    Rectangle {
+                        objectName: "galleryBand"
+                        visible: bandDrag.active
+                        z: 5
+                        x: Math.min(bandDrag.startX, bandDrag.currentX)
+                        y: Math.min(bandDrag.startY, bandDrag.currentY) - (gallery.contentY - gallery.originY)
+                        width: Math.abs(bandDrag.currentX - bandDrag.startX)
+                        height: Math.abs(bandDrag.currentY - bandDrag.startY)
+                        color: "#33d93645"
+                        border.width: 1
+                        border.color: window.accentColor
+                    }
                     onContentYChanged: {
                         window.requestMore()
                         window.updateFocus()
@@ -1783,8 +1866,14 @@ ApplicationWindow {
                                         teachMenu.popup()
                                         return
                                     }
-                                    if (window.app && (window.app.library.selectionMode || (mouse.modifiers & Qt.ControlModifier)))
+                                    if (!window.app)
+                                        return
+                                    if (mouse.modifiers & Qt.ShiftModifier)
+                                        window.app.library.selectRangeTo(tile.key)
+                                    else if (window.app.library.selectionMode || (mouse.modifiers & Qt.ControlModifier))
                                         window.app.library.toggleSelection(tile.key)
+                                    else
+                                        window.app.library.setSelectionAnchor(tile.key)
                                 }
                                 onDoubleClicked: if (!window.app || !window.app.library.selectionMode) previewDialog.open()
                             }
@@ -2273,12 +2362,12 @@ ApplicationWindow {
                             spacing: 4
 
                             Label {
-                                text: (isConfirmed ? "확정 · #" : (modelData.source === "ai" ? "AI · #" : "#")) + (modelData.tag || "")
+                                text: (isAi ? "AI · #" : "#") + (modelData.tag || "")
                                 font.pixelSize: 11
                                 color: isAi ? "#9cd7ff" : "#d99fe6"
                                 ToolTip.visible: userTagMouse.containsMouse
-                                ToolTip.text: isConfirmed ? "내가 가르친 분류 (클릭하여 필터링)"
-                                    : (modelData.source === "ai" ? "AI 자동분류 태그 (클릭하여 필터링)" : "사용자 태그 (클릭하여 필터링)")
+                                ToolTip.text: isConfirmed ? "내가 가르친 AI 분류 (누르면 이 분류만 보기)"
+                                    : (isAi ? "AI 자동분류 (누르면 이 분류만 보기)" : "내 태그 (누르면 이 태그만 보기)")
                                 MouseArea {
                                     id: userTagMouse
                                     anchors.fill: parent
@@ -2286,7 +2375,7 @@ ApplicationWindow {
                                     hoverEnabled: true
                                     onClicked: {
                                         if (modelData.source === "ai" || modelData.source === "confirmed")
-                                            window.app.library.setAiFilter(modelData.tag, modelData.source === "confirmed" ? "confirmed" : "ai")
+                                            window.app.library.setAiFilter(modelData.tag, "")
                                         else
                                             window.applyFilters({ userTag: modelData.tag })
                                         previewDialog.close()
@@ -2403,6 +2492,7 @@ ApplicationWindow {
             ScrollView {
                 id: bodyScroll
                 objectName: "previewBodyScroll"
+                SmoothWheel { flickable: bodyScroll.contentItem }
                 Layout.fillWidth: true
                 Layout.preferredHeight: Math.min(140, previewDialog.availableHeight * 0.25,
                                                 Math.max(1, bodyText.implicitHeight))
@@ -2746,11 +2836,10 @@ ApplicationWindow {
                     || window.app.management.deleteConfirmationPending)
                 return
             window.resumePreview = false
-            Qt.callLater(function() {
-                if (window.app && !window.app.closing && window.currentScreen === 1
-                        && gallery.count > 0 && gallery.currentIndex >= 0 && !previewDialog.visible)
-                    previewDialog.open()
-            })
+            // Only with a photo to show: the library has already opened the one that took the place.
+            if (window.app && !window.app.closing && window.currentScreen === 1 && !previewDialog.visible
+                    && (window.app.library.selectionBusy || window.app.library.selectedKey.length > 0))
+                previewDialog.open()
         }
     }
 
@@ -2931,6 +3020,54 @@ ApplicationWindow {
                     teachPopup.close()
                 }
             }
+        }
+    }
+
+    Menu {
+        id: aiMenu
+        objectName: "galleryAiMenu"
+        readonly property var counts: window.app ? window.app.library.aiCategoryCounts : []
+        readonly property string applied: window.app ? window.app.library.filterAiCategory : ""
+        function amount(value) { return Number(value || 0).toLocaleString(Qt.locale(), "f", 0) }
+        MenuItem {
+            objectName: "galleryAiAll"
+            text: "모든 사진"
+            checkable: true
+            checked: aiMenu.applied.length === 0
+            onTriggered: if (window.app) window.app.library.setAiFilter("", "")
+        }
+        Instantiator {
+            model: aiMenu.counts
+            MenuItem {
+                required property var modelData
+                objectName: "galleryAiCategory_" + (modelData.category || "")
+                text: (modelData.category || "") + "  ·  " + aiMenu.amount(modelData.count) + "장"
+                checkable: true
+                checked: aiMenu.applied === modelData.category
+                onTriggered: if (window.app) window.app.library.setAiFilter(modelData.category, "")
+            }
+            onObjectAdded: (index, object) => aiMenu.insertItem(index + 1, object)
+            onObjectRemoved: (index, object) => aiMenu.removeItem(object)
+        }
+        MenuSeparator {}
+        MenuItem {
+            objectName: "galleryAiClassify"
+            text: window.app && window.app.library.aiScanning ? "분류 중단" : "AI 자동분류 실행"
+            enabled: !!window.app && (window.app.library.aiScanning || !window.app.library.busy)
+            onTriggered: {
+                if (!window.app)
+                    return
+                if (window.app.library.aiScanning)
+                    window.app.library.cancelAiScan()
+                else if (window.app.library.scanAiTags())
+                    window.flashNotice("AI 자동분류를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
+            }
+        }
+        MenuItem {
+            objectName: "galleryAiClear"
+            text: "AI 태그 초기화…"
+            enabled: !!window.app && !window.app.library.busy
+            onTriggered: aiClearConfirm.open()
         }
     }
 
@@ -3168,6 +3305,7 @@ ApplicationWindow {
                 aiClearConfirm.close()
                 teachPopup.close()
                 teachMenu.close()
+                aiMenu.close()
                 unsavedDialog.close()
                 storageDialog.close()
                 repairDialog.close()

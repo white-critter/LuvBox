@@ -463,6 +463,24 @@ class Recorder:
         self._retry_at = 0.0
         return True
 
+    def has(self, key) -> bool:
+        """Whether a preview for this media is already kept or waiting to be written. Never raises."""
+        if self._closed:
+            return False
+        try:
+            key = identity(*key)
+        except (TypeError, ValueError):
+            return False
+        try:
+            if key in self._pending or known(self.account, key):
+                return True
+            if time.monotonic() < self._retry_at:
+                return False
+            return bool(self._open_cache().stored([key]))
+        except Exception:
+            self._cache_failed()
+            return False
+
     def add(self, key, path: Path | str, *, suffix: str | None = None, only_missing=False) -> bool:
         if self._closed:
             return False

@@ -315,6 +315,10 @@ class JobOptions:
     allow_recreate_media: bool = False
     # Manual GUI runs can change this preference live through SaveReview.
     confirm_each: bool = False
+    # Fetch one small picture for a media that could not be stored, so the
+    # unsaved list can show it. The app turns this on; code that builds
+    # options itself (and every test) makes no such request.
+    unsaved_previews: bool = False
 
     @property
     def media_signature(self) -> str:
@@ -337,6 +341,8 @@ class JobOptions:
             raise ValueError("사라진 저장 폴더를 새로 만드는 선택을 확인해 주세요.")
         if type(self.confirm_each) is not bool:
             raise ValueError("파일마다 저장 여부 확인 설정을 확인해 주세요.")
+        if type(self.unsaved_previews) is not bool:
+            raise ValueError("저장하지 못한 미디어의 미리보기 설정을 확인해 주세요.")
         if (not isinstance(self.gif_format, str) or self.gif_format not in {"gif", "mp4"} or
                 not isinstance(self.gif_size, str) or self.gif_size not in GIF_SIZES):
             raise ValueError("움직이는 GIF 저장 형식과 GIF 크기를 다시 선택해 주세요.")
@@ -746,6 +752,23 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             duration=round(duration) if type(duration) in (int, float) and 0 <= duration < 10**6 else 0,
             size_bytes=size, limit_mb=normalized.max_video_mb if reason == unsaved.SIZE else 0, detail=detail)
 
+    unsaved_previews = None
+
+    def keep_unsaved_preview(active, url, media):
+        """Give an unsaved media a small picture for its list. Never affects the save."""
+        nonlocal unsaved_previews
+        if previews is None or not normalized.unsaved_previews:
+            return
+        try:
+            if unsaved_previews is None:
+                from .unsaved_preview import UnsavedPreviews
+                unsaved_previews = UnsavedPreviews(previews)
+            session = getattr(active.extractor, "session", None)
+            if session is not None:
+                unsaved_previews.keep(session, url, media)
+        except Exception:
+            pass
+
     def remember_unsaved():
         if not unsaved_items and not unsaved_resolved:
             return
@@ -895,6 +918,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     extract_source(dest, media)
                     if "_luvbox_attachment_number" in media:
                         dest["_luvbox_attachment_number"] = media["_luvbox_attachment_number"]
+                    # A video's poster picture, for the unsaved list when the video itself is not stored.
+                    poster = media.get("media_url_https")
+                    if isinstance(poster, str):
+                        dest["_luvbox_poster"] = poster
                 self.extractor._extract_media_source = numbered_source
 
                 def direct_media(tweet, media_items, files):
@@ -1122,6 +1149,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
                 note_unsaved(unsaved.SIZE, _SIZE_DETAIL.format(limit=normalized.max_video_mb), media=kwdict,
                              size=self.progress_total or self.progress_bytes)
+                keep_unsaved_preview(self, url, kwdict)
                 emit({"type": "size-skipped", "path": "", "max_video_mb": normalized.max_video_mb,
                       **_media_details(kwdict)})
             else:
@@ -1231,6 +1259,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             recovered[kwdict["_luvbox_archive_key"]] = media_status
                         if identity in unsaved_known:
                             unsaved_resolved.add(identity)
+                    elif identity in unsaved_known:
+                        # Listed as unsaved and met again without a file (a full check passes
+                        # every like): fill its picture if the list still has none.
+                        keep_unsaved_preview(self, url, kwdict)
                     if media_status == "saved":
                         payload_size = self.progress_bytes if media_type == "animated_gif" else original_size
                         self.progress(payload_size, self.progress_total, force=True, final=True)
@@ -1239,6 +1271,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # limit or a choice: it stays unsaved and is listed for a retry.
                     failed += 1
                     note_unsaved(unsaved.FAILED, _FAILED_DETAIL, media=kwdict)
+                    keep_unsaved_preview(self, url, kwdict)
                     emit({"type": "failed", "path": "", **_media_details(kwdict)})
             finally:
                 if self.gif_finalize is not None:

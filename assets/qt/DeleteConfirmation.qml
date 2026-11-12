@@ -40,9 +40,11 @@ Dialog {
     contentItem: ColumnLayout {
         spacing: 16
         ScrollView {
+            id: summaryScroll
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
+            SmoothWheel { flickable: summaryScroll.contentItem }
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
             ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
             Label {

@@ -72,14 +72,19 @@ class DuplicateTests(unittest.TestCase):
         dh2 = compute_dhash(p2)
         dh3 = compute_dhash(p3)
 
+        self.assertEqual(dh1, dh2)
         hashes = [
             ("flat", "101", 1, "photo", p1.stat().st_size, "hash1", dh1),
             ("flat", "102", 1, "photo", p2.stat().st_size, "hash2", dh2),
             ("flat", "103", 1, "photo", p3.stat().st_size, "hash3", dh3),
         ]
         self.store.save_image_hashes(hashes)
+        # The same perceptual hash alone is not a duplicate: the files differ.
+        self.assertEqual(self.store.duplicate_counts(), 0)
+        self.assertEqual(self.store.record_page(0, 10, "all", "", duplicate_only=True)["total"], 0)
 
-        # Total duplicate count should be 2 (101 and 102)
+        # The same file hash and size is.
+        self.store.save_image_hashes([("flat", "102", 1, "photo", p1.stat().st_size, "hash1", dh2)])
         self.assertEqual(self.store.duplicate_counts(), 2)
 
         # Filter duplicate_only

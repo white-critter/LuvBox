@@ -8,7 +8,10 @@ Item {
     width: 0
     height: 0
     property int wheelLines: Application.styleHints.wheelScrollLines
-    property real pixelsPerLine: 20
+    // One notch at Windows' default of three lines. 60 pixels a notch took four
+    // notches to pass one row of tiles.
+    property real notchPixels: 120
+    property real maximumGain: 4
     readonly property bool motionActive: motion.running
     readonly property real multiplier: gain
     property real gain: 1
@@ -46,7 +49,7 @@ Item {
         id: motion
         target: controller.view
         property: "contentY"
-        duration: 110
+        duration: 130
         easing.type: Easing.OutCubic
     }
 
@@ -64,9 +67,9 @@ Item {
         controller.lastInput = now
         controller.burst += 1
         let page = controller.wheelLines < 0 || controller.wheelLines >= 1000
-        controller.gain = page ? 1 : Math.min(3, 1 + (controller.burst - 1) * 0.4)
+        controller.gain = page ? 1 : Math.min(controller.maximumGain, 1 + (controller.burst - 1) * 0.5)
         let distance = page ? sign * controller.view.height :
-            -angleY / 120 * controller.wheelLines * controller.pixelsPerLine * controller.gain
+            -angleY / 120 * controller.notchPixels * (controller.wheelLines / 3) * controller.gain
         let minimum = controller.view.originY
         let maximum = minimum + Math.max(0, controller.view.contentHeight - controller.view.height)
         let destination = Math.max(minimum, Math.min(maximum, previousTarget + distance))

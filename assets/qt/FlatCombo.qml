@@ -112,16 +112,21 @@ ComboBox {
             ScrollBar.vertical: ScrollBar {
                 policy: popupList.contentHeight > popupList.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
             }
+            SmoothWheel {
+                flickable: popupList
+                notchPixels: 108
+                passAtEnds: false
+            }
             WheelHandler {
-                acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                acceptedDevices: PointerDevice.TouchPad
                 blocking: true
                 onWheel: function(event) {
-                    const step = event.angleDelta.y !== 0 ? event.angleDelta.y / 120 * 48 : event.pixelDelta.y
+                    const step = event.pixelDelta.y
                     if (!step)
                         return
                     const minimum = popupList.originY
                     const maximum = minimum + Math.max(0, popupList.contentHeight - popupList.height)
-                    popupList.contentY = Math.max(minimum, Math.min(maximum, popupList.contentY - step))
+                    popupList.contentY = Math.max(minimum, Math.min(maximum, popupList.contentY + step))
                 }
             }
         }

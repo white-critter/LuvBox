@@ -191,7 +191,7 @@ def scene():
             assert inside("galleryFilterToggle", "galleryFilterBar")
             assert inside("galleryFilterReset", "galleryFilterBar")
             names = ("galleryAuthorFilter", "galleryHashtagFilter", "galleryUserTagFilter",
-                     "galleryAiClassify", "galleryAiClear", "galleryDateField", "galleryDateFrom",
+                     "galleryDateField", "galleryDateFrom",
                      "galleryDateTo", "galleryFilterToggle", "galleryFilterReset")
             placed = []
             for name in names:
@@ -234,7 +234,14 @@ def scene():
             assert 0 <= stats.property("y") and stats.property("height") <= height - 16, (height, stats.property("height"))
             invoke(stats, "close")
             wait(lambda: not stats.property("visible"), "statistics closed")
-            click("galleryAiClear")
+            # AI classification lives in its own toolbar menu, with a count per category.
+            click("galleryAiMenuButton")
+            ai_menu = find("galleryAiMenu")
+            wait(lambda: ai_menu.property("visible"), "ai menu open")
+            wait(lambda: len(controller.library.aiCategoryCounts) == 5, "ai counts loaded")
+            assert all(row["count"] == 0 for row in controller.library.aiCategoryCounts)
+            assert "0장" in find("galleryAiCategory_인물").property("text")
+            invoke(find("galleryAiClear"), "click")
             confirm = find("aiClearConfirm")
             wait(lambda: confirm.property("visible"), "ai clear confirmation")
             assert confirm.property("width") + confirm.property("x") <= width

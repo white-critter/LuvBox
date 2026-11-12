@@ -34,4 +34,6 @@ ScrollView {
         function onActiveFocusItemChanged() { Qt.callLater(control.revealFocus) }
     }
     onHeightChanged: Qt.callLater(revealFocus)
+
+    SmoothWheel { flickable: control.contentItem }
 }

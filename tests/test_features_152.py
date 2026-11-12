@@ -177,9 +177,15 @@ class Features152Tests(unittest.TestCase):
         def on_progress(cur, tot):
             progress_calls.append((cur, tot))
 
-        dup_count = repo.scan_duplicates(1, progress_callback=on_progress)
-        self.assertEqual(dup_count, 2)
+        # A resized copy is not an identical file, so the default scan leaves it alone.
+        self.assertEqual(repo.scan_duplicates(1, progress_callback=on_progress), 0)
         self.assertTrue(len(progress_calls) > 0)
+        self.assertEqual(repo.duplicate_copy_keys(1), [])
+        # Asked to, the scan compares the pixels of photos with close hashes and groups the same picture.
+        compared = []
+        dup_count = repo.scan_duplicates(1, near=True, compare_callback=lambda done, total: compared.append((done, total)))
+        self.assertEqual(dup_count, 2)
+        self.assertEqual(compared[-1], (1, 1))
 
         copy_keys = repo.duplicate_copy_keys(1)
         self.assertEqual(len(copy_keys), 1)

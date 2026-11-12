@@ -25,6 +25,8 @@ def default_settings() -> dict:
         "schedule_time": "09:00", "schedule_prompted": "", "record_locations": {},
         # Gallery thumbnail size: 0 small, 1 normal, 2 large.
         "gallery_density": 1,
+        # Last window size and place: {"width", "height", "x", "y", "maximized"}; empty until first closed.
+        "window": {},
     }
 
 

@@ -51,7 +51,7 @@ Window {
     wheel = window.findChild(QQuickItem, "wheel")
     checks = []
 
-    def settle(milliseconds=140):
+    def settle(milliseconds=180):
         deadline = time.monotonic() + milliseconds / 1000
         while time.monotonic() < deadline:
             application.processEvents()
@@ -87,7 +87,7 @@ Window {
         send()
         settle()
         first = view.property("contentY") - 3000
-        if not 55 <= first <= 65:
+        if not 115 <= first <= 125:
             raise AssertionError(f"single click did not honor wheel lines: {first}")
         if window.property("fallbackWheels") != fallback_before:
             raise AssertionError("click wheel leaked into native fallback")
@@ -95,15 +95,15 @@ Window {
         send()
         settle()
         second = view.property("contentY") - before
-        if second <= first or wheel.property("multiplier") > 3:
+        if second <= first or wheel.property("multiplier") > 4:
             raise AssertionError(f"burst did not accelerate within cap: {first}, {second}")
         checks.append("mouse-routing-and-acceleration")
 
         for _ in range(12):
             send()
             settle(10)
-        if wheel.property("multiplier") != 3:
-            raise AssertionError("continuous burst was not capped at three")
+        if wheel.property("multiplier") != 4:
+            raise AssertionError("continuous burst was not capped at four")
         checks.append("bounded-burst")
 
         before = view.property("contentY")
@@ -111,7 +111,7 @@ Window {
         if wheel.property("multiplier") != 1:
             raise AssertionError("reverse input retained acceleration")
         settle()
-        if not 55 <= before - view.property("contentY") <= 65:
+        if not 115 <= before - view.property("contentY") <= 125:
             raise AssertionError("reverse input retained forward residual motion")
         settle(100)
         if wheel.property("multiplier") != 1 or wheel.property("motionActive"):
@@ -214,7 +214,7 @@ Window {
         fallback_before = window.property("fallbackWheels")
         send()
         settle()
-        if not 55 <= view.property("contentY") - 3000 <= 65:
+        if not 115 <= view.property("contentY") - 3000 <= 125:
             raise AssertionError("click wheel after passthrough was lost or applied twice")
         if window.property("fallbackWheels") != fallback_before:
             raise AssertionError("click after passthrough leaked into native fallback")
@@ -365,7 +365,7 @@ ApplicationWindow {
         checks.append("closed-combo-keeps-choice")
         send(gallery, 40, 80)
         settle(160)
-        if not 55 <= gallery.property("contentY") <= 65:
+        if not 115 <= gallery.property("contentY") <= 125:
             raise AssertionError(f"gallery missed a wheel beside the combo: {gallery.property('contentY')}")
         gallery.setProperty("contentY", 0)
         popup = window.findChild(QObject, "authorPopup")

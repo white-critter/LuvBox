@@ -154,8 +154,10 @@ def check_scene(scenario):
 
             start = grid.property("contentY")
             send_wheel()
-            settle(0.15)
-            if abs(grid.property("contentY") - start - 60) > 1:
+            settle(0.2)
+            # One notch moves about 0.6 of a tile row, never less than 120 pixels.
+            notch = max(120, round(grid.property("cellHeight") * 0.6))
+            if abs(grid.property("contentY") - start - notch) > 1:
                 raise AssertionError("one mouse notch must be handled once above the tile MouseArea")
             checks.append("tile-wheel-routing")
             for _ in range(4):

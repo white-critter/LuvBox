@@ -152,6 +152,7 @@ Frame {
         }
         ScrollView {
             id: bodyScroll
+            SmoothWheel { flickable: bodyScroll.contentItem }
             Layout.fillWidth: true
             Layout.preferredHeight: Math.min(120, savedBody.implicitHeight)
             visible: details.hasItem && !!details.item.body
