@@ -16,6 +16,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def scene(shots=None):
     """``shots`` is a folder for window captures at each step, for a look at the result."""
+    import faulthandler
+
+    # A scene that stops responding prints every thread's stack and ends before the
+    # parent test's own timeout, so the report says where it stopped.
+    faulthandler.dump_traceback_later(45, exit=True)
     from contextlib import ExitStack, closing
     from datetime import datetime, timezone, timedelta
     from unittest.mock import patch
@@ -44,7 +49,7 @@ def scene(shots=None):
     application.setFont(font)
     messages = []
     previous = qInstallMessageHandler(lambda _level, _context, message: messages.append(message))
-    controller = engine = window = None
+    controller = engine = window = folder = None
     resources = ExitStack()
 
     def settle():
@@ -101,11 +106,24 @@ def scene(shots=None):
             json.dumps({"account": "offline", "output_dir": str(paths.output_dir), "gallery_density": 2}),
             encoding="utf-8")
 
+        busy_moves = []
+
         def move(path, expected):
+            # A person confirms after the thumbnail and preview readers have let go of the
+            # file. This scene confirms within milliseconds, so wait out a reader instead of
+            # reporting its sharing violation as a failed move.
             path = Path(path)
             target = kept / path.name
-            path.rename(target)
-            return str(target)
+            until = time.monotonic() + 3
+            while True:
+                try:
+                    path.rename(target)
+                    return str(target)
+                except PermissionError:
+                    if time.monotonic() >= until:
+                        raise
+                    busy_moves.append(path.name)
+                    time.sleep(.02)
 
         resources.enter_context(patch("luvbox.deletion.recycle_file", side_effect=move))
         controller = ApplicationController()
@@ -271,7 +289,20 @@ def scene(shots=None):
             "ReferenceError", "TypeError", "Binding loop", "Cannot assign", "Cannot read", "is not a type",
             "Unable to assign"))]
         assert not errors, errors
-        print(json.dumps({"ok": True, "in_place": True, "qml_errors": errors}))
+        print(json.dumps({"ok": True, "in_place": True, "qml_errors": errors, "moves_retried": len(busy_moves)}))
+    except BaseException:
+        # A failed step has to name itself. Tearing Qt down after a half-finished
+        # scene can block on a thumbnail request, and the parent test then saw
+        # only a timeout with no message.
+        import shutil
+        import traceback
+        traceback.print_exc()
+        print("qt messages:", messages[-10:], file=sys.stderr)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        if folder is not None:
+            shutil.rmtree(folder, ignore_errors=True)
+        os._exit(1)
     finally:
         if controller is not None:
             controller.requestClose()
@@ -285,9 +316,12 @@ def scene(shots=None):
 @unittest.skipUnless(find_spec("PySide6") is not None, "Qt dependencies are not installed")
 class GalleryRecycleSceneTests(unittest.TestCase):
     def test_recycling_keeps_the_scroll_position_and_selects_the_next_tile(self):
-        result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scene"],
-                                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=55,
-                                env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+        try:
+            result = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scene"],
+                                    cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=55,
+                                    env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+        except subprocess.TimeoutExpired as error:
+            self.fail("scene timed out: " + str(error.stdout or "") + str(error.stderr or ""))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(json.loads(result.stdout.splitlines()[-1])["ok"])
 

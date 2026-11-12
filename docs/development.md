@@ -1,4 +1,4 @@
-# LuvBox 1.6.9 개발 안내
+# LuvBox 1.6.10 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -45,7 +45,7 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 
 ## 데이터와 인증 호환성
 
-설정·암호화 세션·기록·백업·미리보기는 `%LOCALAPPDATA%\LuvBox`에 있습니다. 1.6.9는 설정 파일에 갤러리 썸네일 크기(`gallery_density`, 0·1·2)만 더하며 기록 DB 구조는 바꾸지 않습니다. 이전 버전은 이 값을 무시하고 보존합니다. 미디어 저장 폴더의 `.luvbox` 사본과 이전 파일명·archive·암호화 형식·예약 이름을 계속 인식합니다. UI 변경을 이유로 기존 파일·DB·계정을 초기화하지 않습니다. 폴더 이전의 명시적 승인 경로를 보존하고, 다른 PC의 기록 사본이 주장하는 외부 경로에 관리 권한을 부여하지 않습니다.
+설정·암호화 세션·기록·백업·미리보기는 `%LOCALAPPDATA%\LuvBox`에 있습니다. 1.6.9·1.6.10은 설정 파일에 갤러리 썸네일 크기(`gallery_density`, 0·1·2)만 더하며 기록 DB 구조는 바꾸지 않습니다. 이전 버전은 이 값을 무시하고 보존합니다. 미디어 저장 폴더의 `.luvbox` 사본과 이전 파일명·archive·암호화 형식·예약 이름을 계속 인식합니다. UI 변경을 이유로 기존 파일·DB·계정을 초기화하지 않습니다. 폴더 이전의 명시적 승인 경로를 보존하고, 다른 PC의 기록 사본이 주장하는 외부 경로에 관리 권한을 부여하지 않습니다.
 
 계정은 브라우저 확장의 코드·계정 확인 후 승인하거나 토큰을 직접 입력해 연결합니다. 수동 토큰 보관은 X 인증 성공을 뜻하지 않습니다. 토큰·쿠키·브라우저 프로필·사용자 DB를 로그·Git·배포 파일에 넣지 않습니다. 계정 연결과 Qt 설정 변경은 Windows 경로별 mutex와 원자적 파일 교체로 보호합니다. 설정 읽기에 실패하면 변경 저장을 중단해 기존 파일을 보존합니다.
 
@@ -90,7 +90,9 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox-1.6.9/`, `release/LuvBox-1.6.9.zip`, `release/SHA256-1.6.9.txt`입니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox-1.6.10/`, `release/LuvBox-1.6.10.zip`, `release/SHA256-1.6.10.txt`입니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+
+릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다).
 
 `tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 
