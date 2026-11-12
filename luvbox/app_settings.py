@@ -23,6 +23,8 @@ def default_settings() -> dict:
         "separate_accounts": False, "gif_format": "gif", "gif_size": "original",
         "detailed_progress": False, "confirm_each": False,
         "schedule_time": "09:00", "schedule_prompted": "", "record_locations": {},
+        # Gallery thumbnail size: 0 small, 1 normal, 2 large.
+        "gallery_density": 1,
     }
 
 

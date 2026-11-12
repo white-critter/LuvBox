@@ -158,6 +158,40 @@ class LibraryScanOverlapTests(unittest.TestCase):
         self.assertIn("16", self.library.status)
         self.assertIn("태그를 적용", self.library.status)
 
+    def test_a_finished_scan_keeps_the_list_unless_its_filter_depends_on_the_result(self):
+        generation = self.library._generation
+        self.assertTrue(self.library.scanAiTags())
+        self.assertTrue(self.repo.started.wait(3))
+        # A scan is not the opened item loading: the preview keeps showing it.
+        self.assertTrue(self.library.busy)
+        self.assertFalse(self.library.selectionBusy)
+        self.repo.release.set()
+        self.wait(lambda: not self.library.busy)
+        self.assertEqual(self.library._generation, generation)
+        self.assertIn("태그를 적용", self.library.status)
+
+        self.repo.started.clear()
+        self.repo.release.clear()
+        self.library._ai_category = "인물"
+        self.assertTrue(self.library.scanAiTags())
+        self.assertTrue(self.repo.started.wait(3))
+        self.repo.release.set()
+        self.wait(lambda: not self.library.busy)
+        self.assertEqual(self.library._generation, generation + 1)
+        self.assertIn("태그를 적용", self.library.status)
+
+    def test_a_finished_duplicate_scan_reloads_only_the_duplicate_view(self):
+        self.repo.scan_duplicates = lambda generation, progress_callback=None, epoch=None: 3
+        generation = self.library._generation
+        self.assertTrue(self.library.scanDuplicates())
+        self.wait(lambda: not self.library.busy)
+        self.assertEqual((self.library._generation, self.library.duplicateCount), (generation, 3))
+        self.assertIn("3", self.library.status)
+        self.library._duplicate_only = True
+        self.assertTrue(self.library.scanDuplicates())
+        self.wait(lambda: not self.library.busy)
+        self.assertEqual(self.library._generation, generation + 1)
+
     def test_teaching_refuses_tag_edits_until_it_finishes(self):
         self.library._exclusive = "teach"
         self.assertTrue(self.library.tagsLocked)

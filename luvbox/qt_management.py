@@ -1,10 +1,26 @@
 """Off-thread, explicitly confirmed moves of gallery files to the Windows Recycle Bin."""
 
 from collections import deque
+import os
 from pathlib import Path
 from threading import Condition, Event, Thread
 
 from PySide6.QtCore import QObject, Property, Qt, QTimer, Signal, Slot
+
+
+def _recycled_keys(rows, paths):
+    """Displayed keys whose file is now in the Recycle Bin, by the path that moved."""
+    if not isinstance(paths, (list, tuple)):
+        return None
+    moved = {os.path.normcase(os.path.abspath(path)) for path in paths if isinstance(path, str) and path}
+    keys = []
+    for row in rows:
+        key, path = row.get("_key"), row.get("path")
+        if not isinstance(key, str) or not isinstance(path, str) or not path:
+            return None
+        if os.path.normcase(os.path.abspath(path)) in moved:
+            keys.append(key)
+    return keys
 
 
 class ManagementController(QObject):
@@ -22,6 +38,7 @@ class ManagementController(QObject):
         self._mutating = self._locked = self._closing = False
         self._error = self._status = ""
         self._delete = None
+        self._recycled_keys = None
         self._stop = Event()
         self._condition = Condition()
         self._pending = deque()
@@ -49,6 +66,15 @@ class ManagementController(QObject):
         if not self._delete: return ""
         names = [row.get("filename") or Path(row["path"]).name for row in self._delete["rows"][:5]]
         return f"선택한 파일 {self.deleteCount:,}개를 Windows 휴지통으로 이동합니다.\n" + "\n".join(names)
+
+    def takeRecycledKeys(self):
+        """Gallery keys of the files the last move sent to the Recycle Bin.
+
+        None means the outcome is not known file by file, so the gallery
+        reloads its list instead of removing single tiles.
+        """
+        keys, self._recycled_keys = self._recycled_keys, None
+        return keys
 
     @Slot(bool)
     def setLocked(self, locked):
@@ -135,6 +161,7 @@ class ManagementController(QObject):
                     manifest, keep = payload
                     result = run_deletion(manifest["location"], manifest["rows"], keep, self._stop,
                                           lambda event: self._delivered.emit(("progress", generation, event, "")))
+                    result = dict(result, keys=_recycled_keys(manifest["rows"], result.get("paths")))
                 self._delivered.emit((kind, generation, result, ""))
             except Exception:
                 self._delivered.emit((kind, generation, {}, "작업을 마치지 못했습니다. 계정·폴더·파일 상태를 확인해 주세요."))
@@ -168,6 +195,11 @@ class ManagementController(QObject):
             self._mutating = False
             self._error = error
             self._status = str(value.get("message") or ("작업을 마쳤습니다" if not error else ""))
+            # A failed or unprocessed file may have changed on disk, so only a
+            # clean result removes single tiles; anything else reloads the list.
+            keys = value.get("keys")
+            clean = not error and not value.get("failed") and not value.get("cancelled")
+            self._recycled_keys = list(keys) if clean and isinstance(keys, (list, tuple)) else None
             self.libraryChanged.emit()
         self.changed.emit()
 

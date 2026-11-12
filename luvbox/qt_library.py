@@ -52,6 +52,16 @@ _TAG_LOCKED = "AI 작업이 끝난 뒤 태그를 바꿀 수 있습니다. 분류
 _FAVORITE_ERROR = "즐겨찾기를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
 
 
+def _thumbnail_workers():
+    """Thumbnail decoders for the gallery: two, or up to four on a PC with cores to spare.
+
+    Decoding releases the interpreter lock, so a screen of tiles fills almost
+    in proportion. Half the logical cores are left for the UI, playback and a
+    running save.
+    """
+    return max(2, min(4, (os.cpu_count() or 2) // 2))
+
+
 def _posted(value, *, time=False):
     """'2026-10-01' (or with its Korean-time hour) from a stored post time."""
     match = _POSTED.match(value) if isinstance(value, str) else None
@@ -1035,11 +1045,25 @@ class LibraryRepository:
                 signature = file_signature(path)
                 if signature != previous_signature:
                     raise ValueError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
-                rows.append(dict(row, _delete_signature=signature))
+                rows.append(dict(row, _delete_signature=signature, _key=key))
         with self._condition:
             if self._request is not request:
                 raise ValueError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
         return {"location": request.location(), "rows": rows, "generation": request.generation}
+
+    def forget(self, keys, generation):
+        """Rows the gallery dropped after their files went to the Recycle Bin.
+
+        The next page continues after the last shown row, which is still the
+        same row; only the count of rows in front of it shrank.
+        """
+        with self._condition:
+            request = self._request
+            if request is None or request.generation != generation:
+                return False
+            dropped = sum(1 for key in keys if self._served.pop(key, None) is not None)
+            self._cursor_offset = max(0, self._cursor_offset - dropped)
+            return True
 
     def selectable_keys(self, keys):
         """Use the displayed file snapshot to exclude missing items from selection.
@@ -1124,7 +1148,8 @@ class LibraryController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._repository = LibraryRepository()
-        self.provider = _LibraryThumbnailProvider(decoder=self._repository.decode)
+        self.provider = _LibraryThumbnailProvider(decoder=self._repository.decode,
+                                                  workers=_thumbnail_workers())
         self._repository.provider = self.provider
         self.model = GalleryModel(self._repository.read, provider=self.provider, parent=self)
         self._generation = 0
@@ -1405,6 +1430,11 @@ class LibraryController(QObject):
     @Property(bool, notify=changed)
     def busy(self):
         return bool(self._exclusive or self._busy)
+
+    @Property(bool, notify=changed)
+    def selectionBusy(self):
+        """Only the opened item is loading. A folder-wide scan does not count."""
+        return self._busy
 
     @Property(bool, notify=changed)
     def tagsLocked(self):
@@ -1857,6 +1887,17 @@ class LibraryController(QObject):
         self.model.setFavorite(key, new_state)
         return new_state
 
+    @Slot(str, result=str)
+    def favoriteNotice(self, key):
+        """Toggle a favorite and say what happened; a failed save is not a removal."""
+        if self._closed or not isinstance(key, str) or not key:
+            return ""
+        added = self.toggleFavorite(key)
+        # A successful toggle clears the error, so it is still set only after a failure.
+        if not added and self._status == _FAVORITE_ERROR:
+            return _FAVORITE_ERROR
+        return "즐겨찾기에 추가했습니다." if added else "즐겨찾기에서 제외했습니다."
+
     @Slot(str, result=bool)
     def addSelectedTag(self, tag):
         if self._refuse_tags() or self._closed or not self.selectedKey or not tag:
@@ -1976,6 +2017,42 @@ class LibraryController(QObject):
     def deletionManifest(self, keys):
         # Called on the management worker; filesystem checks never run in QML.
         return self._repository.deletion_manifest(keys)
+
+    def removeDeleted(self, keys):
+        """Take recycled files out of the shown list without reloading it.
+
+        Returns False when the list has to be reloaded instead: the view
+        changed since the files were chosen, a page is still loading, or the
+        filter itself depends on which copies remain.
+        """
+        forget = getattr(self._repository, "forget", None)
+        if (self._closed or not callable(forget) or self._duplicate_only or self._navigation is not None
+                or not isinstance(keys, (list, tuple)) or not keys):
+            return False
+        prefix = f"g{self._generation}_"
+        if any(not isinstance(key, str) or not key.startswith(prefix) for key in keys):
+            return False
+        present = [key for key in dict.fromkeys(keys) if key in self.model._keys]
+        if not present or not self.model.removeKeys(present):
+            return False
+        forget(present, self._generation)
+        gone = set(present)
+        if self._selection_keys & gone:
+            self._selection_keys -= gone
+            self._batch_selection_changed()
+        if self._selection_key in gone or self.selectedKey in gone:
+            # The grid moves its highlight to the next tile and selects it.
+            self._selection_serial += 1
+            self._selected = {}
+            self._selection_key = ""
+            self._busy = False
+        # Counts beside the filters include the files that just left.
+        with self._condition:
+            for action in ("authors", "hashtags", "user_tags", "duplicate_counts"):
+                self._interactive.append((action, self._generation, self._selection_serial, ""))
+            self._condition.notify_all()
+        self.changed.emit()
+        return True
 
     @Slot(str)
     def selectItem(self, key):
@@ -2209,6 +2286,8 @@ class LibraryController(QObject):
                 selection = self._repository.selected(key, generation)
                 if selection is None:
                     message = "사진을 다시 선택해 주세요."
+            elif action == "reselect":
+                selection = self._repository.selected(key, generation)
             else:
                 message = self._repository.action(key, generation, action)
         except Exception:
@@ -2218,6 +2297,8 @@ class LibraryController(QObject):
                 selection = 0
             elif action == "statistics":
                 selection = {}
+            elif action == "reselect":
+                selection = None
             else:
                 message = "사진 정보를 읽지 못했습니다." if action == "select" else "열지 못했습니다. 파일과 기본 앱을 확인해 주세요."
         self._emit(generation, serial, action, selection, message, epoch)
@@ -2245,6 +2326,32 @@ class LibraryController(QObject):
         action, generation, serial, key = item[:4]
         epoch = item[4] if len(item) > 4 else None
         return action, generation, serial, key, epoch
+
+    def _reselect(self):
+        """Read the opened item again; a finished job may have changed its tags."""
+        key = self.selectedKey
+        if self._closed or not key:
+            return
+        with self._condition:
+            self._interactive.append(("reselect", self._generation, self._selection_serial, key))
+            self._condition.notify_all()
+
+    def _settle(self, message, *, reload):
+        """Show a finished job's result.
+
+        The list is reloaded only when its filter depends on what the job
+        changed. Otherwise the scroll position and an open preview stay.
+        """
+        if reload:
+            self._refresh(reload_authors=False, status=message)
+            return
+        self._status = message
+        if not self._user_tags_loaded:
+            with self._condition:
+                self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
+                self._condition.notify_all()
+        self._reselect()
+        self.changed.emit()
 
     @Slot(object)
     def _release_exclusive(self):
@@ -2325,7 +2432,7 @@ class LibraryController(QObject):
                 self._status = message
                 self.changed.emit()
                 return
-            self._refresh(reload_authors=False, status=message)
+            self._settle(message, reload=bool(self._ai_category))
             return
         if action == "scan_duplicates":
             self._release_exclusive()
@@ -2335,7 +2442,7 @@ class LibraryController(QObject):
                 return
             self._duplicate_count = selection
             self.duplicateCountChanged.emit()
-            self._refresh(reload_authors=False, status=message)
+            self._settle(message, reload=self._duplicate_only)
             return
         if action == "scan_ai_tags":
             self._release_exclusive()
@@ -2344,7 +2451,7 @@ class LibraryController(QObject):
                 self.changed.emit()
                 return
             self._user_tags_loaded = False
-            self._refresh(reload_authors=False, status=message)
+            self._settle(message, reload=bool(self._ai_category))
             return
         if action == "clear_ai_tags":
             self._release_exclusive()
@@ -2357,6 +2464,7 @@ class LibraryController(QObject):
                     t for t in self._selected.get("tags", [])
                     if not (isinstance(t, dict) and t.get("source") == "ai")
                 ]
+            filtered = bool(self._ai_category)
             if self._ai_category and self._ai_origin == "ai":
                 self._ai_category = self._ai_origin = ""
             if isinstance(selection, tuple) and len(selection) == 2:
@@ -2373,7 +2481,13 @@ class LibraryController(QObject):
                     self.userTagFilterChanged.emit()
             else:
                 self._user_tags_loaded = False
-            self._refresh(reload_authors=False, status=message)
+            self._settle(message, reload=filtered)
+            return
+        if action == "reselect":
+            if (serial == self._selection_serial and isinstance(selection, dict)
+                    and selection.get("key") == self.selectedKey):
+                self._selected = selection
+                self.changed.emit()
             return
         if serial != self._selection_serial:
             return

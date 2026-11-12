@@ -169,6 +169,47 @@ class LibraryControlsTests(unittest.TestCase):
         self.assertNotIn("저장하지 못했습니다", self.library.status)
 
 
+    def test_thumbnail_decoders_follow_the_cores_within_two_to_four(self):
+        from luvbox.qt_library import _thumbnail_workers
+        for cores, expected in ((None, 2), (1, 2), (4, 2), (6, 3), (8, 4), (64, 4)):
+            with self.subTest(cores=cores), patch("luvbox.qt_library.os.cpu_count", return_value=cores):
+                self.assertEqual(_thumbnail_workers(), expected)
+        self.assertIn(self.library.provider._worker_count, (2, 3, 4))
+
+    def test_favorite_notice_reports_a_failed_save_instead_of_a_removal(self):
+        key = self.library.model._rows[0]["key"]
+        self.repository.toggle_favorite = lambda key, generation: True
+        self.assertEqual(self.library.favoriteNotice(key), "즐겨찾기에 추가했습니다.")
+        self.assertTrue(self.library.model._rows[0]["favorite"])
+        self.repository.toggle_favorite = lambda key, generation: None
+        self.assertIn("저장하지 못했습니다", self.library.favoriteNotice(key))
+        self.assertTrue(self.library.model._rows[0]["favorite"])
+        self.repository.toggle_favorite = lambda key, generation: False
+        self.assertEqual(self.library.favoriteNotice(key), "즐겨찾기에서 제외했습니다.")
+        self.assertFalse(self.library.model._rows[0]["favorite"])
+        self.assertEqual(self.library.favoriteNotice(""), "")
+
+    def test_teaching_from_the_preview_keeps_the_opened_photo(self):
+        key = self.library.model._rows[0]["key"]
+        self.library.selectItem(key)
+        self.wait(lambda: not self.library.busy and self.library.selectedKey == key)
+        generation = self.library._generation
+        seen = []
+        original = self.repository.selected
+
+        def reread(key, generation):
+            seen.append(key)
+            return dict(original(key, generation), ai_category="인물", ai_confirmed=True)
+
+        self.repository.selected = reread
+        self.repository.teach_labels = lambda generation, idents, category, epoch=None, progress_callback=None: (1, 0)
+        self.assertTrue(self.library.teachSelected("인물"))
+        self.wait(lambda: not self.library.busy and self.library.selectedAiConfirmed)
+        self.assertEqual((self.library._generation, self.library.selectedKey), (generation, key))
+        self.assertEqual(seen, [key])
+        self.assertIn("분류를 저장했습니다", self.library.status)
+        self.assertEqual(self.library.model.count, 2)
+
     def test_clear_selection_resets_selected_keys_and_status(self):
         keys = [row["key"] for row in self.library.model._rows]
         self.library.selectLoaded()

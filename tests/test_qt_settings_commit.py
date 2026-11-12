@@ -84,6 +84,30 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertEqual(self.controller._preferences["custom"], {"preserved": True})
         self.settings.update.assert_not_called()
 
+    def test_thumbnail_size_is_remembered_even_while_a_save_runs(self):
+        self.assertEqual(self.controller.preferences["gallery_density"], 1)
+        self.controller.download._running = True
+        self.assertTrue(self.controller.busy)
+        self.controller.setPreference("gallery_density", 2)
+        self.wait_for(lambda: self.settings.update.called)
+        self.settings.update.assert_called_once_with({"gallery_density": 2})
+        self.assertEqual(self.controller.preferences["gallery_density"], 2)
+        # The same size again writes nothing; values outside the three sizes are ignored.
+        for value in (2, 3, -1, 1.5, "0", True, None):
+            self.controller.setPreference("gallery_density", value)
+        self.wait_for(lambda: not self.controller._pending_settings)
+        self.settings.update.assert_called_once()
+        self.assertEqual(self.controller.preferences["gallery_density"], 2)
+        self.controller.download._running = False
+
+    def test_a_damaged_thumbnail_size_falls_back_to_normal(self):
+        self.close_controller()
+        self.settings.load.return_value.update(gallery_density="large")
+        self.controller = ApplicationController()
+        self.wait_for(lambda: not self.controller.busy)
+        self.assertEqual(self.controller.preferences["gallery_density"], 1)
+        self.settings.update.assert_not_called()
+
     def test_failed_folder_change_restores_previous_folder_and_unlocks_controls(self):
         previous = self.controller.outputFolder
         self.settings.update.side_effect = self.blocked_update

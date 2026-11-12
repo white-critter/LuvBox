@@ -39,7 +39,14 @@ ApplicationWindow {
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
         folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
         runHistoryDialog.visible || unsavedDialog.visible || datePickerPopup.visible || statisticsDialog.visible ||
-        tagBatchPopup.visible || aiClearConfirm.visible || teachPopup.visible
+        tagBatchPopup.visible || aiClearConfirm.visible || teachPopup.visible || shortcutHelp.visible
+    // A focused or open list takes letters for itself (jumping to "@bob" must not
+    // toggle the favorites filter), so the single-letter shortcuts wait.
+    readonly property bool listEngaged: [thumbSizeChoice, mediaFilter, orderChoice, authorFilter, hashtagFilter,
+                                         userTagFilter, aiLabelFilter, dateFieldChoice].some(
+        function(combo) { return combo.activeFocus || combo.popup.visible })
+    readonly property bool letterKeysFree: currentScreen === 1 && !modalOpen && !search.activeFocus
+        && !listEngaged && !!app
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
     color: "#101010"
     palette.window: color
@@ -86,10 +93,16 @@ ApplicationWindow {
         // The person resized the window. Keep that choice until the open detail changes.
         saveHeightHeld = true
     }
-    Component.onCompleted: Qt.callLater(function() {
-        saveFitReady = true
-        fitSaveWindow()
-    })
+    Component.onCompleted: {
+        // The thumbnail size chosen last time, before the first tiles are laid out.
+        const remembered = app ? app.preferences.gallery_density : undefined
+        if (remembered === 0 || remembered === 1 || remembered === 2)
+            densityChoice = remembered
+        Qt.callLater(function() {
+            saveFitReady = true
+            fitSaveWindow()
+        })
+    }
 
     function screenHeightLimit() {
         // The virtual desktop spans every monitor. Grow only within the screen this window is on.
@@ -417,6 +430,16 @@ ApplicationWindow {
             Label { text: window.app ? window.app.version : ""; color: window.mutedColor; visible: window.width > 760 }
             // Settings stay reachable during a save: its records are read-only, and the
             // changeable options are locked inside the dialog until the work ends.
+            FlatButton {
+                objectName: "shortcutHelpButton"
+                text: "단축키"
+                visible: !!window.app && window.currentScreen === 1
+                enabled: window.app && !window.app.closing
+                Accessible.name: "단축키 안내"
+                ToolTip.visible: hovered
+                ToolTip.text: "갤러리와 미리보기에서 쓰는 단축키 (F1)"
+                onClicked: shortcutHelp.open()
+            }
             FlatButton {
                 text: "통계"
                 visible: !!window.app && window.currentScreen === 1
@@ -830,6 +853,7 @@ ApplicationWindow {
                         }
                     }
                     FlatCombo {
+                        id: thumbSizeChoice
                         objectName: "thumbSizeChoice"
                         model: ["작게", "보통", "크게"]
                         currentIndex: window.densityChoice
@@ -838,6 +862,8 @@ ApplicationWindow {
                         Accessible.name: "미리보기 크기"
                         onActivated: {
                             window.setDensity(currentIndex)
+                            if (window.app)
+                                window.app.setPreference("gallery_density", window.densityChoice)
                             currentIndex = Qt.binding(function() { return window.densityChoice })
                         }
                     }
@@ -1879,21 +1905,21 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "D"
-        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app
+        enabled: window.letterKeysFree
         onActivated: {
             window.app.library.setDuplicateOnly(!window.app.library.filterDuplicateOnly)
         }
     }
     Shortcut {
         sequence: "B"
-        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app
+        enabled: window.letterKeysFree
         onActivated: {
             window.app.library.setFavoriteOnly(!window.app.library.filterFavoriteOnly)
         }
     }
     Shortcut {
         sequence: "S"
-        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app && !statisticsDialog.visible
+        enabled: window.letterKeysFree && !statisticsDialog.visible
         onActivated: {
             statisticsDialog.open()
         }
@@ -1907,15 +1933,19 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "F"
-        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app
+        enabled: window.letterKeysFree
             && (!!window.app.library.selectedKey || gallery.currentIndex >= 0)
         onActivated: {
             const key = window.app.library.selectedKey || (gallery.currentItem ? gallery.currentItem.key : "")
             if (!key)
                 return
-            const fav = window.app.library.toggleFavorite(key)
-            window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")
+            window.flashNotice(window.app.library.favoriteNotice(key))
         }
+    }
+    Shortcut {
+        sequence: "F1"
+        enabled: window.currentScreen === 1 && !window.modalOpen && !!window.app && !window.app.closing
+        onActivated: shortcutHelp.open()
     }
     Shortcut {
         sequence: "F5"
@@ -1957,8 +1987,7 @@ ApplicationWindow {
             sequence: "F"
             enabled: previewDialog.visible && !previewDialog.textInputFocused && !!window.app
             onActivated: {
-                const fav = window.app.library.toggleSelectedFavorite()
-                window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")
+                window.flashNotice(window.app.library.favoriteNotice(window.app.library.selectedKey))
             }
         }
         Shortcut {
@@ -2070,12 +2099,7 @@ ApplicationWindow {
                     enabled: window.app && !window.app.busy && !window.app.library.filesLocked && !window.app.library.selectedMissing
                     ToolTip.visible: hovered && window.app && window.app.library.filesLocked
                     ToolTip.text: window.app ? window.app.library.holdReason : ""
-                    onClicked: {
-                        const key = window.app.library.selectedKey
-                        selectedMedia.release()
-                        previewDialog.close()
-                        window.app.management.prepareDelete([key])
-                    }
+                    onClicked: window.app.management.prepareDelete([window.app.library.selectedKey])
                 }
                 FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
                 FlatButton {
@@ -2086,8 +2110,7 @@ ApplicationWindow {
                     ToolTip.visible: hovered && enabled
                     ToolTip.text: window.app && window.app.library.selectedIsFavorite ? "즐겨찾기 해제 (F)" : "즐겨찾기 추가 (F)"
                     onClicked: {
-                        const fav = window.app.library.toggleSelectedFavorite()
-                        window.flashNotice(fav ? "즐겨찾기에 추가했습니다." : "즐겨찾기에서 제외했습니다.")
+                        window.flashNotice(window.app.library.favoriteNotice(window.app.library.selectedKey))
                     }
                 }
             }
@@ -2155,7 +2178,9 @@ ApplicationWindow {
                 sourceRawWidth: window.app ? window.app.library.selectedRawWidth : 0
                 sourceRawHeight: window.app ? window.app.library.selectedRawHeight : 0
                 missingNote: window.app ? window.app.library.selectedMissingNote : ""
-                externalBusy: window.app ? window.app.library.busy : false
+                // Only the opened item's own load. A folder-wide scan used to keep the
+                // spinner on a missing file for as long as the scan ran.
+                externalBusy: window.app ? window.app.library.selectionBusy : false
                 playing: previewDialog.visible
             }
             RowLayout {
@@ -2408,7 +2433,7 @@ ApplicationWindow {
                 color: window.mutedColor
             }
             Label {
-                visible: window.app && text.length > 0 && !window.app.library.busy && !selectedMedia.unavailable
+                visible: window.app && text.length > 0 && !window.app.library.selectionBusy && !selectedMedia.unavailable
                 text: window.app ? window.app.library.selectedMissingNote : ""
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
@@ -2423,7 +2448,7 @@ ApplicationWindow {
         function onChanged() {
             // A filter or account change clears the selection. An empty preview
             // would otherwise say the file is gone while the list reloads.
-            if (previewDialog.visible && window.app && !window.app.library.busy
+            if (previewDialog.visible && window.app && !window.app.library.selectionBusy
                     && window.app.library.selectedKey.length === 0)
                 previewDialog.close()
         }
@@ -2701,14 +2726,30 @@ ApplicationWindow {
         app: window.app
     }
 
+    // A move to the Recycle Bin that started in the preview returns to it:
+    // on the next photo after the move, on the same one after a cancel.
+    property bool resumePreview: false
+
     Connections {
         target: window.app ? window.app.management : null
         function onDeleteConfirmationRequested() {
+            window.resumePreview = previewDialog.visible
             selectedMedia.release()
             previewDialog.close()
             Qt.callLater(function() {
                 if (window.app && !window.app.closing && window.app.management.deleteConfirmationPending)
                     deleteConfirmation.open()
+            })
+        }
+        function onChanged() {
+            if (!window.resumePreview || window.app.management.mutating
+                    || window.app.management.deleteConfirmationPending)
+                return
+            window.resumePreview = false
+            Qt.callLater(function() {
+                if (window.app && !window.app.closing && window.currentScreen === 1
+                        && gallery.count > 0 && gallery.currentIndex >= 0 && !previewDialog.visible)
+                    previewDialog.open()
             })
         }
     }
@@ -2810,6 +2851,11 @@ ApplicationWindow {
             }
             onRejected: aiClearConfirm.close()
         }
+    }
+
+    ShortcutHelp {
+        id: shortcutHelp
+        parent: Overlay.overlay
     }
 
     StatisticsDialog {
@@ -3117,7 +3163,11 @@ ApplicationWindow {
                 scheduleDialog.close()
                 runHistoryDialog.close()
                 statisticsDialog.close()
+                shortcutHelp.close()
                 tagBatchPopup.close()
+                aiClearConfirm.close()
+                teachPopup.close()
+                teachMenu.close()
                 unsavedDialog.close()
                 storageDialog.close()
                 repairDialog.close()

@@ -79,6 +79,15 @@ def _linked(path: Path) -> bool:
 
 def _legacy_source(path: Path, output_dir: Path) -> bool:
     """Reject links at every level before inspecting a legacy database."""
+    try:
+        # Most candidate names do not exist. Nothing there is neither a
+        # database nor a link to one, so the link walk below has nothing to
+        # reject. Opening a catalog asks about dozens of such names.
+        os.lstat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        pass
     current = path
     while current != output_dir:
         if not current.is_relative_to(output_dir) or _linked(current):

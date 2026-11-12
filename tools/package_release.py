@@ -6,6 +6,7 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path, PureWindowsPath
+import re
 import stat
 import sys
 import subprocess
@@ -257,6 +258,33 @@ def _require_startup_report(executable: Path) -> None:
     validate_download_report(download_report, digest)
 
 
+def require_current_guides(root: Path, version: str) -> None:
+    """Refuse guides that still name another version's folder or program.
+
+    The ZIP's top-level guide tells people which EXE to start. It shipped
+    naming an older version twice because nothing compared it with the build.
+    """
+    guide = (root / "docs" / "사용안내.txt").read_text(encoding="utf-8")
+    development = (root / "docs" / "development.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    name = f"LuvBox-{version}"
+    latest = re.search(r"^## (\d+\.\d+\.\d+) ", changelog, re.MULTILINE)
+    checks = (
+        (guide.splitlines()[0].strip() == f"러브박스 (LuvBox) {version}", "docs/사용안내.txt 첫 줄"),
+        (f"{name} 폴더의 {name}.exe" in guide, "docs/사용안내.txt 실행 안내"),
+        (set(re.findall(r"LuvBox-(\d+\.\d+\.\d+)", guide)) == {version}, "docs/사용안내.txt 버전 이름"),
+        (development.splitlines()[0].strip() == f"# LuvBox {version} 개발 안내", "docs/development.md 제목"),
+        (set(re.findall(r"release/(?:LuvBox|SHA256)-(\d+\.\d+\.\d+)", development)) == {version},
+         "docs/development.md 산출물 이름"),
+        (readme.splitlines()[0].strip() == f"# 러브박스 (LuvBox) {version}", "README.md 제목"),
+        (latest is not None and latest[1] == version, "CHANGELOG.md 최신 항목"),
+    )
+    stale = [label for current, label in checks if not current]
+    if stale:
+        raise ValueError(f"Guides do not name version {version}: " + ", ".join(stale))
+
+
 def package() -> None:
     require_inputs(ROOT)
     subprocess.run([sys.executable, str(ROOT / "tools/ffmpeg/build.py"), "--check"], check=True)
@@ -341,4 +369,7 @@ def package() -> None:
 
 
 if __name__ == "__main__":
-    package()
+    # build.ps1 asks for this check alone before the long build; packaging repeats it.
+    require_current_guides(ROOT, __version__)
+    if "--check-guides" not in sys.argv[1:]:
+        package()

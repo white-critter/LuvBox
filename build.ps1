@@ -15,6 +15,8 @@ if ($LASTEXITCODE -ne 0) { throw '필수 빌드 파일 확인에 실패했습니
 
 $version = (& $taskPython -c "from luvbox import __version__; print(__version__)" | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw '버전은 숫자로 된 주.부.수정 형식이어야 합니다. luvbox\__init__.py를 확인하세요.' }
+& $taskPython 'tools\package_release.py' '--check-guides'
+if ($LASTEXITCODE -ne 0) { throw 'README·사용 안내·개발 안내·변경 사항의 버전이 제품 버전과 다릅니다. 문서를 먼저 고친 뒤 다시 빌드하세요.' }
 & $taskPython 'tools\windows_version.py'
 if ($LASTEXITCODE -ne 0) { throw 'Windows 파일 버전 정보를 준비하지 못했습니다.' }
 $name = "LuvBox-$version"

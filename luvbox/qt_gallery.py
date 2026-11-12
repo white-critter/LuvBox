@@ -22,6 +22,7 @@ _READ_ERROR = "사진 목록을 불러오지 못했습니다."
 _LOOKAHEAD_CAP = 48
 _TIMING_CAP = 8192
 _READ_RETRY_DELAYS = (0.1, 0.2, 0.4)
+_REMOVE_RUN_CAP = 32
 
 
 def _timing_summary(values):
@@ -568,6 +569,49 @@ class GalleryModel(QAbstractListModel):
             self._rows[pos]["favorite"] = bool(favorite)
             index = self.index(pos, 0)
             self.dataChanged.emit(index, index, [self.FavoriteRole])
+
+    def removeKeys(self, keys):
+        """Drop rows that left the library, keeping the others and the scroll position.
+
+        Returns how many rows were removed, or 0 when the caller should reload
+        the list instead: a page that is still loading was asked for the old
+        row count, and a selection scattered over many places is not worth
+        renumbering once per gap.
+        """
+        if self._closed or self._busy:
+            return 0
+        wanted = sorted({self._positions[key] for key in keys
+                         if isinstance(key, str) and key in self._positions})
+        if not wanted:
+            return 0
+        runs = []
+        start = previous = wanted[0]
+        for row in wanted[1:]:
+            if row != previous + 1:
+                runs.append((start, previous))
+                start = row
+            previous = row
+        runs.append((start, previous))
+        if len(runs) > _REMOVE_RUN_CAP:
+            return 0
+        # Remove whole runs from the end so earlier row numbers stay valid. The
+        # view can ask for the current row between runs, so the index is exact
+        # after each one.
+        for first, last in reversed(runs):
+            self.beginRemoveRows(QModelIndex(), first, last)
+            for row in self._rows[first:last + 1]:
+                key = row["key"]
+                self._keys.discard(key)
+                self._positions.pop(key, None)
+                self._ready.discard(key)
+                self._missing.discard(key)
+            del self._rows[first:last + 1]
+            for index in range(first, len(self._rows)):
+                self._positions[self._rows[index]["key"]] = index
+            self.endRemoveRows()
+        self._total = max(len(self._rows), self._total - len(wanted))
+        self.changed.emit()
+        return len(wanted)
 
     def canFetchMore(self, parent=QModelIndex()):
         return not parent.isValid() and not (self._closed or self._busy or self._exhausted)

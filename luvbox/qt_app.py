@@ -33,7 +33,9 @@ _CHOICES = {
     "gif_size": {"original", "720", "480"},
 }
 _BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_each", "detailed_progress"}
-_PUBLIC_PREFERENCES = {*_CHOICES, *_BOOLEANS, "max_video_mb"}
+_PUBLIC_PREFERENCES = {*_CHOICES, *_BOOLEANS, "max_video_mb", "gallery_density"}
+# Screen-only choices: they change nothing a save reads, so a running save does not lock them.
+_VIEW_PREFERENCES = {"confirm_each", "detailed_progress", "gallery_density"}
 _SETTINGS_ERROR = "설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요."
 _REPAIR_ERROR = ("기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
                  "저장 폴더 권한을 확인하고 다시 시도해 주세요.")
@@ -65,6 +67,8 @@ class ApplicationController(QObject):
         limit = self._preferences.get("max_video_mb")
         if type(limit) is not int or not 0 <= limit <= 1_000_000:
             self._preferences["max_video_mb"] = defaults["max_video_mb"]
+        if self._preferences.get("gallery_density") not in (0, 1, 2) or type(self._preferences["gallery_density"]) is not int:
+            self._preferences["gallery_density"] = defaults["gallery_density"]
         self._account = str(self._preferences.get("account") or "")
         self._output = str(self._preferences.get("output_dir") or defaults["output_dir"])
         locations = self._preferences.get("record_locations", {})
@@ -348,7 +352,7 @@ class ApplicationController(QObject):
 
     @Slot(str, "QVariant")
     def setPreference(self, name, value):
-        if self._closing or (self.busy and name not in {"confirm_each", "detailed_progress"}):
+        if self._closing or (self.busy and name not in _VIEW_PREFERENCES):
             return
         if name in _CHOICES:
             if not isinstance(value, str) or value not in _CHOICES[name]:
@@ -360,6 +364,12 @@ class ApplicationController(QObject):
             if type(value) not in (int, float) or not 0 <= value <= 1_000_000 or value != int(value):
                 return
             value = int(value)
+        elif name == "gallery_density":
+            if type(value) not in (int, float) or value not in (0, 1, 2):
+                return
+            value = int(value)
+            if value == self._preferences.get("gallery_density"):
+                return
         else:
             return
         self._persist({name: value})
@@ -421,6 +431,14 @@ class ApplicationController(QObject):
         self.changed.emit()
 
     def _managed_library_changed(self):
+        # Take only the recycled tiles out, so a cleanup deep in the gallery
+        # stays where it was. Anything less certain reloads the list.
+        take = getattr(self._management, "takeRecycledKeys", None)
+        keys = take() if callable(take) else None
+        remove = getattr(self._library, "removeDeleted", None)
+        if keys is not None and (not keys or (callable(remove) and remove(keys))):
+            self.changed.emit()
+            return
         self._gallery_dirty = False
         self._library.refresh()
         self.changed.emit()
