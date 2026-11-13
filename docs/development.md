@@ -1,4 +1,4 @@
-# LuvBox 1.8.0 개발 안내
+# LuvBox 1.9.0 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -25,6 +25,7 @@ Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사�
 | 위치 | 역할 |
 | --- | --- |
 | `entry.py`, `luvbox/qt_app.py`, `assets/qt/` | 실행 진입점, Qt 앱 제어와 QML 화면 |
+| `assets/qt/Theme.qml`, `qmldir`, `Flat*.qml`, `Card.qml`, `Glow.qml`, `DialogButtons.qml`, `SettingRow.qml`, `WrapRow.qml` | 테마 값 한 곳, 화면이 함께 쓰는 버튼·입력·메뉴·대화상자 틀·카드·붉은 빛 |
 | `qt_accounts.py`, `qt_browser_setup.py`, `browser_discovery.py`, `login.py`, `browser_bridge.py` | 연결 승인·확장 설치 안내·DPAPI 계정 보관 |
 | `qt_download.py`, `qt_saved_preview.py`, `download_service.py`, `core.py`, `review.py` | 저장 상태·선택적 첫 장면, 별도 worker와 IPC, 실제 다운로드와 저장 여부 확인 |
 | `qt_library.py`, `qt_gallery.py`, `qt_wheel.py`, `duplicates.py`, `clip_classifier.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력, 중복 탐지(완전 일치, 선택 시 픽셀 확인), 로컬 AI CLIP 자동 분류 |
@@ -48,6 +49,16 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 
 휠은 갤러리가 `GalleryWheel`(한 칸 ≈ 타일 높이의 0.6배, 최소 120px), 그 밖의 스크롤 영역이 `SmoothWheel`(120px)을 쓰며 둘 다 같은 방향으로 200ms 안에 이어지면 0.5씩 4배까지 빨라집니다. 새 스크롤 영역에는 `SmoothWheel { flickable: … }`을 넣습니다. 갤러리 그리드는 `interactive: false`이고 끌기는 `DragHandler`가 사각형 선택으로 처리합니다.
 
+### 화면 모양과 테마
+
+색·간격·모서리·글자 크기·컨트롤 높이는 `assets/qt/Theme.qml` 한 파일에 있습니다. `qmldir`이 이 파일을 싱글턴으로 선언하므로 같은 폴더의 QML은 `Theme.accent`처럼 바로 읽습니다. `qmldir`이 빠지면 화면이 뜨지 않으므로 소스 ZIP과 빌드 기록의 파일 목록에 넣었습니다(`package_release.project_source_files`). 다른 QML 파일에는 색 글자(`"#…"`)와 숫자로 쓴 글자 크기·모서리를 두지 않으며, 테마에서 읽는 이름이 실제로 있고 테마의 이름이 모두 쓰이는지까지 `tests/test_qt_theme.py`가 검사합니다.
+
+- **버튼**(`FlatButton`의 `tone`): `primary`는 화면·대화상자마다 하나뿐인 주 동작, 기본 `quiet`는 보통 동작, `ghost`는 물러나 있어야 하는 동작(닫기 옆의 보조 버튼, 제목 줄의 통계·단축키), `danger`는 다른 동작 사이에 놓인 지우는 동작, `chip`은 켜고 끄는 필터, `soft`는 주 동작이 따로 있는 화면에서 눈에 띄어야 하는 동작(업데이트 알림), `nav`는 화면 탭입니다. 목록 줄이나 상태 줄 안의 버튼은 `compact`, 한 줄을 다 쓰는 주 동작은 `large`를 씁니다. 풍선말은 `tip`에 적습니다. 0.5초 머물러야 나오고, 누르면 포인터가 나갔다 올 때까지 나오지 않습니다.
+- **대화상자**: `FlatDialog`(제목·덧말·`banner`, 같은 여백, 카드 배경)와 `DialogButtons`(오른쪽 정렬, 주 동작이 먼저, 닫기·취소가 마지막)를 씁니다. 창 전체를 쓰는 미리보기와 저장 전 확인만 자기 머리말을 두고 배경은 같은 `Card`를 씁니다. 메뉴는 `FlatMenu`·`FlatMenuItem`입니다.
+- **붉은 빛**: `Glow`는 시작 화면의 빛과 같은 감쇠(`(1 − t)^2.2`)를 작은 캔버스에 한 번 그려 늘려 씁니다. 빛은 항목의 가장자리에서 정확히 0이 되어 직선으로 끊기지 않습니다. 창 배경, 로고 뒤, `Card { glow: … }`(대화상자·선택 막대·알림)에 쓰며, 창의 빛은 저장 화면에서 저장이 진행 중이고 창이 활성일 때만 3.4초 주기로 밝기가 바뀝니다(`lightBreathing`). 그 밖에는 움직이지 않습니다.
+- **갤러리 위쪽**: 첫 줄(`gallerySearchRow`)은 검색·정렬·종류·크기, 둘째 줄(`galleryFilterRow`)은 줄바꿈하는 필터 칩(`galleryFilterBar`, `WrapRow`)과 오른쪽의 미리보기·새로고침·여러 개 선택입니다. 날짜 칩(`galleryFilterToggle`)은 범위를 펼치기만 하고, 날짜가 걸려 있을 때만 켜진 색이 됩니다. 상태 줄(`galleryStatusLine`)은 불러오기 오류, 잠깐 뜨는 안내, 그리고 보관함 작업과 파일 관리 가운데 **글이 마지막으로 바뀐 쪽**을 보여 줍니다(`statusSource`). 이전 결과가 지금 진행 중인 일을 가리지 않게 하려는 것입니다. 선택 중 동작은 그리드 아래의 `gallerySelectionBar`에 있습니다.
+- **확인 방법**: `tests/test_qt_look_qml.py`가 실제 창에서 화면마다 강조 버튼이 하나인지, 통계·단축키가 한 번에 열리는지, 선택을 끝내는 컨트롤이 하나인지, 풍선말이 상태를 따라가는지, 설정이 고급을 펼친 채 스크롤 없이 들어오는지를 검사합니다. `--shots 폴더`를 주고 `QT_QPA_PLATFORM` 없이 실행하면 실제 Windows 창의 화면을 단계마다 저장합니다.
+
 ### 기능을 바꿀 때 함께 볼 것
 
 새 기능이나 변경이 기존 기능의 전제를 바꾸는지 아래 짝을 확인하고, 바뀌면 같은 릴리즈에서 함께 고칩니다.
@@ -55,7 +66,8 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 - 목록에서 항목이 빠지거나 순서가 바뀌는 변경 ↔ 제자리 삭제(`removeDeleted`), 다음 페이지 커서, 미리보기 이전·다음, 여러 개 선택.
 - 사진의 분류·태그·중복 여부를 바꾸는 작업 ↔ 통계 창, AI 분류 메뉴의 개수, 중복 배지, 열려 있는 미리보기의 표시.
 - 저장 엔진이 미디어를 건너뛰거나 실패하는 경로 ↔ 저장 못 한 미디어 목록과 그 미리보기, 실행 기록의 개수, 전체 확인에서의 재방문.
-- 새 화면 요소(목록·팝업) ↔ 휠 처리기, 글자 단축키 차단(`modalOpen`·`listEngaged`), 앱을 닫을 때 닫는 창 목록, 단축키 안내.
+- 새 화면 요소(목록·팝업·메뉴) ↔ 휠 처리기, 글자 단축키 차단(`modalOpen`·`listEngaged`·`menuOpen`), 앱을 닫을 때 닫는 창 목록, 단축키 안내.
+- 새 화면이나 대화상자 ↔ `Theme` 값만 쓰는지, `FlatDialog` 틀과 `DialogButtons`, 강조 버튼이 하나인지, 풍선말은 `tip`인지(`test_qt_theme`, `test_qt_look_qml`).
 - QML로 넘기는 값의 자료형과 설정 키 ↔ 이전 버전이 읽어도 깨지지 않는지, 손상된 값의 기본값 복구.
 
 미리보기·저장 전 확인창은 부모 오버레이에서 24px 여백을 남기고 확장합니다. 헤더의 창 최대화·복원은 호스트 앱 창을 제어합니다. 갤러리 본문은 기본으로 접고 필요할 때 펼치며, 이미지 비율과 미디어 해제·저장 승인 순서는 유지합니다.
@@ -91,7 +103,7 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 
 ## 데이터와 인증 호환성
 
-설정·암호화 세션·기록·백업·미리보기는 `%LOCALAPPDATA%\LuvBox`에 있습니다. 1.8.0은 설정 파일에 업데이트 확인 값(`update_check`, `update_checked_at`, `update_found`)을 더하고, 같은 폴더 아래에 `app`(실행기가 풀어 둔 앱)과 `updates`(받는 중인 파일)를 씁니다. 기록 DB는 바꾸지 않으며 이전 버전은 이 값을 무시합니다. 이전 이름(XlikeSaver)의 데이터 폴더가 남아 있고 LuvBox 폴더가 없거나 비어 있으면 실행기가 `app`을 만들기 전에 앱과 같은 방식으로 폴더 이름을 바꿉니다. 그러지 않으면 앱이 두 폴더가 모두 쓰이는 것으로 보고 멈춥니다. 1.7.0은 설정 파일에 창 크기·위치(`window`)를, 기록 DB의 `catalog_meta`에 중복 묶음 방식(`duplicate_rule`) 한 줄을 더합니다. 표 구조는 바꾸지 않으며 이전 버전은 두 값을 무시합니다. 1.6.9·1.6.10은 설정 파일에 갤러리 썸네일 크기(`gallery_density`, 0·1·2)만 더하며 기록 DB 구조는 바꾸지 않습니다. 이전 버전은 이 값을 무시하고 보존합니다. 미디어 저장 폴더의 `.luvbox` 사본과 이전 파일명·archive·암호화 형식·예약 이름을 계속 인식합니다. UI 변경을 이유로 기존 파일·DB·계정을 초기화하지 않습니다. 폴더 이전의 명시적 승인 경로를 보존하고, 다른 PC의 기록 사본이 주장하는 외부 경로에 관리 권한을 부여하지 않습니다.
+설정·암호화 세션·기록·백업·미리보기는 `%LOCALAPPDATA%\LuvBox`에 있습니다. 1.9.0은 화면만 바꾸며 설정 파일·기록 DB·릴리스 첨부 형식을 바꾸지 않습니다. 1.8.0은 설정 파일에 업데이트 확인 값(`update_check`, `update_checked_at`, `update_found`)을 더하고, 같은 폴더 아래에 `app`(실행기가 풀어 둔 앱)과 `updates`(받는 중인 파일)를 씁니다. 기록 DB는 바꾸지 않으며 이전 버전은 이 값을 무시합니다. 이전 이름(XlikeSaver)의 데이터 폴더가 남아 있고 LuvBox 폴더가 없거나 비어 있으면 실행기가 `app`을 만들기 전에 앱과 같은 방식으로 폴더 이름을 바꿉니다. 그러지 않으면 앱이 두 폴더가 모두 쓰이는 것으로 보고 멈춥니다. 1.7.0은 설정 파일에 창 크기·위치(`window`)를, 기록 DB의 `catalog_meta`에 중복 묶음 방식(`duplicate_rule`) 한 줄을 더합니다. 표 구조는 바꾸지 않으며 이전 버전은 두 값을 무시합니다. 1.6.9·1.6.10은 설정 파일에 갤러리 썸네일 크기(`gallery_density`, 0·1·2)만 더하며 기록 DB 구조는 바꾸지 않습니다. 이전 버전은 이 값을 무시하고 보존합니다. 미디어 저장 폴더의 `.luvbox` 사본과 이전 파일명·archive·암호화 형식·예약 이름을 계속 인식합니다. UI 변경을 이유로 기존 파일·DB·계정을 초기화하지 않습니다. 폴더 이전의 명시적 승인 경로를 보존하고, 다른 PC의 기록 사본이 주장하는 외부 경로에 관리 권한을 부여하지 않습니다.
 
 계정은 브라우저 확장의 코드·계정 확인 후 승인하거나 토큰을 직접 입력해 연결합니다. 수동 토큰 보관은 X 인증 성공을 뜻하지 않습니다. 토큰·쿠키·브라우저 프로필·사용자 DB를 로그·Git·배포 파일에 넣지 않습니다. 계정 연결과 Qt 설정 변경은 Windows 경로별 mutex와 원자적 파일 교체로 보호합니다. 설정 읽기에 실패하면 변경 저장을 중단해 기존 파일을 보존합니다.
 
@@ -136,7 +148,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.8.0.txt`, `release/LuvBox-1.8.0-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.9.0.txt`, `release/LuvBox-1.9.0-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 

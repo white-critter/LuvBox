@@ -35,7 +35,7 @@ Item {
         onContentYChanged: review.requestMore()
         onCountChanged: Qt.callLater(review.requestMore)
 
-        delegate: Rectangle {
+        delegate: Card {
             id: card
             required property var modelData
             required property int index
@@ -61,8 +61,6 @@ Item {
             width: list.width - 14
             implicitHeight: body.implicitHeight + 24
             height: implicitHeight
-            radius: 12
-            color: "#191919"
 
             ColumnLayout {
                 id: body
@@ -82,12 +80,13 @@ Item {
                             + (card.modelData.items.length < card.modelData.size
                                ? " (" + card.modelData.items.length + "장 표시)" : "")
                         font.bold: true
-                        color: "#f4f1f1"
+                        font.pixelSize: Theme.fontSection
+                        color: Theme.text
                         elide: Text.ElideRight
                     }
                     FlatButton {
                         objectName: "duplicateGroupSelect"
-                        implicitHeight: 32
+                        compact: true
                         text: card.copiesSelected ? "선택 해제" : "사본 " + card.copies.length + "장 선택"
                         enabled: card.copies.length > 0 && !!review.library && !review.library.copiesLocked
                         Accessible.name: "묶음 " + card.modelData.number + " " + text
@@ -115,10 +114,10 @@ Item {
                             }
                             width: review.tileWidth
                             height: review.tileHeight
-                            radius: 10
-                            color: chosen ? "#241416" : (tileMouse.containsMouse ? "#232323" : "#1f1f1f")
+                            radius: Theme.radiusCard
+                            color: chosen ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.raised : Theme.well)
                             border.width: chosen ? 1 : 0
-                            border.color: "#d93645"
+                            border.color: Theme.accent
                             Accessible.role: Accessible.CheckBox
                             Accessible.name: (tile.modelData.keeper ? "남길 사진 " : "사본 ") + tile.modelData.caption
                             Accessible.checked: chosen
@@ -141,8 +140,8 @@ Item {
                                 anchors.centerIn: picture
                                 visible: tile.modelData.missing || picture.status === Image.Error
                                 text: tile.modelData.missing ? "파일 없음" : "미리보기 없음"
-                                color: "#8a8284"
-                                font.pixelSize: 11
+                                color: Theme.textFaint
+                                font.pixelSize: Theme.fontTiny
                             }
                             // What to do with this one, in words and colour.
                             Rectangle {
@@ -152,13 +151,13 @@ Item {
                                 anchors.margins: 12
                                 width: roleLabel.implicitWidth + 14
                                 height: 22
-                                radius: 11
-                                color: tile.modelData.keeper ? "#1f5a34" : "#7a1f29"
+                                radius: height / 2
+                                color: tile.modelData.keeper ? Theme.keepFill : Theme.accentLine
                                 Label {
                                     id: roleLabel
                                     anchors.centerIn: parent
                                     text: tile.modelData.keeper ? "남김" : "사본"
-                                    font.pixelSize: 11
+                                    font.pixelSize: Theme.fontTiny
                                     font.bold: true
                                     color: "white"
                                 }
@@ -169,8 +168,8 @@ Item {
                                 anchors.margins: 12
                                 visible: tile.modelData.favorite
                                 text: "★"
-                                color: "#ffd166"
-                                font.pixelSize: 15
+                                color: Theme.notice
+                                font.pixelSize: Theme.fontSection
                             }
                             Rectangle {
                                 anchors.right: parent.right
@@ -178,15 +177,15 @@ Item {
                                 anchors.margins: 4
                                 width: 22
                                 height: 22
-                                radius: 4
+                                radius: Theme.radiusSmall
                                 visible: tile.chosen
-                                color: "#d93645"
+                                color: Theme.accent
                                 Label {
                                     anchors.centerIn: parent
                                     text: "✓"
                                     color: "white"
                                     font.bold: true
-                                    font.pixelSize: 13
+                                    font.pixelSize: Theme.fontSmall
                                 }
                             }
                             Column {
@@ -200,16 +199,16 @@ Item {
                                     text: tile.modelData.caption
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
-                                    font.pixelSize: 12
-                                    color: "#b9afb1"
+                                    font.pixelSize: Theme.fontCaption
+                                    color: Theme.textMuted
                                 }
                                 Label {
                                     width: parent.width
                                     text: tile.modelData.detail
                                     textFormat: Text.PlainText
                                     elide: Text.ElideRight
-                                    font.pixelSize: 11
-                                    color: "#8a8284"
+                                    font.pixelSize: Theme.fontTiny
+                                    color: Theme.textFaint
                                 }
                             }
                             MouseArea {
@@ -240,6 +239,6 @@ Item {
             : "찾은 중복 사진이 없습니다. 위의 ‘중복 검사’를 눌러 확인해 보세요."
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap
-        color: "#b9afb1"
+        color: Theme.textMuted
     }
 }

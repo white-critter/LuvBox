@@ -15,11 +15,11 @@ Rectangle {
     readonly property bool highlighted: activeFocus || pickerOpen
     readonly property bool clearHovered: text.length > 0 && mouse.containsMouse && mouse.mouseX >= width - 26
     activeFocusOnTab: true
-    implicitHeight: 40
-    radius: 10
-    color: "#1c1c1c"
-    border.width: highlighted ? 2 : (mouse.containsMouse ? 1 : 0)
-    border.color: highlighted ? "#ff8791" : "#333333"
+    implicitHeight: Theme.inputHeight
+    radius: Theme.radiusControl
+    color: Theme.field
+    border.width: highlighted ? 2 : 1
+    border.color: highlighted ? Theme.focus : (mouse.containsMouse ? Theme.lineStrong : Theme.line)
     Accessible.role: Accessible.Button
     Accessible.name: text.length > 0 ? accessibleLabel + " " + text : accessibleLabel + " 선택"
     Accessible.onPressAction: pickRequested()
@@ -45,7 +45,7 @@ Rectangle {
             onPaint: {
                 const ctx = getContext("2d")
                 ctx.reset()
-                ctx.strokeStyle = "#b9afb1"
+                ctx.strokeStyle = Theme.textMuted
                 ctx.lineWidth = 1.4
                 ctx.strokeRect(1, 2.5, 12, 10.5)
                 ctx.beginPath()
@@ -61,8 +61,8 @@ Rectangle {
         Label {
             Layout.fillWidth: true
             text: field.text.length > 0 ? field.text : field.placeholder
-            color: field.text.length > 0 ? "#f4f1f1" : "#8f8587"
-            font.pixelSize: 13
+            color: field.text.length > 0 ? Theme.text : Theme.textFaint
+            font.pixelSize: Theme.fontSmall
             elide: Text.ElideRight
             verticalAlignment: Text.AlignVCenter
         }
@@ -70,13 +70,13 @@ Rectangle {
             visible: field.text.length > 0
             width: 20
             height: 20
-            radius: 10
-            color: field.clearHovered ? "#333333" : "transparent"
+            radius: Theme.radiusCard
+            color: field.clearHovered ? Theme.raisedHover : "transparent"
             Label {
                 anchors.centerIn: parent
                 text: "×"
-                color: field.clearHovered ? "#ffffff" : "#b9afb1"
-                font.pixelSize: 14
+                color: field.clearHovered ? Theme.text : Theme.textMuted
+                font.pixelSize: Theme.fontBody
                 font.bold: true
             }
         }

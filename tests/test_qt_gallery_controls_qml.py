@@ -138,23 +138,31 @@ def scene():
         wait(lambda: not controller.library.model.busy and controller.library.model.total == 5
              and len(controller.library.authors) == 3, "initial gallery")
         def toolbar_separated(label):
+            # The search row, the filter chips, the two buttons beside them and the status
+            # line: every visible control stays inside the window and none covers another.
             QTest.qWait(30)
             settle()
-            bar = find("galleryToolBar")
-            kids = [child for child in bar.childItems()
-                    if child.property("visible") and child.property("width") >= 1 and child.property("height") >= 1]
-            rects = []
-            for child in kids:
-                origin = child.mapToScene(QPointF(0, 0))
-                rect = (origin.x(), origin.y(), child.property("width"), child.property("height"))
-                assert rect[0] >= 8 and rect[0] + rect[2] <= width - 8, (label, rect, width)
-                rects.append((child.objectName(), rect))
-            for index, (left_name, left) in enumerate(rects):
-                for right_name, right in rects[index + 1:]:
-                    apart = (left[0] + left[2] <= right[0] + 0.5 or right[0] + right[2] <= left[0] + 0.5
-                             or left[1] + left[3] <= right[1] + 0.5 or right[1] + right[3] <= left[1] + 0.5)
-                    assert apart, (label, left_name, left, right_name, right)
-            assert len(rects) >= 4, (label, [name for name, _rect in rects])
+            for bar_name, minimum in (("gallerySearchRow", 4), ("galleryFilterBar", 7),
+                                      ("galleryFilterRow", 3), ("galleryStatusLine", 1)):
+                bar = find(bar_name)
+                kids = [child for child in bar.childItems()
+                        if child.property("visible") and child.property("width") >= 1 and child.property("height") >= 1]
+                rects = []
+                for child in kids:
+                    origin = child.mapToScene(QPointF(0, 0))
+                    rect = (origin.x(), origin.y(), child.property("width"), child.property("height"))
+                    assert rect[0] >= 8 and rect[0] + rect[2] <= width - 8, (label, bar_name, rect, width)
+                    rects.append((child.objectName(), rect))
+                for index, (left_name, left) in enumerate(rects):
+                    for right_name, right in rects[index + 1:]:
+                        apart = (left[0] + left[2] <= right[0] + 0.5 or right[0] + right[2] <= left[0] + 0.5
+                                 or left[1] + left[3] <= right[1] + 0.5 or right[1] + right[3] <= left[1] + 0.5)
+                        assert apart, (label, bar_name, left_name, left, right_name, right)
+                assert len(rects) >= minimum, (label, bar_name, [name for name, _rect in rects])
+            # The rows follow each other from top to bottom: search, filters, status, pictures.
+            tops = [find(name).mapToScene(QPointF(0, 0)).y()
+                    for name in ("gallerySearchRow", "galleryFilterRow", "galleryStatusLine", "galleryGrid")]
+            assert tops == sorted(tops) and len(set(tops)) == 4, (label, tops)
 
         for width, height in ((680, 480), (1080, 760)):
             window.setWidth(width)
@@ -168,16 +176,28 @@ def scene():
             model._busy = True
             model.changed.emit()
             wait(lambda: find("galleryBusy").property("visible") and count.property("width") > narrow + 20,
-                 "toolbar count grew while loading")
+                 "status line count grew while loading")
             toolbar_separated(f"busy {width}")
             model._busy = False
             model._total = 5
             model.changed.emit()
             wait(lambda: not find("galleryBusy").property("visible") and model.total == 5, "toolbar idle")
             toolbar_separated(f"idle {width}")
-            if not find("galleryFilterToggle").property("checked"):
-                click("galleryFilterToggle")
+            # The quick filters are always in reach; only the date range folds away.
             author_combo = find("galleryAuthorFilter")
+            for name in ("galleryFavoriteFilter", "galleryDuplicateFilter", "galleryAiMenuButton",
+                         "galleryAuthorFilter", "galleryHashtagFilter", "galleryUserTagFilter", "galleryFilterToggle"):
+                assert find(name).property("visible"), name
+            assert author_combo.property("displayText") == "작성자"
+            # Nothing is filtered yet, so there is nothing to clear.
+            assert not find("galleryFilterReset").property("visible")
+            if not find("galleryFilterToggle").property("checked"):
+                assert not find("galleryDateFrom").property("visible")
+                click("galleryFilterToggle")
+            wait(lambda: find("galleryDateFrom").property("visible"), "date range shown")
+            # The chips are placed on the next pass of the event loop and the rows on the next frame.
+            QTest.qWait(40)
+            settle()
             labels = [row["label"] for row in author_combo.property("model")]
             assert labels == ["전체 작성자", "@alice · 미디어 3개", "@alice2 · 미디어 1개", "@bob · 미디어 1개"], labels
             def inside(name, bar):
@@ -190,9 +210,10 @@ def scene():
 
             assert inside("galleryFilterToggle", "galleryFilterBar")
             assert inside("galleryFilterReset", "galleryFilterBar")
-            names = ("galleryAuthorFilter", "galleryHashtagFilter", "galleryUserTagFilter",
+            names = ("galleryFavoriteFilter", "galleryDuplicateFilter", "galleryAiMenuButton",
+                     "galleryAuthorFilter", "galleryHashtagFilter", "galleryUserTagFilter",
                      "galleryDateField", "galleryDateFrom",
-                     "galleryDateTo", "galleryFilterToggle", "galleryFilterReset")
+                     "galleryDateTo", "galleryFilterToggle", "galleryRefresh", "gallerySelectionToggle")
             placed = []
             for name in names:
                 item = find(name)
@@ -218,14 +239,23 @@ def scene():
             open_grid = find("galleryGrid").property("height")
             open_bar = find("galleryFilterBar").property("height")
             click("galleryFilterToggle")
-            wait(lambda: not find("galleryAuthorFilter").property("visible")
-                 and find("galleryFilterToggle").property("visible"), "filter inputs hidden")
-            if open_bar > 56:
-                wait(lambda: find("galleryFilterBar").property("height") <= open_bar - 20, "filter row collapsed")
-                assert find("galleryGrid").property("height") > open_grid + 20, (
-                    open_grid, find("galleryGrid").property("height"), open_bar)
+            wait(lambda: not find("galleryDateFrom").property("visible")
+                 and not find("galleryDateField").property("visible")
+                 and find("galleryAuthorFilter").property("visible")
+                 and find("galleryFilterToggle").property("visible"), "date range hidden")
+            QTest.qWait(40)
+            settle()
+            closed_bar = find("galleryFilterBar").property("height")
+            if closed_bar < open_bar - 20:
+                # The range had a line of its own: the pictures get that line back.
+                wait(lambda: find("galleryGrid").property("height") > open_grid + 20, "grid grew")
+            else:
+                assert closed_bar <= open_bar, (closed_bar, open_bar)
             click("galleryFilterToggle")
-            wait(lambda: find("galleryAuthorFilter").property("visible"), "filter reopened")
+            wait(lambda: find("galleryDateFrom").property("visible"), "date range reopened")
+            QTest.qWait(40)
+            settle()
+            assert find("galleryFilterBar").property("height") == open_bar, "the same lines come back"
             assert find("galleryHashtagFilter").property("displayText") == "해시태그"
             stats = find("statisticsDialog")
             invoke(stats, "open")
@@ -302,7 +332,17 @@ def scene():
                  and controller.library.model.total == 2, "author applied without a search step")
             assert (controller.library.dateFrom, controller.library.dateTo) == ("2026-10-01", "2026-10-01")
             assert author_combo.property("currentIndex") == 1
-            assert find("galleryFilterToggle").property("checked"), "the filter panel stays open"
+            assert author_combo.property("displayText") == "@alice" and author_combo.property("chosen")
+            assert find("galleryFilterToggle").property("checked"), "the date range stays open"
+            assert find("galleryFilterToggle").property("lit"), "the date chip is lit while a date is applied"
+            # Now there is something to clear, and the button for it joins the chips.
+            reset = find("galleryFilterReset")
+            wait(lambda: reset.property("visible"), "clear-filters button shown")
+            QTest.qWait(30)
+            origin = reset.mapToScene(QPointF(0, 0))
+            assert reset.property("width") >= 36 and reset.property("height") >= 36
+            assert origin.x() >= 16 and origin.x() + reset.property("width") <= width - 16, (origin.x(), width)
+            toolbar_separated(f"filtered {width}")
             # A start date after the end moves the end along instead of failing.
             click("galleryDateFrom")
             wait(lambda: picker.property("visible"), "date picker for an impossible range")

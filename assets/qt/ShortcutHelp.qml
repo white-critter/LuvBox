@@ -2,18 +2,18 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+FlatDialog {
     id: dialog
     objectName: "shortcutHelp"
     title: "단축키"
-    modal: true
-    focus: true
-    closePolicy: Popup.CloseOnEscape
-    width: Math.min(520, parent ? Math.max(240, parent.width - 32) : 520)
-    height: Math.min(600, parent ? Math.max(200, parent.height - 32) : 600)
-    x: parent ? Math.round((parent.width - width) / 2) : 0
-    y: parent ? Math.round((parent.height - height) / 2) : 0
-    padding: 20
+    // Wide enough for the two lists side by side; a narrow window stacks them.
+    readonly property bool wide: !!parent && parent.width - windowMargin >= 860
+    preferredWidth: wide ? 900 : 520
+    readonly property int windowLimit: parent ? Math.max(200, parent.height - 32) : 600
+    readonly property int chromeHeight: topPadding + bottomPadding
+        + (header && header.implicitHeight > 0 ? header.implicitHeight + spacing : 0)
+        + (footer && footer.implicitHeight > 0 ? footer.implicitHeight + spacing : 0)
+    height: Math.min(lists.implicitHeight + chromeHeight + 4, windowLimit)
 
     // Each key is listed where it works. Keep this in step with the Shortcut
     // items and key handlers in MainWindow.qml.
@@ -47,41 +47,34 @@ Dialog {
         ] }
     ]
 
-    background: Rectangle {
-        color: "#141414"
-        radius: 16
-        border.width: 1
-        border.color: "#2a2a2a"
-    }
-    header: Label {
-        text: dialog.title
-        leftPadding: 20
-        rightPadding: 20
-        topPadding: 16
-        bottomPadding: 2
-        font.pixelSize: 18
-    }
     onOpened: closeButton.forceActiveFocus()
     contentItem: FocusScrollView {
         id: scroll
         clip: true
         contentWidth: availableWidth
+        rightPadding: ScrollBar.vertical.policy === ScrollBar.AlwaysOn ? 14 : 0
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
         ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
-        ColumnLayout {
-            width: scroll.availableWidth - 12
-            spacing: 14
+        GridLayout {
+            id: lists
+            width: scroll.availableWidth
+            columns: dialog.wide ? 2 : 1
+            columnSpacing: Theme.gapSection
+            rowSpacing: Theme.gapLarge
             Repeater {
                 model: dialog.sections
                 delegate: ColumnLayout {
                     id: section
                     required property var modelData
                     Layout.fillWidth: true
+                    Layout.preferredWidth: 1
+                    Layout.alignment: Qt.AlignTop
                     spacing: 6
                     Label {
                         text: section.modelData.title
                         font.bold: true
-                        color: "#f4f1f1"
+                        font.pixelSize: Theme.fontSection
+                        color: Theme.text
                     }
                     Repeater {
                         model: section.modelData.rows
@@ -89,29 +82,29 @@ Dialog {
                             id: entry
                             required property var modelData
                             Layout.fillWidth: true
-                            spacing: 12
+                            spacing: Theme.gap
                             Accessible.role: Accessible.StaticText
                             Accessible.name: entry.modelData.keys + ": " + entry.modelData.text
                             Rectangle {
                                 Layout.preferredWidth: 112
                                 Layout.preferredHeight: 26
                                 Layout.alignment: Qt.AlignTop
-                                radius: 6
-                                color: "#222222"
+                                radius: Theme.radiusSmall
+                                color: Theme.field
                                 border.width: 1
-                                border.color: "#353535"
+                                border.color: Theme.lineStrong
                                 Label {
                                     anchors.centerIn: parent
                                     text: entry.modelData.keys
-                                    font.pixelSize: 12
-                                    color: "#f4f1f1"
+                                    font.pixelSize: Theme.fontCaption
+                                    color: Theme.text
                                     textFormat: Text.PlainText
                                 }
                             }
                             Label {
                                 Layout.fillWidth: true
                                 text: entry.modelData.text
-                                color: "#b9afb1"
+                                color: Theme.textMuted
                                 wrapMode: Text.WordWrap
                                 textFormat: Text.PlainText
                                 verticalAlignment: Text.AlignVCenter
@@ -123,8 +116,7 @@ Dialog {
             }
         }
     }
-    footer: DialogButtonBox {
-        background: null
+    footer: DialogButtons {
         FlatButton {
             id: closeButton
             objectName: "shortcutHelpClose"

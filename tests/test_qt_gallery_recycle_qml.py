@@ -242,7 +242,7 @@ def scene(shots=None):
         shot("4-after-batch")
         assert len(list(kept.iterdir())) == 5
 
-        # The shortcut list opens from the header and with F1, fits the window, and
+        # The shortcut list opens from the title bar and with F1, fits the window, and
         # blocks the single-letter shortcuts behind it.
         click("gallerySelectionToggle")
         help_dialog = find("shortcutHelp")
@@ -272,6 +272,18 @@ def scene(shots=None):
         wait(lambda: library.filterFavoriteOnly and not model.busy, "B toggles favorites from the grid")
         QTest.keyClick(window, Qt.Key.Key_B)
         wait(lambda: not library.filterFavoriteOnly and not model.busy and model.count == 55, "B toggles back")
+        # While a gallery menu is open a letter is not a gallery shortcut either.
+        ai_menu = find("galleryAiMenu")
+        click("galleryAiMenuButton")
+        wait(lambda: ai_menu.property("visible"), "AI menu open")
+        assert window.property("menuOpen") and not window.property("letterKeysFree")
+        QTest.keyClick(window, Qt.Key.Key_B)
+        settle()
+        assert not library.filterFavoriteOnly, "B typed over an open menu must not toggle the favorites filter"
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        wait(lambda: not ai_menu.property("visible") and window.property("letterKeysFree"), "AI menu closed")
+        # The list is one click away in the title bar, next to the statistics.
+        assert find("galleryStatisticsButton").property("visible")
         click("shortcutHelpButton")
         wait(lambda: help_dialog.property("visible"), "shortcut help by button")
         click("shortcutHelpClose")

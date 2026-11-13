@@ -8,20 +8,20 @@ Frame {
     readonly property var download: app ? app.download : null
     readonly property var item: download ? download.currentSavedItem : ({})
     readonly property bool hasItem: !!(item && item.filename)
-    padding: 14
-    background: Rectangle { color: "#191919"; radius: 12 }
+    padding: Theme.cardPadding
+    background: Card {}
 
     ColumnLayout {
         width: parent.width
         spacing: 10
-        Label { text: "최근 저장한 파일"; font.bold: true }
+        Label { text: "최근 저장한 파일"; font.bold: true; font.pixelSize: Theme.fontSection }
         Label {
             Layout.fillWidth: true
             visible: !details.hasItem
             text: "파일을 저장하면 미리보기와 게시물 정보가 여기에 표시됩니다."
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            color: "#b9afb1"
+            color: Theme.textMuted
         }
         RowLayout {
             Layout.fillWidth: true
@@ -58,7 +58,7 @@ Frame {
                         onPaint: {
                             const ctx = getContext("2d")
                             ctx.reset()
-                            ctx.strokeStyle = "#8a8284"
+                            ctx.strokeStyle = Theme.textFaint
                             ctx.lineWidth = 1.8
                             ctx.lineJoin = "round"
                             ctx.lineCap = "round"
@@ -73,7 +73,7 @@ Frame {
                             ctx.lineTo(25, 16)
                             ctx.lineTo(30, 23)
                             ctx.stroke()
-                            ctx.strokeStyle = "#d93645"
+                            ctx.strokeStyle = Theme.accent
                             ctx.lineWidth = 2
                             ctx.beginPath()
                             ctx.moveTo(5, 5)
@@ -84,8 +84,8 @@ Frame {
                     Label {
                         width: parent.width
                         text: "미리보기 없음"
-                        color: "#b9afb1"
-                        font.pixelSize: 12
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontCaption
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.Wrap
                     }
@@ -123,7 +123,7 @@ Frame {
                         ? details.item.posted_at.replace("T", " ").replace(/\+09:00$/, "").slice(0, 16) : ""
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    color: "#b9afb1"
+                    color: Theme.textMuted
                 }
                 Label {
                     Layout.fillWidth: true
@@ -131,7 +131,7 @@ Frame {
                     text: details.item.preview_note || ""
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    color: "#b9afb1"
+                    color: Theme.textMuted
                 }
                 Flow {
                     Layout.fillWidth: true
@@ -168,10 +168,10 @@ Frame {
                 readOnly: true
                 selectByMouse: true
                 wrapMode: TextEdit.Wrap
-                color: "#f4f1f1"
-                selectionColor: "#d93645"
+                color: Theme.text
+                selectionColor: Theme.accent
                 selectedTextColor: "white"
-                font.pixelSize: 13
+                font.pixelSize: Theme.fontSmall
                 background: null
             }
         }

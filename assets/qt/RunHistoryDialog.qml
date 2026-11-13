@@ -2,19 +2,17 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+FlatDialog {
     id: dialog
     objectName: "runHistoryDialog"
     property var app: null
     readonly property var records: app ? app.records : null
     title: "실행 기록"
-    modal: true
-    focus: true
-    closePolicy: Popup.CloseOnEscape
+    subtitle: "수동·자동 저장 결과를 최근 1,000건까지 보관합니다."
     // A desk-sized list, kept inside the window. The corner grip changes chosenWidth/Height
     // and the list fills whatever remains.
     readonly property int frameMargin: 24
-    readonly property int preferredWidth: 960
+    preferredWidth: 960
     readonly property int preferredHeight: 720
     property int chosenWidth: preferredWidth
     property int chosenHeight: preferredHeight
@@ -27,7 +25,6 @@ Dialog {
     height: Math.min(chosenHeight, limitHeight)
     x: placedX
     y: placedY
-    padding: 20
 
     function place() {
         if (!parent || resizing)
@@ -60,33 +57,6 @@ Dialog {
 
     onWidthChanged: { place(); syncContent() }
     onHeightChanged: { place(); syncContent() }
-    background: Rectangle {
-        color: "#141414"
-        radius: 16
-        border.width: 1
-        border.color: "#2a2a2a"
-    }
-    header: Column {
-        width: dialog.width
-        Label {
-            width: parent.width
-            text: dialog.title
-            leftPadding: 20
-            rightPadding: 20
-            topPadding: 16
-            bottomPadding: 2
-            font.pixelSize: 18
-        }
-        Label {
-            width: parent.width
-            text: "수동·자동 저장 결과를 최근 1,000건까지 보관합니다."
-            leftPadding: 20
-            rightPadding: 20
-            color: "#b9afb1"
-            font.pixelSize: 13
-            wrapMode: Text.Wrap
-        }
-    }
     onAboutToShow: {
         place()
         syncContent()
@@ -97,8 +67,8 @@ Dialog {
     onClosed: if (records) records.setActive("runs", false)
 
     readonly property var tones: ({
-        ok: { text: "#8fd3a0", fill: "#1c2a21" }, warn: { text: "#e6bd79", fill: "#2d2616" },
-        error: { text: "#ff8791", fill: "#2f1a1c" }, muted: { text: "#b9afb1", fill: "#252525" }
+        ok: { text: Theme.good, fill: Theme.goodSoft }, warn: { text: Theme.notice, fill: Theme.noticeSoft },
+        error: { text: Theme.error, fill: Theme.errorSoft }, muted: { text: Theme.textMuted, fill: Theme.raised }
     })
 
     contentItem: ColumnLayout {
@@ -108,7 +78,7 @@ Dialog {
             Layout.fillWidth: true
             visible: text.length > 0
             text: dialog.records ? dialog.records.runError : ""
-            color: "#ff8791"
+            color: Theme.error
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
         }
@@ -116,7 +86,7 @@ Dialog {
             Layout.fillWidth: true
             visible: text.length > 0
             text: dialog.records ? dialog.records.runNote : ""
-            color: "#b9afb1"
+            color: Theme.textMuted
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
         }
@@ -130,15 +100,13 @@ Dialog {
             spacing: 8
             model: dialog.records ? dialog.records.runRows : []
             ScrollBar.vertical: ScrollBar { policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
-            delegate: Rectangle {
+            delegate: Card {
                 id: card
                 required property var modelData
                 required property int index
                 readonly property var tone: dialog.tones[modelData.tone] || dialog.tones.muted
                 width: list.width - (list.contentHeight > list.height ? 14 : 0)
                 implicitHeight: body.implicitHeight + 24
-                radius: 10
-                color: "#191919"
                 ColumnLayout {
                     id: body
                     anchors.fill: parent
@@ -150,33 +118,33 @@ Dialog {
                         Rectangle {
                             implicitWidth: chip.implicitWidth + 16
                             implicitHeight: 22
-                            radius: 11
+                            radius: height / 2
                             color: card.tone.fill
                             Label {
                                 id: chip
                                 anchors.centerIn: parent
                                 text: card.modelData.status
                                 color: card.tone.text
-                                font.pixelSize: 12
+                                font.pixelSize: Theme.fontCaption
                                 font.bold: true
                             }
                         }
                         Label {
                             text: card.modelData.when + (card.modelData.origin ? " · " + card.modelData.origin : "")
-                            color: "#b9afb1"
+                            color: Theme.textMuted
                             textFormat: Text.PlainText
                         }
                         Item { Layout.fillWidth: true }
                         Label {
                             Layout.maximumWidth: card.width * 0.3
                             text: card.modelData.account
-                            color: "#b9afb1"
+                            color: Theme.textMuted
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                         }
                         FlatButton {
                             visible: card.modelData.hasLog
-                            implicitHeight: 28
+                            compact: true
                             text: "로그"
                             Accessible.name: "실행 로그 열기"
                             onClicked: dialog.records.openLog(card.modelData.token)
@@ -195,8 +163,8 @@ Dialog {
                         text: card.modelData.message
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
-                        color: card.modelData.tone === "error" ? "#ff8791" : "#b9afb1"
-                        font.pixelSize: 13
+                        color: card.modelData.tone === "error" ? Theme.error : Theme.textMuted
+                        font.pixelSize: Theme.fontSmall
                     }
                 }
             }
@@ -205,7 +173,7 @@ Dialog {
                 anchors.centerIn: parent
                 visible: list.count === 0 && dialog.records && !dialog.records.runBusy && !dialog.records.runError.length
                 text: "아직 실행 기록이 없어요 · 저장하면 여기에 남아요"
-                color: "#b9afb1"
+                color: Theme.textMuted
             }
             Column {
                 anchors.centerIn: parent
@@ -221,7 +189,7 @@ Dialog {
                     objectName: "runHistoryLoading"
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: "기록을 불러오는 중"
-                    color: "#b9afb1"
+                    color: Theme.textMuted
                 }
             }
         }
@@ -237,7 +205,7 @@ Dialog {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 text: dialog.records ? (dialog.records.runPage + 1) + " / " + dialog.records.runPages : ""
-                color: "#b9afb1"
+                color: Theme.textMuted
             }
             FlatButton {
                 text: "다음"
@@ -249,11 +217,9 @@ Dialog {
     footer: Item {
         implicitWidth: closeBox.implicitWidth
         implicitHeight: closeBox.implicitHeight
-        DialogButtonBox {
+        DialogButtons {
             id: closeBox
             anchors.fill: parent
-            background: null
-            rightPadding: 28
             FlatButton {
                 text: "닫기"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
@@ -269,7 +235,7 @@ Dialog {
             onPaint: {
                 const ctx = getContext("2d")
                 ctx.reset()
-                ctx.strokeStyle = "#6e6668"
+                ctx.strokeStyle = Theme.textDisabled
                 ctx.lineWidth = 1.4
                 ctx.beginPath()
                 ctx.moveTo(2, 8)

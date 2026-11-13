@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+FlatDialog {
     id: dialog
     objectName: "unsavedDialog"
     property var app: null
@@ -10,11 +10,11 @@ Dialog {
     readonly property bool excludedView: !!records && records.unsavedView === "excluded"
     property bool confirmClear: false
     title: "저장 못 한 미디어"
-    modal: true
-    focus: true
-    closePolicy: Popup.CloseOnEscape
+    subtitle: excludedView
+        ? "다시 받지 않도록 빼 둔 미디어입니다. ‘제외 해제’는 다음 저장에서 다시 받게 하고, ‘다시 받기’는 지금 받습니다. 목록을 지우는 동작이 아니며 저장된 파일은 바뀌지 않습니다."
+        : "저장하지 못한 미디어입니다. 이미 저장했거나 중복이라 건너뛴 미디어는 표시하지 않습니다. 목록에서 지워도 저장된 파일은 그대로이고, 직접 제외한 항목은 빠지지 않습니다."
     readonly property int frameMargin: 24
-    readonly property int preferredWidth: 1000
+    preferredWidth: 1000
     readonly property int preferredHeight: 740
     property int chosenWidth: preferredWidth
     property int chosenHeight: preferredHeight
@@ -27,7 +27,6 @@ Dialog {
     height: Math.min(chosenHeight, limitHeight)
     x: placedX
     y: placedY
-    padding: 20
 
     function place() {
         if (!parent || resizing)
@@ -58,35 +57,6 @@ Dialog {
 
     onWidthChanged: { place(); syncContent() }
     onHeightChanged: { place(); syncContent() }
-    background: Rectangle {
-        color: "#141414"
-        radius: 16
-        border.width: 1
-        border.color: "#2a2a2a"
-    }
-    header: Column {
-        width: dialog.width
-        Label {
-            width: parent.width
-            text: dialog.title
-            leftPadding: 20
-            rightPadding: 20
-            topPadding: 16
-            bottomPadding: 2
-            font.pixelSize: 18
-        }
-        Label {
-            width: parent.width
-            text: dialog.excludedView
-                ? "다시 받지 않도록 빼 둔 미디어입니다. ‘제외 해제’는 다음 저장에서 다시 받게 하고, ‘다시 받기’는 지금 받습니다. 목록을 지우는 동작이 아니며 저장된 파일은 바뀌지 않습니다."
-                : "저장하지 못한 미디어입니다. 이미 저장했거나 중복이라 건너뛴 미디어는 표시하지 않습니다. 목록에서 지워도 저장된 파일은 그대로이고, 직접 제외한 항목은 빠지지 않습니다."
-            leftPadding: 20
-            rightPadding: 20
-            color: "#b9afb1"
-            font.pixelSize: 13
-            wrapMode: Text.Wrap
-        }
-    }
     onAboutToShow: {
         place()
         syncContent()
@@ -142,7 +112,6 @@ Dialog {
             FlatButton {
                 objectName: "unsavedRetryAll"
                 tone: "primary"
-                implicitHeight: 36
                 text: dialog.excludedView ? "모두 다시 받기" : "모두 다시 저장"
                 enabled: !!dialog.app && dialog.app.canStart && !!dialog.records && dialog.records.retryableCount > 0
                 onClicked: dialog.records.retryAll()
@@ -173,19 +142,19 @@ Dialog {
             Layout.fillWidth: true
             visible: list.count > 0 && !!dialog.app && !dialog.app.canStart
             text: "다시 저장하려면 X 계정이 연결되어 있고 진행 중인 작업이 끝나야 합니다."
-            color: "#e6bd79"
+            color: Theme.notice
             wrapMode: Text.Wrap
-            font.pixelSize: 13
+            font.pixelSize: Theme.fontSmall
         }
         Label {
             objectName: "unsavedMessage"
             Layout.fillWidth: true
             visible: text.length > 0
             text: dialog.records ? (dialog.records.unsavedError || dialog.records.unsavedStatus) : ""
-            color: dialog.records && dialog.records.unsavedError ? "#ff8791" : "#b9afb1"
+            color: dialog.records && dialog.records.unsavedError ? Theme.error : Theme.textMuted
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            font.pixelSize: 13
+            font.pixelSize: Theme.fontSmall
         }
         ListView {
             id: list
@@ -197,14 +166,12 @@ Dialog {
             spacing: 8
             model: dialog.records ? dialog.records.unsavedRows : []
             ScrollBar.vertical: ScrollBar { policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
-            delegate: Rectangle {
+            delegate: Card {
                 id: card
                 required property var modelData
                 required property int index
                 width: list.width - (list.contentHeight > list.height ? 14 : 0)
                 implicitHeight: row.implicitHeight + 24
-                radius: 10
-                color: "#191919"
                 RowLayout {
                     id: row
                     anchors.fill: parent
@@ -218,10 +185,10 @@ Dialog {
                         Layout.alignment: Qt.AlignTop
                         Layout.preferredWidth: 112
                         Layout.preferredHeight: 84
-                        radius: 8
-                        color: "#151515"
+                        radius: Theme.radiusControl
+                        color: Theme.well
                         border.width: 1
-                        border.color: "#252525"
+                        border.color: Theme.line
                         clip: true
                         Image {
                             id: preview
@@ -246,8 +213,8 @@ Dialog {
                             onPaint: {
                                 const ctx = getContext("2d")
                                 ctx.reset()
-                                ctx.strokeStyle = "#7a7274"
-                                ctx.fillStyle = "#7a7274"
+                                ctx.strokeStyle = Theme.textFaint
+                                ctx.fillStyle = Theme.textFaint
                                 ctx.lineWidth = 1.6
                                 ctx.lineJoin = "round"
                                 ctx.strokeRect(2, 2, 28, 22)
@@ -293,17 +260,17 @@ Dialog {
                             Rectangle {
                                 implicitWidth: reason.implicitWidth + 16
                                 implicitHeight: 22
-                                radius: 11
-                                color: card.modelData.reason === "excluded" ? "#252525"
-                                    : card.modelData.reason === "size" ? "#2d2616" : "#2f1a1c"
+                                radius: height / 2
+                                color: card.modelData.reason === "excluded" ? Theme.raised
+                                    : card.modelData.reason === "size" ? Theme.noticeSoft : Theme.errorSoft
                                 Label {
                                     id: reason
                                     anchors.centerIn: parent
                                     text: card.modelData.reasonLabel
-                                    font.pixelSize: 12
+                                    font.pixelSize: Theme.fontCaption
                                     font.bold: true
-                                    color: card.modelData.reason === "excluded" ? "#b9afb1"
-                                        : card.modelData.reason === "size" ? "#e6bd79" : "#ff8791"
+                                    color: card.modelData.reason === "excluded" ? Theme.textMuted
+                                        : card.modelData.reason === "size" ? Theme.notice : Theme.error
                                 }
                             }
                         }
@@ -311,8 +278,8 @@ Dialog {
                             Layout.fillWidth: true
                             text: card.modelData.info + (card.modelData.posted ? " · 게시 " + card.modelData.posted : "")
                             textFormat: Text.PlainText
-                            color: "#b9afb1"
-                            font.pixelSize: 13
+                            color: Theme.textMuted
+                            font.pixelSize: Theme.fontSmall
                             wrapMode: Text.Wrap
                         }
                         Label {
@@ -320,7 +287,7 @@ Dialog {
                             text: card.modelData.detail
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
-                            font.pixelSize: 13
+                            font.pixelSize: Theme.fontSmall
                         }
                         Label {
                             Layout.fillWidth: true
@@ -328,14 +295,14 @@ Dialog {
                             text: card.modelData.hint
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
-                            color: "#e6bd79"
-                            font.pixelSize: 12
+                            color: Theme.notice
+                            font.pixelSize: Theme.fontCaption
                         }
                         Label {
                             text: "마지막 확인 " + card.modelData.seen
                             textFormat: Text.PlainText
-                            color: "#8f8587"
-                            font.pixelSize: 12
+                            color: Theme.textFaint
+                            font.pixelSize: Theme.fontCaption
                         }
                         Flow {
                             Layout.fillWidth: true
@@ -343,21 +310,21 @@ Dialog {
                             spacing: 6
                             FlatButton {
                                 objectName: "unsavedRetry"
-                                implicitHeight: 30
+                                compact: true
                                 text: dialog.excludedView ? "다시 받기" : "다시 저장"
                                 enabled: !!dialog.app && dialog.app.canStart && card.modelData.canRetry
                                 onClicked: dialog.records.retry(card.modelData.token)
                                 onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                             }
                             FlatButton {
-                                implicitHeight: 30
+                                compact: true
                                 text: "원문 보기"
                                 onClicked: dialog.records.openSource(card.modelData.token)
                                 onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                             }
                             FlatButton {
                                 objectName: dialog.excludedView ? "unsavedRelease" : "unsavedDismiss"
-                                implicitHeight: 30
+                                compact: true
                                 text: dialog.excludedView ? "제외 해제" : "목록에서 지우기"
                                 onClicked: dialog.excludedView
                                     ? dialog.records.release(card.modelData.token)
@@ -373,7 +340,7 @@ Dialog {
                 anchors.centerIn: parent
                 visible: list.count === 0 && !!dialog.records && !dialog.records.unsavedBusy && !dialog.records.unsavedError.length
                 text: dialog.excludedView ? "직접 제외한 미디어가 없어요" : "저장하지 못한 미디어가 없어요 · 모두 잘 담겼어요"
-                color: "#b9afb1"
+                color: Theme.textMuted
             }
             Column {
                 anchors.centerIn: parent
@@ -389,7 +356,7 @@ Dialog {
                     objectName: "unsavedLoading"
                     anchors.horizontalCenter: parent.horizontalCenter
                     text: "목록을 불러오는 중"
-                    color: "#b9afb1"
+                    color: Theme.textMuted
                 }
             }
         }
@@ -397,8 +364,8 @@ Dialog {
             Layout.fillWidth: true
             visible: list.count > 0 && dialog.height >= 560
             text: "이 PC에 남겨 둔 미리보기가 있으면 보여 줍니다. 미리보기가 없는 항목은 종류, 이유, 원문으로 구분할 수 있습니다."
-            color: "#8f8587"
-            font.pixelSize: 12
+            color: Theme.textFaint
+            font.pixelSize: Theme.fontCaption
             wrapMode: Text.Wrap
         }
         RowLayout {
@@ -413,7 +380,7 @@ Dialog {
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignHCenter
                 text: dialog.records ? (dialog.records.unsavedPage + 1) + " / " + dialog.records.unsavedPages : ""
-                color: "#b9afb1"
+                color: Theme.textMuted
             }
             FlatButton {
                 text: "다음"
@@ -426,11 +393,9 @@ Dialog {
     footer: Item {
         implicitWidth: closeBox.implicitWidth
         implicitHeight: closeBox.implicitHeight
-        DialogButtonBox {
+        DialogButtons {
             id: closeBox
             anchors.fill: parent
-            background: null
-            rightPadding: 28
             FlatButton {
                 text: "닫기"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
@@ -446,7 +411,7 @@ Dialog {
             onPaint: {
                 const ctx = getContext("2d")
                 ctx.reset()
-                ctx.strokeStyle = "#6e6668"
+                ctx.strokeStyle = Theme.textDisabled
                 ctx.lineWidth = 1.4
                 ctx.beginPath()
                 ctx.moveTo(2, 8)

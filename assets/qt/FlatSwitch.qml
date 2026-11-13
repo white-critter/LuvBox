@@ -3,33 +3,38 @@ import QtQuick.Controls
 
 Switch {
     id: control
-    implicitHeight: 36
+    // A settings row: the text on the left and the switch at the right edge.
+    property bool trailing: false
+    implicitHeight: Theme.controlHeight
+    // In a row the text lines up with the labels above and below it.
+    leftPadding: trailing ? 0 : 6
+    rightPadding: trailing ? 0 : 6
     spacing: 12
-    font.pixelSize: 14
+    font.pixelSize: Theme.fontBody
     HoverHandler {
         cursorShape: control.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
     }
 
     indicator: Rectangle {
-        implicitWidth: 44
-        implicitHeight: 26
-        x: control.leftPadding
+        implicitWidth: 40
+        implicitHeight: 24
+        x: control.trailing ? control.width - width - control.rightPadding : control.leftPadding
         y: (control.height - height) / 2
-        radius: 13
+        radius: height / 2
         border.width: control.visualFocus ? 2 : 0
-        border.color: "#ff8791"
+        border.color: Theme.focus
         color: {
             if (!control.enabled)
-                return control.checked ? Qt.rgba(0.851, 0.212, 0.271, 0.35) : "#222222"
-            return control.checked ? "#d93645" : "#2a2a2a"
+                return control.checked ? Theme.accentDisabled : Theme.hover
+            return control.checked ? Theme.accent : Theme.lineStrong
         }
         Rectangle {
-            width: 20
-            height: 20
-            radius: 10
+            width: 18
+            height: 18
+            radius: height / 2
             y: 3
             x: control.checked ? parent.width - width - 3 : 3
-            color: control.enabled ? "#f7f4f4" : "#8a8385"
+            color: control.enabled ? "white" : Theme.textFaint
             Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
         }
     }
@@ -37,8 +42,9 @@ Switch {
     contentItem: Text {
         text: control.text
         font: control.font
-        color: control.enabled ? control.palette.text : control.palette.placeholderText
-        leftPadding: control.indicator.width + control.spacing
+        color: control.enabled ? Theme.text : Theme.textDisabled
+        leftPadding: control.trailing ? 0 : control.indicator.width + control.spacing
+        rightPadding: control.trailing ? control.indicator.width + control.spacing : 0
         verticalAlignment: Text.AlignVCenter
         elide: Text.ElideRight
     }

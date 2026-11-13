@@ -5,7 +5,7 @@ import QtQuick.Layouts
 // A newer release, shown above the save and gallery screens. Nothing is
 // fetched until "업데이트" is pressed; the running version is never replaced,
 // so pressing it mid-work is safe and the new version starts next time.
-Rectangle {
+Card {
     id: notice
     objectName: "updateNotice"
     property var app: null
@@ -17,10 +17,9 @@ Rectangle {
 
     visible: !!updates && updates.noticeVisible
     implicitHeight: visible ? content.implicitHeight + 24 : 0
-    radius: 12
-    color: "#191919"
-    border.width: 1
-    border.color: phase === "failed" ? "#5a2a31" : "#3a2a2d"
+    border.color: Theme.accentLine
+    // News worth a look: this panel carries the red light.
+    glow: 0.16
     Accessible.role: Accessible.Grouping
     Accessible.name: "업데이트 알림"
     onPhaseChanged: if (phase !== "available") notesOpen = false
@@ -43,8 +42,8 @@ Rectangle {
                 Layout.alignment: Qt.AlignVCenter
                 implicitWidth: 8
                 implicitHeight: 8
-                radius: 4
-                color: notice.phase === "failed" ? "#ff8791" : "#ff4d4f"
+                radius: height / 2
+                color: notice.phase === "failed" ? Theme.error : Theme.accent
             }
             ColumnLayout {
                 Layout.fillWidth: true
@@ -63,8 +62,8 @@ Rectangle {
                             return notice.updates.error
                         return "새 버전이 나왔어요 · " + notice.updates.version
                     }
-                    color: notice.phase === "failed" ? "#ff8791" : "#f4f1f1"
-                    font.pixelSize: 15
+                    color: notice.phase === "failed" ? Theme.error : Theme.text
+                    font.pixelSize: Theme.fontSection
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                 }
@@ -86,8 +85,8 @@ Rectangle {
                             return "지금 버전 " + notice.updates.currentVersion + " · 설정과 사진, 기록은 그대로예요."
                         return ""
                     }
-                    color: "#b9afb1"
-                    font.pixelSize: 13
+                    color: Theme.textMuted
+                    font.pixelSize: Theme.fontSmall
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                 }
@@ -115,6 +114,7 @@ Rectangle {
             }
             FlatButton {
                 objectName: "updateLaterButton"
+                tone: "ghost"
                 visible: notice.phase !== "downloading"
                 text: notice.phase === "failed" ? "닫기" : "나중에"
                 onClicked: notice.updates.dismiss()
@@ -123,9 +123,9 @@ Rectangle {
                 objectName: "updateInstallButton"
                 visible: (notice.phase === "available" || notice.phase === "failed")
                     && !!notice.updates && notice.updates.canInstall
-                tone: "primary"
-                implicitHeight: 36
-                font.pixelSize: 14
+                // Lit, but not the screen's main action: that stays "저장 시작".
+                tone: "soft"
+                font.bold: true
                 text: notice.phase === "failed" ? "다시 시도" : "업데이트"
                 Accessible.name: "새 버전 받기"
                 onClicked: notice.updates.install()
@@ -134,9 +134,8 @@ Rectangle {
                 objectName: "updateRestartButton"
                 visible: notice.phase === "ready"
                 enabled: !notice.saving
-                tone: "primary"
-                implicitHeight: 36
-                font.pixelSize: 14
+                tone: "soft"
+                font.bold: true
                 text: "지금 다시 시작"
                 onClicked: notice.restartRequested()
             }
@@ -152,12 +151,12 @@ Rectangle {
             Rectangle {
                 anchors.fill: parent
                 radius: height / 2
-                color: "#2a2a2a"
+                color: Theme.line
             }
             Rectangle {
                 height: parent.height
                 radius: height / 2
-                color: "#d93645"
+                color: Theme.accent
                 width: parent.width * (notice.updates ? Math.max(0, Math.min(1, notice.updates.progress)) : 0)
                 Behavior on width { NumberAnimation { duration: 120 } }
             }
@@ -180,8 +179,8 @@ Rectangle {
                 id: notesText
                 width: notesView.width - 14
                 text: notice.updates ? notice.updates.notes : ""
-                color: "#d9d2d3"
-                font.pixelSize: 13
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontSmall
                 lineHeight: 1.25
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap

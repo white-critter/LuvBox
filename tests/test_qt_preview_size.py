@@ -324,19 +324,25 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                     window.resize(width, height)
                     settle(.1)
                     density = find("thumbSizeChoice")
-                    preview_button = next(item for item in window.findChildren(QQuickItem)
-                                          if item.property("text") == "미리보기" and item.property("down") is not None)
+                    # With a picture current, the preview button joins the second row. That
+                    # row ends exactly where the search row ends, whatever it holds.
+                    preview_button = find("galleryOpenPreview")
+                    last_button = find("gallerySelectionToggle")
+                    if preview_button.property("text") != "미리보기" or not preview_button.property("visible"):
+                        raise AssertionError("The preview button is missing while a picture is current")
                     for busy in (True, False):
                         library.model._busy = busy
                         library.model.changed.emit()
                         settle()
                         right_edge = density.mapToScene(QPointF(density.width(), 0)).x()
                         preview_right = preview_button.mapToScene(QPointF(preview_button.width(), 0)).x()
-                        # The toolbar packs from the left and wraps. Buttons stay
-                        # inside the search row; they are not pinned to its right edge.
-                        if preview_right > right_edge + 1:
-                            raise AssertionError(f"Gallery toolbar extends past the search row at {width}px: {right_edge}, {preview_right}")
+                        last_right = last_button.mapToScene(QPointF(last_button.width(), 0)).x()
+                        if preview_right > right_edge + 1 or abs(last_right - right_edge) > 1:
+                            raise AssertionError(
+                                f"Gallery rows end at different edges at {width}px: {right_edge}, {preview_right}, {last_right}")
                         bounds(preview_button, "gallery preview button")
+                        for name in ("galleryFilterBar", "galleryStatusLine"):
+                            bounds(find(name), name)
                     capture(f"gallery-toolbar-{width}")
                 report["checks"].append("gallery-toolbar-stays-inside-the-search-row")
                 window.setProperty("currentScreen", 0)

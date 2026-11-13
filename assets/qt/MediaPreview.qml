@@ -257,8 +257,8 @@ Item {
             onPaint: {
                 const ctx = getContext("2d")
                 ctx.reset()
-                ctx.strokeStyle = "#8a8284"
-                ctx.fillStyle = "#8a8284"
+                ctx.strokeStyle = Theme.textFaint
+                ctx.fillStyle = Theme.textFaint
                 ctx.lineWidth = 2
                 ctx.lineJoin = "round"
                 ctx.lineCap = "round"
@@ -273,7 +273,7 @@ Item {
                 ctx.lineTo(39, 24)
                 ctx.lineTo(47, 36)
                 ctx.stroke()
-                ctx.strokeStyle = "#d93645"
+                ctx.strokeStyle = Theme.accent
                 ctx.lineWidth = 2.4
                 ctx.beginPath()
                 ctx.moveTo(8, 8)
@@ -285,9 +285,9 @@ Item {
         Label {
             width: parent.width
             text: preview.failed ? "미리보기를 열지 못했습니다" : "미리보기 없음"
-            font.pixelSize: 15
+            font.pixelSize: Theme.fontSection
             font.bold: true
-            color: "#d4cdcf"
+            color: Theme.textMuted
             textFormat: Text.PlainText
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
@@ -298,8 +298,8 @@ Item {
             text: preview.missingNote || (preview.failed
                 ? "파일을 읽지 못했거나 지원하지 않는 형식입니다."
                 : "원본 파일을 찾을 수 없습니다.")
-            font.pixelSize: 12
-            color: "#9a9294"
+            font.pixelSize: Theme.fontCaption
+            color: Theme.textFaint
             textFormat: Text.PlainText
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
@@ -349,8 +349,7 @@ Item {
         visible: preview.mediaType === "video" && preview.videoSource && preview.ready && player.hasAudio
         text: preview.muted ? "소리 켜기" : "소리 끄기"
         Accessible.name: text
-        ToolTip.visible: hovered
-        ToolTip.text: preview.muted ? "소리 켜기 (M)" : "소리 끄기 (M)"
+        tip: preview.muted ? "소리 켜기 (M)" : "소리 끄기 (M)"
         onClicked: preview.muted = !preview.muted
     }
 }

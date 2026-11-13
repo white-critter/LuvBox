@@ -127,6 +127,8 @@ def project_source_files(root: Path) -> list[Path]:
     for folder, pattern in (("luvbox", "*.py"), ("tests", "*.py"), (".vscode", "*.json")):
         paths.update((root / folder).glob(pattern))
     paths.update((root / "assets/qt").rglob("*.qml"))
+    # The module file that makes Theme.qml one shared object; the screens do not load without it.
+    paths.update((root / "assets/qt").glob("qmldir"))
     for path in paths:
         project_file(path, root)
         if not path.is_file():

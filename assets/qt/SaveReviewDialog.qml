@@ -19,11 +19,12 @@ Dialog {
     x: parent ? Math.round((parent.width - width) / 2) : 0
     y: parent ? Math.round((parent.height - height) / 2) : 0
     padding: 16
-    background: Rectangle {
-        color: "#141414"
-        radius: 16
-        border.width: 1
-        border.color: "#2a2a2a"
+    background: Card {
+        radius: Theme.radiusDialog
+        topColor: Theme.dialogTop
+        bottomColor: Theme.dialog
+        border.color: Theme.lineStrong
+        glow: 0.1
     }
 
     Shortcut {
@@ -103,7 +104,7 @@ Dialog {
             text: dialog.title
             textFormat: Text.PlainText
             font.bold: true
-            font.pixelSize: 18
+            font.pixelSize: Theme.fontHeading
             elide: Text.ElideRight
         }
         PreviewZoomControls {
@@ -112,6 +113,7 @@ Dialog {
         }
         FlatButton {
             objectName: "reviewMaximizeButton"
+            tone: "ghost"
             text: dialog.hostWindow && (dialog.hostWindow.visibility === Window.Maximized
                 || dialog.hostWindow.visibility === Window.FullScreen) ? "창 복원" : "창 최대화"
             enabled: !!dialog.hostWindow
@@ -125,6 +127,7 @@ Dialog {
         }
         FlatButton {
             Layout.rightMargin: 12
+            tone: "danger"
             text: "저장 중단"
             Accessible.name: "저장을 중단하고 닫기"
             onClicked: dialog.submit("stop")
@@ -167,7 +170,7 @@ Dialog {
             text: dialog.item && dialog.item.author ? "@" + String(dialog.item.author).replace(/^@/, "") : ""
             textFormat: Text.PlainText
             elide: Text.ElideRight
-            opacity: 0.72
+            color: Theme.textMuted
         }
     }
 
@@ -186,63 +189,20 @@ Dialog {
                 Accessible.name: "추가 저장 선택"
                 onClicked: moreMenu.open()
 
-                Menu {
+                FlatMenu {
                     id: moreMenu
                     y: -height - 4
-                    padding: 4
                     width: Math.max(220, neverItem.implicitWidth + 24, allItem.implicitWidth + 24)
-                    background: Rectangle {
-                        implicitWidth: 220
-                        implicitHeight: 40
-                        radius: 10
-                        color: "#1c1c1c"
-                        border.width: 1
-                        border.color: "#2e2e2e"
-                    }
-                    MenuItem {
+                    FlatMenuItem {
                         id: neverItem
                         objectName: "reviewNeverItem"
                         text: "이 사진 다시 받지 않기"
-                        font.pixelSize: 14
-                        leftPadding: 12
-                        rightPadding: 12
-                        hoverEnabled: true
-                        HoverHandler { cursorShape: Qt.PointingHandCursor }
-                        contentItem: Text {
-                            text: neverItem.text
-                            font: neverItem.font
-                            color: "#f4f1f1"
-                            verticalAlignment: Text.AlignVCenter
-                            elide: Text.ElideRight
-                        }
-                        background: Rectangle {
-                            implicitHeight: 36
-                            radius: 8
-                            color: neverItem.highlighted || neverItem.hovered ? "#2c2c2c" : "transparent"
-                        }
                         onTriggered: dialog.submit("never")
                     }
-                    MenuItem {
+                    FlatMenuItem {
                         id: allItem
                         objectName: "reviewAllItem"
                         text: "이후 모두 자동 저장"
-                        font.pixelSize: 14
-                        leftPadding: 12
-                        rightPadding: 12
-                        hoverEnabled: true
-                        HoverHandler { cursorShape: Qt.PointingHandCursor }
-                        contentItem: Text {
-                            text: allItem.text
-                            font: allItem.font
-                            color: "#f4f1f1"
-                            verticalAlignment: Text.AlignVCenter
-                            elide: Text.ElideRight
-                        }
-                        background: Rectangle {
-                            implicitHeight: 36
-                            radius: 8
-                            color: allItem.highlighted || allItem.hovered ? "#2c2c2c" : "transparent"
-                        }
                         onTriggered: dialog.submit("all")
                     }
                 }

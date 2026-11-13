@@ -37,6 +37,7 @@ ColumnLayout {
     Label {
         Layout.fillWidth: true
         text: "매일 정한 시각에 현재 저장된 계정과 옵션으로 새 Like를 저장합니다."
+        color: Theme.textMuted
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
     }
@@ -46,6 +47,7 @@ ColumnLayout {
         text: panel.schedule ? panel.schedule.summary : "예약 정보를 확인하는 중"
         textFormat: Text.PlainText
         font.bold: true
+        font.pixelSize: Theme.fontSection
         wrapMode: Text.WordWrap
     }
     Label {
@@ -58,7 +60,7 @@ ColumnLayout {
     Label {
         Layout.fillWidth: true
         text: "예약은 하나입니다. 저장할 계정이나 폴더를 바꾸면 다음 자동 저장의 대상도 바뀝니다."
-        opacity: 0.72
+        color: Theme.textMuted
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
     }
@@ -70,7 +72,13 @@ ColumnLayout {
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
     }
-    Label { text: "매일 실행 시각 (이 PC 시간)"; textFormat: Text.PlainText }
+    Label {
+        Layout.topMargin: Theme.gapTiny
+        text: "매일 실행 시각 (이 PC 시간)"
+        color: Theme.textMuted
+        font.pixelSize: Theme.fontSmall
+        textFormat: Text.PlainText
+    }
     Flow {
         Layout.fillWidth: true
         spacing: 8
@@ -92,7 +100,7 @@ ColumnLayout {
             objectName: "scheduleSaveButton"
             text: panel.schedule && panel.schedule.registered ? "예약 저장" : "예약 만들기"
             tone: "primary"
-            implicitHeight: 40
+            implicitHeight: Theme.inputHeight
             enabled: !!(panel.validTime && panel.app && panel.app.canStart && panel.schedule && panel.schedule.known
                 && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running)
             onClicked: {
@@ -105,7 +113,7 @@ ColumnLayout {
             objectName: "scheduleMigrateButton"
             visible: !!(panel.schedule && panel.schedule.registered && !panel.schedule.current)
             text: "현재 버전으로 변경"
-            implicitHeight: 40
+            implicitHeight: Theme.inputHeight
             enabled: panel.schedule && panel.schedule.enabled && !panel.schedule.busy
                 && !panel.schedule.locked && !panel.schedule.running && !!panel.schedule.time
             onClicked: { panel.action = "migrate"; confirmation.open() }
@@ -114,14 +122,16 @@ ColumnLayout {
             objectName: "scheduleRemoveButton"
             visible: !!(panel.schedule && panel.schedule.registered)
             text: "예약 해제"
-            implicitHeight: 40
+            tone: "danger"
+            implicitHeight: Theme.inputHeight
             enabled: panel.schedule && !panel.schedule.busy && !panel.schedule.locked
             onClicked: { panel.action = "remove"; confirmation.open() }
         }
         FlatButton {
             objectName: "scheduleRefreshButton"
             text: "다시 확인"
-            implicitHeight: 40
+            tone: "ghost"
+            implicitHeight: Theme.inputHeight
             enabled: panel.schedule && !panel.schedule.busy
             onClicked: panel.schedule.refresh()
         }
@@ -131,7 +141,7 @@ ColumnLayout {
         text: "24시간 형식으로 입력하세요. 오늘 시각이 지났다면 내일부터 실행합니다."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
-        opacity: 0.72
+        color: Theme.textMuted
     }
     Label {
         objectName: "scheduleTimeHelp"
@@ -140,7 +150,7 @@ ColumnLayout {
         text: "실행 시각은 09:00처럼 24시간 형식으로 입력해 주세요."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
-        color: "#ff8791"
+        color: Theme.error
     }
     RowLayout {
         visible: !!(panel.schedule && panel.schedule.busy)
@@ -152,7 +162,7 @@ ColumnLayout {
         Layout.fillWidth: true
         text: panel.schedule ? panel.schedule.error || (!panel.schedule.busy ? panel.schedule.status : "") : ""
         visible: text.length > 0
-        color: panel.schedule && panel.schedule.error.length ? "#ff8791" : "#b9afb1"
+        color: panel.schedule && panel.schedule.error.length ? Theme.error : Theme.textMuted
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
     }
@@ -162,7 +172,7 @@ ColumnLayout {
         text: "진행 중인 작업이 끝난 뒤 예약을 바꿀 수 있습니다. 예약 조회와 실행 기록 확인은 계속할 수 있습니다."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
-        opacity: 0.72
+        color: Theme.textMuted
     }
     Label {
         Layout.fillWidth: true
@@ -172,40 +182,19 @@ ColumnLayout {
             + "예약 저장은 확인창 없이 진행합니다. 결과는 설정 › 고급 › 실행 기록에서 확인하세요."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
-        opacity: 0.72
+        color: Theme.textMuted
     }
 
-    Dialog {
+    FlatDialog {
         id: confirmation
         objectName: "scheduleConfirmation"
         parent: Overlay.overlay
-        modal: true
-        anchors.centerIn: parent
-        width: Math.min(460, parent ? parent.width - 32 : 460)
-        implicitHeight: 260
-        height: Math.min(implicitHeight, parent ? Math.max(180, parent.height - 32) : implicitHeight)
-        padding: 24
-        background: Rectangle {
-            color: "#141414"
-            radius: 16
-            border.width: 1
-            border.color: "#2a2a2a"
-        }
-        header: Label {
-            text: confirmation.title
-            leftPadding: 24
-            rightPadding: 24
-            topPadding: 20
-            bottomPadding: 4
-            font.pixelSize: 18
-            background: null
-        }
+        preferredWidth: 460
         title: panel.action === "remove" ? "자동 저장 예약을 해제할까요?"
             : panel.action === "migrate" ? "현재 버전으로 변경할까요?"
             : panel.action === "create" ? "자동 저장을 예약할까요?" : "예약을 저장할까요?"
-        focus: true
-        closePolicy: Popup.CloseOnEscape
         contentItem: Label {
+            color: Theme.textMuted
             text: panel.action === "remove"
                 ? "다음 자동 저장부터 실행하지 않습니다. 이미 시작한 저장과 받은 파일은 유지합니다."
                 : panel.action === "migrate"
@@ -225,8 +214,7 @@ ColumnLayout {
             if (accepted)
                 panel.timeEdited = false
         }
-        footer: DialogButtonBox {
-            background: null
+        footer: DialogButtons {
             FlatButton {
                 id: scheduleConfirm
                 text: panel.action === "remove" ? "예약 해제" : "확인"

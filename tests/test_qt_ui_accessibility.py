@@ -109,8 +109,12 @@ def scene(*, measure=False, qml_root=None, screenshot_dir=None):
             if not measure:
                 assert not find("galleryEmptyState").property("visible")
                 assert label_bounds[0] >= 24 and label_bounds[0] + label_bounds[2] <= width - 23
+                # The error sits in the status line, under the row that holds the refresh button.
                 assert label_bounds[1] >= refresh_bounds[1] + refresh_bounds[3]
                 assert refresh_bounds[0] + refresh_bounds[2] <= width - 23
+                status = bounds(find("galleryStatusLine"))
+                assert status[1] <= label_bounds[1] and label_bounds[1] + label_bounds[3] <= status[1] + status[3] + 1
+                assert status[1] + status[3] <= bounds(find("galleryGrid"))[1]
                 assert label.height() >= label.property("implicitHeight") - 1
                 assert find("galleryGrid").height() >= 40
         # A long filename/path must wrap instead of widening the whole gallery.
@@ -130,7 +134,7 @@ def scene(*, measure=False, qml_root=None, screenshot_dir=None):
         QTest.qWait(40)
         if not measure:
             assert find("galleryEmptyState").property("visible")
-        # The reset button is disabled while nothing is filtered, so check a button that is always on.
+        # The clear-filters button shows only while something is filtered, so check a chip that is always there.
         reset = find("galleryFilterToggle")
         reset.forceActiveFocus(Qt.FocusReason.TabFocusReason)
         QTest.qWait(80)

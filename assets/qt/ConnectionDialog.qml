@@ -2,7 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-Dialog {
+FlatDialog {
     id: dialog
     property var accounts: null
     property var app: null
@@ -14,34 +14,13 @@ Dialog {
     readonly property bool setupUnavailable: unavailable || !browserSetup || browserSetup.busy
         || (accounts.busy && !accounts.browserConnecting)
     title: "X 로그인 연결"
-    modal: true
-    focus: true
-    closePolicy: Popup.CloseOnEscape
-    width: Math.min(560, parent ? Math.max(240, parent.width - 32) : 560)
+    preferredWidth: 560
     readonly property int windowLimit: parent ? Math.max(180, parent.height - 32) : 720
     readonly property int chromeHeight: topPadding + bottomPadding
         + (header && header.implicitHeight > 0 ? header.implicitHeight + spacing : 0)
         + (footer && footer.implicitHeight > 0 ? footer.implicitHeight + spacing : 0)
     implicitHeight: contentColumn.implicitHeight + chromeHeight
     height: Math.min(implicitHeight, windowLimit)
-    x: parent ? Math.round((parent.width - width) / 2) : 0
-    y: parent ? Math.round((parent.height - height) / 2) : 0
-    padding: 20
-    background: Rectangle {
-        color: "#141414"
-        radius: 16
-        border.width: 1
-        border.color: "#2a2a2a"
-    }
-    header: Label {
-        text: dialog.title
-        leftPadding: 20
-        rightPadding: 20
-        topPadding: 16
-        bottomPadding: 2
-        font.pixelSize: 18
-        background: null
-    }
 
     function submitToken() {
         if (unavailable || accounts.busy || !tokenField.text.trim())
@@ -88,6 +67,8 @@ Dialog {
     contentItem: FocusScrollView {
         id: scrollView
         clip: true
+        // The bar gets its own lane, so it never covers a control's right edge.
+        rightPadding: ScrollBar.vertical.policy === ScrollBar.AlwaysOn ? 14 : 0
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
         ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
 
@@ -102,6 +83,7 @@ Dialog {
                 text: dialog.methodIndex === 0
                     ? "사용 중인 브라우저의 X 계정을 연결합니다. 이미 연결했다면 다시 설치할 필요가 없습니다."
                     : "브라우저에서 확인한 토큰을 직접 입력해 이 PC에 보관합니다."
+                color: Theme.textMuted
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
             }
@@ -111,7 +93,7 @@ Dialog {
                 visible: dialog.methodIndex === 0
                 spacing: 8
 
-                Label { text: "연결할 브라우저" }
+                Label { text: "연결할 브라우저"; color: Theme.textMuted; font.pixelSize: Theme.fontSmall }
                 FlatCombo {
                     objectName: "connectionBrowser"
                     Layout.fillWidth: true
@@ -152,7 +134,7 @@ Dialog {
                     text: dialog.browserSetup && dialog.browserSetup.error
                         ? dialog.browserSetup.error
                         : "지원하는 브라우저를 찾지 못했습니다. Chrome·Edge·Firefox를 설치한 뒤 앱을 다시 열어 주세요."
-                    color: "#ff8791"
+                    color: Theme.error
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
                 }
@@ -161,7 +143,7 @@ Dialog {
                     text: "X에 로그인하고 확장을 설치한 일반 프로필을 사용하세요. 여러 프로필을 쓴다면 열린 창의 프로필을 확인해 주세요."
                     wrapMode: Text.Wrap
                     textFormat: Text.PlainText
-                    opacity: 0.72
+                    color: Theme.textMuted
                 }
                 FlatButton {
                     objectName: "connectBrowserButton"
@@ -169,7 +151,7 @@ Dialog {
                     text: dialog.accounts && dialog.accounts.cancelling ? "연결을 취소하는 중…"
                           : dialog.accounts && dialog.accounts.busy ? "연결 진행 중…"
                           : dialog.accounts && dialog.accounts.connected ? "다시 연결" : "X 계정 연결"
-                    tone: "primary"
+                    tone: dialog.accounts && dialog.accounts.busy ? "quiet" : "primary"
                     enabled: !dialog.setupUnavailable && !dialog.accounts.busy
                         && dialog.browserSetup.selectedBrowser.length > 0
                     onClicked: dialog.accounts.connectBrowser(dialog.browserSetup.selectedBrowser)
@@ -177,7 +159,8 @@ Dialog {
                 Frame {
                     Layout.fillWidth: true
                     visible: dialog.accounts && dialog.accounts.browserConnecting
-                    background: Rectangle { color: "#1c1c1c"; radius: 12 }
+                    padding: Theme.gapLarge
+                    background: Card { glow: 0.14 }
                     ColumnLayout {
                         width: parent.width
                         spacing: 8
@@ -199,7 +182,7 @@ Dialog {
                         Label {
                             visible: dialog.accounts && dialog.accounts.secondsRemaining > 0
                             text: dialog.accounts ? "남은 시간 " + dialog.accounts.secondsRemaining + "초" : ""
-                            opacity: 0.72
+                            color: Theme.textMuted
                         }
                         Label {
                             Layout.fillWidth: true
@@ -209,7 +192,7 @@ Dialog {
                         }
                         Label {
                             text: dialog.accounts ? dialog.accounts.pairingCode : ""
-                            font.pixelSize: 28
+                            font.pixelSize: Theme.fontDisplay
                             font.bold: true
                             font.letterSpacing: 3
                             textFormat: Text.PlainText
@@ -221,7 +204,7 @@ Dialog {
                             text: dialog.accounts && dialog.accounts.pendingIdentity.handle
                                 ? "@" + dialog.accounts.pendingIdentity.handle : ""
                             font.bold: true
-                            font.pixelSize: 18
+                            font.pixelSize: Theme.fontHeading
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                         }
@@ -260,16 +243,16 @@ Dialog {
                     }
                     contentItem: Text {
                         text: setupToggle.text
-                        font.pixelSize: 14
-                        color: "#f4f1f1"
+                        font.pixelSize: Theme.fontBody
+                        color: Theme.text
                         horizontalAlignment: Text.AlignHCenter
                         verticalAlignment: Text.AlignVCenter
                     }
                     background: Rectangle {
-                        radius: 10
+                        radius: Theme.radiusControl
                         border.width: setupToggle.visualFocus ? 2 : 0
-                        border.color: "#ff8791"
-                        color: setupToggle.hovered || setupToggle.checked ? "#242424" : "#1c1c1c"
+                        border.color: Theme.focus
+                        color: setupToggle.hovered || setupToggle.checked ? Theme.raised : Theme.field
                     }
                 }
                 ColumnLayout {
@@ -348,9 +331,9 @@ Dialog {
                         text: "앱을 업데이트한 뒤 확장이 응답하지 않으면 확장 관리에서 ‘새로고침’을 누르고 다시 연결하세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
-                        opacity: 0.72
+                        color: Theme.textMuted
                     }
-                    MenuSeparator { Layout.fillWidth: true }
+                    Rectangle { Layout.fillWidth: true; Layout.topMargin: Theme.gapTiny; implicitHeight: 1; color: Theme.line }
                 }
             }
 
@@ -365,16 +348,16 @@ Dialog {
                 }
                 contentItem: Text {
                     text: advancedMethodToggle.text
-                    font.pixelSize: 14
-                    color: "#f4f1f1"
+                    font.pixelSize: Theme.fontBody
+                    color: Theme.text
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
                 background: Rectangle {
-                    radius: 10
+                    radius: Theme.radiusControl
                     border.width: advancedMethodToggle.visualFocus ? 2 : 0
-                    border.color: "#ff8791"
-                    color: advancedMethodToggle.hovered || dialog.methodIndex === 1 ? "#242424" : "#1c1c1c"
+                    border.color: Theme.focus
+                    color: advancedMethodToggle.hovered || dialog.methodIndex === 1 ? Theme.raised : Theme.field
                 }
                 onClicked: dialog.methodIndex = dialog.methodIndex === 1 ? 0 : 1
             }
@@ -406,7 +389,7 @@ Dialog {
                     text: "이 Windows 계정에 암호화해 보관합니다. 저장만으로 실제 X 인증이 확인되지는 않습니다. 값은 다른 사람에게 보내지 마세요."
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
-                    opacity: 0.72
+                    color: Theme.textMuted
                 }
                 FlatButton {
                     Layout.fillWidth: true
@@ -424,7 +407,7 @@ Dialog {
                     && (dialog.browserSetup.error.length > 0
                         || (setupToggle.checked && dialog.browserSetup.status.length > 0))
                 text: dialog.browserSetup ? (dialog.browserSetup.error || dialog.browserSetup.status) : ""
-                color: dialog.browserSetup && dialog.browserSetup.error.length > 0 ? "#ff8791" : "#b9afb1"
+                color: dialog.browserSetup && dialog.browserSetup.error.length > 0 ? Theme.error : Theme.textMuted
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
                 Accessible.role: Accessible.StaticText
@@ -433,7 +416,7 @@ Dialog {
                 Layout.fillWidth: true
                 visible: dialog.accounts && dialog.accounts.connected && !dialog.accounts.busy
                 text: dialog.accounts ? dialog.accounts.authenticationLabel : ""
-                color: dialog.accounts && dialog.accounts.authenticationState === "reconnect_required" ? "#ff8791" : "#b9afb1"
+                color: dialog.accounts && dialog.accounts.authenticationState === "reconnect_required" ? Theme.error : Theme.textMuted
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
             }
@@ -442,7 +425,7 @@ Dialog {
                 visible: dialog.accounts && (dialog.accounts.error.length > 0
                     || (!dialog.accounts.browserConnecting && dialog.accounts.status.length > 0))
                 text: dialog.accounts ? (dialog.accounts.error || dialog.accounts.status) : ""
-                color: dialog.accounts && dialog.accounts.error.length > 0 ? "#ff8791" : "#b9afb1"
+                color: dialog.accounts && dialog.accounts.error.length > 0 ? Theme.error : Theme.textMuted
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
                 Accessible.role: Accessible.StaticText
@@ -450,10 +433,10 @@ Dialog {
         }
     }
 
-    footer: DialogButtonBox {
-        background: null
+    footer: DialogButtons {
         FlatButton {
             text: "현재 계정 연결 해제"
+            tone: "danger"
             visible: dialog.accounts && dialog.accounts.connected
             enabled: !dialog.unavailable && !dialog.accounts.busy
             DialogButtonBox.buttonRole: DialogButtonBox.ActionRole

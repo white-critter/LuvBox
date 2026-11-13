@@ -28,13 +28,6 @@ ApplicationWindow {
         && app.download.currentSavedItem && app.download.currentSavedItem.filename)
     visible: true
     readonly property var app: appController
-    readonly property color cardColor: "#191919"
-    readonly property color textColor: "#f4f1f1"
-    readonly property color mutedColor: "#b9afb1"
-    readonly property color lineColor: "#353535"
-    readonly property color accentColor: "#d93645"
-    readonly property color errorColor: "#ff8791"
-    readonly property color noticeColor: "#e6bd79"
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
         folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
@@ -45,38 +38,69 @@ ApplicationWindow {
     readonly property bool listEngaged: [thumbSizeChoice, mediaFilter, orderChoice, authorFilter, hashtagFilter,
                                          userTagFilter, dateFieldChoice].some(
         function(combo) { return combo.activeFocus || combo.popup.visible })
+    // An open menu is in the same position: a letter typed over it is not meant for the grid.
+    readonly property bool menuOpen: aiMenu.visible || teachMenu.visible
     // Duplicates are reviewed group by group, not in the flat grid.
     readonly property bool duplicateMode: !!app && app.library.filterDuplicateOnly
     property bool duplicateNear: false
     readonly property bool letterKeysFree: currentScreen === 1 && !modalOpen && !search.activeFocus
-        && !listEngaged && !!app
+        && !listEngaged && !menuOpen && !!app
     title: app ? "LuvBox · " + app.version : "LuvBox · 갤러리"
-    color: "#101010"
+    color: Theme.window
+    // The window is lit like the startup screen: a little lighter at the top, with
+    // that screen's red light falling in from above. While a save runs on the
+    // save screen the light breathes, as it does while the app is starting.
+    readonly property bool lightBreathing: !!app && app.download.running && currentScreen === 0 && active
+    background: Rectangle {
+        gradient: Gradient {
+            GradientStop { position: 0; color: Theme.windowTop }
+            GradientStop { position: 0.5; color: Theme.window }
+        }
+        Glow {
+            id: windowLight
+            objectName: "windowLight"
+            property real pulse: 1
+            anchors.horizontalCenter: parent.horizontalCenter
+            // A pool of light under the top edge, not a band across it.
+            width: Math.min(parent.width * 1.3, 1700)
+            height: Math.min(parent.height * 0.68, 520)
+            strength: 0.3
+            opacity: pulse
+            SequentialAnimation {
+                running: window.lightBreathing
+                loops: Animation.Infinite
+                NumberAnimation { target: windowLight; property: "pulse"; to: 0.5; duration: 1700; easing.type: Easing.InOutSine }
+                NumberAnimation { target: windowLight; property: "pulse"; to: 1; duration: 1700; easing.type: Easing.InOutSine }
+                onRunningChanged: if (!running) windowLight.pulse = 1
+            }
+        }
+    }
+    // Stock controls (tooltips, scroll bars, the busy ring) take their colors from here.
     palette.window: color
-    palette.windowText: textColor
-    palette.base: "#121212"
-    palette.alternateBase: "#202020"
-    palette.text: textColor
-    palette.button: "#252525"
-    palette.buttonText: textColor
-    palette.highlight: accentColor
+    palette.windowText: Theme.text
+    palette.base: Theme.well
+    palette.alternateBase: Theme.field
+    palette.text: Theme.text
+    palette.button: Theme.raised
+    palette.buttonText: Theme.text
+    palette.highlight: Theme.accent
     palette.highlightedText: "white"
-    palette.placeholderText: mutedColor
-    palette.light: "#4b4143"
-    palette.midlight: "#40383a"
-    palette.mid: lineColor
-    palette.dark: "#0b0b0b"
-    palette.shadow: "#080808"
-    palette.toolTipBase: "#252525"
-    palette.toolTipText: textColor
-    palette.link: "#ff6977"
-    palette.linkVisited: "#de9ca4"
-    palette.disabled.text: "#776b6e"
-    palette.disabled.buttonText: "#776b6e"
-    palette.disabled.windowText: "#776b6e"
+    palette.placeholderText: Theme.textMuted
+    palette.light: Theme.lineStrong
+    palette.midlight: Theme.raisedHover
+    palette.mid: Theme.lineStrong
+    palette.dark: Theme.window
+    palette.shadow: "black"
+    palette.toolTipBase: Theme.raised
+    palette.toolTipText: Theme.text
+    palette.link: Theme.link
+    palette.linkVisited: Theme.accentText
+    palette.disabled.text: Theme.textDisabled
+    palette.disabled.buttonText: Theme.textDisabled
+    palette.disabled.windowText: Theme.textDisabled
     property string uiFontFamily: "Pretendard"
     font.family: uiFontFamily
-    font.pixelSize: 14
+    font.pixelSize: Theme.fontBody
     font.weight: Font.Normal
     font.hintingPreference: Font.PreferVerticalHinting
     property int currentScreen: 0
@@ -348,6 +372,35 @@ ApplicationWindow {
     }
 
     property string transientNotice: ""
+    // The gallery has one status line. The library (scans, selection notes) and file
+    // management (moves to the Recycle Bin) both report there; the one whose text
+    // changed last is shown, so an old result never hides what is happening now.
+    property string statusSource: ""
+    property string seenLibraryStatus: ""
+    property string seenManagementStatus: ""
+
+    Connections {
+        target: window.app ? window.app.library : null
+        function onChanged() {
+            const text = window.app.library.status
+            if (text === window.seenLibraryStatus)
+                return
+            window.seenLibraryStatus = text
+            if (text.length > 0)
+                window.statusSource = "library"
+        }
+    }
+    Connections {
+        target: window.app ? window.app.management : null
+        function onChanged() {
+            const text = window.app.management.error || window.app.management.status
+            if (text === window.seenManagementStatus)
+                return
+            window.seenManagementStatus = text
+            if (text.length > 0)
+                window.statusSource = "management"
+        }
+    }
 
     function flashNotice(text) {
         transientNotice = text
@@ -390,30 +443,44 @@ ApplicationWindow {
     }
 
     header: ToolBar {
-        height: 64
-        background: Rectangle {
-            color: window.color
+        height: Theme.titleBarHeight
+        // See-through, so the window's light passes behind it; only the line under it is drawn.
+        background: Item {
             Rectangle {
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.bottom: parent.bottom
                 height: 1
-                color: window.lineColor
+                color: Qt.rgba(1, 1, 1, 0.08)
             }
         }
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: 24
-            anchors.rightMargin: 24
-            spacing: 8
+            anchors.leftMargin: Theme.pageMargin
+            anchors.rightMargin: Theme.pageMargin
+            spacing: Theme.gapSmall
             Image {
                 source: "../icons/luvbox.png"
-                Layout.preferredWidth: 28
-                Layout.preferredHeight: 28
-                sourceSize: Qt.size(28, 28)
+                Layout.preferredWidth: 26
+                Layout.preferredHeight: 26
+                sourceSize: Qt.size(26, 26)
                 fillMode: Image.PreserveAspectFit
+                // The heart keeps a little of its own light, as on the startup screen.
+                Glow {
+                    z: -1
+                    anchors.centerIn: parent
+                    width: 170
+                    height: 120
+                    focusY: 0.5
+                    strength: 0.34
+                }
             }
-            Label { text: "LuvBox"; font.pixelSize: 18; Layout.rightMargin: 16 }
+            Label {
+                text: "LuvBox"
+                font.pixelSize: Theme.fontHeading
+                font.bold: true
+                Layout.rightMargin: Theme.gapLarge
+            }
             FlatButton {
                 text: "저장"
                 tone: "nav"
@@ -435,41 +502,57 @@ ApplicationWindow {
                 }
             }
             Item { Layout.fillWidth: true }
-            Label { text: window.app ? window.app.version : ""; color: window.mutedColor; visible: window.width > 760 }
-            // Settings stay reachable during a save: its records are read-only, and the
-            // changeable options are locked inside the dialog until the work ends.
+            Label {
+                text: window.app ? window.app.version : ""
+                color: Theme.textFaint
+                font.pixelSize: Theme.fontSmall
+                visible: window.width > 760
+                Layout.rightMargin: Theme.gapTiny
+            }
+            // The two gallery windows keep the places they had: one click, no menu.
+            FlatButton {
+                objectName: "galleryStatisticsButton"
+                text: "통계"
+                tone: "ghost"
+                visible: !!window.app && window.currentScreen === 1
+                enabled: window.app && !window.app.closing
+                tip: "저장한 사진과 작성자·태그 요약 (S)"
+                onClicked: statisticsDialog.open()
+            }
             FlatButton {
                 objectName: "shortcutHelpButton"
                 text: "단축키"
+                tone: "ghost"
                 visible: !!window.app && window.currentScreen === 1
                 enabled: window.app && !window.app.closing
                 Accessible.name: "단축키 안내"
-                ToolTip.visible: hovered
-                ToolTip.text: "갤러리와 미리보기에서 쓰는 단축키 (F1)"
+                tip: "갤러리와 미리보기에서 쓰는 단축키 (F1)"
                 onClicked: shortcutHelp.open()
             }
+            // Settings stay reachable during a save: its records are read-only, and the
+            // changeable options are locked inside the dialog until the work ends.
             FlatButton {
-                text: "통계"
-                visible: !!window.app && window.currentScreen === 1
+                objectName: "settingsButton"
+                text: "설정"
+                visible: !!window.app
                 enabled: window.app && !window.app.closing
-                onClicked: statisticsDialog.open()
+                onClicked: preferencesDialog.open()
             }
-            FlatButton { text: "설정"; visible: !!window.app; enabled: window.app && !window.app.closing; onClicked: preferencesDialog.open() }
         }
     }
 
     ColumnLayout {
         anchors.fill: parent
-        anchors.leftMargin: 24
-        anchors.rightMargin: 24
-        anchors.topMargin: 16
-        anchors.bottomMargin: 16
-        spacing: 14
+        anchors.leftMargin: Theme.pageMargin
+        anchors.rightMargin: Theme.pageMargin
+        anchors.topMargin: Theme.gapLarge
+        anchors.bottomMargin: Theme.gapLarge
+        spacing: Theme.gap
 
         Label {
             visible: !window.app
             text: "생성한 사진으로 화면을 확인합니다. 실제 계정·저장 폴더는 연결하지 않습니다."
-            color: window.mutedColor
+            color: Theme.textMuted
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
         }
@@ -504,24 +587,26 @@ ApplicationWindow {
                     height: implicitHeight
                     x: Math.max(0, (saveScroll.availableWidth - width) / 2)
                     y: 4
-                    spacing: 12
+                    spacing: Theme.gapLarge
                     ColumnLayout {
                         Layout.fillWidth: true
-                        spacing: 4
-                        Label { text: "사진 저장"; font.pixelSize: 24; font.bold: true }
-                        Label { text: "좋아요한 사진과 영상을 내 폴더에."; color: window.mutedColor }
+                        Layout.topMargin: Theme.gapSmall
+                        spacing: Theme.gapTiny
+                        Label { text: "사진 저장"; font.pixelSize: Theme.fontTitle; font.bold: true }
+                        Label { text: "좋아요한 사진과 영상을 내 폴더에."; color: Theme.textMuted }
                     }
                     Frame {
                         Layout.fillWidth: true
-                        padding: 16
+                        padding: Theme.cardPadding
                         visible: !!window.app
-                        background: Rectangle { color: window.cardColor; radius: 12 }
+                        background: Card {}
                         ColumnLayout {
                             width: parent.width
-                            spacing: 10
-                            Label { text: "X 계정"; color: window.mutedColor }
+                            spacing: Theme.gapSmall
+                            Label { text: "X 계정"; color: Theme.textMuted; font.pixelSize: Theme.fontSmall }
                             RowLayout {
                                 Layout.fillWidth: true
+                                spacing: Theme.gapSmall
                                 FlatCombo {
                                     Layout.fillWidth: true
                                     model: window.app ? window.app.accounts.accounts : []
@@ -542,10 +627,11 @@ ApplicationWindow {
                                     Layout.fillWidth: true
                                     visible: !window.app || window.app.accounts.accounts.length === 0
                                     text: window.app && window.app.accounts.connected ? "연결 정보 저장됨" : "X 로그인을 연결해 주세요"
-                                    color: window.mutedColor
+                                    color: Theme.textMuted
                                 }
                                 FlatButton {
                                     text: window.app && window.app.accounts.authenticationState === "reconnect_required" ? "다시 연결" : "X 연결"
+                                    implicitHeight: Theme.inputHeight
                                     enabled: window.app && !window.app.busy
                                     onClicked: connectionDialog.open()
                                 }
@@ -554,8 +640,9 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 visible: window.app && window.app.accounts.connected
                                 text: window.app ? window.app.accounts.authenticationLabel : ""
+                                font.pixelSize: Theme.fontSmall
                                 color: window.app && window.app.accounts.authenticationState === "reconnect_required"
-                                    ? window.errorColor : window.mutedColor
+                                    ? Theme.error : Theme.textFaint
                                 wrapMode: Text.Wrap
                                 textFormat: Text.PlainText
                             }
@@ -574,16 +661,24 @@ ApplicationWindow {
                                 onEditingFinished: if (window.app) window.app.setAccount(text)
                                 onAccepted: if (window.app) window.app.setAccount(text)
                             }
-                            Label { text: "저장 위치"; color: window.mutedColor; Layout.topMargin: 4 }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.topMargin: Theme.gapSmall
+                                Layout.bottomMargin: Theme.gapTiny
+                                implicitHeight: 1
+                                color: Theme.line
+                            }
+                            Label { text: "저장 위치"; color: Theme.textMuted; font.pixelSize: Theme.fontSmall }
                             RowLayout {
                                 Layout.fillWidth: true
+                                spacing: Theme.gapSmall
                                 Label {
                                     id: outputFolderLabel
                                     Layout.fillWidth: true
                                     text: window.app && window.app.outputFolder.length > 0
                                         ? window.app.outputFolder : "저장할 폴더를 선택해 주세요"
                                     color: window.app && window.app.outputFolder.length > 0
-                                        ? window.textColor : window.mutedColor
+                                        ? Theme.text : Theme.textMuted
                                     textFormat: Text.PlainText
                                     elide: Text.ElideMiddle
                                     HoverHandler { id: outputFolderHover }
@@ -592,33 +687,38 @@ ApplicationWindow {
                                     ToolTip.visible: outputFolderHover.hovered && outputFolderLabel.truncated
                                 }
                                 FlatButton { text: "폴더 선택"; enabled: window.app && !window.app.busy; onClicked: window.chooseSaveFolder() }
-                                FlatButton { text: "열기"; enabled: !!(window.app && window.app.outputFolder.length > 0); onClicked: if (window.app) window.app.openOutputFolder() }
+                                FlatButton {
+                                    text: "열기"
+                                    tone: "ghost"
+                                    enabled: !!(window.app && window.app.outputFolder.length > 0)
+                                    onClicked: if (window.app) window.app.openOutputFolder()
+                                }
                             }
                         }
                     }
                     Frame {
                         Layout.fillWidth: true
                         visible: !!window.app
-                        padding: 16
-                        background: Rectangle { color: window.cardColor; radius: 12 }
+                        padding: Theme.cardPadding
+                        background: Card {}
                         ColumnLayout {
                             width: parent.width
-                            spacing: 12
+                            spacing: Theme.gap
                             Label {
                                 id: saveStatus
                                 text: window.app ? window.app.status : ""
                                 textFormat: Text.PlainText
-                                font.pixelSize: 18
+                                font.pixelSize: Theme.fontHeading
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
                                 color: window.app && window.app.error.length > 0 && text === window.app.error
-                                    ? window.errorColor : window.textColor
+                                    ? Theme.error : Theme.text
                             }
                             Label {
                                 text: window.app ? window.app.error : ""
                                 textFormat: Text.PlainText
                                 visible: text.length > 0 && text !== saveStatus.text
-                                color: window.errorColor
+                                color: Theme.error
                                 wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
                             }
@@ -646,12 +746,12 @@ ApplicationWindow {
                                 Rectangle {
                                     anchors.fill: parent
                                     radius: height / 2
-                                    color: "#2a2a2a"
+                                    color: Theme.line
                                 }
                                 Rectangle {
                                     height: parent.height
                                     radius: height / 2
-                                    color: window.accentColor
+                                    color: Theme.accent
                                     width: saveProgress.sliding ? parent.width * 0.34 : parent.width * saveProgress.amount
                                     x: saveProgress.sliding ? parent.width * saveProgress.slide : 0
                                 }
@@ -666,33 +766,7 @@ ApplicationWindow {
                             }
                             RowLayout {
                                 Layout.fillWidth: true
-                                objectName: "saveScheduleSummary"
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: !window.app ? "" : window.app.schedule.summary.indexOf("자동 저장") === 0
-                                        ? window.app.schedule.summary : "자동 저장 · " + window.app.schedule.summary
-                                    color: window.app && window.app.schedule.registered && !window.app.schedule.current
-                                        ? window.noticeColor : window.mutedColor
-                                    textFormat: Text.PlainText
-                                    wrapMode: Text.WordWrap
-                                }
-                                FlatButton {
-                                    objectName: "saveScheduleButton"
-                                    text: "자동 저장 설정"
-                                    visible: !!window.app
-                                    onClicked: scheduleDialog.open()
-                                }
-                            }
-                            Label {
-                                text: window.app ? window.app.download.notice : ""
-                                textFormat: Text.PlainText
-                                visible: text.length > 0
-                                color: window.noticeColor
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
-                            RowLayout {
-                                Layout.fillWidth: true
+                                spacing: Theme.gap
                                 Label {
                                     objectName: "saveCounters"
                                     Layout.fillWidth: true
@@ -700,7 +774,7 @@ ApplicationWindow {
                                         "개 · 이미 저장됨 " + window.app.download.skippedCount.toLocaleString() + "개" +
                                         (window.app.download.unsavedCount > 0
                                             ? " · 저장 못 함 " + window.app.download.unsavedCount.toLocaleString() + "개" : "") : ""
-                                    color: window.mutedColor
+                                    color: Theme.textMuted
                                     wrapMode: Text.WordWrap
                                 }
                                 FlatSwitch {
@@ -717,23 +791,13 @@ ApplicationWindow {
                                     }
                                 }
                             }
-                            RowLayout {
-                                objectName: "saveUnsavedSummary"
+                            Label {
+                                text: window.app ? window.app.download.notice : ""
+                                textFormat: Text.PlainText
+                                visible: text.length > 0
+                                color: Theme.notice
+                                wrapMode: Text.WordWrap
                                 Layout.fillWidth: true
-                                visible: !!window.app && window.app.records.unsavedCount > 0
-                                spacing: 8
-                                Label {
-                                    Layout.fillWidth: true
-                                    text: window.app ? "저장하지 못한 미디어 " + window.app.records.unsavedCount.toLocaleString()
-                                        + "개가 있습니다." : ""
-                                    color: window.noticeColor
-                                    wrapMode: Text.WordWrap
-                                }
-                                FlatButton {
-                                    objectName: "saveUnsavedButton"
-                                    text: "확인"
-                                    onClicked: unsavedDialog.open()
-                                }
                             }
                             Label {
                                 objectName: "saveReadinessHint"
@@ -752,17 +816,19 @@ ApplicationWindow {
                                     return ""
                                 }
                                 visible: text.length > 0
-                                color: window.mutedColor
+                                color: Theme.textMuted
                                 textFormat: Text.PlainText
                                 wrapMode: Text.WordWrap
                             }
                             RowLayout {
                                 Layout.fillWidth: true
+                                spacing: Theme.gapSmall
                                 FlatButton {
                                     objectName: "saveStartButton"
                                     text: window.app && window.app.accounts.authenticationState === "reconnect_required"
                                         ? "X 계정 다시 연결" : "저장 시작"
                                     tone: "primary"
+                                    large: true
                                     Layout.fillWidth: true
                                     enabled: window.app && !window.app.busy && window.app.accounts.connected &&
                                         window.app.outputFolder.length > 0 && (window.app.accounts.identity.handle
@@ -774,10 +840,54 @@ ApplicationWindow {
                                 }
                                 FlatButton {
                                     text: window.app && window.app.download.stopping ? "중단하는 중" : "중단"
-                                    implicitHeight: 44
+                                    large: true
                                     visible: window.app && window.app.download.running
                                     enabled: window.app && !window.app.download.stopping
                                     onClicked: window.app.download.stop()
+                                }
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.topMargin: Theme.gapTiny
+                                implicitHeight: 1
+                                color: Theme.line
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                objectName: "saveScheduleSummary"
+                                spacing: Theme.gap
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: !window.app ? "" : window.app.schedule.summary.indexOf("자동 저장") === 0
+                                        ? window.app.schedule.summary : "자동 저장 · " + window.app.schedule.summary
+                                    color: window.app && window.app.schedule.registered && !window.app.schedule.current
+                                        ? Theme.notice : Theme.textMuted
+                                    textFormat: Text.PlainText
+                                    wrapMode: Text.WordWrap
+                                }
+                                FlatButton {
+                                    objectName: "saveScheduleButton"
+                                    text: "자동 저장 설정"
+                                    visible: !!window.app
+                                    onClicked: scheduleDialog.open()
+                                }
+                            }
+                            RowLayout {
+                                objectName: "saveUnsavedSummary"
+                                Layout.fillWidth: true
+                                visible: !!window.app && window.app.records.unsavedCount > 0
+                                spacing: Theme.gap
+                                Label {
+                                    Layout.fillWidth: true
+                                    text: window.app ? "저장하지 못한 미디어 " + window.app.records.unsavedCount.toLocaleString()
+                                        + "개가 있습니다." : ""
+                                    color: Theme.notice
+                                    wrapMode: Text.WordWrap
+                                }
+                                FlatButton {
+                                    objectName: "saveUnsavedButton"
+                                    text: "확인"
+                                    onClicked: unsavedDialog.open()
                                 }
                             }
                         }
@@ -793,17 +903,19 @@ ApplicationWindow {
             }
 
             ColumnLayout {
-                spacing: 8
+                spacing: Theme.gapSmall
+                // Row 1: what to look for and how the grid shows it.
                 RowLayout {
-                    spacing: 12
+                    objectName: "gallerySearchRow"
+                    spacing: Theme.gapSmall
                     Layout.fillWidth: true
                     FlatField {
                         id: search
                         objectName: "searchBox"
                         placeholderText: "사진 검색"
-                        implicitHeight: 40
                         Accessible.name: "사진 검색"
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 120
                         selectByMouse: true
                         rightPadding: clearSearchButton.visible ? 36 : 14
                         onTextEdited: {
@@ -847,15 +959,15 @@ ApplicationWindow {
                             HoverHandler { cursorShape: Qt.PointingHandCursor }
                             contentItem: Text {
                                 text: "×"
-                                font.pixelSize: 16
+                                font.pixelSize: Theme.fontSection
                                 font.bold: true
-                                color: clearSearchButton.hovered ? "#ffffff" : "#b9afb1"
+                                color: clearSearchButton.hovered ? Theme.text : Theme.textMuted
                                 horizontalAlignment: Text.AlignHCenter
                                 verticalAlignment: Text.AlignVCenter
                             }
                             background: Rectangle {
-                                radius: 12
-                                color: clearSearchButton.hovered ? "#333333" : "transparent"
+                                radius: Theme.radiusCard
+                                color: clearSearchButton.hovered ? Theme.raisedHover : "transparent"
                             }
                             onClicked: {
                                 search.text = ""
@@ -870,12 +982,37 @@ ApplicationWindow {
                         }
                     }
                     FlatCombo {
+                        id: orderChoice
+                        objectName: "galleryOrderChoice"
+                        visible: !!window.app
+                        label: "정렬"
+                        model: ["최근 저장", "최신 게시물", "오래된 게시물", "좋아요 순"]
+                        enabled: !window.duplicateMode
+                        implicitWidth: 172
+                        Accessible.name: "사진 정렬"
+                        onActivated: window.app.library.setFilters(
+                            ["all", "photo", "video", "animated_gif"][mediaFilter.currentIndex],
+                            ["saved", "posted", "posted_oldest", "liked"][currentIndex], window.app.library.filterAuthor)
+                    }
+                    FlatCombo {
+                        id: mediaFilter
+                        objectName: "galleryMediaFilter"
+                        visible: !!window.app
+                        label: "종류"
+                        model: ["전체", "사진", "영상", "GIF"]
+                        implicitWidth: 116
+                        Accessible.name: "미디어 종류"
+                        onActivated: window.app.library.setFilters(
+                            ["all", "photo", "video", "animated_gif"][currentIndex],
+                            ["saved", "posted", "posted_oldest", "liked"][orderChoice.currentIndex], window.app.library.filterAuthor)
+                    }
+                    FlatCombo {
                         id: thumbSizeChoice
                         objectName: "thumbSizeChoice"
+                        label: "크기"
                         model: ["작게", "보통", "크게"]
                         currentIndex: window.densityChoice
-                        implicitWidth: 108
-                        implicitHeight: 40
+                        implicitWidth: 116
                         Accessible.name: "미리보기 크기"
                         onActivated: {
                             window.setDensity(currentIndex)
@@ -886,552 +1023,447 @@ ApplicationWindow {
                     }
                 }
 
-                Item {
-                    id: toolHost
-                    objectName: "galleryToolBar"
+                // Row 2: quick filters on the left, things to do with the grid on the right.
+                RowLayout {
+                    objectName: "galleryFilterRow"
                     Layout.fillWidth: true
-                    implicitWidth: 0
-                    property real laidHeight: 0
-                    implicitHeight: laidHeight
-                    function layout() {
-                        let x = 0
-                        let y = 0
-                        let rowHeight = 0
-                        const limit = width
-                        for (let index = 0; index < children.length; index++) {
-                            const child = children[index]
-                            if (!child || !child.visible || child.width < 1 || child.height < 1)
-                                continue
-                            if (x > 0 && x + child.width > limit) {
-                                x = 0
-                                y += rowHeight + 8
-                                rowHeight = 0
+                    visible: !!window.app
+                    spacing: Theme.gapSmall
+                    WrapRow {
+                        id: filterHost
+                        objectName: "galleryFilterBar"
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignTop
+                        // Every control applies the moment it changes, so the grid
+                        // always matches what the controls show.
+                        FlatButton {
+                            id: favoriteFilterButton
+                            objectName: "galleryFavoriteFilter"
+                            tone: "chip"
+                            width: implicitWidth
+                            checkable: true
+                            checked: window.app ? window.app.library.filterFavoriteOnly : false
+                            text: checked ? "★ 즐겨찾기" : "☆ 즐겨찾기"
+                            Accessible.name: "즐겨찾기 필터"
+                            tip: checked ? "즐겨찾기 필터 해제 (B)" : "즐겨찾기한 사진·영상만 보기 (B)"
+                            onClicked: {
+                                window.app.library.setFavoriteOnly(!window.app.library.filterFavoriteOnly)
+                                checked = Qt.binding(function() { return window.app ? window.app.library.filterFavoriteOnly : false })
                             }
-                            child.x = x
-                            child.y = y
-                            x += child.width + 8
-                            rowHeight = Math.max(rowHeight, child.height)
                         }
-                        const next = y + rowHeight
-                        if (Math.abs(laidHeight - next) > 0.5)
-                            laidHeight = next
-                    }
-                    onWidthChanged: layout()
-                    Component.onCompleted: {
-                        // The count grows with the library, and the spinner
-                        // appears only while a page is loading. Both change
-                        // after the first layout; without this they stay at
-                        // the origin and cover the count.
-                        for (let index = 0; index < children.length; index++) {
-                            const child = children[index]
-                            child.visibleChanged.connect(function() { Qt.callLater(layout) })
-                            child.widthChanged.connect(function() { Qt.callLater(layout) })
-                        }
-                        Qt.callLater(layout)
-                    }
-                    Label {
-                        objectName: "galleryCount"
-                        width: implicitWidth
-                        height: 40
-                        verticalAlignment: Text.AlignVCenter
-                        text: window.galleryModel.total.toLocaleString() + "개"
-                        color: window.mutedColor
-                    }
-                    Item {
-                        objectName: "galleryBusy"
-                        width: 24
-                        height: 40
-                        visible: window.galleryModel.busy
-                        BusyIndicator {
-                            anchors.centerIn: parent
-                            running: window.galleryModel.busy
-                            implicitWidth: 24
-                            implicitHeight: 24
-                        }
-                    }
-                    FlatCombo {
-                        id: mediaFilter
-                        visible: !!window.app
-                        model: ["전체", "사진", "영상", "GIF"]
-                        implicitWidth: 112
-                        width: implicitWidth
-                        height: implicitHeight
-                        Accessible.name: "미디어 종류"
-                        onActivated: window.app.library.setFilters(
-                            ["all", "photo", "video", "animated_gif"][currentIndex],
-                            ["saved", "posted", "posted_oldest", "liked"][orderChoice.currentIndex], window.app.library.filterAuthor)
-                    }
-                    FlatCombo {
-                        id: orderChoice
-                        visible: !!window.app
-                        model: ["최근 저장", "최신 게시물", "오래된 게시물", "좋아요 순"]
-                        enabled: !window.duplicateMode
-                        implicitWidth: 168
-                        width: implicitWidth
-                        height: implicitHeight
-                        Accessible.name: "사진 정렬"
-                        onActivated: window.app.library.setFilters(
-                            ["all", "photo", "video", "animated_gif"][mediaFilter.currentIndex],
-                            ["saved", "posted", "posted_oldest", "liked"][currentIndex], window.app.library.filterAuthor)
-                    }
-                    FlatButton {
-                        id: favoriteFilterButton
-                        objectName: "galleryFavoriteFilter"
-                        visible: !!window.app
-                        implicitHeight: 40
-                        width: implicitWidth
-                        checkable: true
-                        checked: window.app ? window.app.library.filterFavoriteOnly : false
-                        text: checked ? "★ 즐겨찾기" : "☆ 즐겨찾기"
-                        tone: checked ? "primary" : "quiet"
-                        Accessible.name: "즐겨찾기 필터"
-                        ToolTip.visible: hovered
-                        ToolTip.text: checked ? "즐겨찾기 필터 해제" : "즐겨찾기한 사진·영상만 보기"
-                        onClicked: {
-                            window.app.library.setFavoriteOnly(!window.app.library.filterFavoriteOnly)
-                            checked = Qt.binding(function() { return window.app ? window.app.library.filterFavoriteOnly : false })
-                        }
-                    }
-                    FlatButton {
-                        id: duplicateFilterButton
-                        objectName: "galleryDuplicateFilter"
-                        visible: !!window.app
-                        implicitHeight: 40
-                        width: implicitWidth
-                        checkable: true
-                        checked: window.app ? window.app.library.filterDuplicateOnly : false
-                        text: {
-                            const count = window.app ? window.app.library.duplicateCount : 0
-                            if (checked) {
-                                return count > 0 ? "중복 해제 (" + count.toLocaleString() + ")" : "중복 해제"
+                        FlatButton {
+                            id: duplicateFilterButton
+                            objectName: "galleryDuplicateFilter"
+                            tone: "chip"
+                            width: implicitWidth
+                            checkable: true
+                            checked: window.app ? window.app.library.filterDuplicateOnly : false
+                            text: {
+                                const count = window.app ? window.app.library.duplicateCount : 0
+                                return count > 0 ? "중복 사진 " + count.toLocaleString() : "중복 사진"
                             }
-                            return count > 0 ? "중복 사진 (" + count.toLocaleString() + ")" : "중복 사진"
+                            Accessible.name: "중복 사진 필터"
+                            tip: checked ? "중복 사진 보기 끝내기 (D)" : "중복 사진 보기 및 정리 (D)"
+                            onClicked: {
+                                window.app.library.setDuplicateOnly(!window.app.library.filterDuplicateOnly)
+                                checked = Qt.binding(function() { return window.app ? window.app.library.filterDuplicateOnly : false })
+                            }
                         }
-                        tone: checked ? "primary" : "quiet"
-                        Accessible.name: "중복 사진 필터"
-                        ToolTip.visible: hovered
-                        ToolTip.text: checked ? "중복 사진 필터 해제" : "중복 사진 보기 및 정리"
-                        onClicked: {
-                            window.app.library.setDuplicateOnly(!window.app.library.filterDuplicateOnly)
-                            checked = Qt.binding(function() { return window.app ? window.app.library.filterDuplicateOnly : false })
+                        FlatButton {
+                            id: aiMenuButton
+                            objectName: "galleryAiMenuButton"
+                            tone: "chip"
+                            width: implicitWidth
+                            readonly property string applied: window.app ? window.app.library.filterAiCategory : ""
+                            chosen: applied.length > 0
+                            dropdown: true
+                            text: window.app && window.app.library.aiScanning ? "AI 분류 중…"
+                                : (applied.length ? "AI 분류: " + applied : "AI 분류")
+                            Accessible.name: applied.length ? "AI 분류 " + applied + " 보는 중" : "AI 분류"
+                            tip: !aiMenu.visible ? "사진을 다섯 분류로 나눠 보고, 자동분류를 실행합니다" : ""
+                            onClicked: aiMenu.popup(aiMenuButton, 0, aiMenuButton.height + 4)
+                        }
+                        FlatCombo {
+                            id: authorFilter
+                            objectName: "galleryAuthorFilter"
+                            chip: true
+                            chosen: applied.length > 0
+                            minimumPopupWidth: 280
+                            implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                            width: Math.min(220, Math.max(96, implicitContentWidth + leftPadding + rightPadding))
+                            height: implicitHeight
+                            // The closed chip names the author; the count belongs to the list.
+                            displayText: currentIndex > 0 && model[currentIndex] ? "@" + model[currentIndex].value : "작성자"
+                            Accessible.name: "작성자 선택"
+                            textRole: "label"
+                            valueRole: "value"
+                            readonly property string applied: window.app ? window.app.library.filterAuthor : ""
+                            readonly property var authorRows: {
+                                if (!window.app)
+                                    return []
+                                const rows = window.app.library.authors
+                                return rows ? rows : []
+                            }
+                            // "미디어 N개" is the author's number of saved photos, videos and GIFs
+                            // in the library, whatever filters are active.
+                            model: {
+                                const items = [{ label: "전체 작성자", value: "" }]
+                                let found = !authorFilter.applied.length
+                                for (let i = 0; i < authorRows.length; i++) {
+                                    const row = authorRows[i]
+                                    const handle = row && row.author ? String(row.author) : ""
+                                    if (!handle.length)
+                                        continue
+                                    if (handle.toLowerCase() === authorFilter.applied.toLowerCase())
+                                        found = true
+                                    const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
+                                    items.push({ label: "@" + handle + " · 미디어 " + count + "개", value: handle })
+                                }
+                                if (!found)
+                                    items.push({ label: "@" + authorFilter.applied, value: authorFilter.applied })
+                                return items
+                            }
+                            function authorIndex() {
+                                const wanted = authorFilter.applied.toLowerCase()
+                                for (let i = 1; i < model.length; i++) {
+                                    if (String(model[i].value).toLowerCase() === wanted)
+                                        return i
+                                }
+                                return 0
+                            }
+                            currentIndex: authorIndex()
+                            onActivated: index => {
+                                window.applyFilters({ author: index > 0 && model[index] ? model[index].value : "" })
+                                currentIndex = Qt.binding(function() { return authorFilter.authorIndex() })
+                            }
+                        }
+                        FlatCombo {
+                            id: hashtagFilter
+                            objectName: "galleryHashtagFilter"
+                            chip: true
+                            chosen: applied.length > 0
+                            minimumPopupWidth: 240
+                            implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                            width: Math.min(200, Math.max(96, implicitContentWidth + leftPadding + rightPadding))
+                            height: implicitHeight
+                            displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].value : "해시태그"
+                            Accessible.name: "해시태그 선택"
+                            textRole: "label"
+                            valueRole: "value"
+                            readonly property string applied: window.app ? window.app.library.filterHashtag : ""
+                            readonly property var hashtagRows: {
+                                if (!window.app)
+                                    return []
+                                const rows = window.app.library.hashtags
+                                return rows ? rows : []
+                            }
+                            model: {
+                                const items = [{ label: "해시태그 전체", value: "" }]
+                                let found = !hashtagFilter.applied.length
+                                for (let i = 0; i < hashtagRows.length; i++) {
+                                    const row = hashtagRows[i]
+                                    const tag = row && row.tag ? String(row.tag) : ""
+                                    if (!tag.length)
+                                        continue
+                                    if (tag.toLowerCase() === hashtagFilter.applied.toLowerCase())
+                                        found = true
+                                    const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
+                                    items.push({ label: tag + " · 미디어 " + count + "개", value: tag })
+                                }
+                                if (!found && hashtagFilter.applied.length)
+                                    items.push({ label: hashtagFilter.applied, value: hashtagFilter.applied })
+                                return items
+                            }
+                            function hashtagIndex() {
+                                const wanted = hashtagFilter.applied.toLowerCase()
+                                for (let i = 1; i < model.length; i++) {
+                                    if (String(model[i].value).toLowerCase() === wanted)
+                                        return i
+                                }
+                                return 0
+                            }
+                            currentIndex: hashtagIndex()
+                            onActivated: index => {
+                                window.applyFilters({ hashtag: index > 0 && model[index] ? model[index].value : "" })
+                                currentIndex = Qt.binding(function() { return hashtagFilter.hashtagIndex() })
+                            }
+                        }
+                        FlatCombo {
+                            id: userTagFilter
+                            objectName: "galleryUserTagFilter"
+                            chip: true
+                            chosen: applied.length > 0
+                            minimumPopupWidth: 200
+                            implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                            width: Math.min(200, Math.max(96, implicitContentWidth + leftPadding + rightPadding))
+                            height: implicitHeight
+                            displayText: currentIndex > 0 && model[currentIndex] ? "#" + model[currentIndex].value : "내 태그"
+                            Accessible.name: "내 태그 선택"
+                            textRole: "label"
+                            valueRole: "value"
+                            readonly property string applied: window.app ? window.app.library.filterUserTag : ""
+                            readonly property var tagRows: {
+                                if (!window.app)
+                                    return []
+                                const rows = window.app.library.userTags
+                                return rows ? rows : []
+                            }
+                            model: {
+                                const items = [{ label: "내 태그 전체", value: "" }]
+                                let found = !userTagFilter.applied.length
+                                for (let i = 0; i < tagRows.length; i++) {
+                                    const row = tagRows[i]
+                                    const tag = row && row.tag ? String(row.tag) : ""
+                                    if (!tag.length)
+                                        continue
+                                    if (tag.toLowerCase() === userTagFilter.applied.toLowerCase())
+                                        found = true
+                                    const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
+                                    items.push({ label: "#" + tag + " · " + count + "개", value: tag })
+                                }
+                                if (!found && userTagFilter.applied.length)
+                                    items.push({ label: "#" + userTagFilter.applied, value: userTagFilter.applied })
+                                return items
+                            }
+                            function userTagIndex() {
+                                const wanted = userTagFilter.applied.toLowerCase()
+                                for (let i = 1; i < model.length; i++) {
+                                    if (String(model[i].value).toLowerCase() === wanted)
+                                        return i
+                                }
+                                return 0
+                            }
+                            currentIndex: userTagIndex()
+                            onActivated: index => {
+                                window.applyFilters({ userTag: index > 0 && model[index] ? model[index].value : "" })
+                                currentIndex = Qt.binding(function() { return userTagFilter.userTagIndex() })
+                            }
+                        }
+                        // The date chip opens the range beside it. It is lit while a date
+                        // is applied, whether the range is showing or not. (Scene tests
+                        // know it by the name of the filter panel it replaced.)
+                        FlatButton {
+                            id: filterToggle
+                            objectName: "galleryFilterToggle"
+                            tone: "chip"
+                            width: implicitWidth
+                            checkable: true
+                            checkLights: false
+                            chosen: !!window.app && (window.app.library.dateFrom.length > 0 || window.app.library.dateTo.length > 0)
+                            dropdown: true
+                            dropdownOpen: checked
+                            text: "날짜"
+                            Accessible.name: "날짜 필터"
+                            tip: checked ? "날짜 범위 접기" : "게시일이나 저장일로 좁히기"
+                            onClicked: if (!checked) datePickerPopup.close()
+                        }
+                        // Which date, from when and until when stay in one group, so the
+                        // range does not split across lines.
+                        Row {
+                            id: dateRange
+                            visible: filterToggle.checked
+                            spacing: 6
+                            FlatCombo {
+                                id: dateFieldChoice
+                                objectName: "galleryDateField"
+                                model: ["게시일", "저장일"]
+                                currentIndex: window.app && window.app.library.dateField === "saved" ? 1 : 0
+                                implicitHeight: Theme.controlHeight
+                                implicitWidth: 96
+                                Accessible.name: "날짜 필터 기준"
+                                onActivated: index => {
+                                    window.applyFilters({ dateField: index === 1 ? "saved" : "posted" })
+                                    currentIndex = Qt.binding(function() {
+                                        return window.app && window.app.library.dateField === "saved" ? 1 : 0
+                                    })
+                                }
+                            }
+                            DateField {
+                                id: dateFromFilter
+                                objectName: "galleryDateFrom"
+                                text: window.app ? window.app.library.dateFrom : ""
+                                placeholder: "시작 날짜"
+                                accessibleLabel: "시작 날짜"
+                                pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter
+                                width: 136
+                                height: Theme.controlHeight
+                                onPickRequested: datePickerPopup.openFor(dateFromFilter)
+                                onCleared: {
+                                    if (datePickerPopup.targetField === dateFromFilter)
+                                        datePickerPopup.close()
+                                    window.applyFilters({ from: "" })
+                                }
+                            }
+                            Label {
+                                width: 16
+                                height: Theme.controlHeight
+                                verticalAlignment: Text.AlignVCenter
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "~"
+                                color: Theme.textMuted
+                            }
+                            DateField {
+                                id: dateToFilter
+                                objectName: "galleryDateTo"
+                                text: window.app ? window.app.library.dateTo : ""
+                                placeholder: "종료 날짜"
+                                accessibleLabel: "종료 날짜"
+                                pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateToFilter
+                                width: 136
+                                height: Theme.controlHeight
+                                onPickRequested: datePickerPopup.openFor(dateToFilter)
+                                onCleared: {
+                                    if (datePickerPopup.targetField === dateToFilter)
+                                        datePickerPopup.close()
+                                    window.applyFilters({ to: "" })
+                                }
+                            }
+                        }
+                        // Shown only while there is something to clear.
+                        FlatButton {
+                            id: filterReset
+                            objectName: "galleryFilterReset"
+                            tone: "ghost"
+                            width: implicitWidth
+                            leftPadding: 10
+                            rightPadding: 10
+                            text: "× 필터 지우기"
+                            Accessible.name: "필터 초기화"
+                            visible: !!window.app && (window.app.library.filterSummary.length > 0 || search.text.length > 0
+                                || mediaFilter.currentIndex > 0 || orderChoice.currentIndex > 0 || window.app.library.filterFavoriteOnly || window.app.library.filterDuplicateOnly)
+                            onClicked: {
+                                searchDelay.stop()
+                                datePickerPopup.close()
+                                search.text = ""
+                                mediaFilter.currentIndex = orderChoice.currentIndex = 0
+                                window.app.library.resetFilters()
+                            }
                         }
                     }
+                    // Shown once a picture is current. It comes first, so the two
+                    // after it never move when it appears.
                     FlatButton {
-                        id: scanDuplicatesButton
-                        objectName: "galleryScanDuplicates"
-                        visible: !!window.app && window.app.library.filterDuplicateOnly
-                        enabled: !!window.app && !window.app.library.busy
-                        implicitHeight: 40
-                        width: implicitWidth
-                        text: "중복 검사"
-                        ToolTip.visible: hovered
-                        ToolTip.text: window.duplicateNear
-                            ? "완전히 같은 파일과, 크기·화질만 다르게 다시 저장된 같은 사진을 찾습니다"
-                            : "내용이 완전히 같은 파일만 찾습니다"
-                        onClicked: {
-                            if (window.app.library.scanDuplicates(window.duplicateNear))
-                                window.flashNotice("중복 검사를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
-                        }
-                    }
-                    FlatButton {
-                        id: duplicateNearToggle
-                        objectName: "galleryDuplicateNear"
-                        visible: !!window.app && window.app.library.filterDuplicateOnly
-                        enabled: !!window.app && !window.app.library.busy
-                        implicitHeight: 40
-                        width: implicitWidth
-                        checkable: true
-                        checked: window.duplicateNear
-                        text: checked ? "✓ 화질만 다른 사진 포함" : "화질만 다른 사진 포함"
-                        tone: checked ? "primary" : "quiet"
-                        Accessible.name: "크기나 화질만 다른 같은 사진도 찾기"
-                        ToolTip.visible: hovered
-                        ToolTip.text: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 묶습니다. 두 사진의 화면을 직접 비교해 99% 이상 같을 때만 묶습니다."
-                        onClicked: {
-                            window.duplicateNear = !window.duplicateNear
-                            checked = Qt.binding(function() { return window.duplicateNear })
-                        }
-                    }
-                    FlatButton {
-                        id: selectDuplicatesButton
-                        objectName: "gallerySelectDuplicates"
-                        visible: !!window.app && window.app.library.filterDuplicateOnly
-                        enabled: !!window.app && !window.app.library.copiesLocked && window.galleryModel.count > 0
-                        ToolTip.visible: hovered
-                        ToolTip.text: window.app && window.app.library.copiesLocked
-                            ? window.app.library.holdReason
-                            : "가장 화질이 좋거나 즐겨찾기한 원본 1장씩만 남기고 나머지 사본을 선택합니다"
-                        implicitHeight: 40
-                        width: implicitWidth
-                        text: "사본 일괄 선택"
-                        onClicked: {
-                            const count = window.app.library.selectDuplicateCopies()
-                            if (count > 0)
-                                window.flashNotice(count + "개의 중복 사본이 선택되었습니다. '휴지통으로'를 누르면 정리됩니다.")
-                            else
-                                window.flashNotice(window.app.library.status)
-                        }
-                    }
-                    FlatButton {
-                        id: aiMenuButton
-                        objectName: "galleryAiMenuButton"
-                        visible: !!window.app
-                        implicitHeight: 40
-                        width: implicitWidth
-                        readonly property string applied: window.app ? window.app.library.filterAiCategory : ""
-                        text: window.app && window.app.library.aiScanning ? "AI 분류 중…"
-                            : (applied.length ? "AI 분류: " + applied : "AI 분류")
-                        tone: applied.length ? "primary" : "quiet"
-                        Accessible.name: applied.length ? "AI 분류 " + applied + " 보는 중" : "AI 분류"
-                        ToolTip.visible: hovered && !aiMenu.visible
-                        ToolTip.text: "사진을 다섯 분류로 나눠 보고, 자동분류를 실행합니다"
-                        onClicked: aiMenu.popup(aiMenuButton, 0, aiMenuButton.height + 4)
-                    }
-                    FlatButton {
-                        visible: !!window.app
-                        implicitHeight: 40
-                        width: implicitWidth
-                        text: window.app && window.app.galleryChanged ? "새 사진 보기" : "새로고침"
-                        onClicked: window.app.refreshGallery()
-                    }
-                    FlatButton {
+                        objectName: "galleryOpenPreview"
+                        Layout.alignment: Qt.AlignTop
                         text: "미리보기"
-                        implicitHeight: 40
-                        width: implicitWidth
-                        visible: gallery.currentIndex >= 0
+                        visible: gallery.currentIndex >= 0 && !window.duplicateMode
+                        tip: "고른 사진을 크게 보기 (Enter)"
                         onClicked: previewDialog.open()
                     }
                     FlatButton {
+                        id: refreshButton
+                        objectName: "galleryRefresh"
+                        Layout.alignment: Qt.AlignTop
+                        // New files saved while the gallery was open light the button up.
+                        readonly property bool fresh: !!window.app && window.app.galleryChanged
+                        tone: fresh ? "chip" : "quiet"
+                        chosen: fresh
+                        text: fresh ? "새 사진 보기" : "새로고침"
+                        tip: fresh ? "저장된 새 사진을 목록에 넣기 (F5)" : "목록 다시 읽기 (F5)"
+                        onClicked: window.app.refreshGallery()
+                    }
+                    // Starts and ends choosing several files; what to do with them is in the bar at the bottom.
+                    FlatButton {
                         id: selectionToggle
                         objectName: "gallerySelectionToggle"
-                        implicitHeight: 40
-                        width: implicitWidth
-                        text: window.app && window.app.library.selectionMode ? "선택 끝내기" : "여러 개 선택"
+                        Layout.alignment: Qt.AlignTop
+                        readonly property bool choosing: !!window.app && window.app.library.selectionMode
+                        tone: choosing ? "chip" : "quiet"
+                        chosen: choosing
+                        text: choosing ? "선택 끝내기" : "여러 개 선택"
                         enabled: !!window.app
+                        tip: choosing ? "여러 개 선택 끝내기 (Esc)" : "여러 장을 골라 한 번에 정리하기"
                         onClicked: window.app.library.setSelectionMode(!window.app.library.selectionMode)
                     }
                 }
 
-                Item {
-                    id: filterHost
-                    objectName: "galleryFilterBar"
-                    Layout.fillWidth: true
-                    implicitWidth: 0
-                    visible: !!window.app
-                    property real laidHeight: 0
-                    implicitHeight: laidHeight
-                    function layout() {
-                        let x = 0
-                        let y = 0
-                        let rowHeight = 0
-                        const limit = width
-                        for (let index = 0; index < children.length; index++) {
-                            const child = children[index]
-                            if (!child || !child.visible || child.width < 1 || child.height < 1)
-                                continue
-                            if (x > 0 && x + child.width > limit) {
-                                x = 0
-                                y += rowHeight + 8
-                                rowHeight = 0
-                            }
-                            child.x = x
-                            child.y = y
-                            x += child.width + 8
-                            rowHeight = Math.max(rowHeight, child.height)
-                        }
-                        const next = y + rowHeight
-                        if (Math.abs(laidHeight - next) > 0.5)
-                            laidHeight = next
-                    }
-                    onWidthChanged: layout()
-                    onVisibleChanged: Qt.callLater(layout)
-                    Component.onCompleted: Qt.callLater(layout)
-                    // Every control applies the moment it changes, so the grid
-                    // always matches what the controls show. The start and end
-                    // stay in one group so the range does not split across lines.
-                    FlatCombo {
-                        id: authorFilter
-                        objectName: "galleryAuthorFilter"
-                        visible: filterToggle.checked
-                        minimumPopupWidth: 280
-                        implicitHeight: 40
-                        implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
-                        width: Math.min(280, Math.max(180, implicitContentWidth + leftPadding + rightPadding))
-                        height: implicitHeight
-                        onVisibleChanged: Qt.callLater(filterHost.layout)
-                        onWidthChanged: Qt.callLater(filterHost.layout)
-                        // The closed box names the author; the count belongs to the list.
-                        displayText: currentIndex > 0 && model[currentIndex] ? "@" + model[currentIndex].value : "전체 작성자"
-                        Accessible.name: "작성자 선택"
-                        textRole: "label"
-                        valueRole: "value"
-                        readonly property string applied: window.app ? window.app.library.filterAuthor : ""
-                        readonly property var authorRows: {
-                            if (!window.app)
-                                return []
-                            const rows = window.app.library.authors
-                            return rows ? rows : []
-                        }
-                        // "미디어 N개" is the author's number of saved photos, videos and GIFs
-                        // in the library, whatever filters are active.
-                        model: {
-                            const items = [{ label: "전체 작성자", value: "" }]
-                            let found = !authorFilter.applied.length
-                            for (let i = 0; i < authorRows.length; i++) {
-                                const row = authorRows[i]
-                                const handle = row && row.author ? String(row.author) : ""
-                                if (!handle.length)
-                                    continue
-                                if (handle.toLowerCase() === authorFilter.applied.toLowerCase())
-                                    found = true
-                                const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
-                                items.push({ label: "@" + handle + " · 미디어 " + count + "개", value: handle })
-                            }
-                            if (!found)
-                                items.push({ label: "@" + authorFilter.applied, value: authorFilter.applied })
-                            return items
-                        }
-                        function authorIndex() {
-                            const wanted = authorFilter.applied.toLowerCase()
-                            for (let i = 1; i < model.length; i++) {
-                                if (String(model[i].value).toLowerCase() === wanted)
-                                    return i
-                            }
-                            return 0
-                        }
-                        currentIndex: authorIndex()
-                        onActivated: index => {
-                            window.applyFilters({ author: index > 0 && model[index] ? model[index].value : "" })
-                            currentIndex = Qt.binding(function() { return authorFilter.authorIndex() })
-                        }
-                    }
-                    FlatCombo {
-                        id: hashtagFilter
-                        objectName: "galleryHashtagFilter"
-                        visible: filterToggle.checked
-                        minimumPopupWidth: 240
-                        implicitHeight: 40
-                        implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
-                        width: Math.min(260, Math.max(160, implicitContentWidth + leftPadding + rightPadding))
-                        height: implicitHeight
-                        onVisibleChanged: Qt.callLater(filterHost.layout)
-                        onWidthChanged: Qt.callLater(filterHost.layout)
-                        displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].value : "해시태그"
-                        Accessible.name: "해시태그 선택"
-                        textRole: "label"
-                        valueRole: "value"
-                        readonly property string applied: window.app ? window.app.library.filterHashtag : ""
-                        readonly property var hashtagRows: {
-                            if (!window.app)
-                                return []
-                            const rows = window.app.library.hashtags
-                            return rows ? rows : []
-                        }
-                        model: {
-                            const items = [{ label: "해시태그 전체", value: "" }]
-                            let found = !hashtagFilter.applied.length
-                            for (let i = 0; i < hashtagRows.length; i++) {
-                                const row = hashtagRows[i]
-                                const tag = row && row.tag ? String(row.tag) : ""
-                                if (!tag.length)
-                                    continue
-                                if (tag.toLowerCase() === hashtagFilter.applied.toLowerCase())
-                                    found = true
-                                const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
-                                items.push({ label: tag + " · 미디어 " + count + "개", value: tag })
-                            }
-                            if (!found && hashtagFilter.applied.length)
-                                items.push({ label: hashtagFilter.applied, value: hashtagFilter.applied })
-                            return items
-                        }
-                        function hashtagIndex() {
-                            const wanted = hashtagFilter.applied.toLowerCase()
-                            for (let i = 1; i < model.length; i++) {
-                                if (String(model[i].value).toLowerCase() === wanted)
-                                    return i
-                            }
-                            return 0
-                        }
-                        currentIndex: hashtagIndex()
-                        onActivated: index => {
-                            window.applyFilters({ hashtag: index > 0 && model[index] ? model[index].value : "" })
-                            currentIndex = Qt.binding(function() { return hashtagFilter.hashtagIndex() })
-                        }
-                    }
-                    FlatCombo {
-                        id: userTagFilter
-                        objectName: "galleryUserTagFilter"
-                        visible: filterToggle.checked
-                        minimumPopupWidth: 200
-                        implicitHeight: 40
-                        implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
-                        width: Math.min(240, Math.max(140, implicitContentWidth + leftPadding + rightPadding))
-                        height: implicitHeight
-                        onVisibleChanged: Qt.callLater(filterHost.layout)
-                        onWidthChanged: Qt.callLater(filterHost.layout)
-                        displayText: currentIndex > 0 && model[currentIndex] ? "#" + model[currentIndex].value : "내 태그 전체"
-                        Accessible.name: "내 태그 선택"
-                        textRole: "label"
-                        valueRole: "value"
-                        readonly property string applied: window.app ? window.app.library.filterUserTag : ""
-                        readonly property var tagRows: {
-                            if (!window.app)
-                                return []
-                            const rows = window.app.library.userTags
-                            return rows ? rows : []
-                        }
-                        model: {
-                            const items = [{ label: "내 태그 전체", value: "" }]
-                            let found = !userTagFilter.applied.length
-                            for (let i = 0; i < tagRows.length; i++) {
-                                const row = tagRows[i]
-                                const tag = row && row.tag ? String(row.tag) : ""
-                                if (!tag.length)
-                                    continue
-                                if (tag.toLowerCase() === userTagFilter.applied.toLowerCase())
-                                    found = true
-                                const count = row.count !== undefined ? Number(row.count).toLocaleString() : "0"
-                                items.push({ label: "#" + tag + " · " + count + "개", value: tag })
-                            }
-                            if (!found && userTagFilter.applied.length)
-                                items.push({ label: "#" + userTagFilter.applied, value: userTagFilter.applied })
-                            return items
-                        }
-                        function userTagIndex() {
-                            const wanted = userTagFilter.applied.toLowerCase()
-                            for (let i = 1; i < model.length; i++) {
-                                if (String(model[i].value).toLowerCase() === wanted)
-                                    return i
-                            }
-                            return 0
-                        }
-                        currentIndex: userTagIndex()
-                        onActivated: index => {
-                            window.applyFilters({ userTag: index > 0 && model[index] ? model[index].value : "" })
-                            currentIndex = Qt.binding(function() { return userTagFilter.userTagIndex() })
-                        }
-                    }
-                    FlatCombo {
-                        id: dateFieldChoice
-                        objectName: "galleryDateField"
-                        visible: filterToggle.checked
-                        model: ["게시일", "저장일"]
-                        currentIndex: window.app && window.app.library.dateField === "saved" ? 1 : 0
-                        implicitWidth: 92
-                        width: implicitWidth
-                        height: implicitHeight
-                        Accessible.name: "날짜 필터 기준"
-                        onActivated: index => {
-                            window.applyFilters({ dateField: index === 1 ? "saved" : "posted" })
-                            currentIndex = Qt.binding(function() {
-                                return window.app && window.app.library.dateField === "saved" ? 1 : 0
-                            })
-                        }
-                    }
-                    Row {
-                        id: dateRange
-                        visible: filterToggle.checked
-                        spacing: 6
-                        DateField {
-                            id: dateFromFilter
-                            objectName: "galleryDateFrom"
-                            text: window.app ? window.app.library.dateFrom : ""
-                            placeholder: "시작 날짜"
-                            accessibleLabel: "시작 날짜"
-                            pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateFromFilter
-                            width: 136
-                            onPickRequested: datePickerPopup.openFor(dateFromFilter)
-                            onCleared: {
-                                if (datePickerPopup.targetField === dateFromFilter)
-                                    datePickerPopup.close()
-                                window.applyFilters({ from: "" })
-                            }
-                        }
-                        Label {
-                            width: 16
-                            height: 40
-                            verticalAlignment: Text.AlignVCenter
-                            horizontalAlignment: Text.AlignHCenter
-                            text: "~"
-                            color: window.mutedColor
-                        }
-                        DateField {
-                            id: dateToFilter
-                            objectName: "galleryDateTo"
-                            text: window.app ? window.app.library.dateTo : ""
-                            placeholder: "종료 날짜"
-                            accessibleLabel: "종료 날짜"
-                            pickerOpen: datePickerPopup.visible && datePickerPopup.targetField === dateToFilter
-                            width: 136
-                            onPickRequested: datePickerPopup.openFor(dateToFilter)
-                            onCleared: {
-                                if (datePickerPopup.targetField === dateToFilter)
-                                    datePickerPopup.close()
-                                window.applyFilters({ to: "" })
-                            }
-                        }
-                    }
-                    FlatButton {
-                        id: filterToggle
-                        objectName: "galleryFilterToggle"
-                        implicitHeight: 40
-                        width: implicitWidth
-                        text: checked ? "필터 닫기" : "작성자·태그·날짜 필터"
-                        checkable: true
-                        onClicked: if (!checked) datePickerPopup.close()
-                        onCheckedChanged: Qt.callLater(filterHost.layout)
-                        onWidthChanged: Qt.callLater(filterHost.layout)
-                    }
-                    FlatButton {
-                        id: filterReset
-                        objectName: "galleryFilterReset"
-                        implicitHeight: 40
-                        width: implicitWidth
-                        text: "필터 초기화"
-                        enabled: !!window.app && (window.app.library.filterSummary.length > 0 || search.text.length > 0
-                            || mediaFilter.currentIndex > 0 || orderChoice.currentIndex > 0 || window.app.library.filterFavoriteOnly || window.app.library.filterDuplicateOnly)
-                        onClicked: {
-                            searchDelay.stop()
-                            datePickerPopup.close()
-                            search.text = ""
-                            mediaFilter.currentIndex = orderChoice.currentIndex = 0
-                            window.app.library.resetFilters()
-                        }
-                    }
-                }
-                Label {
-                    objectName: "galleryLoadError"
-                    Layout.fillWidth: true
-                    text: window.galleryModel.error
-                    visible: text.length > 0
-                    color: window.errorColor
-                    wrapMode: Text.Wrap
-                    textFormat: Text.PlainText
-                }
-                Label {
-                    objectName: "galleryActiveFilters"
-                    Layout.fillWidth: true
-                    text: window.app ? window.app.library.filterSummary : ""
-                    visible: text.length > 0
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    color: window.mutedColor
-                }
+                // One status line: how many, which filters, and whatever last had something to say.
                 RowLayout {
+                    id: statusLine
+                    objectName: "galleryStatusLine"
                     Layout.fillWidth: true
-                    visible: (window.app && window.app.library.status.length > 0) || (window.app && (window.app.library.duplicateProgressTotal > 0 || window.app.library.aiProgressTotal > 0))
-                    spacing: 8
+                    Layout.minimumHeight: 28
+                    spacing: Theme.gapSmall
+                    readonly property bool loadFailed: window.galleryModel.error.length > 0
+                    readonly property string managementText: window.transientNotice
+                        || (window.app ? (window.app.management.error || window.app.management.status) : "")
+                    readonly property string workText: window.app ? window.app.library.status : ""
+                    // A notice flashes over anything; otherwise the source that changed last speaks.
+                    readonly property bool showManagement: !loadFailed && managementText.length > 0
+                        && (window.transientNotice.length > 0 || workText.length === 0 || window.statusSource === "management")
+                    readonly property bool showWork: !loadFailed && workText.length > 0 && !showManagement
                     Label {
+                        objectName: "galleryCount"
+                        text: window.galleryModel.total.toLocaleString() + "개"
+                        font.bold: true
+                        color: Theme.text
+                    }
+                    Item {
+                        objectName: "galleryBusy"
+                        implicitWidth: 20
+                        implicitHeight: 20
+                        visible: window.galleryModel.busy
+                        BusyIndicator {
+                            anchors.centerIn: parent
+                            running: window.galleryModel.busy
+                            implicitWidth: 20
+                            implicitHeight: 20
+                        }
+                    }
+                    Label {
+                        id: activeFilters
+                        objectName: "galleryActiveFilters"
                         Layout.fillWidth: true
-                        text: window.app ? window.app.library.status : ""
-                        wrapMode: Text.WordWrap
+                        text: window.app ? window.app.library.filterSummary : ""
+                        visible: text.length > 0
+                        elide: Text.ElideRight
                         textFormat: Text.PlainText
-                        color: window.noticeColor
+                        color: Theme.textMuted
+                        HoverHandler { id: activeFiltersHover }
+                        ToolTip.text: text
+                        ToolTip.delay: 500
+                        ToolTip.visible: activeFiltersHover.hovered && truncated
+                    }
+                    Item { Layout.fillWidth: true; visible: !activeFilters.visible }
+                    Label {
+                        objectName: "galleryLoadError"
+                        Layout.maximumWidth: Math.max(160, statusLine.width - 220)
+                        text: window.galleryModel.error
+                        visible: statusLine.loadFailed
+                        color: Theme.error
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                    }
+                    Label {
+                        objectName: "galleryManagementMessage"
+                        Layout.maximumWidth: Math.max(160, statusLine.width * 0.62)
+                        text: statusLine.managementText
+                        visible: statusLine.showManagement
+                        horizontalAlignment: Text.AlignRight
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 3
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                        color: window.app && window.app.management.error && !window.transientNotice
+                            ? Theme.error : Theme.textMuted
+                    }
+                    Label {
+                        objectName: "galleryWorkStatus"
+                        Layout.maximumWidth: Math.max(160, statusLine.width * 0.62)
+                        text: statusLine.workText
+                        visible: statusLine.showWork
+                        horizontalAlignment: Text.AlignRight
+                        wrapMode: Text.WordWrap
+                        maximumLineCount: 3
+                        elide: Text.ElideRight
+                        textFormat: Text.PlainText
+                        color: Theme.notice
                     }
                     ProgressBar {
+                        id: workProgress
                         objectName: "galleryWorkProgress"
-                        Layout.preferredWidth: 160
-                        Layout.preferredHeight: 6
+                        Layout.preferredWidth: 140
+                        Layout.preferredHeight: 4
                         readonly property bool aiWork: window.app && window.app.library.aiProgressTotal > 0
                         readonly property bool duplicateWork: window.app && window.app.library.duplicateProgressTotal > 0
                         readonly property bool preparingAi: window.app && window.app.library.aiScanning && !aiWork && !duplicateWork
@@ -1447,6 +1479,7 @@ ApplicationWindow {
                     FlatButton {
                         objectName: "cancelDuplicateScanButton"
                         text: "검사 중단"
+                        compact: true
                         visible: window.app && window.app.library.copiesLocked
                         Accessible.name: "중복 검사 중단"
                         onClicked: if (window.app) window.app.library.cancelDuplicateScan()
@@ -1454,83 +1487,88 @@ ApplicationWindow {
                     FlatButton {
                         objectName: "cancelAiScanButton"
                         text: "분류 중단"
+                        compact: true
                         visible: window.app && window.app.library.aiScanning
                         Accessible.name: "AI 분류 중단"
                         onClicked: if (window.app) window.app.library.cancelAiScan()
                     }
                 }
-                Label {
-                    objectName: "galleryManagementMessage"
-                    Layout.fillWidth: true
-                    text: window.transientNotice || (window.app ? (window.app.management.error || window.app.management.status) : "")
-                    visible: text.length > 0
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    color: window.app && window.app.management.error && !window.transientNotice
-                        ? window.errorColor : window.mutedColor
-                }
-                RowLayout {
-                    objectName: "gallerySelectionBar"
-                    Layout.fillWidth: true
-                    visible: window.app && window.app.library.selectionMode
-                    spacing: 8
-                    Label {
-                        objectName: "gallerySelectionCount"
-                        Layout.fillWidth: true
-                        text: window.app ? window.app.library.selectedCount.toLocaleString() + "개 선택"
-                            + (window.app.busy && window.app.library.selectedCount > 0
-                               ? " · 작업이 끝나면 휴지통으로 이동할 수 있습니다" : "") : ""
-                        elide: Text.ElideRight
-                    }
-                    FlatButton {
-                        objectName: "gallerySelectLoaded"
-                        text: "불러온 항목 선택"
-                        enabled: !!window.app
-                        onClicked: window.app.library.selectLoaded()
-                    }
-                    FlatButton {
-                        objectName: "galleryTeachSelected"
-                        text: "분류 가르치기"
-                        enabled: window.app && !window.app.library.tagsLocked && !window.app.library.filesLocked
-                            && window.app.library.selectedCount > 0
-                        ToolTip.visible: hovered
-                        ToolTip.text: window.app && window.app.library.holdReason
-                            ? window.app.library.holdReason
-                            : "선택한 사진을 하나의 AI 분류로 가르칩니다. 매우 닮은 사진도 함께 바뀝니다."
-                        onClicked: teachPopup.open()
-                    }
-                    FlatButton {
-                        objectName: "galleryAddTagSelected"
-                        text: "태그 추가"
-                        enabled: window.app && !window.app.busy && !window.app.library.tagsLocked && window.app.library.selectedCount > 0
-                        ToolTip.visible: hovered && window.app && window.app.library.tagsLocked
-                        ToolTip.text: window.app ? window.app.library.holdReason : ""
-                        onClicked: tagBatchPopup.open()
-                    }
-                    FlatButton {
-                        objectName: "gallerySelectionClear"
-                        text: "선택 해제"
-                        onClicked: window.app.library.clearSelection()
-                    }
-                    FlatButton {
-                        objectName: "galleryRecycleSelected"
-                        text: "휴지통으로"
-                        enabled: window.app && !window.app.busy && !window.app.library.filesLocked && window.app.library.selectedCount > 0
-                        ToolTip.visible: hovered && window.app && window.app.library.filesLocked
-                        ToolTip.text: window.app ? window.app.library.holdReason : ""
-                        onClicked: window.app.management.prepareDelete(window.app.library.selectedKeys)
-                    }
-                }
 
-                Label {
-                    objectName: "duplicateGuide"
+                // Duplicates are reviewed group by group; what that view needs sits right above it.
+                Card {
+                    objectName: "duplicateStrip"
                     Layout.fillWidth: true
                     visible: window.duplicateMode
-                    text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’을 골라 휴지통으로 보내세요. "
-                        + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다."
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    color: window.mutedColor
+                    implicitHeight: duplicateStripLayout.implicitHeight + 2 * Theme.gap
+                    GridLayout {
+                        id: duplicateStripLayout
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: Theme.gapLarge
+                        anchors.rightMargin: Theme.gap
+                        columns: parent.width >= 900 ? 2 : 1
+                        columnSpacing: Theme.gapLarge
+                        rowSpacing: Theme.gapSmall
+                        Label {
+                            objectName: "duplicateGuide"
+                            Layout.fillWidth: true
+                            text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’을 골라 휴지통으로 보내세요. "
+                                + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다."
+                            wrapMode: Text.WordWrap
+                            textFormat: Text.PlainText
+                            font.pixelSize: Theme.fontSmall
+                            color: Theme.textMuted
+                        }
+                        RowLayout {
+                            spacing: Theme.gapSmall
+                            Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                            FlatButton {
+                                id: duplicateNearToggle
+                                objectName: "galleryDuplicateNear"
+                                tone: "chip"
+                                enabled: !!window.app && !window.app.library.busy
+                                checkable: true
+                                checked: window.duplicateNear
+                                text: checked ? "✓ 화질만 다른 사진 포함" : "화질만 다른 사진 포함"
+                                Accessible.name: "크기나 화질만 다른 같은 사진도 찾기"
+                                tip: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 묶습니다. 두 사진의 화면을 직접 비교해 99% 이상 같을 때만 묶습니다."
+                                onClicked: {
+                                    window.duplicateNear = !window.duplicateNear
+                                    checked = Qt.binding(function() { return window.duplicateNear })
+                                }
+                            }
+                            FlatButton {
+                                id: scanDuplicatesButton
+                                objectName: "galleryScanDuplicates"
+                                enabled: !!window.app && !window.app.library.busy
+                                text: "중복 검사"
+                                tip: window.duplicateNear
+                                    ? "완전히 같은 파일과, 크기·화질만 다르게 다시 저장된 같은 사진을 찾습니다"
+                                    : "내용이 완전히 같은 파일만 찾습니다"
+                                onClicked: {
+                                    if (window.app.library.scanDuplicates(window.duplicateNear))
+                                        window.flashNotice("중복 검사를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
+                                }
+                            }
+                            FlatButton {
+                                id: selectDuplicatesButton
+                                objectName: "gallerySelectDuplicates"
+                                enabled: !!window.app && !window.app.library.copiesLocked && window.galleryModel.count > 0
+                                tip: window.app && window.app.library.copiesLocked
+                                    ? window.app.library.holdReason
+                                    : "가장 화질이 좋거나 즐겨찾기한 원본 1장씩만 남기고 나머지 사본을 선택합니다"
+                                text: "사본 일괄 선택"
+                                onClicked: {
+                                    const count = window.app.library.selectDuplicateCopies()
+                                    if (count > 0)
+                                        window.flashNotice(count + "개의 중복 사본이 선택되었습니다. '휴지통으로'를 누르면 정리됩니다.")
+                                    else
+                                        window.flashNotice(window.app.library.status)
+                                }
+                            }
+                        }
+                    }
                 }
                 DuplicateReview {
                     id: duplicateReview
@@ -1686,9 +1724,9 @@ ApplicationWindow {
                         y: Math.min(bandDrag.startY, bandDrag.currentY) - (gallery.contentY - gallery.originY)
                         width: Math.abs(bandDrag.currentX - bandDrag.startX)
                         height: Math.abs(bandDrag.currentY - bandDrag.startY)
-                        color: "#33d93645"
+                        color: Qt.alpha(Theme.accent, 0.2)
                         border.width: 1
-                        border.color: window.accentColor
+                        border.color: Theme.accent
                     }
                     onContentYChanged: {
                         window.requestMore()
@@ -1779,11 +1817,19 @@ ApplicationWindow {
                         Rectangle {
                             anchors.fill: parent
                             anchors.margins: 6
-                            radius: 10
-                            color: tile.batchSelected || gallery.currentIndex === tile.index ? "#241416"
-                                : (tileMouse.containsMouse ? "#212121" : window.cardColor)
+                            radius: Theme.radiusCard
+                            // Only the picture's own frame is always drawn; the tile around it
+                            // shows when it is pointed at, current or chosen.
+                            color: tile.batchSelected || gallery.currentIndex === tile.index ? Theme.accentSoft
+                                : (tileMouse.containsMouse ? Theme.card : "transparent")
                             border.width: tile.batchSelected || gallery.currentIndex === tile.index ? 1 : 0
-                            border.color: window.accentColor
+                            border.color: tile.batchSelected ? Theme.accent : Theme.accentLine
+                            Rectangle {
+                                anchors.fill: photo
+                                radius: Theme.radiusControl
+                                color: Theme.card
+                                visible: !tile.imageMissing
+                            }
                             Image {
                                 id: photo
                                 anchors.top: parent.top
@@ -1801,10 +1847,10 @@ ApplicationWindow {
                             Rectangle {
                                 objectName: "galleryTileMissingPlaceholder"
                                 anchors.fill: photo
-                                radius: 8
-                                color: "#151515"
+                                radius: Theme.radiusControl
+                                color: Theme.well
                                 border.width: 1
-                                border.color: "#252525"
+                                border.color: Theme.line
                                 visible: tile.imageMissing
                                 Column {
                                     anchors.centerIn: parent
@@ -1816,7 +1862,7 @@ ApplicationWindow {
                                         onPaint: {
                                             const ctx = getContext("2d")
                                             ctx.reset()
-                                            ctx.strokeStyle = "#7a7274"
+                                            ctx.strokeStyle = Theme.textFaint
                                             ctx.lineWidth = 1.6
                                             ctx.lineJoin = "round"
                                             ctx.lineCap = "round"
@@ -1831,7 +1877,7 @@ ApplicationWindow {
                                             ctx.lineTo(23, 14)
                                             ctx.lineTo(27, 21)
                                             ctx.stroke()
-                                            ctx.strokeStyle = "#d93645"
+                                            ctx.strokeStyle = Theme.accent
                                             ctx.lineWidth = 1.8
                                             ctx.beginPath()
                                             ctx.moveTo(4, 4)
@@ -1843,8 +1889,8 @@ ApplicationWindow {
                                         anchors.horizontalCenter: parent.horizontalCenter
                                         text: tile.caption.indexOf("클라우드") >= 0 ? "클라우드"
                                             : tile.caption.indexOf("파일 없음") >= 0 ? "파일 없음" : "미리보기 없음"
-                                        font.pixelSize: 11
-                                        color: "#8a8284"
+                                        font.pixelSize: Theme.fontTiny
+                                        color: Theme.textFaint
                                         textFormat: Text.PlainText
                                     }
                                 }
@@ -1857,8 +1903,8 @@ ApplicationWindow {
                                 text: tile.caption
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
-                                font.pixelSize: 12
-                                color: window.mutedColor
+                                font.pixelSize: Theme.fontCaption
+                                color: Theme.textMuted
                             }
                             MouseArea {
                                 id: tileMouse
@@ -1895,14 +1941,14 @@ ApplicationWindow {
                                 z: 3
                                 width: 28
                                 height: 28
-                                radius: 14
-                                color: tile.favorite ? "#d93645" : (favMouse.containsMouse ? "#404040" : "#b3141414")
+                                radius: height / 2
+                                color: tile.favorite ? Theme.accent : (favMouse.containsMouse ? Theme.lineStrong : Theme.scrim)
                                 visible: tile.favorite || tileMouse.containsMouse || favMouse.containsMouse
                                 Text {
                                     anchors.centerIn: parent
                                     text: "★"
-                                    font.pixelSize: 14
-                                    color: tile.favorite ? "#ffffff" : (favMouse.containsMouse ? "#ffffff" : "#d8d1d2")
+                                    font.pixelSize: Theme.fontBody
+                                    color: tile.favorite || favMouse.containsMouse ? "white" : Theme.textMuted
                                 }
                                 MouseArea {
                                     id: favMouse
@@ -1918,14 +1964,37 @@ ApplicationWindow {
                                 }
                             }
                             CheckBox {
+                                id: tileCheck
                                 objectName: "galleryItemSelection"
                                 anchors.left: parent.left
                                 anchors.top: parent.top
+                                anchors.margins: 6
                                 z: 2
+                                padding: 6
                                 visible: window.app && window.app.library.selectionMode
                                 enabled: window.app && window.app.library.canSelect(tile.key)
                                 checked: tile.batchSelected
                                 Accessible.name: "사진 선택: " + tile.caption
+                                HoverHandler { cursorShape: tileCheck.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor }
+                                indicator: Rectangle {
+                                    implicitWidth: 22
+                                    implicitHeight: 22
+                                    x: tileCheck.leftPadding
+                                    y: tileCheck.topPadding
+                                    radius: Theme.radiusSmall
+                                    color: tileCheck.checked ? Theme.accent : Theme.scrim
+                                    border.width: tileCheck.visualFocus ? 2 : (tileCheck.checked ? 0 : 1)
+                                    border.color: tileCheck.visualFocus ? Theme.focus
+                                        : (tileCheck.enabled ? Theme.textMuted : Theme.textDisabled)
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: tileCheck.checked
+                                        text: "✓"
+                                        font.pixelSize: Theme.fontBody
+                                        font.bold: true
+                                        color: "white"
+                                    }
+                                }
                                 onClicked: {
                                     window.app.library.toggleSelection(tile.key)
                                     checked = Qt.binding(function() { return tile.batchSelected })
@@ -1960,7 +2029,85 @@ ApplicationWindow {
                         width: Math.max(0, parent.width - 32)
                         horizontalAlignment: Text.AlignHCenter
                         wrapMode: Text.WordWrap
-                        color: window.mutedColor
+                        color: Theme.textMuted
+                    }
+                }
+                // While files are being chosen, what can be done with them stays at the
+                // bottom edge, where it does not push the pictures down.
+                Card {
+                    id: selectionBar
+                    objectName: "gallerySelectionBar"
+                    Layout.fillWidth: true
+                    visible: !!window.app && window.app.library.selectionMode
+                    border.color: Theme.accentLine
+                    glow: 0.12
+                    implicitHeight: selectionLayout.implicitHeight + 2 * Theme.gapSmall
+                    GridLayout {
+                        id: selectionLayout
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.leftMargin: Theme.gapLarge
+                        anchors.rightMargin: Theme.gapSmall
+                        columns: selectionBar.width >= 800 ? 2 : 1
+                        columnSpacing: Theme.gap
+                        rowSpacing: Theme.gapTiny
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: Theme.gapTiny
+                            Label {
+                                objectName: "gallerySelectionCount"
+                                Layout.fillWidth: true
+                                text: window.app ? window.app.library.selectedCount.toLocaleString() + "개 선택"
+                                    + (window.app.busy && window.app.library.selectedCount > 0
+                                       ? " · 작업이 끝나면 휴지통으로 이동할 수 있습니다" : "") : ""
+                                font.bold: true
+                                elide: Text.ElideRight
+                            }
+                            FlatButton {
+                                objectName: "gallerySelectLoaded"
+                                tone: "ghost"
+                                text: "불러온 항목 선택"
+                                enabled: !!window.app
+                                tip: "지금 불러온 사진을 모두 선택 (Ctrl+A)"
+                                onClicked: window.app.library.selectLoaded()
+                            }
+                            FlatButton {
+                                objectName: "gallerySelectionClear"
+                                tone: "ghost"
+                                text: "선택 해제"
+                                onClicked: window.app.library.clearSelection()
+                            }
+                        }
+                        RowLayout {
+                            Layout.alignment: Qt.AlignRight
+                            spacing: Theme.gapSmall
+                            FlatButton {
+                                objectName: "galleryTeachSelected"
+                                text: "분류 가르치기"
+                                enabled: window.app && !window.app.library.tagsLocked && !window.app.library.filesLocked
+                                    && window.app.library.selectedCount > 0
+                                tip: window.app && window.app.library.holdReason
+                                    ? window.app.library.holdReason
+                                    : "선택한 사진을 하나의 AI 분류로 가르칩니다. 매우 닮은 사진도 함께 바뀝니다."
+                                onClicked: teachPopup.open()
+                            }
+                            FlatButton {
+                                objectName: "galleryAddTagSelected"
+                                text: "태그 추가"
+                                enabled: window.app && !window.app.busy && !window.app.library.tagsLocked && window.app.library.selectedCount > 0
+                                tip: window.app && window.app.library.tagsLocked ? (window.app ? window.app.library.holdReason : "") : ""
+                                onClicked: tagBatchPopup.open()
+                            }
+                            FlatButton {
+                                objectName: "galleryRecycleSelected"
+                                tone: "danger"
+                                text: "휴지통으로"
+                                enabled: window.app && !window.app.busy && !window.app.library.filesLocked && window.app.library.selectedCount > 0
+                                tip: window.app && window.app.library.filesLocked ? (window.app ? window.app.library.holdReason : "") : ""
+                                onClicked: window.app.management.prepareDelete(window.app.library.selectedKeys)
+                            }
+                        }
                     }
                 }
             }
@@ -2152,11 +2299,12 @@ ApplicationWindow {
             inlineTagField.text = ""
             selectedMedia.release()
         }
-        background: Rectangle {
-            color: "#141414"
-            radius: 16
-            border.width: 1
-            border.color: "#2a2a2a"
+        background: Card {
+            radius: Theme.radiusDialog
+            topColor: Theme.dialogTop
+            bottomColor: Theme.dialog
+            border.color: Theme.lineStrong
+            glow: 0.1
         }
         header: RowLayout {
             spacing: 8
@@ -2166,11 +2314,14 @@ ApplicationWindow {
                 Layout.topMargin: 12
                 Layout.bottomMargin: 4
                 text: previewDialog.title
-                font.pixelSize: 18
+                font.pixelSize: Theme.fontHeading
+                font.bold: true
             }
             FlatButton {
                 objectName: "previewMaximizeButton"
                 Layout.rightMargin: 12
+                Layout.topMargin: 8
+                tone: "ghost"
                 text: window.visibility === Window.Maximized || window.visibility === Window.FullScreen
                     ? "창 복원" : "창 최대화"
                 onClicked: {
@@ -2194,28 +2345,32 @@ ApplicationWindow {
                 FlatButton { text: "폴더"; enabled: window.app && !window.app.library.selectedMissing; onClicked: window.app.library.revealSelected() }
                 FlatButton {
                     objectName: "previewRecycle"
+                    tone: "danger"
                     text: "휴지통으로"
                     enabled: window.app && !window.app.busy && !window.app.library.filesLocked && !window.app.library.selectedMissing
-                    ToolTip.visible: hovered && window.app && window.app.library.filesLocked
-                    ToolTip.text: window.app ? window.app.library.holdReason : ""
+                    tip: window.app && window.app.library.filesLocked ? (window.app ? window.app.library.holdReason : "") : ""
                     onClicked: window.app.management.prepareDelete([window.app.library.selectedKey])
                 }
                 FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
                 FlatButton {
                     objectName: "previewFavoriteButton"
                     text: window.app && window.app.library.selectedIsFavorite ? "★ 즐겨찾기 해제" : "☆ 즐겨찾기"
-                    tone: window.app && window.app.library.selectedIsFavorite ? "primary" : "quiet"
+                    // A state that is on, like a filter: lit, not the dialog's main action.
+                    tone: "chip"
+                    chosen: !!window.app && window.app.library.selectedIsFavorite
                     enabled: !!window.app && !!window.app.library.selectedKey
-                    ToolTip.visible: hovered && enabled
-                    ToolTip.text: window.app && window.app.library.selectedIsFavorite ? "즐겨찾기 해제 (F)" : "즐겨찾기 추가 (F)"
+                    tip: window.app && window.app.library.selectedIsFavorite ? "즐겨찾기 해제 (F)" : "즐겨찾기 추가 (F)"
                     onClicked: {
                         window.flashNotice(window.app.library.favoriteNotice(window.app.library.selectedKey))
                     }
                 }
             }
-            DialogButtonBox {
+            DialogButtons {
                 Layout.fillWidth: true
-                background: null
+                leftPadding: 16
+                rightPadding: 16
+                topPadding: 4
+                bottomPadding: 14
                 FlatButton {
                     objectName: "previewDetailsButton"
                     visible: window.app && window.app.library.selectedBody.length > 0
@@ -2244,8 +2399,7 @@ ApplicationWindow {
                     objectName: "previewPreviousButton"
                     text: "이전"
                     enabled: window.app && window.app.library.canPrevious
-                    ToolTip.visible: hovered && enabled
-                    ToolTip.text: "이전 미디어 (←)"
+                    tip: "이전 미디어 (←)"
                     onClicked: {
                         inlineTagField.text = ""
                         window.app.library.previousItem()
@@ -2255,8 +2409,7 @@ ApplicationWindow {
                     objectName: "previewNextButton"
                     text: "다음"
                     enabled: window.app && window.app.library.canNext
-                    ToolTip.visible: hovered && enabled
-                    ToolTip.text: "다음 미디어 (→)"
+                    tip: "다음 미디어 (→)"
                     onClicked: {
                         inlineTagField.text = ""
                         window.app.library.nextItem()
@@ -2291,7 +2444,7 @@ ApplicationWindow {
                     textFormat: Text.PlainText
                     font.bold: true
                     elide: Text.ElideRight
-                    color: authorMouse.containsMouse ? window.accentColor : "#f4f1f1"
+                    color: authorMouse.containsMouse ? Theme.accent : Theme.text
                     MouseArea {
                         id: authorMouse
                         anchors.fill: parent
@@ -2314,8 +2467,8 @@ ApplicationWindow {
                 text: window.app ? window.app.library.selectedPublicInfo : ""
                 textFormat: Text.PlainText
                 elide: Text.ElideMiddle
-                color: window.mutedColor
-                font.pixelSize: 12
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
             }
             Flow {
                 Layout.fillWidth: true
@@ -2325,10 +2478,10 @@ ApplicationWindow {
                 Repeater {
                     model: window.app ? window.app.library.selectedHashtags : []
                     delegate: Rectangle {
-                        color: hashMouse.containsMouse ? "#26352c" : "#1c2520"
-                        radius: 6
+                        color: hashMouse.containsMouse ? Theme.hashtagHover : Theme.hashtagFill
+                        radius: Theme.radiusSmall
                         border.width: 1
-                        border.color: "#2a4030"
+                        border.color: Theme.hashtagLine
                         implicitWidth: hashLabel.implicitWidth + 12
                         implicitHeight: 22
 
@@ -2336,8 +2489,8 @@ ApplicationWindow {
                             id: hashLabel
                             anchors.centerIn: parent
                             text: modelData
-                            font.pixelSize: 11
-                            color: "#8fd3a0"
+                            font.pixelSize: Theme.fontTiny
+                            color: Theme.hashtagText
                             ToolTip.visible: hashMouse.containsMouse
                             ToolTip.text: "해시태그 모아보기"
                         }
@@ -2359,10 +2512,10 @@ ApplicationWindow {
                     delegate: Rectangle {
                         readonly property bool isConfirmed: modelData.source === "confirmed"
                         readonly property bool isAi: modelData.source === "ai" || isConfirmed
-                        color: userTagMouse.containsMouse ? (isAi ? "#1a3550" : "#35243a") : (isAi ? "#13253a" : "#281c2c")
-                        radius: 6
+                        color: userTagMouse.containsMouse ? (isAi ? Theme.aiTagHover : Theme.userTagHover) : (isAi ? Theme.aiTagFill : Theme.userTagFill)
+                        radius: Theme.radiusSmall
                         border.width: 1
-                        border.color: isAi ? "#2b5680" : "#4a2a50"
+                        border.color: isAi ? Theme.aiTagLine : Theme.userTagLine
                         implicitWidth: userTagRow.implicitWidth + 10
                         implicitHeight: 22
 
@@ -2373,8 +2526,8 @@ ApplicationWindow {
 
                             Label {
                                 text: (isAi ? "AI · #" : "#") + (modelData.tag || "")
-                                font.pixelSize: 11
-                                color: isAi ? "#9cd7ff" : "#d99fe6"
+                                font.pixelSize: Theme.fontTiny
+                                color: isAi ? Theme.aiTagText : Theme.userTagText
                                 ToolTip.visible: userTagMouse.containsMouse
                                 ToolTip.text: isConfirmed ? "내가 가르친 AI 분류 (누르면 이 분류만 보기)"
                                     : (isAi ? "AI 자동분류 (누르면 이 분류만 보기)" : "내 태그 (누르면 이 태그만 보기)")
@@ -2395,11 +2548,11 @@ ApplicationWindow {
                             Label {
                                 visible: !isAi
                                 text: "×"
-                                font.pixelSize: 13
+                                font.pixelSize: Theme.fontSmall
                                 font.bold: true
                                 leftPadding: 3
                                 rightPadding: 3
-                                color: removeMouse.containsMouse ? "#ff8791" : "#b9afb1"
+                                color: removeMouse.containsMouse ? Theme.error : Theme.textMuted
                                 ToolTip.visible: removeMouse.containsMouse
                                 ToolTip.text: "태그 삭제"
                                 MouseArea {
@@ -2428,7 +2581,7 @@ ApplicationWindow {
                         Layout.preferredWidth: 96
                         maximumLength: 50
                         placeholderText: "새 태그"
-                        font.pixelSize: 11
+                        font.pixelSize: Theme.fontTiny
                         Keys.onEscapePressed: event => {
                             text = ""
                             focus = false
@@ -2442,10 +2595,9 @@ ApplicationWindow {
                     FlatButton {
                         text: "+ 태그"
                         implicitHeight: 22
-                        font.pixelSize: 11
+                        font.pixelSize: Theme.fontTiny
                         enabled: inlineTagField.cleanTag.length > 0 && (!window.app || !window.app.library.tagsLocked)
-                        ToolTip.visible: hovered && window.app && window.app.library.tagsLocked
-                        ToolTip.text: window.app ? window.app.library.holdReason : ""
+                        tip: window.app && window.app.library.tagsLocked ? (window.app ? window.app.library.holdReason : "") : ""
                         onClicked: {
                             if (window.app && window.app.library.addSelectedTag(inlineTagField.cleanTag))
                                 inlineTagField.text = ""
@@ -2468,13 +2620,13 @@ ApplicationWindow {
                             return "AI " + library.selectedAiCategory
                                 + (library.selectedAiConfidence.length ? " " + library.selectedAiConfidence : "")
                         }
-                        color: window.mutedColor
-                        font.pixelSize: 11
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontTiny
                     }
                     FlatButton {
                         text: "맞아요"
                         implicitHeight: 22
-                        font.pixelSize: 11
+                        font.pixelSize: Theme.fontTiny
                         visible: !!window.app && window.app.library.selectedAiCategory.length > 0 && !window.app.library.selectedAiConfirmed
                         enabled: !!window.app && !window.app.library.tagsLocked
                         onClicked: {
@@ -2485,11 +2637,10 @@ ApplicationWindow {
                     FlatButton {
                         text: "분류 고치기"
                         implicitHeight: 22
-                        font.pixelSize: 11
+                        font.pixelSize: Theme.fontTiny
                         visible: !!window.app && window.app.library.selectedMediaType === "photo"
                         enabled: !!window.app && !window.app.library.tagsLocked
-                        ToolTip.visible: hovered
-                        ToolTip.text: "다섯 분류 중 하나로 가르치거나, 어느 쪽도 아니라고 지정합니다"
+                        tip: "다섯 분류 중 하나로 가르치거나, 어느 쪽도 아니라고 지정합니다"
                         onClicked: {
                             if (!window.app)
                                 return
@@ -2517,10 +2668,10 @@ ApplicationWindow {
                     readOnly: true
                     wrapMode: TextEdit.Wrap
                     selectByMouse: true
-                    color: "#f4f1f1"
-                    selectionColor: window.accentColor
+                    color: Theme.text
+                    selectionColor: Theme.accent
                     selectedTextColor: "white"
-                    font.pixelSize: 13
+                    font.pixelSize: Theme.fontSmall
                     background: null
                 }
             }
@@ -2530,7 +2681,7 @@ ApplicationWindow {
                 textFormat: Text.PlainText
                 visible: text.length > 0
                 wrapMode: Text.WordWrap
-                color: window.mutedColor
+                color: Theme.textMuted
             }
             Label {
                 visible: window.app && text.length > 0 && !window.app.library.selectionBusy && !selectedMedia.unavailable
@@ -2538,7 +2689,7 @@ ApplicationWindow {
                 textFormat: Text.PlainText
                 wrapMode: Text.WordWrap
                 Layout.fillWidth: true
-                color: window.mutedColor
+                color: Theme.textMuted
             }
         }
     }
@@ -2637,11 +2788,10 @@ ApplicationWindow {
             open()
         }
 
-        background: Rectangle {
-            radius: 12
-            color: "#1a1a1a"
-            border.width: 1
-            border.color: "#333333"
+        background: Card {
+            topColor: Theme.dialogTop
+            bottomColor: Theme.dialog
+            border.color: Theme.lineStrong
         }
 
         contentItem: ColumnLayout {
@@ -2675,7 +2825,7 @@ ApplicationWindow {
                     horizontalAlignment: Text.AlignHCenter
                     text: datePickerPopup.viewYear + "년 " + (datePickerPopup.viewMonth + 1) + "월"
                     font.bold: true
-                    font.pixelSize: 14
+                    font.pixelSize: Theme.fontBody
                 }
                 FlatButton {
                     objectName: "datePickerNextMonth"
@@ -2712,8 +2862,8 @@ ApplicationWindow {
                         Layout.preferredWidth: 34
                         horizontalAlignment: Text.AlignHCenter
                         text: modelData
-                        font.pixelSize: 11
-                        color: "#8f8587"
+                        font.pixelSize: Theme.fontTiny
+                        color: Theme.textFaint
                     }
                 }
                 Repeater {
@@ -2733,14 +2883,14 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.preferredWidth: 34
                         Layout.preferredHeight: 30
-                        radius: 6
+                        radius: Theme.radiusSmall
                         activeFocusOnTab: validDay
                         Accessible.role: Accessible.Button
                         Accessible.name: validDay
                             ? datePickerPopup.viewYear + "년 " + (datePickerPopup.viewMonth + 1) + "월 " + dayNumber + "일"
                             : ""
                         border.width: activeFocus ? 2 : (!selectedDay && isToday ? 1 : 0)
-                        border.color: activeFocus ? "#ff8791" : "#7a7274"
+                        border.color: activeFocus ? Theme.focus : Theme.textFaint
                         Keys.onPressed: event => {
                             if (!validDay)
                                 return
@@ -2762,14 +2912,14 @@ ApplicationWindow {
                             }
                         }
                         color: !validDay ? "transparent"
-                            : (selectedDay ? window.accentColor : (dayMouse.containsMouse ? "#2c2c2c" : "transparent"))
+                            : (selectedDay ? Theme.accent : (dayMouse.containsMouse ? Theme.raised : "transparent"))
                         Label {
                             anchors.centerIn: parent
                             visible: dayCell.validDay
                             text: dayCell.validDay ? String(dayCell.dayNumber) : ""
-                            font.pixelSize: 12
+                            font.pixelSize: Theme.fontCaption
                             font.bold: dayCell.selectedDay
-                            color: dayCell.selectedDay ? "#ffffff" : "#f4f1f1"
+                            color: dayCell.selectedDay ? "white" : Theme.text
                         }
                         MouseArea {
                             id: dayMouse
@@ -2891,45 +3041,21 @@ ApplicationWindow {
         app: window.app
     }
 
-    Dialog {
+    FlatDialog {
         id: aiClearConfirm
         objectName: "aiClearConfirm"
         parent: Overlay.overlay
-        modal: true
-        focus: true
         title: "AI 태그를 초기화할까요?"
-        closePolicy: Popup.CloseOnEscape
-        width: Math.min(460, parent ? Math.max(280, parent.width - 48) : 460)
-        height: Math.min(220, parent ? Math.max(180, parent.height - 48) : 220)
-        x: parent ? Math.round((parent.width - width) / 2) : 0
-        y: parent ? Math.round((parent.height - height) / 2) : 0
-        padding: 20
-        background: Rectangle {
-            color: "#141414"
-            radius: 16
-            border.width: 1
-            border.color: "#2a2a2a"
-        }
-        header: Label {
-            width: aiClearConfirm.width
-            text: aiClearConfirm.title
-            leftPadding: 20
-            rightPadding: 20
-            topPadding: 16
-            bottomPadding: 4
-            font.pixelSize: 18
-            color: "#f4f1f1"
-            wrapMode: Text.Wrap
-        }
+        preferredWidth: 460
+        windowMargin: 48
         onOpened: aiClearCancel.forceActiveFocus()
         contentItem: Label {
             text: "자동분류로 붙은 AI 태그만 지웁니다. 직접 추가한 태그와 사진 파일은 그대로 둡니다."
             wrapMode: Text.Wrap
-            color: "#b9afb1"
+            color: Theme.textMuted
             textFormat: Text.PlainText
         }
-        footer: DialogButtonBox {
-            background: null
+        footer: DialogButtons {
             FlatButton {
                 objectName: "aiClearConfirmButton"
                 text: "AI 태그 초기화"
@@ -2998,13 +3124,18 @@ ApplicationWindow {
         width: 320
         height: 380
         padding: 16
-        background: Rectangle { color: "#141414"; radius: 12; border.width: 1; border.color: "#2a2a2a" }
+        background: Card {
+            topColor: Theme.dialogTop
+            bottomColor: Theme.dialog
+            border.color: Theme.lineStrong
+            glow: 0.12
+        }
         ColumnLayout {
             anchors.fill: parent
             spacing: 10
             Label {
                 text: "선택한 사진을 이 분류로 가르칩니다."
-                color: "#f4f1f1"
+                color: Theme.text
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
@@ -3033,13 +3164,13 @@ ApplicationWindow {
         }
     }
 
-    Menu {
+    FlatMenu {
         id: aiMenu
         objectName: "galleryAiMenu"
         readonly property var counts: window.app ? window.app.library.aiCategoryCounts : []
         readonly property string applied: window.app ? window.app.library.filterAiCategory : ""
         function amount(value) { return Number(value || 0).toLocaleString(Qt.locale(), "f", 0) }
-        MenuItem {
+        FlatMenuItem {
             objectName: "galleryAiAll"
             text: "모든 사진"
             checkable: true
@@ -3048,7 +3179,7 @@ ApplicationWindow {
         }
         Instantiator {
             model: aiMenu.counts
-            MenuItem {
+            FlatMenuItem {
                 required property var modelData
                 objectName: "galleryAiCategory_" + (modelData.category || "")
                 text: (modelData.category || "") + "  ·  " + aiMenu.amount(modelData.count) + "장"
@@ -3059,8 +3190,8 @@ ApplicationWindow {
             onObjectAdded: (index, object) => aiMenu.insertItem(index + 1, object)
             onObjectRemoved: (index, object) => aiMenu.removeItem(object)
         }
-        MenuSeparator {}
-        MenuItem {
+        FlatMenuSeparator {}
+        FlatMenuItem {
             objectName: "galleryAiClassify"
             text: window.app && window.app.library.aiScanning ? "분류 중단" : "AI 자동분류 실행"
             enabled: !!window.app && (window.app.library.aiScanning || !window.app.library.busy)
@@ -3073,7 +3204,7 @@ ApplicationWindow {
                     window.flashNotice("AI 자동분류를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
             }
         }
-        MenuItem {
+        FlatMenuItem {
             objectName: "galleryAiClear"
             text: "AI 태그 초기화…"
             enabled: !!window.app && !window.app.library.busy
@@ -3081,12 +3212,12 @@ ApplicationWindow {
         }
     }
 
-    Menu {
+    FlatMenu {
         id: teachMenu
         property string targetKey: ""
         Instantiator {
             model: window.app ? window.app.library.aiCategories : []
-            MenuItem {
+            FlatMenuItem {
                 required property string modelData
                 text: modelData
                 onTriggered: {
@@ -3100,7 +3231,7 @@ ApplicationWindow {
             onObjectAdded: (index, object) => teachMenu.insertItem(index, object)
             onObjectRemoved: (index, object) => teachMenu.removeItem(object)
         }
-        MenuItem {
+        FlatMenuItem {
             text: "어느 쪽도 아님"
             onTriggered: {
                 if (window.app && window.app.library.selectionMode && window.app.library.selectedCount > 1
@@ -3126,19 +3257,19 @@ ApplicationWindow {
             batchTagInput.text = ""
             batchTagInput.forceActiveFocus()
         }
-        background: Rectangle {
-            color: "#1a1a1a"
-            radius: 12
-            border.width: 1
-            border.color: "#333333"
+        background: Card {
+            topColor: Theme.dialogTop
+            bottomColor: Theme.dialog
+            border.color: Theme.lineStrong
+            glow: 0.12
         }
         contentItem: ColumnLayout {
             spacing: 12
             Label {
                 text: "선택한 항목에 태그 추가"
                 font.bold: true
-                font.pixelSize: 14
-                color: "#f4f1f1"
+                font.pixelSize: Theme.fontSection
+                color: Theme.text
             }
             FlatField {
                 id: batchTagInput
@@ -3189,32 +3320,14 @@ ApplicationWindow {
         app: window.app
     }
 
-    Dialog {
+    FlatDialog {
         id: storageDialog
+        objectName: "storageDialog"
         parent: Overlay.overlay
         title: "저장 위치 확인"
-        anchors.centerIn: parent
-        width: Math.min(window.width - 48, 440)
-        modal: true
-        focus: true
-        closePolicy: Popup.CloseOnEscape
-        background: Rectangle {
-            color: "#141414"
-            radius: 16
-            border.width: 1
-            border.color: "#2a2a2a"
-        }
-        header: Label {
-            text: storageDialog.title
-            leftPadding: 24
-            rightPadding: 24
-            topPadding: 20
-            bottomPadding: 4
-            font.pixelSize: 18
-            background: null
-        }
-        footer: DialogButtonBox {
-            background: null
+        preferredWidth: 440
+        windowMargin: 48
+        footer: DialogButtons {
             FlatButton {
                 id: storageContinue
                 text: "계속"
@@ -3232,38 +3345,20 @@ ApplicationWindow {
         Label {
             width: parent.width
             text: window.app ? window.app.confirmation : ""
+            color: Theme.textMuted
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
         }
     }
 
-    Dialog {
+    FlatDialog {
         id: repairDialog
         objectName: "repairDialog"
         parent: Overlay.overlay
         title: "기록 복구"
-        anchors.centerIn: parent
-        width: Math.min(window.width - 48, 460)
-        modal: true
-        focus: true
-        closePolicy: Popup.CloseOnEscape
-        background: Rectangle {
-            color: "#141414"
-            radius: 16
-            border.width: 1
-            border.color: "#2a2a2a"
-        }
-        header: Label {
-            text: repairDialog.title
-            leftPadding: 24
-            rightPadding: 24
-            topPadding: 20
-            bottomPadding: 4
-            font.pixelSize: 18
-            background: null
-        }
-        footer: DialogButtonBox {
-            background: null
+        preferredWidth: 460
+        windowMargin: 48
+        footer: DialogButtons {
             FlatButton {
                 id: repairAccept
                 text: "복구"
