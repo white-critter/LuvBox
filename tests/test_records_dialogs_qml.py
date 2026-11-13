@@ -23,7 +23,7 @@ def scene():
     from unittest.mock import patch
 
     from PIL import Image
-    from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPointF, Qt, qInstallMessageHandler
+    from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QPointF, Qt, qInstallMessageHandler
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
     from PySide6.QtTest import QTest
@@ -275,6 +275,36 @@ def scene():
                 assert history.property("width") == 780 and history.property("height") == 520, (
                     history.property("width"), history.property("height"))
                 assert find("runHistoryList").property("width") > 700
+                # The window gets smaller while the dialog still fits: it moves back inside.
+                window.setWidth(860)
+                window.setHeight(600)
+                wait(lambda: overlay.width() <= 860 and overlay.height() <= 600, "window made smaller")
+                QTest.qWait(40)
+                assert history.property("width") == 780 and history.property("height") == 520
+                assert history.property("x") >= -1 and history.property("y") >= -1
+                assert history.property("x") + history.property("width") <= overlay.width() + 1, (
+                    history.property("x"), history.property("width"), overlay.width())
+                assert history.property("y") + history.property("height") <= overlay.height() + 1, (
+                    history.property("y"), history.property("height"), overlay.height())
+                window.setWidth(width)
+                window.setHeight(height)
+                wait(lambda: overlay.width() >= width - 1, "window restored")
+                QTest.qWait(40)
+                # Dragging the corner grip resizes by the pointer's travel, without wavering.
+                grip = find("runHistoryResize")
+                start = grip.mapToScene(QPointF(grip.width() / 2, grip.height() / 2)).toPoint()
+                QTest.mousePress(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, start)
+                widths = []
+                for step in range(1, 9):
+                    QTest.mouseMove(window, QPoint(start.x() - 15 * step, start.y() - 10 * step))
+                    QTest.qWait(10)
+                    widths.append(history.property("width"))
+                QTest.mouseRelease(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                                   QPoint(start.x() - 120, start.y() - 80))
+                QTest.qWait(40)
+                assert widths == sorted(widths, reverse=True), widths
+                assert abs(history.property("width") - 660) <= 6, (history.property("width"), widths)
+                assert abs(history.property("height") - 440) <= 6, history.property("height")
                 history.setProperty("chosenWidth", 960)
                 history.setProperty("chosenHeight", 720)
                 QTest.qWait(40)
@@ -301,6 +331,26 @@ def scene():
             assert dialog.property("height") >= min(700, height - 56)
             assert dialog.property("x") >= -1 and dialog.property("y") + dialog.property("height") <= overlay.height() + 1
             shot(f"{tag}-unsaved")
+            if width >= 1080:
+                # The same when the window shrinks under the unsaved list.
+                dialog.setProperty("chosenWidth", 800)
+                dialog.setProperty("chosenHeight", 520)
+                QTest.qWait(40)
+                window.setWidth(880)
+                window.setHeight(600)
+                wait(lambda: overlay.width() <= 880 and overlay.height() <= 600, "window made smaller")
+                QTest.qWait(40)
+                assert dialog.property("width") == 800 and dialog.property("height") == 520
+                assert dialog.property("x") >= -1 and dialog.property("y") >= -1
+                assert dialog.property("x") + dialog.property("width") <= overlay.width() + 1, (
+                    dialog.property("x"), dialog.property("width"), overlay.width())
+                assert dialog.property("y") + dialog.property("height") <= overlay.height() + 1
+                window.setWidth(width)
+                window.setHeight(height)
+                wait(lambda: overlay.width() >= width - 1, "window restored")
+                dialog.setProperty("chosenWidth", 1000)
+                dialog.setProperty("chosenHeight", 740)
+                QTest.qWait(40)
             click("unsavedViewExcluded")
             wait(lambda: controller.records.unsavedView == "excluded" and controller.records.unsavedTotal == 1
                  and not controller.records.unsavedBusy, "excluded view")

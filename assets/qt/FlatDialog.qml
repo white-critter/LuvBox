@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Layouts
 
 // The frame every dialog shares: the title at the top left with an optional
 // line under it, one padding, and the buttons at the bottom right

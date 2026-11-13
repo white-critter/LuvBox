@@ -1673,16 +1673,25 @@ ApplicationWindow {
                                 Math.floor(Math.max(0, left) / gallery.cellWidth),
                                 Math.floor(Math.max(0, right) / gallery.cellWidth), columns)
                         }
+                        // Where a pointer position is inside the grid's visible area. The handler
+                        // reports positions in the scrolling content, which already include the
+                        // scroll offset and go stale while the grid moves under a resting pointer,
+                        // so the scene position is mapped instead.
+                        function inView(scenePoint) {
+                            return gallery.mapFromItem(null, scenePoint.x, scenePoint.y)
+                        }
                         function follow() {
-                            currentX = Math.max(0, Math.min(gallery.width, centroid.position.x))
-                            currentY = centroid.position.y + gallery.contentY - gallery.originY
+                            const point = inView(centroid.scenePosition)
+                            currentX = Math.max(0, Math.min(gallery.width, point.x))
+                            currentY = point.y + gallery.contentY - gallery.originY
                             update()
                         }
                         onActiveChanged: {
                             if (active) {
                                 window.stopWheel()
-                                startX = Math.max(0, Math.min(gallery.width, centroid.pressPosition.x))
-                                startY = centroid.pressPosition.y + gallery.contentY - gallery.originY
+                                const pressed = inView(centroid.scenePressPosition)
+                                startX = Math.max(0, Math.min(gallery.width, pressed.x))
+                                startY = pressed.y + gallery.contentY - gallery.originY
                                 const held = pressModifiers | centroid.modifiers
                                 window.app.library.beginBandSelection(
                                     (held & (Qt.ControlModifier | Qt.ShiftModifier)) !== 0)
@@ -1699,7 +1708,7 @@ ApplicationWindow {
                         repeat: true
                         running: bandDrag.active
                         onTriggered: {
-                            const y = bandDrag.centroid.position.y
+                            const y = bandDrag.inView(bandDrag.centroid.scenePosition).y
                             let step = 0
                             if (y < 28)
                                 step = -Math.min(48, 8 + (28 - y) * 0.6)
@@ -1718,6 +1727,8 @@ ApplicationWindow {
                     }
                     Rectangle {
                         objectName: "galleryBand"
+                        // Drawn over the visible area, not inside the scrolling content.
+                        parent: gallery
                         visible: bandDrag.active
                         z: 5
                         x: Math.min(bandDrag.startX, bandDrag.currentX)

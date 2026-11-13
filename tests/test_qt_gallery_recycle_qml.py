@@ -27,7 +27,7 @@ def scene(shots=None):
 
     from PIL import Image
     from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPointF, Qt, qInstallMessageHandler
-    from PySide6.QtGui import QFont, QFontDatabase
+    from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from PySide6.QtQml import QQmlApplicationEngine
@@ -70,6 +70,16 @@ def scene(shots=None):
         if result is None:
             raise AssertionError("Missing product control: " + name)
         return result
+
+    def press_key(key):
+        # QTest.keyClick keeps Python's global lock for as long as Qt handles the key. Changing
+        # the thumbnail size makes Qt's image thread call the provider (Python) at the same
+        # moment, and the two stopped each other in 9 of 200 cold starts. Posted events are
+        # delivered by processEvents, which lets other threads run, as the real event loop
+        # does: 0 of 200 stopped that way.
+        for kind in (QEvent.Type.KeyPress, QEvent.Type.KeyRelease):
+            QCoreApplication.postEvent(window, QKeyEvent(kind, key, Qt.KeyboardModifier.NoModifier))
+        settle()
 
     def shot(name):
         if shots is not None:
@@ -147,8 +157,8 @@ def scene(shots=None):
         size_choice = find("thumbSizeChoice")
         QMetaObject.invokeMethod(size_choice, "forceActiveFocus")
         settle()
-        QTest.keyClick(window, Qt.Key.Key_Up)
-        QTest.keyClick(window, Qt.Key.Key_Up)
+        press_key(Qt.Key.Key_Up)
+        press_key(Qt.Key.Key_Up)
         wait(lambda: window.property("densityChoice") == 0 and controller.preferences["gallery_density"] == 0
              and not controller.busy, "small thumbnails chosen")
         assert grid.property("cellHeight") < large

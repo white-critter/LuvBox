@@ -248,6 +248,38 @@ def scene(shots=None):
         click("gallerySelectionToggle")
         assert not library.selectionMode and library.selectedCount == 0
 
+        # --- The same drag after scrolling two rows down. The rectangle is under the pointer,
+        # the tiles under it are the ones chosen, and the grid stays put while the pointer is
+        # in the middle of the view. (Positions from the handler already include the scroll
+        # offset; adding it again chose tiles further down and kept the grid scrolling.)
+        grid.setProperty("contentY", grid.property("originY") + grid.property("cellHeight") * 2)
+        settle(150)
+        scrolled = grid.property("contentY")
+        first = columns * 2
+        begin, _ = tile_point(first)
+        finish, _ = tile_point(first + columns + 1)
+        QTest.mousePress(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, begin)
+        for step in range(1, steps + 1):
+            QTest.mouseMove(window, QPoint(begin.x() + (finish.x() - begin.x()) * step // steps,
+                                           begin.y() + (finish.y() - begin.y()) * step // steps))
+            settle(15)
+        band = find("galleryBand")
+        wait(lambda: band.property("visible"), "selection rectangle shown after scrolling")
+        wait(lambda: library.selectedCount == 4, "dragged rectangle selected two by two after scrolling")
+        corner = band.mapToItem(grid, QPointF(0, 0))
+        pressed = grid.mapFromScene(QPointF(begin))
+        assert abs(corner.x() - pressed.x()) <= 2 and abs(corner.y() - pressed.y()) <= 2, (corner, pressed)
+        settle(150)
+        assert abs(grid.property("contentY") - scrolled) < 1, (grid.property("contentY"), scrolled)
+        shot("4-drag-band-scrolled")
+        QTest.mouseRelease(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, finish)
+        settle(60)
+        assert set(library.selectedKeys) == {keys[first], keys[first + 1], keys[first + columns],
+                                             keys[first + columns + 1]}, library.selectedKeys
+        click("gallerySelectionClear")
+        click("gallerySelectionToggle")
+        assert not library.selectionMode and library.selectedCount == 0
+
         controller.requestClose()
         wait(lambda: controller.shutdownReady, "shutdown")
         window.close()

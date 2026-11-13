@@ -40,8 +40,8 @@ Rectangle {
         anchors.rightMargin: 8
         spacing: 6
         Canvas {
-            width: 14
-            height: 14
+            Layout.preferredWidth: 14
+            Layout.preferredHeight: 14
             onPaint: {
                 const ctx = getContext("2d")
                 ctx.reset()
@@ -68,8 +68,8 @@ Rectangle {
         }
         Rectangle {
             visible: field.text.length > 0
-            width: 20
-            height: 20
+            Layout.preferredWidth: 20
+            Layout.preferredHeight: 20
             radius: Theme.radiusCard
             color: field.clearHovered ? Theme.raisedHover : "transparent"
             Label {

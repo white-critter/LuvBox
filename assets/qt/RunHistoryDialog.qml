@@ -55,6 +55,13 @@ FlatDialog {
         placedY = Math.max(0, Math.min(placedY, parent.height - fittedHeight))
     }
 
+    // The window can change size while the dialog still fits. Its own size then stays the
+    // same, so nothing else would bring it back inside the window.
+    Connections {
+        target: dialog.parent
+        function onWidthChanged() { dialog.place() }
+        function onHeightChanged() { dialog.place() }
+    }
     onWidthChanged: { place(); syncContent() }
     onHeightChanged: { place(); syncContent() }
     onAboutToShow: {
@@ -258,9 +265,13 @@ FlatDialog {
             property real originY
             property int originWidth
             property int originHeight
+            // The grip sits on the corner it moves, so positions inside it shift with every
+            // step and the corner followed the pointer at half speed. Follow the pointer in
+            // window coordinates instead.
             onPressed: function(mouse) {
-                originX = mouse.x
-                originY = mouse.y
+                const point = mapToItem(null, mouse.x, mouse.y)
+                originX = point.x
+                originY = point.y
                 originWidth = dialog.width
                 originHeight = dialog.height
                 dialog.resizing = true
@@ -268,7 +279,8 @@ FlatDialog {
             onPositionChanged: function(mouse) {
                 if (!pressed)
                     return
-                dialog.applySize(originWidth + mouse.x - originX, originHeight + mouse.y - originY)
+                const point = mapToItem(null, mouse.x, mouse.y)
+                dialog.applySize(originWidth + point.x - originX, originHeight + point.y - originY)
             }
             onReleased: dialog.resizing = false
         }
