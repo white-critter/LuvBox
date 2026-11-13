@@ -15,6 +15,7 @@ import time
 import unittest
 import zipfile
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import launcher as launcher_format
 from tools import build_launcher
 

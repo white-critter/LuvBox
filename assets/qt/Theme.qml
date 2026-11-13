@@ -32,9 +32,13 @@ QtObject {
     readonly property color textDisabled: "#776b6e"
 
     readonly property color accent: "#d93645"
-    readonly property color accentTop: "#ea4b5a"     // the main button is lit from above
+    // The main button is lit from above. Both ends sit a little under the plain
+    // accent so a full-width button does not outshine the page around it.
+    readonly property color accentTop: "#df4352"
+    readonly property color accentBase: "#cd3040"
+    readonly property real mainGlow: 0.10            // strength of the light around the main button
+    readonly property int mainGlowStep: 2            // width of each of its two rings
     readonly property color glow: "#e23a4c"          // the red light behind the heart on the startup screen
-    readonly property color accentHover: "#e24b59"
     readonly property color accentPressed: "#b42332"
     readonly property color accentDisabled: Qt.rgba(0.851, 0.212, 0.271, 0.35)
     readonly property color accentSoft: "#2a1519"    // a filter that is on, a chosen tile

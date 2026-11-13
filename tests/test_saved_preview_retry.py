@@ -10,6 +10,7 @@ from unittest.mock import patch
 from PIL import Image
 from PySide6.QtCore import QCoreApplication
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import qt_saved_preview
 from luvbox.preview import Thumbnail
 from tests import test_qt_saved_preview as support

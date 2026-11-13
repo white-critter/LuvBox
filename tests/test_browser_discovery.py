@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import browser_discovery as discovery
 
 

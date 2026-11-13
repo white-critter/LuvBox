@@ -10,6 +10,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import _JOINED, HistoryError, HistoryStore
 from luvbox.recovery import rebuild_history
 from luvbox.storage import _merge_history, _merge_media

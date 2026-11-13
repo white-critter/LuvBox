@@ -16,6 +16,7 @@ from gallery_dl import config, exception
 from gallery_dl.extractor.common import Extractor
 from gallery_dl.extractor.message import Message
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import JobOptions, run_worker
 from luvbox.storage import resolve_storage
 

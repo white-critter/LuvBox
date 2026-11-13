@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import recycling
 from luvbox.recycling import RecyclingError, file_signature, recycle_file, verify_receipt
 

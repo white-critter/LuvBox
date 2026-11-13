@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from tests import test_core as core_support
 from tests import test_missing_files as missing_support
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import run_worker
 from luvbox.history import HistoryStore
 from luvbox.storage import resolve_storage

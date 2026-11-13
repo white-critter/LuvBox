@@ -8,6 +8,7 @@ import time
 import unittest
 from pathlib import Path
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.process_limits import MetadataJob
 
 

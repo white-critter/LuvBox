@@ -9,6 +9,7 @@ import unittest
 from gallery_dl.extractor.message import Message
 
 from tests import test_core, test_media
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import unsaved
 from luvbox.core import run_worker
 

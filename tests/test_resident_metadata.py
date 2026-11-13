@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from tests.test_metadata import PNG, image_payload
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import metadata
 
 

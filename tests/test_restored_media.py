@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import HistoryStore
 from luvbox.storage import migrate_records, resolve_storage
 
@@ -49,9 +50,11 @@ class RestoredMediaTests(unittest.TestCase):
     def test_restore_in_former_root_reconnects_all_layouts_and_preserves_metadata(self):
         self.parked.rename(self.original)
         self.store.import_legacy(refresh=True)
-        rows = self.store.records(include_deleted=False)
+        rows = self.store.records()
         self.assertEqual(len(rows), 2)
         self.assertTrue(all(row["path"] == str(self.original) for row in rows))
+        # Both layouts' records are reconnected; the gallery lists the one file once.
+        self.assertEqual(len(self.store.records(include_deleted=False)), 1)
         for row in rows:
             for field in ("saved_at", "posted_at", "posted_source", "author", "author_id", "source_url",
                           "metadata_status", "author_metadata_status", "status", "record_source", "content", "hashtags"):
@@ -104,7 +107,8 @@ class RestoredMediaTests(unittest.TestCase):
             self.store.set_missing_ignored([("100", 1, "photo")], True)
         self.parked.rename(self.original)
         self.store.import_legacy(refresh=True)
-        self.assertEqual(self.store.record_page(include_deleted=False)["total"], 2)
+        self.assertEqual(sum(bool(row["path"]) for row in self.store.records()), 2)
+        self.assertEqual(self.store.record_page(include_deleted=False)["total"], 1)   # one file, one entry
         self.assertEqual(self.store.ignored_media(), {("100", 1, "photo")})
 
     def test_unavailable_former_root_does_not_clear_the_saved_last_location(self):

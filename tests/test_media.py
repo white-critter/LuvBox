@@ -19,6 +19,7 @@ from gallery_dl.extractor.message import Message
 from gallery_dl.extractor.twitter import TwitterExtractor
 
 from tests import test_core
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import JobOptions, run_worker
 from luvbox.history import HistoryError, HistoryStore
 from luvbox.metadata import embed_source as _real_embed_source

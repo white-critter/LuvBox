@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import HistoryError, HistoryStore
 from luvbox.recovery import latest_backup
 from luvbox.storage import (MigrationError, prepare_storage, publish_snapshot, resolve_storage,

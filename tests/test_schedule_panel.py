@@ -26,6 +26,7 @@ from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
 from PySide6.QtQuickControls2 import QQuickStyle
 from shiboken6 import delete
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.qt_schedule import ScheduleController
 
 QQuickStyle.setStyle("Basic")

@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import launcher, scheduled
 from tests.release_server import make_program
 

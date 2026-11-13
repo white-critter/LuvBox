@@ -306,45 +306,132 @@ def _normalize_tag(tag) -> str:
     return cleaned.strip()
 
 
-def _exact_duplicate_exists(alias: str) -> str:
-    """Correlated exact-hash twin check. ``alias`` is a fixed SQL identifier.
+# One file can have a record per folder layout: a photo saved by author folder,
+# moved into one folder and met again by a flat save has two records with the
+# same path. Everything a person looks at counts files, so one record stands
+# for the file and the others are left out (see _precedes and _shadowed).
+_MODE_LIST = "('author','date','flat')"
+# Windows names files without regard to case.
+_SAME_TEXT = " COLLATE NOCASE" if os.name == "nt" else ""
+
+
+def _precedes(first: str, second: str) -> str:
+    """SQL: record ``first`` stands for their shared file or media before ``second``.
+
+    The record with a save time comes first, then the earlier save, then a
+    fixed order of layout and attachment. The order is total within a tweet,
+    so exactly one record of a file is first, and it stays first when a later
+    save in another layout adds a record without a save time.
+    """
+    return (
+        f"(({first}.saved_at IS NOT NULL AND {second}.saved_at IS NULL) OR "
+        f"(({first}.saved_at IS NULL)=({second}.saved_at IS NULL) AND "
+        f"(COALESCE({first}.saved_at,''),{first}.folder_mode,{first}.num,{first}.media_type) < "
+        f"(COALESCE({second}.saved_at,''),{second}.folder_mode,{second}.num,{second}.media_type)))"
+    )
+
+
+def _shadowed(alias: str, twin: str = "twin") -> str:
+    """SQL: another record already stands for the file this record points at.
+
+    File names begin with their tweet ID, so only that tweet's records can
+    hold the same path; the layout list lets SQLite use the primary key. A
+    record never precedes itself, so it needs no exclusion here.
+    """
+    return (
+        f"({alias}.path!='' AND EXISTS (SELECT 1 FROM media AS {twin} "
+        f"WHERE {twin}.folder_mode IN {_MODE_LIST} AND {twin}.tweet_id={alias}.tweet_id "
+        f"AND {twin}.path={alias}.path{_SAME_TEXT} AND {_precedes(twin, alias)}))"
+    )
+
+
+def _listed(alias: str) -> str:
+    """SQL: a record that has a file and stands for it."""
+    return f"({alias}.path!='' AND NOT {_shadowed(alias)})"
+
+
+def _fileless_elsewhere(alias: str) -> str:
+    """SQL: a record without a file that the gallery leaves out.
+
+    Its media has a file under another layout, an earlier file-less record
+    stands for the media, or the person removed it through another layout's
+    record (declined, or sent to the Recycle Bin). The record itself can match
+    only through the last two, which hide it on their own already.
+    """
+    receipt = (
+        "other.last_path!='' AND EXISTS (SELECT 1 FROM deletion_items WHERE deletion_items.tweet_id=other.tweet_id "
+        "AND deletion_items.num=other.num AND deletion_items.media_type=other.media_type "
+        f"AND deletion_items.path=other.last_path{_SAME_TEXT} "
+        "AND deletion_items.status IN ('recycled','interrupted'))"
+    )
+    return (
+        f"(({alias}.path='')=1 AND EXISTS (SELECT 1 FROM media AS other WHERE other.folder_mode IN {_MODE_LIST} "
+        f"AND other.tweet_id={alias}.tweet_id AND other.num={alias}.num AND other.media_type={alias}.media_type "
+        f"AND (other.path!='' OR {_precedes('other', alias)} "
+        f"OR other.record_source='declined' OR ({receipt}))))"
+    )
+
+
+def _on_file(mark: str, media: str = "media") -> str:
+    """SQL: a row of a mark table (aliased ``mark``) set on any record of the file ``media`` points at.
+
+    A favorite, a tag or a taught category belongs to the file, whichever of
+    its records was shown when the person set it.
+    """
+    return (
+        f"{mark}.folder_mode IN {_MODE_LIST} AND {mark}.tweet_id={media}.tweet_id AND ("
+        f"({mark}.folder_mode={media}.folder_mode AND {mark}.num={media}.num AND {mark}.media_type={media}.media_type) "
+        f"OR ({media}.path!='' AND EXISTS (SELECT 1 FROM media AS marked WHERE marked.folder_mode={mark}.folder_mode "
+        f"AND marked.tweet_id={mark}.tweet_id AND marked.num={mark}.num AND marked.media_type={mark}.media_type "
+        f"AND marked.path={media}.path{_SAME_TEXT})))"
+    )
+
+
+def _other_file(alias: str, media: str) -> str:
+    """SQL fragment after the join of ``h2``/``m2``: a listed record of a different file than ``media``."""
+    return (
+        f"{_listed('m2')} AND m2.path!={media}.path{_SAME_TEXT} "
+        f"AND NOT (h2.folder_mode={alias}.folder_mode AND h2.tweet_id={alias}.tweet_id "
+        f"AND h2.num={alias}.num AND h2.media_type={alias}.media_type)"
+    )
+
+
+def _exact_duplicate_exists(alias: str, media: str) -> str:
+    """Correlated exact-hash twin check. ``alias`` is the hash row, ``media`` its record.
 
     Only the file hash counts. An equal perceptual hash used to count as well,
-    which listed different pictures that merely look alike once reduced.
+    which listed different pictures that merely look alike once reduced. The
+    twin has to be another file: a second record of the same path is not one.
     """
     return (
         "EXISTS (SELECT 1 FROM image_hashes h2 "
         "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
         "AND m2.num=h2.num AND m2.media_type=h2.media_type "
-        f"WHERE m2.path!='' AND {alias}.file_hash!='' AND h2.file_hash={alias}.file_hash "
-        f"AND h2.filesize={alias}.filesize "
-        f"AND NOT (h2.folder_mode={alias}.folder_mode AND h2.tweet_id={alias}.tweet_id "
-        f"AND h2.num={alias}.num AND h2.media_type={alias}.media_type))"
+        f"WHERE {alias}.file_hash!='' AND h2.file_hash={alias}.file_hash "
+        f"AND h2.filesize={alias}.filesize AND {_other_file(alias, media)})"
     )
 
 
-def _cluster_duplicate_exists(alias: str) -> str:
-    """Correlated check that another active photo shares the same saved cluster_id."""
+def _cluster_duplicate_exists(alias: str, media: str) -> str:
+    """Correlated check that another file's listed record shares the same saved cluster_id."""
     return (
         f"{alias}.cluster_id > 0 AND EXISTS (SELECT 1 FROM image_hashes h2 "
         "JOIN media m2 ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
         "AND m2.num=h2.num AND m2.media_type=h2.media_type "
-        f"WHERE h2.cluster_id={alias}.cluster_id AND m2.path!='' "
-        f"AND NOT (h2.folder_mode={alias}.folder_mode AND h2.tweet_id={alias}.tweet_id "
-        f"AND h2.num={alias}.num AND h2.media_type={alias}.media_type))"
+        f"WHERE h2.cluster_id={alias}.cluster_id AND {_other_file(alias, media)})"
     )
 
 
-def _duplicate_predicate(alias: str, *, has_cluster: bool) -> str:
-    """True when a hash row shares a saved cluster or an exact twin with another active photo.
+def _duplicate_predicate(alias: str, media: str, *, has_cluster: bool) -> str:
+    """True when a hash row shares a saved cluster or an exact twin with another file.
 
     SQLite evaluates CASE branches in order, so a stored cluster id uses the
     cluster index and does not run the unclustered exact-hash lookup.
     """
-    exact = _exact_duplicate_exists(alias)
+    exact = _exact_duplicate_exists(alias, media)
     if not has_cluster:
         return exact
-    cluster = _cluster_duplicate_exists(alias)
+    cluster = _cluster_duplicate_exists(alias, media)
     return f"(CASE WHEN {cluster} THEN 1 WHEN {alias}.cluster_id = 0 AND {exact} THEN 1 ELSE 0 END)=1"
 
 
@@ -1907,6 +1994,11 @@ class HistoryStore:
                            "AND deletion_items.path=media.last_path "
                            + ("COLLATE NOCASE " if os.name == "nt" else "") +
                            "AND deletion_items.status IN ('recycled','interrupted')))" )
+            # One entry per file, and one per media that has no file anywhere:
+            # a second record of the same path, or an old layout's record of a
+            # photo that is here, is not another photo.
+            clauses.append("NOT " + _shadowed("media"))
+            clauses.append("NOT " + _fileless_elsewhere("media"))
         if media_type != "all":
             clauses.append("media.media_type=?")
             params.append(media_type)
@@ -1937,19 +2029,15 @@ class HistoryStore:
             if not has_favorites:
                 clauses.append("0")
             else:
-                clauses.append("EXISTS (SELECT 1 FROM favorites WHERE favorites.folder_mode=media.folder_mode "
-                               "AND favorites.tweet_id=media.tweet_id AND favorites.num=media.num "
-                               "AND favorites.media_type=media.media_type)")
+                clauses.append("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark") + ")")
         if user_tag:
             tag = user_tag.strip().lstrip("#")
             if tag:
                 if not has_media_tags:
                     clauses.append("0")
                 else:
-                    clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
-                                   "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
-                                   "AND media_tags.media_type=media.media_type AND media_tags.source='user' "
-                                   "AND media_tags.tag=?)")
+                    clauses.append("EXISTS (SELECT 1 FROM media_tags AS mark WHERE " + _on_file("mark") +
+                                   " AND mark.source='user' AND mark.tag=?)")
                     params.append(tag)
         if ai_category:
             if not isinstance(ai_category, str) or ai_category not in _AI_CATEGORIES or not has_media_tags:
@@ -1972,10 +2060,10 @@ class HistoryStore:
             if not has_image_hashes:
                 clauses.append("0")
             else:
-                clauses.append("media.path!='' AND EXISTS (SELECT 1 FROM image_hashes h1 "
+                clauses.append(_listed("media") + " AND EXISTS (SELECT 1 FROM image_hashes h1 "
                                "WHERE h1.folder_mode=media.folder_mode AND h1.tweet_id=media.tweet_id "
                                "AND h1.num=media.num AND h1.media_type=media.media_type AND "
-                               + _duplicate_predicate("h1", has_cluster=has_cluster_id) + ")")
+                               + _duplicate_predicate("h1", "media", has_cluster=has_cluster_id) + ")")
         if author:
             if not isinstance(author, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,15}", author):
                 raise HistoryError(_HISTORY_HELP)
@@ -2115,39 +2203,61 @@ class HistoryStore:
                 and isinstance(media_type, str)):
             raise HistoryError(_HISTORY_HELP)
         with self._db:
-            exists = self._db.execute(
+            # The star belongs to the file: any of its records may carry it.
+            records = self._file_records(folder_mode, tweet_id, num, media_type)
+            starred = [record for record in records if self._db.execute(
                 "SELECT 1 FROM favorites WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                (folder_mode, tweet_id, num, media_type)
-            ).fetchone()
-            if exists:
-                self._db.execute(
-                    "DELETE FROM favorites WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                    (folder_mode, tweet_id, num, media_type)
-                )
+                record).fetchone()]
+            if starred:
+                self._db.executemany(
+                    "DELETE FROM favorites WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?", starred)
                 return False
-            else:
-                self._db.execute(
-                    "INSERT INTO favorites(folder_mode, tweet_id, num, media_type, created_at) VALUES (?,?,?,?,?)",
-                    (folder_mode, tweet_id, num, media_type, _now())
-                )
-                return True
+            self._db.execute(
+                "INSERT INTO favorites(folder_mode, tweet_id, num, media_type, created_at) VALUES (?,?,?,?,?)",
+                (folder_mode, tweet_id, num, media_type, _now())
+            )
+            return True
+
+    def _file_records(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> list[tuple]:
+        """Every record of the file this record points at, itself first.
+
+        One file can be recorded once per folder layout. What a person sets
+        on a photo (a star, a tag, a taught category) belongs to the file.
+        """
+        own = (folder_mode, tweet_id, num, media_type)
+        stored = self._db.execute(
+            "SELECT path FROM media WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?", own).fetchone()
+        if stored is None or not stored["path"]:
+            return [own]
+        key = self._file_key(stored["path"])
+        modes = sorted(_MODES)
+        records = [own]
+        for row in self._db.execute(
+                "SELECT folder_mode,tweet_id,num,media_type,path FROM media WHERE folder_mode IN ("
+                + ",".join("?" for _ in modes) + ") AND tweet_id=? AND path!=''", (*modes, tweet_id)).fetchall():
+            record = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+            if record != own and self._file_key(row["path"]) == key:
+                records.append(record)
+        return records
 
     @_safe
     def is_favorite(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> bool:
         if not self._has_table("favorites"):
             return False
-        row = self._db.execute(
+        return any(self._db.execute(
             "SELECT 1 FROM favorites WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-            (folder_mode, tweet_id, num, media_type)
-        ).fetchone()
-        return bool(row)
+            record).fetchone() for record in self._file_records(folder_mode, tweet_id, num, media_type))
 
     @_safe
     def favorite_identities(self) -> set[tuple]:
+        """Every record whose file carries a star, whichever of its records was starred."""
         if not self._has_table("favorites"):
             return set()
         rows = self._read_rows("SELECT folder_mode, tweet_id, num, media_type FROM favorites")
-        return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]) for r in rows}
+        found = set()
+        for row in rows:
+            found.update(self._file_records(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
+        return found
 
     @_safe
     def favorite_identities_among(self, identities) -> set[tuple]:
@@ -2156,10 +2266,14 @@ class HistoryStore:
             return set()
         found = set()
         for clause, params in _identity_chunks(identities):
+            # A star set on the record itself, or on another record of the same file.
             rows = self._read_rows(
                 "SELECT folder_mode, tweet_id, num, media_type FROM favorites "
-                f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})",
-                params,
+                f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause}) "
+                "UNION SELECT media.folder_mode, media.tweet_id, media.num, media.media_type FROM media "
+                f"WHERE (media.folder_mode, media.tweet_id, media.num, media.media_type) IN (VALUES {clause}) "
+                "AND EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark") + ")",
+                (*params, *params),
             )
             found.update((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows)
         return found
@@ -2199,46 +2313,69 @@ class HistoryStore:
         tag = _normalize_tag(tag)
         if not tag:
             return False
+        removed = False
         with self._db:
-            row = self._db.execute(
-                "SELECT source FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
-                (folder_mode, tweet_id, num, media_type, tag),
-            ).fetchone()
-            cur = self._db.execute(
-                "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
-                (folder_mode, tweet_id, num, media_type, tag)
-            )
-            if cur.rowcount > 0 and row is not None and row["source"] == "ai":
-                # Keep an empty AI evaluation marker so incremental scans do not
-                # re-apply a tag that the user explicitly removed.
-                self._db.execute(
-                    "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
-                    (folder_mode, tweet_id, num, media_type, "", "ai", _now()),
+            own = (folder_mode, tweet_id, num, media_type)
+            for record in self._file_records(*own):
+                row = self._db.execute(
+                    "SELECT source FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
+                    (*record, tag),
+                ).fetchone()
+                if row is None or (record != own and row["source"] != "user"):
+                    # Another record's own AI label is that record's; a tag the
+                    # person typed belongs to the file and goes everywhere.
+                    continue
+                cur = self._db.execute(
+                    "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
+                    (*record, tag)
                 )
-            return cur.rowcount > 0
+                removed = removed or cur.rowcount > 0
+                if cur.rowcount > 0 and row["source"] == "ai":
+                    # Keep an empty AI evaluation marker so incremental scans do not
+                    # re-apply a tag that the user explicitly removed.
+                    self._db.execute(
+                        "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                        (*record, "", "ai", _now()),
+                    )
+        return removed
 
     @_safe
     def item_tags(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> list[dict]:
         if not self._has_table("media_tags"):
             return []
+        own = (folder_mode, tweet_id, num, media_type)
         rows = self._read_rows(
             "SELECT tag, source, created_at FROM media_tags "
             "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag != '' ORDER BY created_at ASC",
-            (folder_mode, tweet_id, num, media_type)
+            own
         )
-        return [{"tag": row["tag"], "source": row["source"]} for row in rows]
+        tags = [{"tag": row["tag"], "source": row["source"]} for row in rows]
+        known = {item["tag"] for item in tags}
+        # Tags the person typed while another record of this file was shown.
+        for record in self._file_records(*own)[1:]:
+            for row in self._read_rows(
+                    "SELECT tag, source FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND tag != '' AND source='user' ORDER BY created_at ASC", record):
+                if row["tag"] in known:
+                    for item in tags:
+                        if item["tag"] == row["tag"]:
+                            item["source"] = "user"
+                else:
+                    known.add(row["tag"])
+                    tags.append({"tag": row["tag"], "source": "user"})
+        return tags
 
     @_safe
     def user_tags(self, limit: int = 200) -> list[dict]:
         if not self._has_table("media_tags"):
             return []
+        # Count files: a tag typed on either record of a file counts once.
         rows = self._read_rows(
-            "SELECT media_tags.tag AS tag, COUNT(*) AS count FROM media_tags "
-            "JOIN media ON media.folder_mode=media_tags.folder_mode AND media.tweet_id=media_tags.tweet_id "
-            "AND media.num=media_tags.num AND media.media_type=media_tags.media_type "
-            "WHERE media_tags.tag != '' AND media_tags.source='user' AND media.path != '' "
-            "GROUP BY media_tags.tag ORDER BY count DESC, media_tags.tag ASC LIMIT ?",
+            "SELECT tag, COUNT(*) AS count FROM (SELECT DISTINCT mark.tag AS tag, media.rowid AS file FROM media "
+            "JOIN media_tags AS mark ON " + _on_file("mark") + " "
+            "WHERE mark.tag != '' AND mark.source='user' AND " + _listed("media") + ") "
+            "GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?",
             (limit,)
         )
         return [{"tag": row["tag"], "count": row["count"]} for row in rows]
@@ -2250,7 +2387,7 @@ class HistoryStore:
             return []
         query = (
             "SELECT folder_mode, tweet_id, num, media_type, path, filename "
-            "FROM media WHERE media_type='photo' AND path != '' "
+            "FROM media WHERE media_type='photo' AND " + _listed("media") + " "
             "AND NOT EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
             "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
             "AND media_tags.media_type=media.media_type AND media_tags.source IN ('ai','confirmed')) "
@@ -2301,7 +2438,7 @@ class HistoryStore:
             return self.photo_records_for_scan()
         return self._read_rows(
             "SELECT folder_mode, tweet_id, num, media_type, path, filename "
-            "FROM media WHERE media_type='photo' AND path != '' "
+            "FROM media WHERE media_type='photo' AND " + _listed("media") + " "
             "AND NOT EXISTS (SELECT 1 FROM ai_embeddings e WHERE e.folder_mode=media.folder_mode "
             "AND e.tweet_id=media.tweet_id AND e.num=media.num AND e.media_type=media.media_type) "
             "ORDER BY rowid ASC"
@@ -2330,7 +2467,7 @@ class HistoryStore:
             "FROM ai_embeddings e "
             "JOIN media m ON m.folder_mode=e.folder_mode AND m.tweet_id=e.tweet_id "
             "AND m.num=e.num AND m.media_type=e.media_type "
-            "WHERE m.media_type='photo' AND m.path != '' "
+            "WHERE m.media_type='photo' AND " + _listed("m") + " "
             + feedback + tags
         )
 
@@ -2546,13 +2683,16 @@ class HistoryStore:
         """The category shown for one photo, and whether the user confirmed it."""
         category, confirmed, confidence = "", False, None
         if self._has_table("ai_feedback"):
-            row = self._db.execute(
-                "SELECT category FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                (folder_mode, tweet_id, num, media_type),
-            ).fetchone()
-            if row is not None:
-                category = row["category"] or ""
-                confirmed = True
+            # What the person taught while any record of this file was shown.
+            for record in self._file_records(folder_mode, tweet_id, num, media_type):
+                row = self._db.execute(
+                    "SELECT category FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                    record,
+                ).fetchone()
+                if row is not None:
+                    category = row["category"] or ""
+                    confirmed = True
+                    break
         if not confirmed and self._has_table("media_tags"):
             row = self._db.execute(
                 "SELECT tag FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
@@ -2582,7 +2722,15 @@ class HistoryStore:
         if not identities or not self._has_table("ai_feedback"):
             return 0
         now = _now()
-        ident_rows = [(folder_mode, tweet_id, num, media_type) for folder_mode, tweet_id, num, media_type in identities]
+        ident_rows = []
+        seen = set()
+        for folder_mode, tweet_id, num, media_type in identities:
+            # Every record of the file learns the same answer, so it holds
+            # whichever record later stands for the file.
+            for record in self._file_records(folder_mode, tweet_id, num, media_type):
+                if record not in seen:
+                    seen.add(record)
+                    ident_rows.append(record)
         feedback_rows = [(f, t, n, m, category, now) for f, t, n, m in ident_rows]
         tag_rows = [(f, t, n, m, category or "", "confirmed", now) for f, t, n, m in ident_rows]
         with self._db:
@@ -2671,7 +2819,7 @@ class HistoryStore:
             "SELECT media_tags.tag AS tag, COUNT(*) AS count FROM media_tags "
             "JOIN media ON media.folder_mode=media_tags.folder_mode AND media.tweet_id=media_tags.tweet_id "
             "AND media.num=media_tags.num AND media.media_type=media_tags.media_type "
-            "WHERE media_tags.source IN ('ai', 'confirmed') AND media_tags.tag != '' AND media.path != '' "
+            "WHERE media_tags.source IN ('ai', 'confirmed') AND media_tags.tag != '' AND " + _listed("media") + " "
             "GROUP BY media_tags.tag ORDER BY count DESC, media_tags.tag ASC"
         )
         return {r["tag"]: r["count"] for r in rows}
@@ -2717,7 +2865,7 @@ class HistoryStore:
             "FROM image_hashes h "
             "JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
             "AND m.num=h.num AND m.media_type=h.media_type "
-            "WHERE m.path!=''"
+            "WHERE " + _listed("m")
         )
         return {(r["folder_mode"], r["tweet_id"], r["num"], r["media_type"]):
                 (r["filesize"], r["file_hash"], r["dhash"]) + ((r["file_signature"],) if include_signatures else ())
@@ -2725,11 +2873,28 @@ class HistoryStore:
 
     @_safe
     def photo_records_for_scan(self) -> list[dict]:
-        """Lightweight scan list of all active photo records without joins or limit caps."""
+        """Lightweight scan list of every photo file, one record each, without joins or limit caps."""
         return self._read_rows(
             "SELECT folder_mode, tweet_id, num, media_type, path, filename, filesize "
-            "FROM media WHERE media_type='photo' AND path != '' ORDER BY rowid ASC"
+            "FROM media WHERE media_type='photo' AND " + _listed("media") + " ORDER BY rowid ASC"
         )
+
+    @_safe
+    def forget_unlisted_hashes(self) -> int:
+        """Drop stored hashes of records that no longer stand for a file.
+
+        Earlier versions hashed every record, so a file with two records was
+        stored twice and grouped with itself.
+        """
+        if not self._has_table("image_hashes"):
+            return 0
+        with self._db:
+            cursor = self._db.execute(
+                "DELETE FROM image_hashes WHERE NOT EXISTS (SELECT 1 FROM media WHERE "
+                "media.folder_mode=image_hashes.folder_mode AND media.tweet_id=image_hashes.tweet_id "
+                "AND media.num=image_hashes.num AND media.media_type=image_hashes.media_type AND "
+                + _listed("media") + ")")
+        return int(cursor.rowcount or 0)
 
     @_safe
     def save_clusters(self, clusters: list[list[tuple]]) -> int:
@@ -2788,7 +2953,7 @@ class HistoryStore:
             "SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.filesize, h.file_hash "
             "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
             "AND m.num=h.num AND m.media_type=h.media_type "
-            "WHERE m.path!='' AND h.file_hash!='' ORDER BY h.file_hash, h.filesize")
+            "WHERE " + _listed("m") + " AND h.file_hash!='' ORDER BY h.file_hash, h.filesize")
         groups: dict[tuple, list[tuple]] = {}
         for row in rows:
             groups.setdefault((row["file_hash"], row["filesize"]), []).append(
@@ -2816,8 +2981,7 @@ class HistoryStore:
         where, params = self._filter_clause(media_type, query, period, author, False, hashtag=hashtag,
                                             favorite_only=favorite_only, user_tag=user_tag,
                                             ai_category=ai_category, ai_origin=ai_origin)
-        favorite = ("(SELECT 1 FROM favorites f WHERE f.folder_mode=h.folder_mode AND f.tweet_id=h.tweet_id "
-                    "AND f.num=h.num AND f.media_type=h.media_type) IS NOT NULL"
+        favorite = ("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark", "m") + ")"
                     if self._has_table("favorites") else "0")
         ranked = (
             "WITH ranked AS (SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id, "
@@ -2825,7 +2989,7 @@ class HistoryStore:
             "h.tweet_id DESC, h.num DESC) AS cluster_rank, "
             "COUNT(*) OVER (PARTITION BY h.cluster_id) AS cluster_size "
             "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
-            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND m.path!='') ")
+            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND " + _listed("m") + ") ")
         source = ("FROM ranked JOIN media ON media.folder_mode=ranked.folder_mode AND media.tweet_id=ranked.tweet_id "
                   "AND media.num=ranked.num AND media.media_type=ranked.media_type "
                   "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
@@ -2854,7 +3018,7 @@ class HistoryStore:
             "SELECT COUNT(*) FROM image_hashes h1 "
             "JOIN media m1 ON m1.folder_mode=h1.folder_mode AND m1.tweet_id=h1.tweet_id "
             "AND m1.num=h1.num AND m1.media_type=h1.media_type "
-            "WHERE m1.path!='' AND " + _duplicate_predicate("h1", has_cluster=has_cluster)
+            "WHERE " + _listed("m1") + " AND " + _duplicate_predicate("h1", "m1", has_cluster=has_cluster)
         ).fetchone()
         return row[0] if row else 0
 
@@ -2867,12 +3031,8 @@ class HistoryStore:
         """
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return None
-        has_fav = self._has_table("favorites")
-        fav_join = (
-            "LEFT JOIN favorites f ON f.folder_mode=h.folder_mode AND f.tweet_id=h.tweet_id "
-            "AND f.num=h.num AND f.media_type=h.media_type " if has_fav else ""
-        )
-        fav_col = "CASE WHEN f.created_at IS NOT NULL THEN 1 ELSE 0 END AS favorite" if has_fav else "0 AS favorite"
+        fav_col = ("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark", "m") + ") AS favorite"
+                   if self._has_table("favorites") else "0 AS favorite")
         rows = self._read_rows(
             "SELECT h.folder_mode AS folder_mode, h.tweet_id AS tweet_id, h.num AS num, "
             "h.media_type AS media_type, h.filesize AS filesize, h.cluster_id AS cluster_id, "
@@ -2880,8 +3040,7 @@ class HistoryStore:
             "FROM image_hashes h "
             "JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
             "AND m.num=h.num AND m.media_type=h.media_type "
-            f"{fav_join}"
-            "WHERE m.path!='' AND h.cluster_id>0 "
+            "WHERE " + _listed("m") + " AND h.cluster_id>0 "
             "ORDER BY h.cluster_id ASC, favorite DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"
         )
         copies: list[tuple] = []
@@ -2893,6 +3052,31 @@ class HistoryStore:
             else:
                 copies.append((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
         return copies
+
+    @_safe
+    def duplicate_members(self) -> dict[int, list[dict]]:
+        """The files of each stored group, the photo to keep first.
+
+        ``{group: [{"identity": (layout, tweet, num, type), "path": ...}]}`` in
+        the order the duplicate view shows them. Groups with fewer than two
+        files are left out: one file is never its own copy.
+        """
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
+            return {}
+        favorite = ("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark", "m") + ")"
+                    if self._has_table("favorites") else "0")
+        groups: dict[int, list[dict]] = {}
+        for row in self._read_rows(
+                "SELECT h.cluster_id AS cluster_id, m.folder_mode AS folder_mode, m.tweet_id AS tweet_id, "
+                "m.num AS num, m.media_type AS media_type, m.path AS path "
+                "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
+                "AND m.num=h.num AND m.media_type=h.media_type "
+                "WHERE h.cluster_id>0 AND " + _listed("m") + " "
+                f"ORDER BY h.cluster_id, {favorite} DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"):
+            groups.setdefault(row["cluster_id"], []).append({
+                "identity": (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]),
+                "path": row["path"]})
+        return {number: members for number, members in groups.items() if len(members) >= 2}
 
     @_safe
     def run_page(self, page=0, page_size=100) -> dict:

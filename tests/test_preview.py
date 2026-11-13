@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from PIL import Image, ImageChops, ImageOps, ImageStat
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.preview import PREVIEW_SIZE, thumbnail
 
 

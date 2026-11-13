@@ -11,6 +11,7 @@ from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import HistoryStore
 from luvbox.protection import AccountGuard, ProtectionError
 from luvbox.storage import (MigrationError, OutputGuard, migrate_records,

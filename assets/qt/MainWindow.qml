@@ -2206,7 +2206,8 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "F5"
-        enabled: window.currentScreen === 1 && !window.modalOpen && window.app && !window.app.busy
+        // Like the button whose tip names this key: also during a save, when new photos wait to be shown.
+        enabled: window.currentScreen === 1 && !window.modalOpen && !!window.app && !window.app.closing
         onActivated: window.app.refreshGallery()
     }
     Dialog {
@@ -2489,18 +2490,20 @@ ApplicationWindow {
                 Repeater {
                     model: window.app ? window.app.library.selectedHashtags : []
                     delegate: Rectangle {
+                        objectName: "previewHashtagChip"
+                        required property string modelData
                         color: hashMouse.containsMouse ? Theme.hashtagHover : Theme.hashtagFill
                         radius: Theme.radiusSmall
                         border.width: 1
                         border.color: Theme.hashtagLine
-                        implicitWidth: hashLabel.implicitWidth + 12
-                        implicitHeight: 22
+                        implicitWidth: hashLabel.implicitWidth + 16
+                        implicitHeight: Theme.compactHeight
 
                         Label {
                             id: hashLabel
                             anchors.centerIn: parent
                             text: modelData
-                            font.pixelSize: Theme.fontTiny
+                            font.pixelSize: Theme.fontSmall
                             color: Theme.hashtagText
                             ToolTip.visible: hashMouse.containsMouse
                             ToolTip.text: "해시태그 모아보기"
@@ -2521,14 +2524,19 @@ ApplicationWindow {
                 Repeater {
                     model: window.app ? window.app.library.selectedTags : []
                     delegate: Rectangle {
+                        objectName: "previewTagChip"
+                        // Declared, or the fields of a tag read as undefined: the chip
+                        // then showed no name, and an AI label looked like a typed tag.
+                        required property var modelData
+                        readonly property string tagName: modelData.tag || ""
                         readonly property bool isConfirmed: modelData.source === "confirmed"
                         readonly property bool isAi: modelData.source === "ai" || isConfirmed
                         color: userTagMouse.containsMouse ? (isAi ? Theme.aiTagHover : Theme.userTagHover) : (isAi ? Theme.aiTagFill : Theme.userTagFill)
                         radius: Theme.radiusSmall
                         border.width: 1
                         border.color: isAi ? Theme.aiTagLine : Theme.userTagLine
-                        implicitWidth: userTagRow.implicitWidth + 10
-                        implicitHeight: 22
+                        implicitWidth: userTagRow.implicitWidth + 14
+                        implicitHeight: Theme.compactHeight
 
                         RowLayout {
                             id: userTagRow
@@ -2536,8 +2544,9 @@ ApplicationWindow {
                             spacing: 4
 
                             Label {
+                                objectName: "previewTagName"
                                 text: (isAi ? "AI · #" : "#") + (modelData.tag || "")
-                                font.pixelSize: Theme.fontTiny
+                                font.pixelSize: Theme.fontSmall
                                 color: isAi ? Theme.aiTagText : Theme.userTagText
                                 ToolTip.visible: userTagMouse.containsMouse
                                 ToolTip.text: isConfirmed ? "내가 가르친 AI 분류 (누르면 이 분류만 보기)"
@@ -2581,18 +2590,23 @@ ApplicationWindow {
                     }
                 }
 
+                // The same height and type size as the other small buttons of the app
+                // (it used to be a row of 22-pixel controls in the smallest type).
                 RowLayout {
-                    spacing: 4
+                    objectName: "previewTagTools"
+                    spacing: Theme.gapSmall
                     visible: !!window.app && !!window.app.library.selectedKey
                     FlatField {
                         id: inlineTagField
                         objectName: "inlineTagField"
                         readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
-                        implicitHeight: 22
-                        Layout.preferredWidth: 96
+                        implicitHeight: Theme.compactHeight
+                        Layout.preferredWidth: 132
+                        leftPadding: Theme.gap
+                        rightPadding: Theme.gap
                         maximumLength: 50
                         placeholderText: "새 태그"
-                        font.pixelSize: Theme.fontTiny
+                        font.pixelSize: Theme.fontSmall
                         Keys.onEscapePressed: event => {
                             text = ""
                             focus = false
@@ -2604,9 +2618,9 @@ ApplicationWindow {
                         }
                     }
                     FlatButton {
+                        objectName: "inlineTagAdd"
                         text: "+ 태그"
-                        implicitHeight: 22
-                        font.pixelSize: Theme.fontTiny
+                        compact: true
                         enabled: inlineTagField.cleanTag.length > 0 && (!window.app || !window.app.library.tagsLocked)
                         tip: window.app && window.app.library.tagsLocked ? (window.app ? window.app.library.holdReason : "") : ""
                         onClicked: {
@@ -2632,12 +2646,12 @@ ApplicationWindow {
                                 + (library.selectedAiConfidence.length ? " " + library.selectedAiConfidence : "")
                         }
                         color: Theme.textMuted
-                        font.pixelSize: Theme.fontTiny
+                        font.pixelSize: Theme.fontSmall
                     }
                     FlatButton {
+                        objectName: "previewAiConfirm"
                         text: "맞아요"
-                        implicitHeight: 22
-                        font.pixelSize: Theme.fontTiny
+                        compact: true
                         visible: !!window.app && window.app.library.selectedAiCategory.length > 0 && !window.app.library.selectedAiConfirmed
                         enabled: !!window.app && !window.app.library.tagsLocked
                         onClicked: {
@@ -2646,9 +2660,9 @@ ApplicationWindow {
                         }
                     }
                     FlatButton {
+                        objectName: "previewAiCorrect"
                         text: "분류 고치기"
-                        implicitHeight: 22
-                        font.pixelSize: Theme.fontTiny
+                        compact: true
                         visible: !!window.app && window.app.library.selectedMediaType === "photo"
                         enabled: !!window.app && !window.app.library.tagsLocked
                         tip: "다섯 분류 중 하나로 가르치거나, 어느 쪽도 아니라고 지정합니다"

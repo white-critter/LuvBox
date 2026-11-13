@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from tests import test_core
 from tests.test_missing_files import FakeTweetExtractor
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import run_worker
 from luvbox.history import HistoryStore
 from luvbox.storage import migrate_records, resolve_storage

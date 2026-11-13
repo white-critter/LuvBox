@@ -8,6 +8,10 @@ from threading import Event
 import time
 import unittest
 from unittest.mock import Mock, patch
+try:
+    from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
+except ModuleNotFoundError:      # run as a script: the tests folder is the path
+    import app_data_isolation  # noqa: F401
 
 
 _QT_AVAILABLE = find_spec("PySide6") is not None

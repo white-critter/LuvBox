@@ -13,6 +13,7 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import file_access, preview
 from luvbox.file_access import is_read_locked
 

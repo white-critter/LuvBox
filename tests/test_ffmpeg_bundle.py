@@ -11,6 +11,7 @@ import unittest
 
 from PIL import Image
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.media import convert_mp4_to_gif, ffmpeg_path
 
 

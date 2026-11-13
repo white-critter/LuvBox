@@ -11,6 +11,7 @@ from unittest.mock import patch
 import numpy as np
 from PIL import Image
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.clip_classifier import (
     CATEGORY_NAMES,
     categories_from_embeddings,

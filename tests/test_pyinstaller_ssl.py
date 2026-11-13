@@ -10,6 +10,10 @@ import unittest
 from unittest.mock import patch
 
 from tools import package_release
+try:
+    from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
+except ModuleNotFoundError:      # run as a script: the tests folder is the path
+    import app_data_isolation  # noqa: F401
 
 
 ROOT = Path(__file__).resolve().parents[1]

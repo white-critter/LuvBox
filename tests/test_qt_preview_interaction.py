@@ -17,6 +17,7 @@ from PIL import Image, ImageFile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.preview import photo_dimensions, photo_info
 
 

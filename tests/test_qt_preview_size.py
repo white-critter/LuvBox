@@ -14,6 +14,10 @@ from threading import get_ident
 import time
 import unittest
 from unittest.mock import patch
+try:
+    from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
+except ModuleNotFoundError:      # run as a script: the tests folder is the path
+    import app_data_isolation  # noqa: F401
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -582,7 +586,8 @@ class PreviewSizeTests(unittest.TestCase):
         self.assertEqual(report["qml_errors"], [])
         # Navigation and zoom controls occupy one row; the long description
         # must still leave substantially more image space than the old326px.
-        self.assertGreater(report["gallery"]["1080x760"]["canvas"][1], 420)
+        # (The tag row under the picture is 6 pixels taller since 1.9.4: 418.)
+        self.assertGreater(report["gallery"]["1080x760"]["canvas"][1], 410)
 
     @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_saved_details_and_preview_controls_work_in_the_real_window(self):

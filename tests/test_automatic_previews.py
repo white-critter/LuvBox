@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import thumbcache
 from luvbox.history import HistoryError, HistoryStore
 from luvbox.media import ffmpeg_path

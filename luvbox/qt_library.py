@@ -677,6 +677,11 @@ class LibraryRepository:
                 stale_hashes = []
                 active_hashes = {}
                 active_paths = {}
+                seen_files = set()
+                # Versions up to 1.9.3 hashed every record, so a file with a
+                # record per folder layout was stored twice and paired with itself.
+                if hasattr(store, "forget_unlisted_hashes"):
+                    store.forget_unlisted_hashes()
                 if progress_callback:
                     progress_callback(0, total_records)
                 for idx, rec in enumerate(records):
@@ -696,6 +701,16 @@ class LibraryRepository:
                         if ident in cached:
                             stale_hashes.append(ident)
                         continue
+                    # The same file reached by another name (another spelling of
+                    # its path, a hard link) is not a copy of itself. A file
+                    # system that reports no file number cannot say.
+                    volume, number = signature.split(":")[:2]
+                    if number != "0":
+                        if (volume, number) in seen_files:
+                            if ident in cached:
+                                stale_hashes.append(ident)
+                            continue
+                        seen_files.add((volume, number))
                     active_paths[ident] = path
                     if ident in cached and cached[ident][3] == signature and (cached[ident][1] or cached[ident][2]):
                         active_hashes[ident] = cached[ident]
@@ -1087,6 +1102,7 @@ class LibraryRepository:
                 raise ValueError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
             displayed = {key: self._served[key] for key in keys}
         rows = []
+        kept = 0
         with closing(_ReadOnlyHistory(request.location())) as store:
             store._folder_cache = {}
             for key in keys:
@@ -1099,10 +1115,41 @@ class LibraryRepository:
                 if signature != previous_signature:
                     raise ValueError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
                 rows.append(dict(row, _delete_signature=signature, _key=key))
+            if request.duplicate_only:
+                rows, kept = self._copies_only(store, rows)
         with self._condition:
             if self._request is not request:
                 raise ValueError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
-        return {"location": request.location(), "rows": rows, "generation": request.generation}
+        return {"location": request.location(), "rows": rows, "generation": request.generation, "kept": kept}
+
+    @staticmethod
+    def _copies_only(store, rows):
+        """Mark what the duplicate view sends to the Recycle Bin as copies.
+
+        Each row gets the other photos of its group that stay (``_copy_keepers``):
+        the deletion worker moves a copy only while one of those is, at that
+        moment, a different file with the same content. A group chosen whole
+        keeps its first photo, so the view can never remove the last one.
+        Returns the rows to move and how many chosen photos were kept back.
+        """
+        rule = store.duplicate_rule() if hasattr(store, "duplicate_rule") else "exact"
+        groups = store.duplicate_members() if hasattr(store, "duplicate_members") else {}
+        member_of = {member["identity"]: number for number, members in groups.items() for member in members}
+        chosen = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows}
+        spared = set()
+        for members in groups.values():
+            if members and all(member["identity"] in chosen for member in members):
+                spared.add(members[0]["identity"])      # the photo the view calls "남김"
+        marked = []
+        for row in rows:
+            identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+            if identity in spared:
+                continue
+            keepers = [member["path"] for member in groups.get(member_of.get(identity), ())
+                       if member["identity"] != identity and (member["identity"] not in chosen
+                                                              or member["identity"] in spared)]
+            marked.append(dict(row, _copy_keepers=keepers, _copy_rule=rule or "exact"))
+        return marked, len(spared)
 
     def forget(self, keys, generation):
         """Rows the gallery dropped after their files went to the Recycle Bin.
@@ -1853,9 +1900,10 @@ class LibraryController(QObject):
             normalized.append({"tag": clean, "count": delta})
         normalized.sort(key=lambda r: (-int(r.get("count", 0)), str(r.get("tag", ""))))
         self._user_tags = normalized
-        if self._user_tag == clean and delta < 0 and not any(r.get("tag") == clean for r in normalized):
-            self._user_tag = ""
-            self.userTagFilterChanged.emit()
+        # The tag being filtered on stays the filter even when its last photo
+        # loses it: the list on screen is still that filter's list, and the
+        # filter chip names a tag that is no longer in the list on its own.
+        # (Turning the filter off here left one photo listed under "no filter".)
         self.userTagsChanged.emit()
 
     def _refuse_tags(self):

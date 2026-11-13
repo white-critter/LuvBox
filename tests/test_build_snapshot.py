@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import launcher, release_signature, updater
 from tests.release_server import TEST_KEY, sign_for_tests
 from tools import build_launcher, build_snapshot, package_release

@@ -11,6 +11,7 @@ from gallery_dl import exception
 
 from tests import test_core, test_missing_files
 from tests.test_core import FakeHttpDownloader, SECRET
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import run_worker
 from luvbox.history import HistoryStore
 from luvbox.recycling import file_signature

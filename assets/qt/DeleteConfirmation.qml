@@ -33,7 +33,10 @@ FlatDialog {
             ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
             Label {
                 id: summary
-                width: parent.width
+                objectName: "deleteSummaryText"
+                // The width of the view, not of the content: a long line then wraps
+                // instead of running out of the dialog.
+                width: summaryScroll.availableWidth
                 text: dialog.app ? dialog.app.management.deleteSummary : ""
                 color: Theme.textMuted
                 textFormat: Text.PlainText

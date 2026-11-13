@@ -16,6 +16,7 @@ from unittest.mock import patch
 from PIL import Image
 from PySide6.QtCore import QCoreApplication
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import _saved_post_details
 from luvbox.preview import Thumbnail
 from luvbox.qt_download import DownloadController, _saved_item

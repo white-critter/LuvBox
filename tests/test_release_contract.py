@@ -17,6 +17,7 @@ import unittest
 
 from PIL import Image
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import launcher, release_signature, updater
 from tests.release_server import ReleaseServer, make_program, sign_for_tests
 from tools import draw_splash, package_release

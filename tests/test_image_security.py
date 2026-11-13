@@ -10,6 +10,7 @@ import zlib
 
 from PIL import Image, WebPImagePlugin, features
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import preview
 from luvbox.preview import gif_screen_size, thumbnail
 

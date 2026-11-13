@@ -140,14 +140,17 @@ class HistoryTests(unittest.TestCase):
         where, params = self.store._record_filter("all", "", include_deleted=False)
         visible = ("SELECT media.rowid FROM media" + where + " ORDER BY " + _ORDERS["saved"] +
                    ",media.num,media.folder_mode,media.media_type LIMIT 100 OFFSET 10000")
-        program = self.store._db.execute("EXPLAIN " + visible, params).fetchall()
-        media_page = self.store._db.execute(
-            "SELECT rootpage FROM sqlite_master WHERE type='table' AND name='media'").fetchone()[0]
-        media_cursors = {row["p1"] for row in program if row["opcode"] == "OpenRead" and row["p2"] == media_page}
-        path_column = next(row["cid"] for row in self.store._db.execute("PRAGMA table_info(media)")
-                           if row["name"] == "path")
-        self.assertFalse(any(row["opcode"] == "Column" and row["p1"] in media_cursors and row["p2"] == path_column
-                             for row in program), "paging must read the empty-path flag from the index")
+        # The gallery lists one entry per file, so a page asks, for each record
+        # it walks, whether another record of the same tweet holds the same
+        # path. That has to stay an ordered walk with primary-key lookups:
+        # no sort, and no scan of the catalog for any record.
+        plan = [row[3] for row in self.store._db.execute("EXPLAIN QUERY PLAN " + visible, params)]
+        self.assertTrue(any("media_saved_order" in detail for detail in plan), plan)
+        self.assertFalse(any("TEMP B-TREE" in detail for detail in plan), plan)
+        for alias in ("twin", "other"):
+            lookups = [detail for detail in plan if f" {alias} " in detail + " " or detail.endswith(" " + alias)]
+            self.assertTrue(lookups, plan)
+            self.assertTrue(all(detail.startswith("SEARCH") and "tweet_id=?" in detail for detail in lookups), plan)
         migration = [row[3] for row in self.store._db.execute(
             "EXPLAIN QUERY PLAN SELECT 1 FROM media WHERE source_url='' LIMIT 1")]
         self.assertTrue(any("SEARCH media USING COVERING INDEX" in detail for detail in migration), migration)
@@ -164,7 +167,10 @@ class HistoryTests(unittest.TestCase):
                      "AND deletion_items.num=media.num AND deletion_items.media_type=media.media_type "
                      "AND deletion_items.path=media.last_path" + collation +
                      " AND deletion_items.status IN ('recycled','interrupted')))")
-        fixture = ("WITH media(tweet_id,num,media_type,path,record_source,last_path) AS (VALUES (?,?,?,?,?,?)),"
+        # One record on its own: the clauses that fold several records of a
+        # file into one entry must not change what a single record does.
+        fixture = ("WITH media(tweet_id,num,media_type,path,record_source,last_path,folder_mode,saved_at) AS "
+                   "(VALUES (?,?,?,?,?,?,'flat',NULL)),"
                    "deletion_items(tweet_id,num,media_type,path,status) AS (VALUES (?,?,?,?,?)) "
                    "SELECT EXISTS(SELECT 1 FROM media")
         for path, source, last_path, receipt in product(

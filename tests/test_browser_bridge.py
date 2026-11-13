@@ -18,6 +18,7 @@ import unittest
 from unittest.mock import patch
 from urllib.parse import urlsplit
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.browser_bridge import (BrowserBridge, BrowserBridgeError, _decrypt, _decrypt_progress,
                                    _decode, _derive_key, _session, extension_directory)
 

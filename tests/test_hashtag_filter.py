@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import HistoryStore
 from luvbox.qt_library import LibraryRepository, _Request
 from luvbox.storage import resolve_storage

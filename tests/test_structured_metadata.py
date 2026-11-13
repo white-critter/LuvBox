@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import metadata
 from tests import test_metadata as fixtures
 from tests.test_metadata import JPEG, URL, atoms, image_payload

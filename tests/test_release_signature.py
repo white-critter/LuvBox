@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import release_signature, updater
 from luvbox.release_signature import Key
 from tests import release_server

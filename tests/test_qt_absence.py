@@ -2,6 +2,7 @@ import os
 import unittest
 from pathlib import Path
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.qt_browser_setup import plan_extension_launch
 from luvbox.qt_library import absence_note
 

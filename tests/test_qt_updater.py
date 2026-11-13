@@ -10,6 +10,7 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import updater
 from tests.release_server import ReleaseServer, make_program
 

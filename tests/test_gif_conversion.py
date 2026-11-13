@@ -16,6 +16,7 @@ from unittest.mock import patch
 from PIL import Image, ImageSequence
 
 from tests import test_core, test_missing_files
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import core, media
 from luvbox.history import HistoryStore
 from luvbox.storage import migrate_records, resolve_storage

@@ -5,6 +5,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from PIL import Image
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.history import HistoryStore
 from luvbox.storage import resolve_storage
 from luvbox.duplicates import compute_dhash, hamming_distance
@@ -215,12 +216,14 @@ class Features152Tests(unittest.TestCase):
         LibraryController._upsert_cached_user_tag(dummy, "풍경", delta=-1)
         self.assertEqual(dummy._user_tags, [{"tag": "인물", "count": 1}, {"tag": "풍경", "count": 1}])
 
-        # Set active filter to 인물 and remove its last occurrence -> removed from list & filter reset
+        # The active filter is 인물 and its last photo loses the tag: the tag leaves the list,
+        # but the filter stays, because the list on screen is still that filter's list
+        # (the filter chip names a tag that is no longer in the list on its own).
         dummy._user_tag = "인물"
         LibraryController._upsert_cached_user_tag(dummy, "인물", delta=-1)
         self.assertEqual(dummy._user_tags, [{"tag": "풍경", "count": 1}])
-        self.assertEqual(dummy._user_tag, "")
-        self.assertEqual(dummy.userTagFilterChanged.count, 1)
+        self.assertEqual(dummy._user_tag, "인물")
+        self.assertEqual(dummy.userTagFilterChanged.count, 0)
 
     def test_overview_includes_ai_categories_and_user_tags_and_repo_duplicate_counts(self):
         with closing(HistoryStore.for_storage(self.paths)) as store:

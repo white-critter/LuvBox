@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import __version__
 from tools import package_release
 

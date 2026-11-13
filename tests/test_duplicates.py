@@ -7,6 +7,7 @@ from unittest.mock import patch
 from contextlib import closing
 from pathlib import Path
 from PIL import Image, ImageDraw
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.duplicates import compute_dhash, compute_file_hash, hamming_distance, cluster_duplicates
 from luvbox.history import HistoryStore
 from luvbox.qt_library import LibraryRepository, _Request

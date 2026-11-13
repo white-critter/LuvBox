@@ -87,21 +87,23 @@ Button {
         }
         Gradient {
             id: primaryLight
-            GradientStop { position: 0; color: control.hovered ? Qt.lighter(Theme.accentTop, 1.08) : Theme.accentTop }
-            GradientStop { position: 1; color: control.hovered ? Theme.accentHover : Theme.accent }
+            GradientStop { position: 0; color: control.hovered ? Qt.lighter(Theme.accentTop, 1.06) : Theme.accentTop }
+            GradientStop { position: 1; color: control.hovered ? Theme.accent : Theme.accentBase }
         }
         // Two soft rings of red light around the main action and around a filter that is on.
+        // The main action's rings are narrower and fainter: it is already the brightest thing on the page.
         Repeater {
             model: (face.primary || control.lit) && control.enabled ? 2 : 0
             Rectangle {
                 required property int index
+                readonly property int step: face.primary ? Theme.mainGlowStep : 3
                 z: -1
                 anchors.fill: parent
-                anchors.margins: -(index + 1) * 3
-                radius: face.radius + (index + 1) * 3
+                anchors.margins: -(index + 1) * step
+                radius: face.radius + (index + 1) * step
                 color: "transparent"
-                border.width: 3
-                border.color: Qt.alpha(Theme.glow, (face.primary ? 0.16 : 0.09) / (index + 1))
+                border.width: step
+                border.color: Qt.alpha(Theme.glow, (face.primary ? Theme.mainGlow : 0.09) / (index + 1))
             }
         }
         // The lit edge along the top of the main action.
@@ -111,7 +113,7 @@ Button {
             y: 1
             width: face.width - 2 * face.radius
             height: 1
-            color: Qt.rgba(1, 1, 1, 0.22)
+            color: Qt.rgba(1, 1, 1, 0.14)
         }
         // The tab of the screen being shown: a short red light under its name.
         Rectangle {

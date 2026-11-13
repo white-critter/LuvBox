@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.protection import AccountGuard, ProtectionError, cooldown_until
 
 

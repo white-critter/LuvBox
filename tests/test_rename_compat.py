@@ -13,6 +13,7 @@ from gallery_dl.extractor.common import Extractor
 from gallery_dl.extractor.message import Message
 
 import test_core
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import core, login, protection, settings
 
 

@@ -12,6 +12,7 @@ from gallery_dl.extractor.message import Message
 from PIL import Image
 
 import test_core
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import core
 
 

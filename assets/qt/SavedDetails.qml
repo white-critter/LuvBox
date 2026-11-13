@@ -31,6 +31,7 @@ Frame {
                 Layout.preferredWidth: Math.min(188, details.availableWidth * 0.36)
                 Layout.preferredHeight: 132
                 Image {
+                    id: savedThumbnail
                     objectName: "savedMediaThumbnail"
                     anchors.fill: parent
                     source: details.item.preview_url || ""
@@ -49,7 +50,10 @@ Frame {
                 Column {
                     anchors.centerIn: parent
                     width: parent.width
-                    visible: !details.item.preview_loading && !details.item.preview_url
+                    // Also when the picture was offered but could not be read: an empty
+                    // frame said nothing.
+                    visible: !details.item.preview_loading
+                        && (!details.item.preview_url || savedThumbnail.status === Image.Error)
                     spacing: 6
                     Canvas {
                         anchors.horizontalCenter: parent.horizontalCenter

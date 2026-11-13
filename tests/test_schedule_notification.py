@@ -18,6 +18,7 @@ import sys
 from unittest.mock import patch
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import scheduled
 
 app = QApplication([])

@@ -9,6 +9,10 @@ import sys
 import tempfile
 import time
 import unittest
+try:
+    from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
+except ModuleNotFoundError:      # run as a script: the tests folder is the path
+    import app_data_isolation  # noqa: F401
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -456,6 +460,44 @@ def scene():
         assert find("galleryRecycleSelected").property("enabled")
         click("gallerySelectionClear")
         click("gallerySelectionToggle")
+        # The preview names every tag of the photo: the AI's label in its own colour without
+        # a remove mark, a typed tag with one. The chips once showed no name at all, and the
+        # controls beside them were smaller than every other button.
+        with closing(HistoryStore.for_storage(paths, create_media=False)) as store:
+            store.save_ai_tags([("flat", "100", 1, "photo", "풍경·배경")])
+            store.add_tag("flat", "100", 1, "photo", "여행")
+        tagged_key = next(row["key"] for row in controller.library.model._rows if "_100_" in row["key"])
+        controller.library.selectItem(tagged_key)
+        wait(lambda: not controller.library.selectionBusy and controller.library.selectedKey == tagged_key
+             and len(controller.library.selectedTags) == 2, "select the tagged item")
+        tagged_preview = find("previewDialog")
+        invoke(tagged_preview, "open")
+        wait(lambda: tagged_preview.property("visible"), "open the tagged preview")
+        QTest.qWait(40)
+        settle()
+        def named_items(name):
+            # What a Repeater makes is found through the visual tree: the chips sit in the same Flow as the field.
+            found, pending = [], [find("inlineTagField").parentItem().parentItem()]
+            while pending:
+                node = pending.pop()
+                if node.objectName() == name:
+                    found.append(node)
+                pending.extend(node.childItems())
+            return found
+
+        chips = named_items("previewTagChip")
+        named = sorted((chip.property("tagName"), chip.property("isAi")) for chip in chips)
+        assert named == [("여행", False), ("풍경·배경", True)], named
+        shown = sorted(item.property("text") for item in named_items("previewTagName"))
+        assert shown == ["#여행", "AI · #풍경·배경"], shown
+        compact = find("previewAiCorrect").property("height")
+        assert compact >= 28, compact
+        for name in ("inlineTagField", "inlineTagAdd", "previewAiConfirm"):
+            assert find(name).property("height") == compact, (name, find(name).property("height"))
+        assert all(chip.property("height") == compact for chip in chips), "chips are as tall as the buttons"
+        assert find("inlineTagAdd").property("font").pixelSize() >= 13
+        invoke(tagged_preview, "close")
+        wait(lambda: not tagged_preview.property("visible"), "close the tagged preview")
         # A missing tile must not make selecting and recycling the other
         # visible files impossible. Only the disposable fixture is removed.
         files[-1].unlink()

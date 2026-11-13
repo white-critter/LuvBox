@@ -14,6 +14,47 @@ from .recycling import RecyclingError, file_signature, recycle_file
 from .storage import OutputGuard, StoragePaths, publish_snapshot
 
 
+_NO_OTHER_COPY = "같은 내용의 다른 파일이 남는지 확인하지 못해 그대로 두었습니다."
+
+
+def _same_content(first: Path, second: Path, rule: str) -> bool:
+    """The two files hold the same photo, read now rather than taken from stored hashes."""
+    from .duplicates import compute_file_hash, nearly_identical, pixel_vector
+
+    digest = compute_file_hash(first)
+    if digest and digest == compute_file_hash(second):
+        return True
+    # Groups made with "the same photo at another size or quality" hold files
+    # whose bytes differ; the scan's own pixel comparison decides again.
+    return rule == "near" and nearly_identical(pixel_vector(first), pixel_vector(second))
+
+
+def kept_copy(store: HistoryStore, path: str, signature, keepers, rule: str) -> str:
+    """A different file with the same content that exists right now, or ''.
+
+    A file sent away as "a copy" must leave such a file behind. Another record
+    of the same file, another spelling of its path or a hard link to it is the
+    file itself, however the catalog lists it.
+    """
+    own = os.path.normcase(os.path.realpath(path))
+    for keeper in keepers if isinstance(keepers, (list, tuple)) else ():
+        try:
+            if not isinstance(keeper, str) or not keeper or not store.is_media_path(keeper):
+                continue
+            other = file_signature(keeper)          # an ordinary file, not a link
+            if os.path.normcase(os.path.realpath(keeper)) == own:
+                continue
+            if other[1] and signature[1] and other[:2] == tuple(signature[:2]):
+                continue                            # the same file number on the same volume
+            if file_signature(path) != tuple(signature):
+                return ""                           # the file to move changed meanwhile
+            if _same_content(Path(path), Path(keeper), rule) and file_signature(keeper) == other:
+                return keeper
+        except (OSError, ValueError, TypeError):
+            continue
+    return ""
+
+
 def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: bool,
                  stop: threading.Event, emit) -> dict:
     """Recycle only the confirmed physical files, preserving their media history.
@@ -21,6 +62,12 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
     Intent is committed before every native operation. An uncertain receipt or
     catalog write stops the batch; the next protected job settles any remaining
     intent without repeating a deletion. Native code never falls back to erase.
+
+    A row from the duplicate view carries ``_copy_keepers``, the other files of
+    its group. It moves only while one of them is, at that moment, a different
+    file with the same content; otherwise it stays and is counted in
+    ``protected``. Each file is checked when its turn comes, so the last file
+    of a group can never go.
     """
     unique = {}
     for row in rows:
@@ -29,7 +76,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
         if key is not None:
             unique.setdefault(key, dict(row))
     candidates = list(unique.values())
-    result = dict(total=len(candidates), recycled=0, failed=0, cancelled=0, paths=[], message="")
+    result = dict(total=len(candidates), recycled=0, failed=0, cancelled=0, protected=0, paths=[], message="")
     guards, store, account_guard = [], None, None
     roots_locked = False
     processed = 0
@@ -43,8 +90,12 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
     def finished():
         result["cancelled"] = result["total"] - processed
         result["message"] = f"휴지통 이동 {result['recycled']:,}개 · 실패 {result['failed']:,}개"
+        if result["protected"]:
+            result["message"] += f" · 그대로 둔 파일 {result['protected']:,}개"
         if result["cancelled"]:
             result["message"] += f" · 처리하지 않은 파일 {result['cancelled']:,}개"
+        if result["protected"]:
+            result["message"] += "\n" + _NO_OTHER_COPY
         if failures:
             # The results are not kept in a separate list; name a few here.
             result["message"] += "\n" + "\n".join(failures[:3])
@@ -121,6 +172,13 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 processed += 1
                 failures.append(f"{Path(path).name}: {error}")
                 progress(failures[-1])
+                continue
+            if "_copy_keepers" in row and not kept_copy(store, path, signature, row.get("_copy_keepers"),
+                                                        row.get("_copy_rule") or "exact"):
+                # Nothing is recorded: the file and its records stay as they are.
+                result["protected"] += 1
+                processed += 1
+                progress(f"{Path(path).name}: {_NO_OTHER_COPY}")
                 continue
             ident = store.begin_deletion(batch, row, keep_deleted, signature)
             if stop.is_set():

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import login
 from luvbox.file_mutex import file_mutex, replace_file
 

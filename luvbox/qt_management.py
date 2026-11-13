@@ -65,7 +65,15 @@ class ManagementController(QObject):
     def deleteSummary(self):
         if not self._delete: return ""
         names = [row.get("filename") or Path(row["path"]).name for row in self._delete["rows"][:5]]
-        return f"선택한 파일 {self.deleteCount:,}개를 Windows 휴지통으로 이동합니다.\n" + "\n".join(names)
+        summary = f"선택한 파일 {self.deleteCount:,}개를 Windows 휴지통으로 이동합니다.\n"
+        if any("_copy_keepers" in row for row in self._delete["rows"]):
+            # From the duplicate view: say what protects the last file of a group.
+            summary += "보내기 직전에 같은 내용의 다른 파일이 남는지 하나씩 확인하고, 확인되지 않으면 그대로 둡니다.\n"
+        kept = self._delete.get("kept") or 0
+        if kept:
+            # A whole group was chosen in the duplicate view: its first photo stays.
+            summary += f"묶음을 통째로 고른 곳에서는 한 장씩 남깁니다(남기는 사진 {kept:,}장).\n"
+        return summary + "\n".join(names)
 
     def takeRecycledKeys(self):
         """Gallery keys of the files the last move sent to the Recycle Bin.
@@ -198,7 +206,8 @@ class ManagementController(QObject):
             # A failed or unprocessed file may have changed on disk, so only a
             # clean result removes single tiles; anything else reloads the list.
             keys = value.get("keys")
-            clean = not error and not value.get("failed") and not value.get("cancelled")
+            clean = (not error and not value.get("failed") and not value.get("cancelled")
+                     and not value.get("protected"))
             self._recycled_keys = list(keys) if clean and isinstance(keys, (list, tuple)) else None
             self.libraryChanged.emit()
         self.changed.emit()

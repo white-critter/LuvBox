@@ -16,6 +16,7 @@ try:
     from . import test_core as support
 except ImportError:
     import test_core as support
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox.core import _GalleryLogHandler, _response_authentication_state
 
 

@@ -17,6 +17,7 @@ from unittest.mock import Mock, patch
 from PIL import Image
 
 from tests import test_core as core_support
+from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import thumbcache
 from luvbox.history import HistoryStore
 from luvbox.qt_library import LibraryRepository, _Request

@@ -9,6 +9,10 @@ import sys
 import tempfile
 import time
 import unittest
+try:
+    from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
+except ModuleNotFoundError:      # run as a script: the tests folder is the path
+    import app_data_isolation  # noqa: F401
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -206,6 +210,12 @@ def scene(shots=None):
         click("galleryRecycleSelected")
         confirmation = find("deleteConfirmation")
         wait(lambda: confirmation.property("visible"), "delete confirmation")
+        # The question says what protects the last file of a group, and the long
+        # sentence wraps inside the dialog (it used to run out of it, cut off).
+        summary = find("deleteSummaryText")
+        assert "같은 내용의 다른 파일이 남는지" in summary.property("text"), summary.property("text")
+        wait(lambda: 0 < summary.property("width") <= confirmation.property("width")
+             and summary.property("lineCount") > summary.property("text").count("\n") + 1, "the summary wraps")
         click("confirmRecycle")
         wait(lambda: not controller.management.mutating and not model.busy and model.count == 2
              and library.duplicateCount == 2, "copies recycled, the kept photo leaves the list")
