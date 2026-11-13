@@ -39,7 +39,7 @@ from tools import build_launcher
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
     "tools/draw_icon.py",
-    "tools/release_key.py", "tools/release_key.ps1",
+    "tools/release_key.py", "tools/release_key.ps1", "tools/release_key_backup.ps1",
     "tools/draw_splash.py", "tools/build_launcher.py", "tools/launcher/Launcher.cs", "tools/launcher/app.manifest",
     "tools/launcher/splash.ini", "assets/splash/card.png", "assets/splash/glow.png", "assets/splash/mark.png",
     "assets/splash/README.md",

@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -199,6 +200,77 @@ class WindowsKeyTests(unittest.TestCase):
             with self.assertRaises(release_key.KeyUnavailable) as raised:
                 release_key.require_release_key()
         self.assertIn("공개 키", str(raised.exception))
+
+    BACKUP = Path(release_key.SCRIPT).with_name("release_key_backup.ps1")
+
+    def backup(self, *arguments, passphrase="throwaway passphrase for a test key"):
+        environment = dict(os.environ, LUVBOX_TEST_KEY_PASSPHRASE=passphrase)
+        return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                               "-File", str(self.BACKUP), *arguments], env=environment, capture_output=True,
+                              text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=180,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    def test_a_backup_restores_the_same_key_and_is_refused_where_it_should_be(self):
+        first = release_key.TEST_PREFIX + uuid.uuid4().hex[:12]
+        second = release_key.TEST_PREFIX + uuid.uuid4().hex[:12]
+        try:
+            release_key._run("-Create", name=first)
+        except release_key.KeyUnavailable:
+            self.skipTest("PowerShell cannot create a key here")
+        for name in (first, second):
+            self.addCleanup(release_key._run, "-Delete", name=name)
+        folder = Path(tempfile.mkdtemp(prefix="luvbox-key-backup-"))
+        self.addCleanup(shutil.rmtree, folder, True)
+        file = folder / "backup.p8"
+        original = release_key.public_key(first)
+
+        made = self.backup("-Export", str(file), "-Name", first)
+        self.assertEqual(made.returncode, 0, made.stdout + made.stderr)
+        self.assertIn("read back", made.stdout)
+        self.assertIn(original.identifier, made.stdout)
+        data = file.read_bytes()
+        self.assertEqual(data[0], 0x30)
+        # Encrypted as a whole: not even the public number is readable in the file.
+        self.assertNotIn(original.modulus.to_bytes(original.size, "big")[:32], data)
+
+        checked = self.backup("-Verify", str(file), "-Name", first)
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        self.assertIn("same key", checked.stdout)
+        self.assertNotEqual(self.backup("-Verify", str(file), "-Name", first, passphrase="not the passphrase").returncode, 0)
+
+        restored = self.backup("-Import", str(file), "-Name", second)
+        self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
+        self.assertEqual(release_key.public_key(second), original)
+        key, signature = release_key.sign(b"signed by the restored key", second)
+        self.assertTrue(release_signature.confirms(original, b"signed by the restored key", signature))
+        # The restored key can be backed up again, and it is still a signing key.
+        again = folder / "again.p8"
+        self.assertEqual(self.backup("-Export", str(again), "-Name", second).returncode, 0)
+
+        # Nothing is overwritten, nothing lands in the project, and a short passphrase is not enough.
+        self.assertNotEqual(self.backup("-Import", str(file), "-Name", second).returncode, 0)
+        self.assertNotEqual(self.backup("-Export", str(file), "-Name", first).returncode, 0)
+        self.assertEqual(file.read_bytes(), data)
+        inside = Path(release_key.ROOT) / "build" / "never-a-key-backup.p8"
+        self.assertNotEqual(self.backup("-Export", str(inside), "-Name", first).returncode, 0)
+        self.assertFalse(inside.exists())
+        short = folder / "short.p8"
+        self.assertNotEqual(self.backup("-Export", str(short), "-Name", first, passphrase="short").returncode, 0)
+        self.assertFalse(short.exists())
+        self.assertNotEqual(self.backup("-Export", str(folder / "other.p8"), "-Name", "SomeOtherKey").returncode, 0)
+
+    def test_the_release_keys_backup_passphrase_can_only_be_typed(self):
+        source = self.BACKUP.read_text(encoding="utf-8")
+        # No parameter carries a passphrase, and the one unattended source is tied to test key names.
+        parameters = source[source.index("param("):source.index("$ErrorActionPreference")]
+        self.assertNotRegex(parameters, "(?i)pass|secret|password")
+        uses = [line for line in source.splitlines() if "LUVBOX_TEST_KEY_PASSPHRASE" in line]
+        self.assertEqual(len(uses), 2)
+        self.assertIn("$Name.StartsWith($TestPrefix) -and", uses[0])
+        self.assertLess(source.index(uses[0]), source.index("Read-Host -AsSecureString"))
+        # The only keys it ever removes are the short-lived ones it makes to read a backup.
+        self.assertEqual(source.count(".Delete()"), 1)
+        self.assertLess(source.index("if ($trial.StartsWith($TestPrefix)"), source.index(".Delete()"))
 
     def test_the_tool_takes_only_the_release_key_or_a_test_key_and_cannot_write_or_remove_the_release_key(self):
         for action in ("-Public", "-Delete"):
