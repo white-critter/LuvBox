@@ -11,7 +11,34 @@ import json
 import threading
 import zipfile
 
-from luvbox import launcher, updater
+from luvbox import launcher, release_signature, updater
+
+
+# A throwaway key for the stand-in releases served here. No installed version
+# trusts it: only the Source that ReleaseServer hands out names it.
+_TEST_MODULUS = int(
+    "bd0e2d301ceab0ff52bd6fc0191a415405d7049c2d2a3225a97f626754a8698f5563148689e751dc341bcfe7fa2ba539"
+    "6141d86f85e6bac4716ebbc2f754c4bbf337348272b98ff26e56a3f7b3903962b7ba9357d68aeb8a8fba58eefbe4e18d"
+    "3199ecedf71c8c74c6fdb4e83d1c5af94f7efead0e00aa70cae1b640826496a0de35a1341b79e39c0730cc1c3a67e6c7"
+    "fa0a2624bed834d50d29b0a31b2eec533286ac9d0846b43c31aa4e5894121df225ae02ec127451ba5a723b4226b8d6f2"
+    "9e5897a012336a9c232a6dc343ec5a64d4862a61b2a75970c78825805390a9ebddcd3c2ff7157205ed007a03f4b8722f"
+    "8a8f12c9f9e54ceeacb0615835fe7201",
+    16)
+_TEST_PRIVATE = int(
+    "315711d40cb7f399af2e618bf101392b849aa949594039f63a565488433ff0ccc7ac241f38be764ed20ab0280ad2793c"
+    "90756ed72c4b1b5349876cd965536a44e324f53f5651b78fbddc3eced6be3d3bd6578b3cd1715027c97b08dad642d5da"
+    "d3a7287eb28f70d8c9564d708f02677bc9938b43fef38d88026b05f5b012307d382ba5f25d991df59806df0e3e87f5a5"
+    "ac2fe493ae897673199baa4bb3a69b53d7f9d8084a3cc837fdd61180e123eb71622f985788472ac0a427afd4653fd2be"
+    "7b3f2bdc72305603c17481afd9741f701bb4d2a3abd2e62236261a0f741f0a0a9410af10c72a627b0b1d6ea0ad0b5c8b"
+    "c419c229c90461705e1a379c8cf5145",
+    16)
+TEST_KEY = release_signature.Key(_TEST_MODULUS)
+
+
+def sign_for_tests(message: bytes):
+    """Sign as the release key does (RSA, PKCS#1 v1.5, SHA-256), with the throwaway key."""
+    block = release_signature._expected_block(message, TEST_KEY.size)
+    return TEST_KEY, pow(int.from_bytes(block, "big"), _TEST_PRIVATE, _TEST_MODULUS).to_bytes(TEST_KEY.size, "big")
 
 
 def make_program(version: str, content: bytes = b"application") -> bytes:
@@ -86,7 +113,8 @@ class ReleaseServer:
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.source = updater.Source(latest=f"http://127.0.0.1:{self.port}/latest",
-                                     downloads=f"http://127.0.0.1:{self.port}/download", secure=False)
+                                     downloads=f"http://127.0.0.1:{self.port}/download", secure=False,
+                                     keys=(TEST_KEY,))
 
     def close(self):
         self.slow.set()
@@ -95,7 +123,7 @@ class ReleaseServer:
         self.thread.join(5)
 
     def publish(self, version, program=None, *, notes="### 주요 변경 사항\n\n- **첫째**: 고친 것\n- 둘째\n",
-                checksum=None, with_program=True, with_checksum=True):
+                checksum=None, with_program=True, with_checksum=True, signed=True):
         """Make `version` the latest release, with the files a real release carries."""
         program = make_program(version) if program is None else program
         digest = hashlib.sha256(program).hexdigest() if checksum is None else checksum
@@ -107,6 +135,8 @@ class ReleaseServer:
             assets.append({"name": program_name, "size": len(program), "state": "uploaded"})
         if with_checksum:
             text = updater.format_checksums([(digest, program_name), ("0" * 64, source_name)])
+            if signed:
+                text = updater.sign_checksums(version, text, sign_for_tests)
             self.files[f"/download/v{version}/{checksum_name}"] = text.encode("ascii")
             assets.append({"name": checksum_name, "size": len(text), "state": "uploaded"})
         self.status = 200

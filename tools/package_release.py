@@ -28,7 +28,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from luvbox import __version__  # noqa: E402
-from luvbox.updater import format_checksums, release_assets  # noqa: E402
+from luvbox.updater import format_checksums, release_assets, sign_checksums  # noqa: E402
 from tools.check_build_inputs import require_inputs  # noqa: E402
 from tools.qt.prepare_sources import release_files as qt_source_files
 from tools.check_download_startup import validate_report as validate_download_report
@@ -39,6 +39,7 @@ from tools import build_launcher
 SOURCE_FILES = (
     "assets/icons/luvbox.png", "assets/icons/luvbox.ico", "assets/icons/README.md", "tools/build_icon.py",
     "tools/draw_icon.py",
+    "tools/release_key.py", "tools/release_key.ps1",
     "tools/draw_splash.py", "tools/build_launcher.py", "tools/launcher/Launcher.cs", "tools/launcher/app.manifest",
     "tools/launcher/splash.ini", "assets/splash/card.png", "assets/splash/glow.png", "assets/splash/mark.png",
     "assets/splash/README.md",
@@ -326,7 +327,12 @@ def _digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def package() -> None:
+def package(sign=None) -> None:
+    """Write the three release files. `sign(message) -> (Key, signature)` adds the signature line.
+
+    A release for publishing is always signed (the entry point below passes
+    the release key); installed versions from 1.9.2 on refuse one that is not.
+    """
     require_inputs(ROOT)
     subprocess.run([sys.executable, str(ROOT / "tools/ffmpeg/build.py"), "--check"], check=True)
     output = ROOT / "release"
@@ -409,12 +415,24 @@ def package() -> None:
     finally:
         staged.unlink(missing_ok=True)
         staged_program.unlink(missing_ok=True)
-    (output / checksum_name).write_text(format_checksums(rows), encoding="utf-8", newline="\n")
-    print(f"Release {__version__}: {program_name}, {checksum_name}, {source_name}")
+    listing = format_checksums(rows)
+    if sign is not None:
+        listing = sign_checksums(__version__, listing, sign)
+    (output / checksum_name).write_text(listing, encoding="utf-8", newline="\n")
+    print(f"Release {__version__}: {program_name}, {checksum_name}, {source_name}"
+          + (" (signed)" if sign is not None else " (not signed)"))
 
 
 if __name__ == "__main__":
-    # build.ps1 asks for this check alone before the long build; packaging repeats it.
+    from tools import release_key
+
+    # build.ps1 asks for these checks alone before the long build; packaging repeats them.
     require_current_guides(ROOT, __version__)
-    if "--check-guides" not in sys.argv[1:]:
-        package()
+    if "--check-guides" in sys.argv[1:]:
+        raise SystemExit(0)
+    try:
+        signer = release_key.release_signer()
+    except release_key.KeyUnavailable as error:
+        raise SystemExit(str(error)) from None
+    if "--check-signing-key" not in sys.argv[1:]:
+        package(signer)

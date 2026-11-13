@@ -17,6 +17,9 @@ $version = (& $taskPython -c "from luvbox import __version__; print(__version__)
 if ($LASTEXITCODE -ne 0 -or $version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw '버전은 숫자로 된 주.부.수정 형식이어야 합니다. luvbox\__init__.py를 확인하세요.' }
 & $taskPython 'tools\package_release.py' '--check-guides'
 if ($LASTEXITCODE -ne 0) { throw 'README·사용 안내·개발 안내·변경 사항의 버전이 제품 버전과 다릅니다. 문서를 먼저 고친 뒤 다시 빌드하세요.' }
+# A release that is not signed with the key installed versions trust would be refused by them.
+& $taskPython 'tools\release_key.py' '--check'
+if ($LASTEXITCODE -ne 0) { throw '릴리스 서명 키를 쓸 수 없습니다. 위 안내를 확인하세요. 서명이 없는 릴리스는 설치된 버전이 받지 않습니다.' }
 & $taskPython 'tools\windows_version.py'
 if ($LASTEXITCODE -ne 0) { throw 'Windows 파일 버전 정보를 준비하지 못했습니다.' }
 # The application is built as a folder (build\app\LuvBox), then packed with the

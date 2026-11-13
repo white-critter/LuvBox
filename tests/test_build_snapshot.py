@@ -10,7 +10,8 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from luvbox import launcher, updater
+from luvbox import launcher, release_signature, updater
+from tests.release_server import TEST_KEY, sign_for_tests
 from tools import build_launcher, build_snapshot, package_release
 
 
@@ -126,7 +127,7 @@ class BuildSnapshotTests(unittest.TestCase):
         self.complete_build()
         self.pack_single()
         self.packaging(manifest, distribution)
-        package_release.package()
+        package_release.package(sign_for_tests)
         version = build_snapshot.__version__
         release = self.root / "release"
         # Literal names: an installed 1.8.0 asks GitHub for exactly these.
@@ -138,8 +139,12 @@ class BuildSnapshotTests(unittest.TestCase):
         self.assertEqual(rows["LuvBox.exe"], hashlib.sha256(self.single.read_bytes()).hexdigest())
         self.assertEqual(rows[f"LuvBox-{version}-source-licenses.zip"],
                          hashlib.sha256((release / f"LuvBox-{version}-source-licenses.zip").read_bytes()).hexdigest())
-        self.assertEqual(text.count("\n"), 2)
+        # Two rows and the signature over them; the rows read the same with or without that line.
+        self.assertEqual(text.count("\n"), 3)
         self.assertNotIn("\r", text)
+        self.assertTrue(text.splitlines()[2].startswith("# luvbox-signature v1 "))
+        self.assertTrue(release_signature.verify(version, text, rows, (TEST_KEY,)))
+        self.assertFalse(release_signature.verify(version, text, rows))        # not a key installed versions trust
         with zipfile.ZipFile(release / f"LuvBox-{version}-source-licenses.zip") as archive:
             names = archive.namelist()
         # Sources, notices and the guide; the application itself is only in LuvBox.exe.

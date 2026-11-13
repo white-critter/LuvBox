@@ -6,6 +6,11 @@ checksum file. The names and the checksum format below are a contract between
 releases: `tools/package_release.py` writes them from here, and tests pin them,
 so a later release cannot ship something an installed version fails to read.
 
+The checksum file must carry a signature by a key this version trusts
+(luvbox/release_signature.py); without it nothing large is fetched. The
+checksum alone comes from the same release as the program and proves only a
+clean transfer.
+
 A running LuvBox never replaces itself. It runs from its own unpacked folder
 (see luvbox/launcher.py); the update swaps the launcher file, and the next
 start unpacks and runs the new version.
@@ -23,6 +28,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from . import release_signature
 from .launcher import read_footer
 
 
@@ -47,6 +53,7 @@ MESSAGES = {
     "unexpected": "릴리스 정보를 읽지 못했어요. 릴리스 페이지에서 직접 확인해 주세요.",
     "download": "새 버전을 받지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.",
     "checksum": "받은 파일이 릴리스의 체크섬과 달라 지웠어요. 다시 시도해 주세요.",
+    "signature": "릴리스의 서명을 확인하지 못해 받지 않았어요. 릴리스 페이지에서 직접 확인해 주세요.",
     "program": "받은 파일이 LuvBox 실행 파일이 아니에요. 릴리스 페이지에서 직접 받아 주세요.",
     "space": "받은 파일을 저장하지 못했어요. 디스크 여유 공간을 확인해 주세요.",
     "replace": "LuvBox.exe를 바꾸지 못했어요. 파일이 있는 폴더에 쓸 수 있는지 확인하거나, 릴리스 페이지에서 직접 받아 주세요.",
@@ -101,6 +108,19 @@ def parse_checksums(text: str) -> dict[str, str]:
     return found
 
 
+def sign_checksums(version: str, text: str, sign) -> str:
+    """The checksum file with its signature line, for packaging.
+
+    `sign(message) -> (Key, signature)`. The result is read back the way an
+    installed version reads it before it is returned.
+    """
+    key, signature = sign(release_signature.signed_message(version, parse_checksums(text)))
+    signed = text + release_signature.signature_line(key, signature)
+    if not release_signature.verify(version, signed, parse_checksums(signed), (key,)):
+        raise ValueError("The signature does not confirm the checksum rows it was made for")
+    return signed
+
+
 def summarize(description) -> str:
     """The release's own list of changes as a few plain lines for the notice."""
     if not isinstance(description, str):
@@ -150,6 +170,8 @@ class Source:
     # GitHub serves release files from its own storage hosts after a redirect.
     hosts: tuple = ("api.github.com", "github.com", ".githubusercontent.com")
     secure: bool = True
+    # Whose signature on the checksum file makes a release installable.
+    keys: tuple = release_signature.RELEASE_KEYS
 
     def asset(self, version: str, name: str) -> str:
         return f"{self.downloads}/v{version}/{urllib.parse.quote(name)}"
@@ -284,14 +306,19 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
     try:
         with _open(source, source.asset(version, checksum_asset(version)), "application/octet-stream",
                    timeout) as response:
-            rows = parse_checksums(_read_limited(response, _CHECKSUM_LIMIT).decode("utf-8", errors="replace"))
+            listing = _read_limited(response, _CHECKSUM_LIMIT).decode("utf-8", errors="replace")
     except UpdateError:
         raise
     except (OSError, ValueError):
         raise UpdateError("download") from None
+    rows = parse_checksums(listing)
     expected = rows.get(EXE_ASSET)
     if expected is None:
         raise UpdateError("unexpected")
+    # The rows come from the same release as the program; the signature is what
+    # ties them to the maintainer's key. Checked before the large download.
+    if not release_signature.verify(version, listing, rows, source.keys):
+        raise UpdateError("signature")
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError:

@@ -17,8 +17,8 @@ import unittest
 
 from PIL import Image
 
-from luvbox import launcher, updater
-from tests.release_server import ReleaseServer, make_program
+from luvbox import launcher, release_signature, updater
+from tests.release_server import ReleaseServer, make_program, sign_for_tests
 from tools import draw_splash, package_release
 
 
@@ -86,6 +86,33 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertEqual((launcher.MARKER_NAME, launcher.INNER_NAME), (".luvbox-app", "LuvBox.exe"))
         self.assertEqual(updater.replaced_name(Path("C:/apps/LuvBox.exe")).name, "LuvBox.exe.old")
 
+    def test_the_signature_is_one_comment_line_over_the_version_and_the_rows(self):
+        # Versions from 1.9.2 on refuse a release without this line, so its shape and what it
+        # covers are as fixed as the asset names. Written out literally on purpose.
+        digest = hashlib.sha256(b"program").hexdigest()
+        other = hashlib.sha256(b"sources").hexdigest()
+        rows = updater.format_checksums([(digest, "LuvBox.exe"), (other, "LuvBox-1.9.2-source-licenses.zip")])
+        self.assertEqual(release_signature.signed_message("1.9.2", updater.parse_checksums(rows)),
+                         f"LuvBox release 1.9.2\n{digest}  LuvBox.exe\n{other}  LuvBox-1.9.2-source-licenses.zip\n"
+                         .encode("ascii"))
+        signed = updater.sign_checksums("1.9.2", rows, sign_for_tests)
+        self.assertTrue(signed.startswith(rows))
+        line = signed[len(rows):]
+        self.assertRegex(line, r"\A# luvbox-signature v1 [0-9a-f]{16} [A-Za-z0-9+/]+={0,2}\n\Z")
+        # 1.8.0 to 1.9.1 keep reading the same rows: the line is not a row to them.
+        self.assertIsNone(INSTALLED_CHECKSUM_ROW.match(line.strip("\r\n")))
+        self.assertEqual(updater.parse_checksums(signed), updater.parse_checksums(rows))
+        self.assertIs(package_release.sign_checksums, updater.sign_checksums)
+
+    def test_the_release_key_installed_versions_trust_stays_trusted(self):
+        # RSA 3072 made on 2026-11-14 in the maintainer's Windows key store. Keys may be added;
+        # removing or replacing this one strands every version that knows only it.
+        self.assertIn("0bfe3f93c5cd80de", [key.identifier for key in release_signature.RELEASE_KEYS])
+        for key in release_signature.RELEASE_KEYS:
+            self.assertGreaterEqual(key.modulus.bit_length(), 3072)
+            self.assertEqual(key.exponent, 65537)
+        self.assertEqual(updater.GITHUB.keys, release_signature.RELEASE_KEYS)
+
     def test_what_packaging_publishes_is_what_an_installed_version_fetches_and_installs(self):
         # A release directory as package_release writes it, served the way GitHub serves a release.
         folder = Path(tempfile.mkdtemp(prefix="luvbox-contract-"))
@@ -93,9 +120,9 @@ class ReleaseContractTests(unittest.TestCase):
         program = make_program("1.9.0")
         (folder / "LuvBox.exe").write_bytes(program)
         (folder / "LuvBox-1.9.0-source-licenses.zip").write_bytes(b"sources")
-        (folder / "SHA256-1.9.0.txt").write_text(package_release.format_checksums([
+        (folder / "SHA256-1.9.0.txt").write_text(package_release.sign_checksums("1.9.0", package_release.format_checksums([
             (hashlib.sha256(program).hexdigest(), "LuvBox.exe"),
-            (hashlib.sha256(b"sources").hexdigest(), "LuvBox-1.9.0-source-licenses.zip")]),
+            (hashlib.sha256(b"sources").hexdigest(), "LuvBox-1.9.0-source-licenses.zip")]), sign_for_tests),
             encoding="utf-8", newline="\n")
         server = ReleaseServer()
         self.addCleanup(server.close)
