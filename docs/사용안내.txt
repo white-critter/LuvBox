@@ -1,4 +1,4 @@
-러브박스 (LuvBox) 1.9.0
+러브박스 (LuvBox) 1.9.1
 
 좋아요한 사진과 영상을 내 폴더에 저장하고 갤러리에서 보는 Windows 앱입니다.
 
@@ -120,6 +120,6 @@ Firefox 임시 확장은 브라우저를 다시 시작하면 다시 불러와야
 
 기존 설정·로그인·기록·저장 파일은 계속 사용합니다.
 테마는 블랙·레드 하나입니다. 시작 화면과 같은 붉은 빛이 창 위쪽에 들어가고, 빨간 강조 버튼은 화면마다 하나입니다.
-소스와 라이선스는 같은 릴리스의 LuvBox-1.9.0-source-licenses.zip에 있습니다.
+소스와 라이선스는 같은 릴리스의 LuvBox-1.9.1-source-licenses.zip에 있습니다.
 검사와 보안 변경의 자세한 내용은 그 안의 source/docs/verification.md,
 source/docs/development.md, source/docs/security-review.md를 참고하세요.

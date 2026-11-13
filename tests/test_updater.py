@@ -267,6 +267,19 @@ class DownloadTests(ReleaseServerCase):
         self.assertEqual(self.leftovers(), ["LuvBox-1.9.0.exe.bak", "LuvBox-2.0.0.exe", "LuvBox.exe", "notes.txt"])
         updater.clear_downloads(self.folder / "missing")
 
+    def test_the_sweep_at_start_leaves_what_was_touched_recently(self):
+        self.downloads.mkdir()
+        an_hour_ago = time.time() - 3600
+        for name, stamp in (("LuvBox-1.9.0.exe.part", an_hour_ago), ("LuvBox-1.9.0.exe", an_hour_ago),
+                            ("LuvBox-1.9.1.exe.part", None), ("LuvBox-1.9.1.exe", None), ("notes.txt", an_hour_ago)):
+            (self.downloads / name).write_bytes(b"x")
+            if stamp:
+                os.utime(self.downloads / name, (stamp, stamp))
+        updater.clear_downloads(self.downloads, older_than=600)
+        # Another LuvBox may still be fetching or about to install the recent ones.
+        self.assertEqual(self.leftovers(), ["LuvBox-1.9.1.exe", "LuvBox-1.9.1.exe.part", "notes.txt"])
+        updater.clear_downloads(self.folder / "missing", older_than=600)
+
 
 class InstallTests(ReleaseServerCase):
     def setUp(self):

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import requests
+from gallery_dl import text
 from gallery_dl.downloader.http import HttpDownloader
 from gallery_dl.extractor.message import Message
 from gallery_dl.extractor.twitter import TwitterExtractor
@@ -51,6 +52,27 @@ class VariantExtractor(test_core.FakeLikesExtractor):
         yield Message.Directory, "", directory
         for num, file in enumerate(files, 1):
             metadata = dict(directory, **file, num=num, extension="mp4")
+            yield Message.Url, file["url"], metadata
+
+
+class PostExtractor(VariantExtractor):
+    """A whole post's attachments, photos included, through gallery-dl's real media selection."""
+
+    _size_image = "orig"
+    _size_fallback = ("4096x4096", "large", "medium", "small")
+    _image_fallback = TwitterExtractor._image_fallback
+
+    def items(self):
+        files = []
+        self._extract_media({"id_str": "100"}, self.media, files)
+        directory = {"tweet_id": "100", "author": {"name": "alice"}, "user": {"name": "alice"},
+                     "date": datetime(2020, 1, 1, tzinfo=timezone.utc)}
+        yield Message.Directory, "", directory
+        for num, file in enumerate(files, 1):
+            metadata = dict(directory, num=num)
+            metadata.update(file)
+            if "extension" not in metadata:
+                text.nameext_from_url(file["url"], metadata)
             yield Message.Url, file["url"], metadata
 
 
@@ -205,6 +227,49 @@ class MediaTests(unittest.TestCase):
         self.assertEqual(events[-1]["saved"], 1)
         self.assertEqual(events[-1]["skipped"], 1)
         self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 2)
+
+    def test_a_post_with_twenty_attachments_saves_every_one(self):
+        # X raised a post's limit from 4 to 20 photos and videos on 2026-11-12.
+        def clip(name):
+            return [{"url": f"https://video.twimg.com/{name}.mp4", "content_type": "video/mp4", "bitrate": 1000}]
+
+        media = []
+        for position in range(1, 21):
+            if position in (5, 12):
+                media.append(self.variant_media("video", clip(f"clip{position}")))
+            elif position == 20:
+                media.append(self.variant_media("animated_gif", clip("loop20")))
+            else:
+                media.append({"type": "photo", "original_info": {"width": 1200, "height": 900},
+                              "media_url_https": f"https://pbs.twimg.com/media/Photo{position}.jpg"})
+
+        def save():
+            events = []
+            with patch("gallery_dl.extractor.find", side_effect=lambda url: PostExtractor(url, media)), \
+                    patch("gallery_dl.downloader.find", return_value=test_core.FakeHttpDownloader):
+                code = run_worker(self.all_media(), events.append)
+            return code, events
+
+        code, events = save()
+        self.assertEqual(code, 0)
+        self.assertEqual(events[-1]["saved"], 20)
+        self.assertEqual(len(set(test_core.FakeHttpDownloader.downloaded)), 20)
+        names = {path.name for path in (self.output / "myaccount" / "alice").iterdir() if path.is_file()}
+        # Photos count among themselves, in the post's order; videos and GIFs keep their place in the post.
+        self.assertEqual({name for name in names if name.endswith(".jpg")},
+                         {f"alice_100_{number}.jpg" for number in range(1, 18)})
+        self.assertLessEqual({"alice_100_video_5.mp4", "alice_100_video_12.mp4"}, names)
+        self.assertEqual(len([name for name in names if name.startswith("alice_100_gif_20.")]), 1)
+        recorded = sorted((row["media_type"], row["num"]) for row in self.history_rows())
+        self.assertEqual(recorded, sorted([("photo", number) for number in range(1, 18)]
+                                          + [("video", 5), ("video", 12), ("animated_gif", 20)]))
+        # The tenth and later photos were asked for by their own address, not a shortened one.
+        self.assertIn("https://pbs.twimg.com/media/Photo19?format=jpg&name=orig", test_core.FakeHttpDownloader.downloaded)
+
+        code, events = save()
+        self.assertEqual(code, 0)
+        self.assertEqual(events[-1]["saved"], 0)
+        self.assertEqual(events[-1]["skipped"], 20)
 
     def test_unsupported_first_attachment_does_not_renumber_later_mp4(self):
         hls = [{"url": "https://video.twimg.com/hls.m3u8", "content_type": "application/x-mpegURL"}]

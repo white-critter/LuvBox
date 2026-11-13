@@ -12,6 +12,11 @@ from . import __version__, updater
 from .launcher import launcher_path
 
 
+# A download cut off by closing the application stays on disk (up to the size
+# of a release). The next start removes what has not been touched this long.
+_LEFTOVER_AGE = 10 * 60
+
+
 class UpdateController(QObject):
     changed = Signal()
     shutdownFinished = Signal()
@@ -42,6 +47,7 @@ class UpdateController(QObject):
         self._shutdown_complete = False
         self._lock = Lock()
         self._swapping = False
+        self._swept = False
         self._cancel = Event()
         self._jobs = Queue()
         self._worker = None
@@ -150,6 +156,9 @@ class UpdateController(QObject):
         """At application start: show what an earlier check found, and look again once a day."""
         if self._closing or self.busy:
             return
+        if not self._swept:
+            # Once per run, off the UI thread, and without any request.
+            self._swept = self._queue("sweep")
         if self._found and self._state == "idle":
             self._state = "available"
             self.changed.emit()
@@ -238,6 +247,12 @@ class UpdateController(QObject):
                 return
             if kind == "remember":
                 self._remember(details["changes"])
+                continue
+            if kind == "sweep":
+                try:
+                    updater.clear_downloads(self._folder_path(), older_than=_LEFTOVER_AGE)
+                except Exception:
+                    pass  # tidying is never worth a failure; the next install clears the folder anyway
                 continue
             try:
                 if kind == "check":

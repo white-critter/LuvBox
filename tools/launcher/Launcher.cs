@@ -52,6 +52,7 @@ namespace LuvBox
         public const int Busy = 74;
         public const int StartFailed = 75;
         public const int SameVersionRunning = 76;
+        public const int Replaced = 77;
     }
 
     internal static class Messages
@@ -70,6 +71,8 @@ namespace LuvBox
             "앱을 시작하지 못했습니다.\nLuvBox.exe를 다시 받아 실행해 주세요.";
         public const string SameVersionRunning =
             "같은 버전의 LuvBox가 실행 중이라 새 파일로 바꾸지 못했습니다.\n열려 있는 LuvBox를 닫고 다시 실행해 주세요.";
+        public const string Replaced =
+            "LuvBox.exe가 방금 다른 버전으로 바뀌었습니다.\n다시 실행해 주세요.";
         public const string OldData =
             "이전 이름(XlikeSaver)의 앱 데이터를 LuvBox 폴더로 옮기지 못했습니다.\n실행 중인 이전 버전을 모두 닫고 다시 실행해 주세요.";
     }
@@ -102,37 +105,48 @@ namespace LuvBox
         public static Footer Read(string path)
         {
             using (FileStream stream = Files.OpenShared(path))
+                return Read(stream);
+        }
+
+        /// <summary>The same reading through a handle that is already open.</summary>
+        public static Footer Read(FileStream stream)
+        {
+            if (stream.Length < Size + 4096)
+                return null;
+            byte[] data = new byte[Size];
+            stream.Position = stream.Length - Size;
+            Files.ReadExactly(stream, data, Size);
+            for (int index = 0; index < 8; index++)
             {
-                if (stream.Length < Size + 4096)
-                    return null;
-                byte[] data = new byte[Size];
-                stream.Position = stream.Length - Size;
-                Files.ReadExactly(stream, data, Size);
-                for (int index = 0; index < 8; index++)
+                if (data[index] != Head[index] || data[Size - 8 + index] != Tail[index])
                 {
-                    if (data[index] != Head[index] || data[Size - 8 + index] != Tail[index])
-                    {
-                        // Bytes after the program but no footer at the end: a
-                        // download that stopped early, not a bare launcher.
-                        if (stream.Length > ProgramEnd(stream))
-                            throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
-                        return null;
-                    }
+                    // Bytes after the program but no footer at the end: a
+                    // download that stopped early, not a bare launcher.
+                    if (stream.Length > ProgramEnd(stream))
+                        throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
+                    return null;
                 }
-                if (BitConverter.ToUInt32(data, 8) != 1)
-                    throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
-                Footer footer = new Footer();
-                footer.Offset = BitConverter.ToInt64(data, 12);
-                footer.Length = BitConverter.ToInt64(data, 20);
-                footer.Hash = new byte[32];
-                Array.Copy(data, 28, footer.Hash, 0, 32);
-                footer.Version = Encoding.ASCII.GetString(data, 60, 16).TrimEnd('\0');
-                if (footer.Offset < 4096 || footer.Length < 22
-                        || footer.Offset + footer.Length + Size != stream.Length
-                        || !VersionShape.IsMatch(footer.Version))
-                    throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
-                return footer;
             }
+            if (BitConverter.ToUInt32(data, 8) != 1)
+                throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
+            Footer footer = new Footer();
+            footer.Offset = BitConverter.ToInt64(data, 12);
+            footer.Length = BitConverter.ToInt64(data, 20);
+            footer.Hash = new byte[32];
+            Array.Copy(data, 28, footer.Hash, 0, 32);
+            footer.Version = Encoding.ASCII.GetString(data, 60, 16).TrimEnd('\0');
+            if (footer.Offset < 4096 || footer.Length < 22
+                    || footer.Offset + footer.Length + Size != stream.Length
+                    || !VersionShape.IsMatch(footer.Version))
+                throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
+            return footer;
+        }
+
+        /// <summary>Both describe the same archive.</summary>
+        public bool Matches(Footer other)
+        {
+            return other != null && Offset == other.Offset && Length == other.Length
+                && Version == other.Version && HashText == other.HashText;
         }
 
         /// <summary>Where the launcher program itself ends, from its section table.</summary>
@@ -210,17 +224,26 @@ namespace LuvBox
         }
     }
 
-    /// <summary>A read-only window onto part of a stream, so the archive starts at zero.</summary>
+    /// <summary>
+    /// A read-only window onto part of a stream, so the archive starts at zero.
+    /// Several windows share one open file: each keeps its own place and its
+    /// own read-ahead, and takes the gate only while it reads from the file.
+    /// </summary>
     internal sealed class SubStream : Stream
     {
         readonly Stream inner;
+        readonly object gate;
         readonly long start;
         readonly long length;
+        readonly byte[] ahead = new byte[256 * 1024];
+        long aheadStart = -1;
+        int aheadLength;
         long position;
 
-        public SubStream(Stream inner, long start, long length)
+        public SubStream(Stream inner, object gate, long start, long length)
         {
             this.inner = inner;
+            this.gate = gate;
             this.start = start;
             this.length = length;
         }
@@ -239,14 +262,36 @@ namespace LuvBox
         public override int Read(byte[] buffer, int offset, int count)
         {
             long remaining = length - position;
-            if (remaining <= 0)
+            if (remaining <= 0 || count <= 0)
                 return 0;
             if (count > remaining)
                 count = (int)remaining;
-            inner.Position = start + position;
-            int read = inner.Read(buffer, offset, count);
-            position += read;
-            return read;
+            if (aheadStart < 0 || position < aheadStart || position >= aheadStart + aheadLength)
+            {
+                int wanted = (int)Math.Min(ahead.Length, remaining);
+                int filled = 0;
+                lock (gate)
+                {
+                    inner.Position = start + position;
+                    while (filled < wanted)
+                    {
+                        int read = inner.Read(ahead, filled, wanted - filled);
+                        if (read <= 0)
+                            break;
+                        filled += read;
+                    }
+                }
+                if (filled <= 0)
+                    return 0;
+                aheadStart = position;
+                aheadLength = filled;
+            }
+            int available = (int)(aheadStart + aheadLength - position);
+            if (count > available)
+                count = available;
+            Buffer.BlockCopy(ahead, (int)(position - aheadStart), buffer, offset, count);
+            position += count;
+            return count;
         }
 
         public override long Seek(long offset, SeekOrigin origin)
@@ -263,12 +308,7 @@ namespace LuvBox
         public override void SetLength(long value) { throw new NotSupportedException(); }
         public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
 
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing)
-                inner.Dispose();
-            base.Dispose(disposing);
-        }
+        // The file belongs to whoever opened it: closing a window leaves it open.
     }
 
     /// <summary>Where this version lives on the PC and how it gets there.</summary>
@@ -293,6 +333,12 @@ namespace LuvBox
         public long TotalBytes = 1;
         public volatile bool Waiting;
         public volatile bool Updating;
+
+        // The one handle the archive is checked and then unpacked through. An
+        // update may rename LuvBox.exe and put a newer file under its name at
+        // any moment; this handle keeps reading the file that was checked.
+        FileStream verified;
+        readonly object verifiedGate = new object();
 
         public Installation(string selfPath, Footer footer)
         {
@@ -363,11 +409,13 @@ namespace LuvBox
                     return;
                 RemoveLeftovers();
                 Updating = OtherVersionExists();
-                using (FileStream source = Files.OpenShared(SelfPath))
+                using (FileStream source = OpenSelf())
                 {
-                    // The same handle stays open from the check to the last file,
-                    // and it denies writers, so what was checked is what is unpacked.
+                    // This handle stays open from the check to the last file and
+                    // denies writers, and nothing below opens LuvBox.exe by name
+                    // again, so what was checked is what is unpacked.
                     Verify(source);
+                    verified = source;
                     string temporary = Path.Combine(AppRoot, ".new-" + Process.GetCurrentProcess().Id.ToString("x")
                                                     + "-" + (DateTime.UtcNow.Ticks & 0xffffff).ToString("x"));
                     try
@@ -388,6 +436,10 @@ namespace LuvBox
                     {
                         TryDelete(temporary);
                         throw new LauncherError(ExitCodes.UnpackFailed, Messages.UnpackFailed);
+                    }
+                    finally
+                    {
+                        verified = null;
                     }
                 }
                 RemoveOlderVersions();
@@ -512,9 +564,41 @@ namespace LuvBox
             }
         }
 
+        /// <summary>Open LuvBox.exe and make sure it is still the file whose footer was read at start.</summary>
+        FileStream OpenSelf()
+        {
+            FileStream source;
+            try
+            {
+                source = Files.OpenShared(SelfPath);
+            }
+            catch (Exception)
+            {
+                throw new LauncherError(ExitCodes.UnpackFailed, Messages.UnpackFailed);
+            }
+            try
+            {
+                // An update that landed since then put another archive under this
+                // name. Its offsets are not ours: say so instead of "damaged".
+                if (!Footer.Matches(Footer.Read(source)))
+                    throw new LauncherError(ExitCodes.Replaced, Messages.Replaced);
+                return source;
+            }
+            catch (LauncherError)
+            {
+                source.Dispose();
+                throw;
+            }
+            catch (Exception)
+            {
+                source.Dispose();
+                throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
+            }
+        }
+
         ZipArchive OpenArchive()
         {
-            return new ZipArchive(new SubStream(Files.OpenShared(SelfPath), Footer.Offset, Footer.Length),
+            return new ZipArchive(new SubStream(verified, verifiedGate, Footer.Offset, Footer.Length),
                                   ZipArchiveMode.Read, false);
         }
 

@@ -328,6 +328,70 @@ class LauncherTests(unittest.TestCase):
         self.assertEqual(self.run_program("--check", program=rebuilt)[0], 0)
         self.assertTrue((self.installed / "_internal" / "rebuilt.txt").is_file())
 
+    def replace_as_an_update_does(self, program, newer):
+        """What luvbox.updater.install does: the running file is renamed, the new one takes its name."""
+        os.replace(program, program.with_name("LuvBox.exe.old"))
+        shutil.copyfile(newer, program)
+
+    def test_a_launcher_replaced_before_it_unpacks_says_so_and_the_next_start_runs_the_new_one(self):
+        folder = self.local / "place"
+        folder.mkdir()
+        program = folder / "LuvBox.exe"
+        shutil.copyfile(self.program, program)
+        seen = folder / "LuvBox.exe.old"
+        seen.write_bytes(b"removed by the launcher just before it reads its own footer")
+        inner = (self.application / "LuvBox.exe").read_bytes()
+        newer = self.program_with_archive([("LuvBox.exe", inner), ("_internal/newer.txt", b"the update")], "newer")
+        self.root.mkdir(parents=True)
+        environment, report = self.environment()
+        # Hold the unpacking gate, as another launcher that is still unpacking does.
+        with (self.root / ".lock").open("wb"):
+            process = subprocess.Popen([str(program), "--check"], env=environment,
+                                       creationflags=subprocess.CREATE_NO_WINDOW)
+            deadline = time.monotonic() + 60
+            while seen.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertFalse(seen.exists())
+            time.sleep(0.5)                     # it has read its footer and now waits at the gate
+            self.assertIsNone(process.poll())
+            self.replace_as_an_update_does(program, newer)
+        self.assertEqual(process.wait(timeout=120), 77)
+        self.assertFalse(report.is_file())
+        self.assertFalse(self.installed.exists())
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(program.read_bytes(), newer.read_bytes())
+        # Starting again, as the message asks, runs the update.
+        code, report = self.run_program("--check", program=program)
+        self.assertEqual(code, 0)
+        self.assertEqual((self.installed / "_internal" / "newer.txt").read_bytes(), b"the update")
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["LuvBox.exe"])
+
+    def test_a_launcher_replaced_while_it_unpacks_still_unpacks_the_file_it_checked(self):
+        folder = self.local / "place"
+        folder.mkdir()
+        program = folder / "LuvBox.exe"
+        inner = (self.application / "LuvBox.exe").read_bytes()
+        parts = [(f"_internal/part-{index:02}.bin", os.urandom(1024 * 1024)) for index in range(24)]
+        shutil.copyfile(self.program_with_archive([("LuvBox.exe", inner)] + parts, "large"), program)
+        newer = self.program_with_archive([("LuvBox.exe", inner), ("_internal/newer.txt", b"the update")],
+                                          "newer-during")
+        environment, report = self.environment(STANDIN_EXIT=5)
+        process = subprocess.Popen([str(program), "--check"], env=environment,
+                                   creationflags=subprocess.CREATE_NO_WINDOW)
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and process.poll() is None:
+            if self.root.is_dir() and any(path.name.startswith(".new-") for path in self.root.iterdir()):
+                break
+            time.sleep(0.002)
+        self.replace_as_an_update_does(program, newer)
+        self.assertEqual(process.wait(timeout=120), 5)
+        self.assertTrue(report.is_file())
+        for name, data in parts:
+            self.assertEqual((self.installed / name).read_bytes(), data, name)
+        self.assertFalse((self.installed / "_internal" / "newer.txt").exists())
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(program.read_bytes(), newer.read_bytes())
+
     def test_an_unpacked_copy_that_lost_its_program_is_unpacked_again(self):
         self.assertEqual(self.run_program("--check")[0], 0)
         (self.installed / "LuvBox.exe").unlink()

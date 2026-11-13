@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -432,15 +433,24 @@ def install(downloaded, launcher, expected: str) -> None:
             pass
 
 
-def clear_downloads(folder) -> None:
-    """Remove fetched programs once they are installed or abandoned."""
+def clear_downloads(folder, *, older_than: float = 0) -> None:
+    """Remove fetched programs once they are installed or abandoned.
+
+    With `older_than` (seconds) only files left untouched for that long go.
+    That is for the sweep at application start, where another LuvBox may be
+    in the middle of its own download: a file being written cannot be
+    removed anyway, and one just finished is still waiting to be installed.
+    """
     try:
         entries = list(Path(folder).iterdir())
     except OSError:
         return
+    newest = time.time() - older_than if older_than > 0 else None
     for path in entries:
         if re.fullmatch(r"LuvBox-[0-9.]+\.exe(\.part)?", path.name) and path.is_file() and not path.is_symlink():
             try:
+                if newest is not None and path.stat().st_mtime > newest:
+                    continue
                 path.unlink()
             except OSError:
                 pass

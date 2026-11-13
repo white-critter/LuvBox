@@ -269,6 +269,29 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertEqual(self.launcher.read_bytes(), self.old)
         self.server.slow.set()
 
+    def test_a_download_left_by_an_earlier_run_is_removed_at_the_next_start(self):
+        updates = self.folder / "updates"
+        updates.mkdir()
+        an_hour_ago = time.time() - 3600
+        (updates / "LuvBox-1.9.0.exe.part").write_bytes(b"cut off when the application closed")
+        os.utime(updates / "LuvBox-1.9.0.exe.part", (an_hour_ago, an_hour_ago))
+        (updates / "LuvBox-1.9.1.exe.part").write_bytes(b"another LuvBox is still fetching this")
+        (updates / "notes.txt").write_bytes(b"not ours")
+        controller = self.controller(update_check=False)
+        controller.startAutomaticCheck()
+        self.wait(lambda: not (updates / "LuvBox-1.9.0.exe.part").exists())
+        self.assertEqual(sorted(path.name for path in updates.iterdir()), ["LuvBox-1.9.1.exe.part", "notes.txt"])
+        # Tidying asks the network nothing, shows nothing, and happens once.
+        self.assertEqual(self.paths(), [])
+        self.assertEqual(controller.state, "idle")
+        self.assertFalse(controller.noticeVisible)
+        os.utime(updates / "LuvBox-1.9.1.exe.part", (an_hour_ago, an_hour_ago))
+        controller.startAutomaticCheck()
+        for _ in range(40):
+            self.application.processEvents()
+            time.sleep(0.005)
+        self.assertTrue((updates / "LuvBox-1.9.1.exe.part").exists())
+
 
 @unittest.skipUnless(_QT_AVAILABLE, "optional Qt dependencies are not installed")
 class ApplicationUpdateTests(unittest.TestCase):
