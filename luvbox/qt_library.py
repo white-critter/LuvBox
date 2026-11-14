@@ -14,6 +14,8 @@ import webbrowser
 
 from PySide6.QtCore import QObject, Property, Qt, QTimer, QUrl, Signal, Slot
 
+# The names only: the classifier itself (numpy, onnxruntime) is loaded by the work that classifies.
+from .clip_model import CATEGORY_NAMES
 from .history import HistoryStore, page_cursor
 from .preview import Thumbnail, thumbnail
 from .qt_gallery import GalleryModel, SafeThumbnailProvider
@@ -415,7 +417,6 @@ class LibraryRepository:
 
     def ai_counts(self, generation=None):
         """Photos per AI category, in the fixed category order, zero included."""
-        from .clip_classifier import CATEGORY_NAMES
         request = self.current(generation)
         if request is None:
             return []
@@ -1039,7 +1040,7 @@ class LibraryRepository:
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0, 0
-        from .clip_classifier import CATEGORY_NAMES, classify_detailed, ensure_model, get_session, is_available, release_session
+        from .clip_classifier import classify_detailed, ensure_model, get_session, is_available, release_session
         if category not in CATEGORY_NAMES and category != "":
             return 0, 0
         try:
@@ -1484,7 +1485,6 @@ class LibraryController(QObject):
 
     @Property("QVariantList", constant=True)
     def aiCategories(self):
-        from .clip_classifier import CATEGORY_NAMES
         return list(CATEGORY_NAMES)
 
     @Property("QVariantList", notify=aiCountsChanged)
@@ -1944,7 +1944,6 @@ class LibraryController(QObject):
 
     @Slot(str, str)
     def setAiFilter(self, category, origin):
-        from .clip_classifier import CATEGORY_NAMES
         category = category.strip() if isinstance(category, str) else ""
         # The screen shows one list per category. Estimated and taught photos
         # are no longer split; the second argument stays for older callers.
@@ -1957,7 +1956,6 @@ class LibraryController(QObject):
         self._refresh(reload_authors=False)
 
     def _queue_teach(self, category, keys):
-        from .clip_classifier import CATEGORY_NAMES
         if self._closed:
             return False
         if category not in CATEGORY_NAMES and category != "":
