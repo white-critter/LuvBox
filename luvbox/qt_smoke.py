@@ -229,7 +229,8 @@ def run(destination):
               "launcher": launcher_path() is not None,
               "stage": "qt-import", "isolated": True, "native_scheduler_access": False,
               "authentication_or_network": False}
-    previous_environment = {name: os.environ.get(name) for name in ("LOCALAPPDATA", "APPDATA", "QT_QPA_PLATFORM")}
+    previous_environment = {name: os.environ.get(name) for name in (
+        "LOCALAPPDATA", "APPDATA", "QT_QPA_PLATFORM", "QML_DISABLE_DISK_CACHE")}
     messages = []
     previous_handler = None
     handler_installed = False
@@ -241,6 +242,11 @@ def run(destination):
         os.environ["LOCALAPPDATA"] = temporary.name
         os.environ["APPDATA"] = str(Path(temporary.name) / "roaming")
         os.environ["QT_QPA_PLATFORM"] = "windows" if os.name == "nt" else "offscreen"
+        if not os.environ.get("QML_DISK_CACHE_PATH"):
+            # Qt does not read LOCALAPPDATA: it asks the system for the folder of its compiled-QML
+            # cache, which is this PC's real one. A caller that gave Qt a folder (the build's check,
+            # the tests) keeps it; otherwise this run writes no cache files at all.
+            os.environ["QML_DISABLE_DISK_CACHE"] = "1"
         from PySide6.QtCore import qInstallMessageHandler
 
         previous_handler = qInstallMessageHandler(lambda severity, context, message: messages.append(message))

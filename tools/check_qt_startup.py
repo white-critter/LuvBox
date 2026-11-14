@@ -37,9 +37,15 @@ def validate_report(report, executable_sha256=None):
 
 
 def launcher_environment(app_data):
-    """The launcher unpacks under LOCALAPPDATA; point it at a folder of the check's own."""
+    """The launcher unpacks under LOCALAPPDATA; point it at a folder of the check's own.
+
+    Qt does not read LOCALAPPDATA: it asks Windows for the folder of its compiled-QML
+    cache, so that cache gets the check's folder through its own variable. Without it
+    every checked build left .qmlc files in the developer's real LuvBox cache folder.
+    """
     environment = dict(os.environ)
     environment["LOCALAPPDATA"] = str(app_data)
+    environment["QML_DISK_CACHE_PATH"] = str(Path(app_data) / "qml-cache")
     environment["LUVBOX_LAUNCHER_SILENT"] = "1"
     for name in ("LUVBOX_LAUNCHER", "LUVBOX_READY_EVENT"):
         environment.pop(name, None)

@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +17,21 @@ from luvbox import settings
 TESTS = Path(__file__).resolve().parent
 _ISOLATION = re.compile(r"^\s*(from tests import app_data_isolation|import app_data_isolation)\b")
 _LUVBOX = re.compile(r"^\s*(from luvbox\b|import luvbox\b)")
+
+# What a scene test's child process does first: load a QML file from disk.
+_LOAD_QML = """
+import sys
+from PySide6.QtCore import QCoreApplication, QUrl
+from PySide6.QtQml import QQmlComponent, QQmlEngine
+
+application = QCoreApplication(sys.argv)
+engine = QQmlEngine()
+component = QQmlComponent(engine, QUrl.fromLocalFile(sys.argv[1]))
+thing = component.create()
+loaded = thing is not None and thing.property("doubled") == 8
+del thing, component, engine
+sys.exit(0 if loaded else 1)
+"""
 
 
 class AppDataIsolationTests(unittest.TestCase):
@@ -54,9 +71,32 @@ class AppDataIsolationTests(unittest.TestCase):
             with patch.dict(os.environ, {"LOCALAPPDATA": folder}):
                 self.assertEqual(settings.app_directory(), Path(folder) / "LuvBox")
 
-    def test_both_names_of_the_module_are_one_module(self):
-        import sys
+    def test_qt_is_given_a_qml_cache_folder_inside_the_private_folder(self):
+        # Qt asks Windows for its cache folder and ignores LOCALAPPDATA; only this variable moves it.
+        cache = Path(os.environ["QML_DISK_CACHE_PATH"])
+        self.assertEqual(cache, Path(app_data_isolation.QML_CACHE))
+        self.assertEqual(cache.parent, Path(app_data_isolation.FOLDER))
+        # Beside the application's folder: a test that looks into its app data never meets Qt's files.
+        self.assertNotEqual(cache, settings.app_directory())
+        self.assertFalse(cache.is_relative_to(settings.app_directory()))
 
+    def test_a_child_process_writes_its_compiled_qml_into_that_folder(self):
+        # Compiled QML used to land under the real LocalAppData (Python\cache\qmlcache). Qt has one
+        # cache folder, so a new file's cache appearing here means it went nowhere else.
+        cache = Path(app_data_isolation.QML_CACHE)
+        before = {item.name for item in cache.glob("*.qmlc")} if cache.is_dir() else set()
+        with tempfile.TemporaryDirectory(prefix="luvbox-isolation-qml-") as folder:
+            source = Path(folder) / "Probe.qml"
+            source.write_text("import QtQml\nQtObject {\n    property int size: 4\n"
+                              "    property int doubled: size * 2\n    function next(x) { return x + 1 }\n}\n",
+                              encoding="utf-8")
+            result = subprocess.run([sys.executable, "-c", _LOAD_QML, str(source)], capture_output=True, text=True,
+                                    timeout=120, env={**os.environ, "QT_QPA_PLATFORM": "offscreen"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        after = {item.name for item in cache.glob("*.qmlc")}
+        self.assertEqual(len(after - before), 1, f"one new cache file for the one new QML file, got {after - before}")
+
+    def test_both_names_of_the_module_are_one_module(self):
         self.assertIs(sys.modules["tests.app_data_isolation"], sys.modules["app_data_isolation"])
 
 

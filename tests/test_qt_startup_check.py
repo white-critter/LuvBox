@@ -87,6 +87,9 @@ class FrozenStartupCheckTests(unittest.TestCase):
             self.assertEqual(environment["LUVBOX_LAUNCHER_SILENT"], "1")
             self.assertNotIn("LUVBOX_LAUNCHER", environment)
             self.assertNotIn("LUVBOX_READY_EVENT", environment)
+            # Qt's compiled-QML cache follows the check's folder; LOCALAPPDATA alone does not move it.
+            self.assertEqual(Path(environment["QML_DISK_CACHE_PATH"]),
+                             Path(environment["LOCALAPPDATA"]) / "qml-cache")
 
     def test_source_incomplete_or_error_reports_are_rejected(self):
         valid = self.complete_report()

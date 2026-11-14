@@ -15,6 +15,13 @@ As a second line of defence the application's own folder lookup refuses the
 real folder for the rest of the process. A test that points LOCALAPPDATA back
 at it, or clears the variable, fails instead of writing there, and the process
 ends with an error even when the code under test swallowed the exception.
+
+Qt does not read LOCALAPPDATA: it asks Windows for the cache folder where it
+keeps compiled QML (.qmlc), so test runs used to leave those files under the
+real LocalAppData (``Python\\cache\\qmlcache``, and
+``LuvBox\\LuvBox\\cache\\qmlcache`` for code that names the application).
+QML_DISK_CACHE_PATH moves that cache into the private folder. Qt reads it once,
+at the first QML a process loads, which is why it is set here, at import.
 """
 
 import atexit
@@ -56,10 +63,16 @@ if _inherited and _original and _spelled(_original) not in REAL_FOLDERS:
     # A worker process started by a test. Its parent already chose a private
     # folder, often one the test reads afterwards, and removes it itself.
     FOLDER = _original
+    # The parent's cache folder, shared by every process of the run.
+    os.environ.setdefault("QML_DISK_CACHE_PATH", os.path.join(FOLDER, "qml-cache"))
 else:
     FOLDER = tempfile.mkdtemp(prefix="luvbox-test-appdata-")
     os.environ["LOCALAPPDATA"] = FOLDER
+    # Beside the application's own folder (FOLDER\LuvBox), not inside it.
+    os.environ["QML_DISK_CACHE_PATH"] = os.path.join(FOLDER, "qml-cache")
     atexit.register(shutil.rmtree, FOLDER, True)
+
+QML_CACHE = os.environ["QML_DISK_CACHE_PATH"]
 
 REACHED = []                              # attempts to use the real folder, for the exit check
 
