@@ -292,7 +292,10 @@ class RecordsControllerTests(unittest.TestCase):
             cache.close()
         self.open_unsaved('excluded')
         self.wait(lambda: self.records.unsavedTotal == 1 and not self.records.unsavedBusy)
-        self.assertTrue(self.records.unsavedRows[0]['preview'].startswith('data:image/png;base64,'))
+        # The row names where its tile asks for the picture; it does not carry the picture.
+        row = self.records.unsavedRows[0]
+        self.assertEqual(row['preview'], 'image://unsavedpreview/' + row['token'])
+        self.assertEqual(self.records._previews.lookup(row['token']), ('alice', ('301', 1, 'photo')))
         self.records.setUnsavedView('unsaved')
         self.wait(lambda: not self.records.unsavedBusy and self.records.unsavedTotal == 1)
         self.assertEqual(self.records.unsavedRows[0]['preview'], '')

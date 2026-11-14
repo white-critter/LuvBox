@@ -200,6 +200,7 @@ def scene():
         wheel = WheelInputFilter()
         engine = QQmlApplicationEngine()
         engine.addImageProvider("thumbs", controller.library.provider)
+        engine.addImageProvider("unsavedpreview", controller.records.preview_provider())
         engine.setInitialProperties({"appController": controller, "galleryModel": controller.library.model,
                                      "wheelInputFilter": wheel})
         engine.load(ROOT / "assets/qt/MainWindow.qml")
@@ -366,7 +367,7 @@ def scene():
             wait(lambda: controller.records.unsavedView == "excluded" and controller.records.unsavedTotal == 1
                  and not controller.records.unsavedBusy and len(tiles()) == 1, "excluded view")
             assert controller.records.unsavedRows[0]["reasonLabel"] == "직접 제외"
-            assert controller.records.unsavedRows[0]["preview"].startswith("data:image/png;base64,")
+            assert controller.records.unsavedRows[0]["preview"].startswith("image://unsavedpreview/")
             preview = next(item for item in items(page) if item.objectName() == "unsavedPreview")
             wait(lambda: preview.property("paintedWidth") > 0, "excluded local preview")
             shot(f"{tag}-unsaved-excluded")

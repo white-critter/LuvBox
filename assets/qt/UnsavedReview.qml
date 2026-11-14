@@ -3,8 +3,10 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // Media that is not in the gallery, looked at the way the gallery is: what a save could not
-// store, what the person excluded, and saved files that are gone. Tiles are picked by a
-// click and the buttons above act on the picked ones, or on the whole list when none is.
+// store, what the person excluded, and saved files that are gone. Tiles are picked as in
+// the gallery (click, Shift+click for a range, drag for a rectangle) and the buttons above
+// act on the picked ones, or on the whole list when none is. More tiles arrive as the
+// view scrolls.
 Item {
     id: review
     property var app: null
@@ -14,7 +16,6 @@ Item {
     readonly property var records: app ? app.records : null
     readonly property string view: records ? records.unsavedView : "unsaved"
     readonly property int chosen: records ? records.unsavedSelectedCount : 0
-    readonly property var chosenTokens: records ? records.unsavedSelection : []
     // Acting on a whole list asks once more; it lapses after a few seconds.
     property bool confirmAll: false
     readonly property string retryWord: view === "unsaved" ? "다시 저장" : "다시 받기"
@@ -25,6 +26,25 @@ Item {
         confirmAll = false
         if (records)
             records.setUnsavedView(name)
+    }
+
+    // Esc lets go of what is picked first, then leaves the page (as in the gallery).
+    function stepBack() {
+        if (chosen > 0)
+            records.clearUnsavedSelection()
+        else
+            backRequested()
+    }
+
+    function selectAll() {
+        if (records && grid.count > 0)
+            records.selectUnsavedPage()
+    }
+
+    function requestMore() {
+        if (records && records.unsavedMore && !records.unsavedBusy
+                && grid.contentY - grid.originY + grid.height + grid.cellHeight * 2 >= grid.contentHeight)
+            records.loadMoreUnsaved()
     }
 
     onViewChanged: confirmAll = false
@@ -73,6 +93,17 @@ Item {
                         color: Theme.text
                     }
                     Item { Layout.fillWidth: true }
+                    Label {
+                        objectName: "unsavedLoadedCount"
+                        visible: !!review.records && review.records.unsavedTotal > 0
+                        text: review.records
+                            ? (review.records.unsavedTotal > grid.count
+                               ? review.records.unsavedTotal.toLocaleString() + "개 중 " + grid.count.toLocaleString() + "개 불러옴"
+                               : review.records.unsavedTotal.toLocaleString() + "개")
+                            : ""
+                        color: Theme.textFaint
+                        font.pixelSize: Theme.fontSmall
+                    }
                 }
                 // The three lists share the width, so they fit a narrow window too.
                 RowLayout {
@@ -119,7 +150,7 @@ Item {
                     objectName: "unsavedGuide"
                     Layout.fillWidth: true
                     text: review.view === "excluded"
-                        ? "다시 받지 않도록 빼 둔 미디어입니다. ‘제외 해제’는 다음 저장에서 다시 받게 하고, ‘다시 받기’는 지금 받습니다. 저장된 파일은 바뀌지 않습니다."
+                        ? "다시 받지 않도록 빼 둔 미디어입니다. ‘제외 해제’는 다음 저장에서 다시 받게 하고, ‘다시 받기’는 지금 받습니다. 저장된 파일은 바뀌지 않습니다. 빈 미리보기는 전체 목록 확인으로 저장하면 채워집니다."
                         : review.view === "missing"
                         ? "저장했지만 폴더에 파일이 없는 미디어입니다. 갤러리에는 ‘파일 없음’ 칸으로 보입니다. ‘다시 받기’는 지금 다시 받고, ‘갤러리에서 빼기’는 갤러리에서 감추고 다시 받지 않게 합니다. 뺀 것은 ‘직접 제외’에서 되돌릴 수 있습니다."
                         : "저장하지 못한 미디어입니다. ‘다시 저장’은 지금 다시 받습니다. 목록에서 지워도 저장된 파일은 그대로이고, 직접 제외한 항목은 빠지지 않습니다."
@@ -172,16 +203,16 @@ Item {
                     FlatButton {
                         objectName: "unsavedSelectPage"
                         tone: "ghost"
-                        text: review.chosen > 0 ? "선택 해제" : "보이는 것 모두 선택"
-                        onClicked: review.chosen > 0 ? review.records.clearUnsavedSelection()
-                                                     : review.records.selectUnsavedPage()
+                        text: review.chosen > 0 ? "선택 해제" : "불러온 것 모두 선택"
+                        tip: review.chosen > 0 ? "선택 해제 (Esc)" : "불러온 타일을 모두 고릅니다 (Ctrl+A). Shift+클릭은 범위를, 끌기는 사각형 안을 고릅니다."
+                        onClicked: review.chosen > 0 ? review.records.clearUnsavedSelection() : review.selectAll()
                     }
                     FlatButton {
                         objectName: "unsavedOpenSource"
                         tone: "ghost"
                         text: "원문 보기"
                         visible: review.chosen === 1
-                        onClicked: review.records.openSource(review.chosenTokens[0])
+                        onClicked: review.records.openSource(review.records.unsavedSelection[0])
                     }
                 }
                 Label {
@@ -219,31 +250,69 @@ Item {
                 readonly property int columns: Math.max(1, Math.floor(width / (review.tileWidth + 12)))
                 cellWidth: Math.floor(width / columns)
                 cellHeight: Math.round(review.tileWidth * 0.75) + 62
-                model: review.records ? review.records.unsavedRows : []
+                model: review.records ? review.records.unsavedModel : null
                 ScrollBar.vertical: ScrollBar {
                     policy: grid.contentHeight > grid.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                 }
-                SmoothWheel { flickable: grid; notchPixels: 160 }
+                SmoothWheel { flickable: grid; notchPixels: Math.max(120, Math.round(grid.cellHeight * 0.6)) }
+                onContentYChanged: review.requestMore()
+                onCountChanged: Qt.callLater(review.requestMore)
+                onHeightChanged: Qt.callLater(review.requestMore)
+
+                // A list read again after a change (something excluded, released or forgotten)
+                // comes back as a new list, which a grid shows from its top; stay where the
+                // person was looking. Another list (or the page opened again) is emptied
+                // first, so it does start at its top.
+                property real keptY: -1
+                property int resets: 0
+                Connections {
+                    target: grid.model
+                    function onModelAboutToBeReset() { grid.keptY = grid.contentY - grid.originY }
+                    function onModelReset() {
+                        const wanted = grid.keptY
+                        const serial = ++grid.resets
+                        grid.keptY = -1
+                        if (wanted > 0)
+                            Qt.callLater(function() {
+                                if (serial !== grid.resets)
+                                    return              // a newer list arrived meanwhile
+                                const limit = Math.max(0, grid.contentHeight - grid.height)
+                                grid.contentY = grid.originY + Math.min(wanted, limit)
+                            })
+                    }
+                }
 
                 delegate: Item {
                     id: cell
-                    required property var modelData
                     required property int index
+                    required property string token
+                    required property string author
+                    required property string reason
+                    required property string reasonLabel
+                    required property string mediaType
+                    required property string info
+                    required property string posted
+                    required property string detail
+                    required property string seen
+                    required property string hint
+                    required property string preview
+                    required property bool picked
                     width: grid.cellWidth
                     height: grid.cellHeight
                     Rectangle {
                         id: tile
                         objectName: "unsavedTile"
-                        readonly property bool picked: review.chosenTokens.indexOf(cell.modelData.token) >= 0
+                        readonly property bool picked: cell.picked
+                        readonly property string token: cell.token
                         anchors.fill: parent
                         anchors.margins: 4
                         radius: Theme.radiusCard
-                        color: picked ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.raised : Theme.well)
-                        border.width: picked ? 1 : 0
+                        color: cell.picked ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.raised : Theme.well)
+                        border.width: cell.picked ? 1 : 0
                         border.color: Theme.accent
                         Accessible.role: Accessible.CheckBox
-                        Accessible.name: cell.modelData.reasonLabel + " " + cell.modelData.author
-                        Accessible.checked: picked
+                        Accessible.name: cell.reasonLabel + " " + cell.author
+                        Accessible.checked: cell.picked
 
                         Item {
                             id: frame
@@ -253,11 +322,11 @@ Item {
                             anchors.margins: 8
                             height: parent.height - 62
                             Image {
-                                id: preview
+                                id: picture
                                 objectName: "unsavedPreview"
                                 anchors.fill: parent
-                                source: cell.modelData.preview || ""
-                                sourceSize: Qt.size(384, 384)
+                                // Read from this PC's preview cache when the tile is shown.
+                                source: cell.preview
                                 asynchronous: true
                                 cache: false
                                 fillMode: Image.PreserveAspectFit
@@ -266,11 +335,11 @@ Item {
                             // No picture kept on this PC: say what kind of media it is.
                             Canvas {
                                 objectName: "unsavedPlaceholder"
-                                visible: !preview.visible
+                                visible: !picture.visible
                                 anchors.centerIn: parent
                                 width: 32
                                 height: 26
-                                property string kind: cell.modelData.mediaType
+                                property string kind: cell.mediaType
                                 onKindChanged: requestPaint()
                                 onPaint: {
                                     const ctx = getContext("2d")
@@ -311,19 +380,19 @@ Item {
                             anchors.left: parent.left
                             anchors.top: parent.top
                             anchors.margins: 12
-                            width: reasonLabel.implicitWidth + 14
+                            width: reasonText.implicitWidth + 14
                             height: 22
                             radius: height / 2
-                            color: cell.modelData.reason === "excluded" ? Theme.raised
-                                : cell.modelData.reason === "failed" ? Theme.errorSoft : Theme.noticeSoft
+                            color: cell.reason === "excluded" ? Theme.raised
+                                : cell.reason === "failed" ? Theme.errorSoft : Theme.noticeSoft
                             Label {
-                                id: reasonLabel
+                                id: reasonText
                                 anchors.centerIn: parent
-                                text: cell.modelData.reasonLabel
+                                text: cell.reasonLabel
                                 font.pixelSize: Theme.fontTiny
                                 font.bold: true
-                                color: cell.modelData.reason === "excluded" ? Theme.textMuted
-                                    : cell.modelData.reason === "failed" ? Theme.error : Theme.notice
+                                color: cell.reason === "excluded" ? Theme.textMuted
+                                    : cell.reason === "failed" ? Theme.error : Theme.notice
                             }
                         }
                         Rectangle {
@@ -333,7 +402,7 @@ Item {
                             width: 22
                             height: 22
                             radius: Theme.radiusSmall
-                            visible: tile.picked
+                            visible: cell.picked
                             color: Theme.accent
                             Label {
                                 anchors.centerIn: parent
@@ -351,7 +420,7 @@ Item {
                             spacing: 1
                             Label {
                                 width: parent.width
-                                text: cell.modelData.author
+                                text: cell.author
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 font.pixelSize: Theme.fontCaption
@@ -359,7 +428,7 @@ Item {
                             }
                             Label {
                                 width: parent.width
-                                text: cell.modelData.info + (cell.modelData.posted ? " · 게시 " + cell.modelData.posted : "")
+                                text: cell.info + (cell.posted ? " · 게시 " + cell.posted : "")
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 font.pixelSize: Theme.fontTiny
@@ -367,8 +436,8 @@ Item {
                             }
                             Label {
                                 width: parent.width
-                                visible: cell.modelData.hint.length > 0
-                                text: cell.modelData.hint
+                                visible: cell.hint.length > 0
+                                text: cell.hint
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 font.pixelSize: Theme.fontTiny
@@ -380,14 +449,114 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            ToolTip.visible: containsMouse
+                            ToolTip.visible: containsMouse && !bandDrag.active
                             ToolTip.delay: 600
-                            ToolTip.text: cell.modelData.detail + (cell.modelData.seen ? "\n마지막 확인 " + cell.modelData.seen : "")
-                                + "\n누르면 선택 · 두 번 누르면 원문 보기"
-                            onClicked: review.records.toggleUnsavedSelected(cell.modelData.token)
-                            onDoubleClicked: review.records.openSource(cell.modelData.token)
+                            ToolTip.text: cell.detail + (cell.seen ? "\n마지막 확인 " + cell.seen : "")
+                                + "\n누르면 선택 · Shift+클릭은 범위 · 두 번 누르면 원문 보기"
+                            onClicked: mouse => {
+                                if (mouse.modifiers & Qt.ShiftModifier)
+                                    review.records.selectUnsavedRangeTo(cell.token)
+                                else
+                                    review.records.toggleUnsavedSelected(cell.token)
+                            }
+                            onDoubleClicked: review.records.openSource(cell.token)
                         }
                     }
+                }
+
+                // Drag a rectangle to pick the tiles it touches, as in the gallery.
+                DragHandler {
+                    id: bandDrag
+                    objectName: "unsavedBandDrag"
+                    target: null
+                    acceptedDevices: PointerDevice.Mouse
+                    acceptedButtons: Qt.LeftButton
+                    enabled: !!review.records && grid.count > 0
+                    dragThreshold: 10
+                    property real startX: 0
+                    property real startY: 0
+                    property real currentX: 0
+                    property real currentY: 0
+                    // Ctrl or Shift held when the button went down adds to what is picked,
+                    // even if the key is let go before the drag ends.
+                    property int pressModifiers: Qt.NoModifier
+                    onGrabChanged: (transition, point) => {
+                        if (transition === PointerDevice.GrabPassive)
+                            pressModifiers = centroid.modifiers
+                    }
+                    function update() {
+                        // The rectangle lives in content coordinates, so it grows while the grid scrolls under it.
+                        const top = Math.min(startY, currentY)
+                        const bottom = Math.max(startY, currentY)
+                        const left = Math.min(startX, currentX)
+                        const right = Math.max(startX, currentX)
+                        review.records.unsavedBandSelect(
+                            Math.floor(Math.max(0, top) / grid.cellHeight),
+                            Math.floor(Math.max(0, bottom) / grid.cellHeight),
+                            Math.floor(Math.max(0, left) / grid.cellWidth),
+                            Math.floor(Math.max(0, right) / grid.cellWidth), grid.columns)
+                    }
+                    // The handler reports positions in the scrolling content, which go stale while
+                    // the grid moves under a resting pointer; the scene position is mapped instead.
+                    function inView(scenePoint) {
+                        return grid.mapFromItem(null, scenePoint.x, scenePoint.y)
+                    }
+                    function follow() {
+                        const point = inView(centroid.scenePosition)
+                        currentX = Math.max(0, Math.min(grid.width, point.x))
+                        currentY = point.y + grid.contentY - grid.originY
+                        update()
+                    }
+                    onActiveChanged: {
+                        if (active) {
+                            const pressed = inView(centroid.scenePressPosition)
+                            startX = Math.max(0, Math.min(grid.width, pressed.x))
+                            startY = pressed.y + grid.contentY - grid.originY
+                            const held = pressModifiers | centroid.modifiers
+                            review.records.beginUnsavedBand((held & (Qt.ControlModifier | Qt.ShiftModifier)) !== 0)
+                            follow()
+                        } else {
+                            review.records.endUnsavedBand()
+                        }
+                    }
+                    onCentroidChanged: if (active) follow()
+                }
+                Timer {
+                    // Near the top or bottom edge the grid scrolls and the rectangle keeps growing.
+                    interval: 30
+                    repeat: true
+                    running: bandDrag.active
+                    onTriggered: {
+                        const y = bandDrag.inView(bandDrag.centroid.scenePosition).y
+                        let step = 0
+                        if (y < 28)
+                            step = -Math.min(48, 8 + (28 - y) * 0.6)
+                        else if (y > grid.height - 28)
+                            step = Math.min(48, 8 + (y - (grid.height - 28)) * 0.6)
+                        if (!step)
+                            return
+                        const minimum = grid.originY
+                        const maximum = minimum + Math.max(0, grid.contentHeight - grid.height)
+                        const next = Math.max(minimum, Math.min(maximum, grid.contentY + step))
+                        if (next !== grid.contentY) {
+                            grid.contentY = next
+                            bandDrag.follow()
+                        }
+                    }
+                }
+                Rectangle {
+                    objectName: "unsavedBand"
+                    // Drawn over the visible area, not inside the scrolling content.
+                    parent: grid
+                    visible: bandDrag.active
+                    z: 5
+                    x: Math.min(bandDrag.startX, bandDrag.currentX)
+                    y: Math.min(bandDrag.startY, bandDrag.currentY) - (grid.contentY - grid.originY)
+                    width: Math.abs(bandDrag.currentX - bandDrag.startX)
+                    height: Math.abs(bandDrag.currentY - bandDrag.startY)
+                    color: Qt.alpha(Theme.accent, 0.2)
+                    border.width: 1
+                    border.color: Theme.accent
                 }
             }
             Label {
@@ -420,38 +589,6 @@ Item {
                     text: "목록을 불러오는 중"
                     color: Theme.textMuted
                 }
-            }
-        }
-
-        RowLayout {
-            objectName: "unsavedPager"
-            Layout.fillWidth: true
-            visible: !!review.records && review.records.unsavedPages > 1
-            spacing: Theme.gap
-            Label {
-                Layout.fillWidth: true
-                text: "미리보기는 이 PC에 남아 있는 것만 보여 줍니다. ‘직접 제외’의 빈 칸은 전체 목록 확인 저장을 하면 채워집니다."
-                color: Theme.textFaint
-                font.pixelSize: Theme.fontCaption
-                elide: Text.ElideRight
-            }
-            FlatButton {
-                objectName: "unsavedPrevious"
-                text: "이전"
-                enabled: !!review.records && !review.records.unsavedBusy && review.records.unsavedPage > 0
-                onClicked: review.records.loadUnsaved(review.records.unsavedPage - 1)
-            }
-            Label {
-                objectName: "unsavedPageLabel"
-                text: review.records ? (review.records.unsavedPage + 1) + " / " + review.records.unsavedPages : ""
-                color: Theme.textMuted
-            }
-            FlatButton {
-                objectName: "unsavedNext"
-                text: "다음"
-                enabled: !!review.records && !review.records.unsavedBusy
-                    && review.records.unsavedPage + 1 < review.records.unsavedPages
-                onClicked: review.records.loadUnsaved(review.records.unsavedPage + 1)
             }
         }
     }

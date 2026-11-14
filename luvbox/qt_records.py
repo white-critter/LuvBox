@@ -15,11 +15,12 @@ from collections import deque
 from contextlib import closing
 from pathlib import Path
 import re
-from threading import Condition, Thread
+from threading import Condition, Lock, Thread
 import uuid
 
-from PySide6.QtCore import QObject, Property, Qt, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, Property, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtGui import QDesktopServices, QImage
+from PySide6.QtQuick import QQuickImageProvider
 
 from . import thumbcache, unsaved
 from .core import RETRY_LIMIT
@@ -72,6 +73,134 @@ def duration_text(seconds):
     return f"{minutes}분 {rest}초" if minutes else f"{rest}초"
 
 
+class UnsavedModel(QAbstractListModel):
+    """The open unsaved-media list for the tile view; rows are appended as it scrolls.
+
+    A plain list given to QML rebuilds the whole grid, and loses its place, on every
+    change. Here a new page only adds rows, and picking a tile changes that tile.
+    """
+
+    FIELDS = ("token", "author", "reason", "reasonLabel", "mediaType", "info", "posted", "detail", "seen",
+              "canRetry", "hint", "preview")
+    _FIRST = Qt.ItemDataRole.UserRole + 1
+    PickedRole = _FIRST + len(FIELDS)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._rows = []
+        self._picked = set()
+
+    def roleNames(self):
+        names = {self._FIRST + index: name.encode() for index, name in enumerate(self.FIELDS)}
+        names[self.PickedRole] = b"picked"
+        return names
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._rows)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self._rows):
+            return None
+        row = self._rows[index.row()]
+        if role == self.PickedRole:
+            return row["token"] in self._picked
+        field = role - self._FIRST
+        return row[self.FIELDS[field]] if 0 <= field < len(self.FIELDS) else None
+
+    def replace(self, rows):
+        self.beginResetModel()
+        self._rows = list(rows)
+        self._picked &= {row["token"] for row in self._rows}
+        self.endResetModel()
+
+    def append(self, rows):
+        rows = list(rows)
+        if rows:
+            self.beginInsertRows(QModelIndex(), len(self._rows), len(self._rows) + len(rows) - 1)
+            self._rows.extend(rows)
+            self.endInsertRows()
+
+    def pick(self, tokens):
+        """Which tiles are picked now; only the tiles that changed are told."""
+        tokens = set(tokens)
+        changed = tokens ^ self._picked
+        self._picked = tokens
+        if changed:
+            for number, row in enumerate(self._rows):
+                if row["token"] in changed:
+                    index = self.index(number, 0)
+                    self.dataChanged.emit(index, index, [self.PickedRole])
+
+
+# As many tiles as one retry can carry (core.RETRY_LIMIT).
+MAX_PICKED = RETRY_LIMIT
+# The name the page's tiles ask their pictures under: image://unsavedpreview/<tile>.
+PREVIEW_PROVIDER = "unsavedpreview"
+
+
+def _preview_key(row):
+    try:
+        return thumbcache.identity(row.get("tweet_id"), row.get("num"), row.get("media_type"))
+    except (TypeError, ValueError):
+        return None
+
+
+class PreviewShelf:
+    """Which kept preview belongs to which tile. The list writes it; Qt's image thread reads it."""
+
+    def __init__(self):
+        self._lock = Lock()
+        self._account, self._known = "", {}
+
+    def replace(self, account, entries):
+        with self._lock:
+            self._account, self._known = account, dict(entries)
+
+    def add(self, entries):
+        with self._lock:
+            self._known.update(entries)
+
+    def lookup(self, token):
+        with self._lock:
+            key = self._known.get(token)
+            return (self._account, key) if key is not None else None
+
+    def __len__(self):
+        with self._lock:
+            return len(self._known)
+
+
+class UnsavedPreviewProvider(QQuickImageProvider):
+    """Pictures for the tiles of the unsaved-media page, read when a tile is shown.
+
+    The rows of the list carry no picture, so a list of any length costs the same.
+    Only the preview cache on this PC is read, for tiles the list itself named; the
+    picture is decoded here and handed to Qt as pixels. The QML engine it is given
+    to owns it.
+    """
+
+    def __init__(self, shelf):
+        super().__init__(QQuickImageProvider.ImageType.Image,
+                         QQuickImageProvider.Flag.ForceAsynchronousImageLoading)
+        self._shelf = shelf
+
+    def requestImage(self, identifier, size, requestedSize):
+        image = QImage()
+        try:
+            found = self._shelf.lookup(identifier.partition("?")[0])
+            picture = thumbcache.recall(*found) if found else None
+            if picture is not None:
+                pixels = picture.tobytes("raw", "RGBA")
+                image = QImage(pixels, picture.width, picture.height, picture.width * 4,
+                               QImage.Format.Format_RGBA8888).copy()
+        except Exception:
+            image = QImage()
+        if size is not None:
+            size.setWidth(image.width())
+            size.setHeight(image.height())
+        return image
+
+
 class RecordsController(QObject):
     changed = Signal()
     # Count refreshes also emit changed. The open page, including its preview
@@ -105,6 +234,11 @@ class RecordsController(QObject):
         self._counts = {reason: 0 for reason in unsaved.REASONS}
         self._missing_count = 0
         self._unsaved_selected = set()
+        self._unsaved_anchor = ""        # the tile a Shift+click measures its range from
+        self._unsaved_band = None        # the selection a drag started from, while it lasts
+        self._unsaved_band_rect = None
+        self._unsaved_model = UnsavedModel(self)
+        self._previews = PreviewShelf()
         self._condition = Condition()
         self._pending = deque()
         self._delivered.connect(self._accept, Qt.ConnectionType.QueuedConnection)
@@ -131,6 +265,14 @@ class RecordsController(QObject):
 
     @Property("QVariantList", notify=unsavedRowsChanged)
     def unsavedRows(self): return self._unsaved_rows
+    @Property(QObject, constant=True)
+    def unsavedModel(self):
+        """The same rows for the tile view, which adds to them as it scrolls."""
+        return self._unsaved_model
+    @Property(bool, notify=changed)
+    def unsavedMore(self):
+        """There are rows beyond the ones loaded so far."""
+        return self._unsaved_page + 1 < self._unsaved_pages
     @Property(int, notify=changed)
     def unsavedTotal(self): return self._unsaved_total
     @Property(int, notify=changed)
@@ -181,9 +323,7 @@ class RecordsController(QObject):
         self._context = context
         self._counts = {reason: 0 for reason in unsaved.REASONS}
         self._missing_count = 0
-        self._unsaved_rows, self._unsaved_tokens = [], {}
-        self._clear_selection()
-        self.unsavedRowsChanged.emit()
+        self._empty_unsaved()
         self._unsaved_total = self._unsaved_pages = self._unsaved_page = 0
         self._run_rows, self._run_tokens = [], {}
         self._run_total = self._run_page = self._run_pages = 0
@@ -200,7 +340,8 @@ class RecordsController(QObject):
             self._retryable_total = None
             self._rebuild_unsaved()
             if self._unsaved_pages > 1:
-                self.loadUnsaved(self._unsaved_page)
+                # Everything loaded so far, not the last part alone.
+                self._load_unsaved(self._unsaved_page, "through")
             self.changed.emit()
 
     @Slot(str, bool)
@@ -212,6 +353,9 @@ class RecordsController(QObject):
         if active and section == "runs":
             self.loadRuns(0)
         elif active and section == "unsaved":
+            # Opened again: the list starts at its top, not where an earlier visit left it.
+            if self._unsaved_rows:
+                self._empty_unsaved()
             self.loadUnsaved(0)
 
     @Slot()
@@ -222,7 +366,7 @@ class RecordsController(QObject):
         if "runs" in self._active:
             self.loadRuns(self._run_page)
         if "unsaved" in self._active:
-            self.loadUnsaved(self._unsaved_page)
+            self._load_unsaved(self._unsaved_page, "through")
 
     # -- run history ---------------------------------------------------------------------
 
@@ -257,6 +401,17 @@ class RecordsController(QObject):
 
     @Slot(int)
     def loadUnsaved(self, page):
+        """Show one page in place of what is shown."""
+        self._load_unsaved(page, "replace")
+
+    @Slot()
+    def loadMoreUnsaved(self):
+        """The view reached the end of what is loaded: add the next page under it."""
+        if not self._unsaved_busy and self._unsaved_page + 1 < self._unsaved_pages:
+            self._load_unsaved(self._unsaved_page + 1, "append")
+
+    def _load_unsaved(self, page, mode):
+        # mode: "replace" shows that page alone, "append" adds it, "through" reloads every page up to it.
         if self._closing:
             return
         self._unsaved_serial += 1
@@ -264,16 +419,27 @@ class RecordsController(QObject):
         self._unsaved_error = ""
         self._retryable_total = None
         self._enqueue("unsaved", (self._unsaved_view, max(0, int(page)), self._unsaved_serial,
-                                  self._limit_mb), replace=True)
+                                  self._limit_mb, mode), replace=True)
         self.changed.emit()
+
+    def preview_provider(self):
+        """A picture source for the page's tiles, for a QML engine to take under PREVIEW_PROVIDER."""
+        return UnsavedPreviewProvider(self._previews)
+
+    def _empty_unsaved(self):
+        """Show nothing until the next list arrives: no tile of another list stays on screen."""
+        self._unsaved_rows, self._unsaved_tokens = [], {}
+        self._clear_selection()
+        self._previews.replace("", {})
+        self._unsaved_model.replace([])
+        self.unsavedRowsChanged.emit()
 
     @Slot(str)
     def setUnsavedView(self, view):
         if view in _KINDS and view != self._unsaved_view:
             self._unsaved_view, self._unsaved_status = view, ""
-            self._unsaved_rows, self._unsaved_tokens, self._unsaved_total = [], {}, 0
-            self._clear_selection()
-            self.unsavedRowsChanged.emit()
+            self._unsaved_total = 0
+            self._empty_unsaved()
             self.loadUnsaved(0)
 
     @Slot(str)
@@ -333,10 +499,28 @@ class RecordsController(QObject):
 
     # -- the chosen tiles of the open page ---------------------------------------------
 
-    def _clear_selection(self):
-        if self._unsaved_selected:
-            self._unsaved_selected = set()
+    def _set_selection(self, tokens):
+        tokens = set(tokens)
+        if tokens != self._unsaved_selected:
+            self._unsaved_selected = tokens
+            self._unsaved_model.pick(tokens)
             self.unsavedSelectionChanged.emit()
+
+    def _clear_selection(self):
+        self._unsaved_anchor = ""
+        self._unsaved_band = self._unsaved_band_rect = None
+        self._set_selection(())
+
+    def _pick_within_limit(self, tokens, base):
+        """Selection = base plus these tiles in the order shown, up to what one retry can carry."""
+        chosen = set(base)
+        room = max(0, MAX_PICKED - len(chosen))
+        new = [token for token in tokens if token not in chosen]
+        chosen.update(new[:room])
+        self._set_selection(chosen)
+        if len(new) > room:
+            self._unsaved_status = f"한 번에 최대 {MAX_PICKED:,}개를 고를 수 있습니다."
+            self.changed.emit()
 
     def _chosen(self):
         """Rows of the chosen tiles, in the order shown."""
@@ -344,16 +528,62 @@ class RecordsController(QObject):
 
     @Slot(str)
     def toggleUnsavedSelected(self, token):
-        if token in self._unsaved_tokens:
-            self._unsaved_selected ^= {token}
-            self.unsavedSelectionChanged.emit()
+        if token not in self._unsaved_tokens:
+            return
+        if token in self._unsaved_selected:
+            self._set_selection(self._unsaved_selected - {token})
+        else:
+            self._pick_within_limit([token], self._unsaved_selected)
+        self._unsaved_anchor = token
+
+    @Slot(str)
+    def selectUnsavedRangeTo(self, token):
+        """Shift+click: add every loaded tile from the last clicked one to this one."""
+        order = list(self._unsaved_tokens)
+        if token not in self._unsaved_tokens:
+            return
+        anchor = self._unsaved_anchor if self._unsaved_anchor in self._unsaved_tokens else token
+        first, last = sorted((order.index(anchor), order.index(token)))
+        self._pick_within_limit(order[first:last + 1], self._unsaved_selected)
+
+    @Slot(bool)
+    def beginUnsavedBand(self, additive):
+        """A drag starts; with Ctrl or Shift held what was picked stays."""
+        self._unsaved_band = set(self._unsaved_selected) if additive else set()
+        self._unsaved_band_rect = None
+
+    @Slot(int, int, int, int, int)
+    def unsavedBandSelect(self, row_first, row_last, column_first, column_last, columns):
+        """Pick the tiles a dragged rectangle touches, given as grid rows and columns."""
+        if self._unsaved_band is None or columns < 1:
+            return
+        rect = (row_first, row_last, column_first, column_last, columns)
+        if rect == self._unsaved_band_rect:
+            return
+        self._unsaved_band_rect = rect
+        order = list(self._unsaved_tokens)
+        touched = []
+        for row in range(max(0, row_first), max(0, row_last) + 1):
+            start = row * columns
+            if start >= len(order):
+                break
+            for column in range(max(0, column_first), min(columns - 1, column_last) + 1):
+                if start + column < len(order):
+                    touched.append(order[start + column])
+        self._pick_within_limit(touched, self._unsaved_band)
+
+    @Slot()
+    def endUnsavedBand(self):
+        if self._unsaved_band is None:
+            return
+        self._unsaved_band = self._unsaved_band_rect = None
+        picked = [token for token in self._unsaved_tokens if token in self._unsaved_selected]
+        self._unsaved_anchor = picked[-1] if picked else ""
 
     @Slot()
     def selectUnsavedPage(self):
-        chosen = set(self._unsaved_tokens)
-        if chosen != self._unsaved_selected:
-            self._unsaved_selected = chosen
-            self.unsavedSelectionChanged.emit()
+        """Every tile loaded so far (Ctrl+A)."""
+        self._pick_within_limit(list(self._unsaved_tokens), ())
 
     @Slot()
     def clearUnsavedSelection(self):
@@ -401,6 +631,7 @@ class RecordsController(QObject):
 
     def _rebuild_unsaved(self):
         self._unsaved_rows = [self._unsaved_row(token, row) for token, row in self._unsaved_tokens.items()]
+        self._unsaved_model.replace(self._unsaved_rows)
         self.unsavedRowsChanged.emit()
 
     def _unsaved_row(self, token, row):
@@ -416,9 +647,8 @@ class RecordsController(QObject):
             hint = "설정 › 고급에서 크기 제한을 올린 뒤 다시 저장할 수 있습니다."
         elif row["attempts"] > 1:
             hint = f"{row['attempts']}번째 시도까지 저장하지 못했습니다."
-        preview = row.get("preview") if isinstance(row.get("preview"), str) else ""
-        if not preview.startswith("data:image/png;base64,") or len(preview) > 200_000:
-            preview = ""
+        # The tile asks for its picture when it is shown; the row only says there is one.
+        preview = f"image://{PREVIEW_PROVIDER}/{token}" if row.get("preview") is True else ""
         return dict(token=token, author=("@" + row["author"]) if row["author"] else "작성자 미확인",
                     reason=row["reason"], reasonLabel=_REASON.get(row["reason"], ""), mediaType=row["media_type"],
                     info=info, posted=(row["posted_at"] or "")[:10], detail=row["detail"],
@@ -457,19 +687,26 @@ class RecordsController(QObject):
                             paths = None
                     result = dict(run_page(paths, page), serial=serial)
                 elif kind == "unsaved":
-                    view, page, serial, limit_mb = payload
-                    if view == "excluded":
-                        result = dict(self._excluded_page(account, output_dir, separate, page),
-                                      serial=serial, view=view)
-                    elif view == "missing":
-                        result = dict(self._missing_page(account, output_dir, separate, page),
-                                      serial=serial, view=view)
-                    else:
-                        result = dict(unsaved.page(account, output_dir, _KINDS[view], page, _UNSAVED_PAGE),
-                                      serial=serial, view=view)
-                        if result.get("pages", 0) > 1:
-                            result.update(retryable_total=unsaved.retryable_count(account, output_dir, limit_mb),
-                                          retryable_limit=limit_mb)
+                    view, page, serial, limit_mb, mode = payload
+
+                    def read(number):
+                        if view == "excluded":
+                            return self._excluded_page(account, output_dir, separate, number)
+                        if view == "missing":
+                            return self._missing_page(account, output_dir, separate, number)
+                        return unsaved.page(account, output_dir, _KINDS[view], number, _UNSAVED_PAGE)
+
+                    found = read(0 if mode == "through" else page)
+                    if mode == "through":
+                        # Everything that was on screen, read again after a change.
+                        for number in range(1, min(page, found.get("pages", 0) - 1) + 1):
+                            following = read(number)
+                            found["rows"] = list(found["rows"]) + list(following["rows"])
+                            found["page"] = following.get("page", number)
+                    result = dict(found, serial=serial, view=view, mode=mode)
+                    if view == "unsaved" and result.get("pages", 0) > 1:
+                        result.update(retryable_total=unsaved.retryable_count(account, output_dir, limit_mb),
+                                      retryable_limit=limit_mb)
                     self._attach_previews(account, result)
                 elif kind == "counts":
                     result = unsaved.counts(account, output_dir) if account else {}
@@ -518,15 +755,12 @@ class RecordsController(QObject):
             return store.excluded_media(page=0, page_size=1)["total"]
 
     def _attach_previews(self, account, result):
-        """Fill previews from this PC's cache. A miss stays blank; nothing is downloaded."""
+        """Mark the rows that have a preview in this PC's cache. Nothing is read or downloaded here."""
         rows = result.get("rows") or []
-        urls = {}
-        for start in range(0, len(rows), 50):          # the cache answers fifty at a time
-            urls.update(thumbcache.preview_data_urls(
-                account, [(row.get("tweet_id"), row.get("num"), row.get("media_type"))
-                          for row in rows[start:start + 50]]))
+        kept = thumbcache.kept(account, [(row.get("tweet_id"), row.get("num"), row.get("media_type"))
+                                         for row in rows])
         for row in rows:
-            row["preview"] = urls.get((row.get("tweet_id"), row.get("num"), row.get("media_type")), "")
+            row["preview"] = _preview_key(row) in kept
 
     def _excluded_page(self, account, output_dir, separate, page):
         try:
@@ -655,9 +889,22 @@ class RecordsController(QObject):
             self._unsaved_busy = False
             self._unsaved_error = error
             if not error and result.get("view") == self._unsaved_view:
-                self._unsaved_tokens = {uuid.uuid4().hex: row for row in result.get("rows", [])}
-                self._clear_selection()
-                self._rebuild_unsaved()
+                fresh = {uuid.uuid4().hex: row for row in result.get("rows", [])}
+                pictures = {token: _preview_key(row) for token, row in fresh.items()
+                            if row.get("preview") is True and _preview_key(row) is not None}
+                if result.get("mode") == "append":
+                    # Under what is shown: the tiles above keep their place and what was picked.
+                    self._previews.add(pictures)
+                    self._unsaved_tokens.update(fresh)
+                    added = [self._unsaved_row(token, row) for token, row in fresh.items()]
+                    self._unsaved_rows = self._unsaved_rows + added
+                    self._unsaved_model.append(added)
+                    self.unsavedRowsChanged.emit()
+                else:
+                    self._previews.replace(self._context[0], pictures)
+                    self._unsaved_tokens = fresh
+                    self._clear_selection()
+                    self._rebuild_unsaved()
                 self._unsaved_total, self._unsaved_page, self._unsaved_pages = (
                     result.get("total", 0), result.get("page", 0), result.get("pages", 0))
                 self._retryable_total = result.get("retryable_total")

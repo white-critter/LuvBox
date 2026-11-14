@@ -21,7 +21,7 @@ from .qt_download import DownloadController
 from .qt_library import LibraryController
 from .qt_schedule import ScheduleController
 from .qt_management import ManagementController
-from .qt_records import RecordsController
+from .qt_records import PREVIEW_PROVIDER, RecordsController
 from .qt_updater import UpdateController
 from .qt_wheel import WheelInputFilter
 
@@ -1010,6 +1010,7 @@ def launch(*, startup_probe=None):
     wheel_input = WheelInputFilter()
     engine = QQmlApplicationEngine()
     engine.addImageProvider("thumbs", controller._library.provider)
+    engine.addImageProvider(PREVIEW_PROVIDER, controller._records.preview_provider())
     engine.setInitialProperties({"galleryModel": controller._library.model,
                                  "wheelInputFilter": wheel_input, "appController": controller,
                                  "uiFontFamily": family})

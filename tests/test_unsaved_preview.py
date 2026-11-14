@@ -132,8 +132,13 @@ class KeeperTests(unittest.TestCase):
         # Met again (a full check passes every like): no second request.
         self.assertTrue(keeper.keep(Session(), self.url(), self.media()))
         self.recorder.close()
-        urls = thumbcache.preview_data_urls("offline", [("100", 1, "photo")])
-        self.assertTrue(urls[("100", 1, "photo")].startswith("data:image/png;base64,"))
+        # The list learns there is a picture without reading it; a tile reads it when shown.
+        self.assertEqual(thumbcache.kept("offline", [("100", 1, "photo"), ("101", 1, "photo"), ("bad",)]),
+                         {("100", 1, "photo")})
+        picture = thumbcache.recall("offline", ("100", 1, "photo"))
+        self.assertLessEqual(picture.size, thumbcache.SIZE)
+        self.assertEqual(thumbcache.kept("not an account", [("100", 1, "photo")]), set())
+        self.assertEqual(thumbcache.kept("nobody", [("100", 1, "photo")]), set())
         self.assertEqual(list((self.root / "thumbnails").glob("unsaved-preview-*")), [])
 
     def test_failures_stop_the_requests_for_the_rest_of_the_run(self):
@@ -184,7 +189,7 @@ class EngineTests(unittest.TestCase):
                 patch("luvbox.unsaved.unsaved_path", return_value=self.base / "unsaved.sqlite3"), \
                 patch("luvbox.thumbcache.directory", return_value=self.base / "thumbnails"):
             code = run_worker(options, events.append)
-            previews = thumbcache.preview_data_urls("myaccount", [("100", 1, "photo")])
+            previews = thumbcache.kept("myaccount", [("100", 1, "photo")])
         self.assertNotIn(test_core.SECRET, json.dumps(events))
         return events, requests, previews
 
@@ -193,7 +198,7 @@ class EngineTests(unittest.TestCase):
         events, requests, previews = self.save(self.options)
         self.assertEqual(events[-1]["failed_media"], 1)
         self.assertEqual(requests, [])
-        self.assertEqual(previews, {})
+        self.assertEqual(previews, set())
 
     def exclude(self, *identities):
         from contextlib import closing
@@ -220,7 +225,7 @@ class EngineTests(unittest.TestCase):
         events, requests, previews = self.save(self.options)
         self.assertEqual((events[-1]["saved"], events[-1]["failed_media"]), (0, 0))
         self.assertEqual(requests, [])
-        self.assertEqual(previews, {})
+        self.assertEqual(previews, set())
 
     def test_a_failed_photo_gets_its_picture_when_the_app_asks_for_it(self):
         events, requests, previews = self.save(replace(self.options, unsaved_previews=True))

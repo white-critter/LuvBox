@@ -2208,10 +2208,16 @@ ApplicationWindow {
                 window.updateFocus()
         }
     }
+    // On the unsaved media page: Esc lets go of what is picked, then returns to the gallery; Ctrl+A picks all loaded.
     Shortcut {
         sequence: "Escape"
         enabled: window.currentScreen === 2 && !window.modalOpen
-        onActivated: window.currentScreen = 1
+        onActivated: unsavedReview.stepBack()
+    }
+    Shortcut {
+        sequence: "Ctrl+A"
+        enabled: window.currentScreen === 2 && !window.modalOpen
+        onActivated: unsavedReview.selectAll()
     }
     Shortcut {
         sequence: "Ctrl+F"
