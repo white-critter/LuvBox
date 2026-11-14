@@ -248,6 +248,26 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertFalse(self.controller.preferences["auto_classify"])
         self.assertFalse(library._auto_classify)
 
+    def test_a_finished_save_that_brought_files_asks_the_gallery_to_classify_them(self):
+        asked = []
+        self.controller.library.classifyNewPhotos = lambda: asked.append(True)
+        # Nothing saved: nothing to classify.
+        self.controller._download._saved = 0
+        self.controller._download_event({"type": "finished", "status": "finished"})
+        self.controller._download_event({"type": "process_exit", "code": 0})
+        self.assertEqual(asked, [])
+        # Files were saved: one request when the save's process has ended, not at every saved file.
+        self.controller._download._saved = 3
+        self.controller._download_event({"type": "saved", "path": "x.jpg"})
+        self.controller._download_event({"type": "finished", "status": "finished"})
+        self.assertEqual(asked, [])
+        self.controller._download_event({"type": "process_exit", "code": 0})
+        self.assertEqual(asked, [True])
+        # A save that ended with an error still classifies what it did bring.
+        self.controller._download_event({"type": "process_exit", "code": 1})
+        self.assertEqual(asked, [True, True])
+        self.wait_for(lambda: not self.controller.busy)
+
     def test_failed_details_toggle_restores_the_hidden_state(self):
         self.settings.update.side_effect = self.blocked_update
         self.controller.setPreference("detailed_progress", True)
