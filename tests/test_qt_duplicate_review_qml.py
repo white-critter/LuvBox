@@ -224,6 +224,8 @@ def scene(shots=None):
         assert [group["size"] for group in library.duplicateGroups] == [2, 2]
         assert "묶음에서 뺐습니다" in library.status, library.status
         assert library.selectedCount == 0 and not every("duplicateGroupPhotosDistinct")
+        # The bar that came with the pick left with it: nothing is picked, nothing to act on.
+        assert not library.selectionMode and not find("gallerySelectionBar").property("visible")
         wait(lambda: [item.property("text") for item in every("duplicateGroupTitle")]
              == ["묶음 1 · 같은 사진 2장", "묶음 2 · 같은 사진 2장"], "the card shows the two that stay")
         assert find("galleryClearDistinct").property("text") == "중복 아님 1개 초기화"
@@ -264,8 +266,22 @@ def scene(shots=None):
         tiles = every("duplicateTile")
         press(tiles[1])
         wait(lambda: library.selectedCount == 1, "one copy picked by hand")
+        assert library.selectionMode and find("gallerySelectionBar").property("visible")
         press(tiles[1])
         wait(lambda: library.selectedCount == 0, "picked copy released")
+        wait(lambda: not library.selectionMode and not find("gallerySelectionBar").property("visible"),
+             "the bar goes when the last picked photo is let go")
+        # Someone who switched selecting on with its button keeps the bar, also with nothing picked.
+        click("gallerySelectionToggle")
+        wait(lambda: library.selectionMode and find("gallerySelectionBar").property("visible"), "selecting switched on")
+        press(tiles[1])
+        wait(lambda: library.selectedCount == 1, "a copy picked while selecting is on")
+        press(tiles[1])
+        wait(lambda: library.selectedCount == 0, "and let go")
+        settle(60)
+        assert library.selectionMode and find("gallerySelectionBar").property("visible")
+        click("gallerySelectionToggle")
+        wait(lambda: not library.selectionMode, "selecting switched off")
         # Without a mouse: the accessibility interface toggles or presses a tile, as a screen reader does.
         for action in ("toggleAction", "pressAction"):
             QQmlExpression(qmlContext(tiles[1]), tiles[1], f"Accessible.{action}()").evaluate()

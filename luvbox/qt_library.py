@@ -1504,6 +1504,7 @@ class LibraryController(QObject):
         self._date_field = "posted"
         self._date_from = self._date_to = ""
         self._selection_mode = False
+        self._selection_explicit = False     # the person switched selecting on, rather than just picking a tile
         self._selection_keys = set()
         self._selected_keys_order = []
         self._selection_revision = 0
@@ -2519,7 +2520,7 @@ class LibraryController(QObject):
     def setSelectionMode(self, enabled):
         if self._closed or self._selection_mode == enabled:
             return
-        self._selection_mode = enabled
+        self._selection_mode = self._selection_explicit = enabled
         if not enabled:
             self._selection_keys.clear()
             if self._status:
@@ -2662,6 +2663,11 @@ class LibraryController(QObject):
                 self.changed.emit()
 
     def _batch_selection_changed(self):
+        # In the duplicate view a photo is picked by clicking it, without switching selecting on
+        # first. Once nothing is picked (it was put away, or let go) the bar that came with the
+        # pick goes too; it stays only for someone who switched selecting on with its button.
+        if self._duplicate_only and self._selection_mode and not self._selection_explicit and not self._selection_keys:
+            self._selection_mode = False
         self._selection_revision += 1
         self._selected_keys_order = sorted(self._selection_keys, key=lambda key: self.model._positions.get(key, -1))
         self.selectionChanged.emit()
