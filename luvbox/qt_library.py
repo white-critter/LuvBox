@@ -12,7 +12,7 @@ import subprocess
 from threading import Condition, Event, Thread
 import webbrowser
 
-from PySide6.QtCore import QObject, Property, Qt, QTimer, QUrl, Signal, Slot
+from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, Property, Qt, QTimer, QUrl, Signal, Slot
 
 # The names only: the classifier itself (numpy, onnxruntime) is loaded by the work that classifies.
 from .clip_model import CATEGORY_NAMES
@@ -1158,6 +1158,37 @@ class LibraryRepository:
         except Exception:
             return None
 
+    def mark_photos_distinct(self, keys, generation):
+        """The owner says these photos are no duplicates of the rest of their group.
+
+        Returns the mark (what ``undo_photos_distinct`` takes), or None when
+        nothing was changed: the photos are not of one group, or are all of it.
+        """
+        request = self.current(generation)
+        if request is None or not keys:
+            return None
+        identities = []
+        for key in keys:
+            match = _KEY.fullmatch(key) if isinstance(key, str) else None
+            if match is None or int(match[1]) != request.generation:
+                return None
+            identities.append((match[2], match[3], int(match[4]), match[5]))
+        try:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                return store.set_duplicate_photos_distinct(identities)
+        except Exception:
+            return None
+
+    def undo_photos_distinct(self, mark, generation):
+        request = self.current(generation)
+        if request is None or not mark:
+            return False
+        try:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                return bool(store.undo_duplicate_photos_distinct(mark))
+        except Exception:
+            return False
+
     def undo_group_distinct(self, members, generation):
         request = self.current(generation)
         if request is None or not members:
@@ -1318,6 +1349,79 @@ def absence_note(output_dir):
     return _FILE_MISSING
 
 
+class DuplicateGroupModel(QAbstractListModel):
+    """The duplicate groups for the card list.
+
+    A plain list given to QML rebuilds every card, and the list returns to its
+    top, whenever one group changes. Here a group that left is removed, a group
+    that changed is redrawn, and the rest stays where the person was looking.
+    """
+
+    FIELDS = ("group", "number", "size", "items")
+    _FIRST = Qt.ItemDataRole.UserRole + 1
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._groups = []
+
+    def roleNames(self):
+        return {self._FIRST + index: name.encode() for index, name in enumerate(self.FIELDS)}
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self._groups)
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or not 0 <= index.row() < len(self._groups):
+            return None
+        field = role - self._FIRST
+        return self._groups[index.row()][self.FIELDS[field]] if 0 <= field < len(self.FIELDS) else None
+
+    def adopt(self, groups):
+        """Show these groups, touching only what differs from what is shown.
+
+        Groups are known by their number in the catalog. When the ones that stay
+        keep their order (something was put away, a mark was taken back, more
+        was read), rows are removed, added and redrawn in place. Any other
+        change is another list and starts from its top.
+        """
+        groups = list(groups)
+        old = [group["group"] for group in self._groups]
+        new = [group["group"] for group in groups]
+        before, after = set(old), set(new)
+        kept = [number for number in old if number in after]
+        if (not kept or len(after) != len(new) or len(before) != len(old)
+                or [number for number in new if number in before] != kept):
+            if groups or self._groups:
+                self.beginResetModel()
+                self._groups = groups
+                self.endResetModel()
+            return
+        for row in range(len(self._groups) - 1, -1, -1):
+            if self._groups[row]["group"] not in after:
+                self.beginRemoveRows(QModelIndex(), row, row)
+                del self._groups[row]
+                self.endRemoveRows()
+        row = 0
+        while row < len(groups):
+            if row < len(self._groups) and self._groups[row]["group"] == new[row]:
+                row += 1
+                continue
+            end = row                       # a run of groups that were not shown: they go in here
+            while end < len(groups) and new[end] not in before:
+                end += 1
+            self.beginInsertRows(QModelIndex(), row, end - 1)
+            self._groups[row:row] = groups[row:end]
+            self.endInsertRows()
+            row = end
+        for row, group in enumerate(groups):
+            shown = self._groups[row]
+            roles = [self._FIRST + index for index, name in enumerate(self.FIELDS) if shown[name] != group[name]]
+            if roles:
+                self._groups[row] = group
+                index = self.index(row, 0)
+                self.dataChanged.emit(index, index, roles)
+
+
 class _LibraryThumbnailProvider(SafeThumbnailProvider):
     def _record(self, name, elapsed):
         return None
@@ -1339,6 +1443,8 @@ class LibraryController(QObject):
     duplicateCountChanged = Signal()
     duplicateGroupsChanged = Signal()
     duplicateDistinctChanged = Signal()
+    # The duplicate cards are being read again after something was put away.
+    duplicateSettlingChanged = Signal()
     duplicateScanProgress = Signal(int, int)
     aiScanProgress = Signal(int, int)
     aiScanningChanged = Signal()
@@ -1384,8 +1490,10 @@ class LibraryController(QObject):
         self._ai_counts = []
         self._duplicate_near = False
         self._duplicate_groups = []
-        self._distinct_count = 0         # groups the owner marked "not duplicates"
-        self._distinct_undo = None       # the files of the last such mark, to take it back
+        self._duplicate_model = DuplicateGroupModel(self)
+        self._duplicate_hold = None      # rows to read again before the cards are redrawn in place
+        self._distinct_count = 0         # "not duplicates" marks: whole groups and photos taken out of one
+        self._distinct_undo = None       # the last such mark as (kind, what the catalog takes back)
         self._auto_classify = True       # classify newly saved photos without being asked
         self._auto_ai_wanted = False     # a save ended or a library opened: look for photos to classify
         self._auto_ai_seen = None        # the library that look was already made for at opening
@@ -1513,16 +1621,43 @@ class LibraryController(QObject):
         """Loaded duplicates as groups: [{group, size, items: [{key, caption, detail, thumbUrl, keeper, ...}]}]."""
         return self._duplicate_groups
 
+    @Property(QObject, constant=True)
+    def duplicateGroupModel(self):
+        """The same groups for the card list, changed in place so the list keeps where it is."""
+        return self._duplicate_model
+
+    @Property(bool, notify=duplicateSettlingChanged)
+    def duplicatesSettling(self):
+        """The cards on screen are from before the last change; the list is being read again."""
+        return self._duplicate_hold is not None
+
     @Property(int, notify=duplicateDistinctChanged)
     def distinctDuplicateCount(self):
-        """Groups the owner marked "not duplicates"; a scan leaves them out until the marks are cleared."""
+        """Marks "not duplicates" (groups, and photos taken out of a group); a scan honours them until cleared."""
         return self._distinct_count
 
     @Property(bool, notify=duplicateDistinctChanged)
     def canUndoDistinct(self):
         return bool(self._distinct_undo)
 
+    def _hold_duplicates(self, rows):
+        held = self._duplicate_hold is not None
+        self._duplicate_hold = rows
+        if held != (rows is not None):
+            self.duplicateSettlingChanged.emit()
+
     def _rebuild_duplicate_groups(self):
+        if self._duplicate_hold is not None:
+            # Something was put away and the list is read again from its start. The cards stay
+            # as they are until it has been read as far as before; then only what differs is
+            # redrawn, and the view stays where the person was looking.
+            if self._duplicate_only and not self.model.error:
+                if self.model.busy:
+                    return
+                if self.model.count < self._duplicate_hold and self.model.canFetchMore():
+                    self.model.loadMore()
+                    return
+            self._hold_duplicates(None)
         groups = []
         if self._duplicate_only:
             current = None
@@ -1541,6 +1676,7 @@ class LibraryController(QObject):
                 group["number"] = index + 1
         if groups != self._duplicate_groups:
             self._duplicate_groups = groups
+            self._duplicate_model.adopt(groups)
             self.duplicateGroupsChanged.emit()
 
     @Slot("QVariantList", result=int)
@@ -1770,11 +1906,16 @@ class LibraryController(QObject):
 
     @Slot()
     def refresh(self):
-        self._refresh(reload_authors=True)
+        # The same listing read again (files were recycled, a save ended): duplicate cards keep their place.
+        self._refresh(reload_authors=True, keep_place=True)
 
-    def _refresh(self, *, reload_authors=True, status=""):
+    def _refresh(self, *, reload_authors=True, status="", keep_place=False):
         if self._closed:
             return
+        # keep_place: the listing is the same one, minus what was just put away. In the duplicate
+        # view the cards then wait for the rows that were loaded before (see _rebuild_duplicate_groups).
+        self._hold_duplicates(max(self.model.count, self._duplicate_hold or 0)
+                              if keep_place and self._duplicate_only and self._duplicate_groups else None)
         self._generation += 1
         self._selection_serial += 1
         self._selected = {}
@@ -2174,7 +2315,7 @@ class LibraryController(QObject):
     def _duplicate_marks_changed(self, status):
         """Reload the duplicate list and its counts after a "not duplicates" mark changed."""
         self.duplicateDistinctChanged.emit()
-        self._refresh(reload_authors=False, status=status)
+        self._refresh(reload_authors=False, status=status, keep_place=True)
         with self._condition:
             for action in ("duplicate_counts", "distinct_counts"):
                 self._interactive.append((action, self._generation, self._selection_serial, ""))
@@ -2194,10 +2335,30 @@ class LibraryController(QObject):
             self._status = _DISTINCT_ERROR
             self.changed.emit()
             return False
-        self._distinct_undo = members
+        self._distinct_undo = ("group", members)
         self._distinct_count += 1
         self._duplicate_marks_changed(
             f"사진 {len(members):,}장을 중복 아님으로 표시했습니다. 다음 검사부터 묶지 않습니다.")
+        return True
+
+    @Slot("QVariantList", result=bool)
+    def markPhotosDistinct(self, keys):
+        """These photos are no duplicates of the rest of their group: take only them out of it."""
+        if self._closed or not isinstance(keys, (list, tuple)) or not keys:
+            return False
+        if self._exclusive == "duplicates":
+            self._status = _HOLD_REASON["duplicates"]
+            self.changed.emit()
+            return False
+        mark = self._repository.mark_photos_distinct(list(keys), self._generation)
+        if not mark:
+            self._status = _DISTINCT_ERROR
+            self.changed.emit()
+            return False
+        self._distinct_undo = ("photos", mark)
+        self._distinct_count += 1
+        self._duplicate_marks_changed(
+            f"사진 {len(mark['photos']):,}장을 묶음에서 뺐습니다. 다음 검사부터 이 묶음의 사진과 묶지 않습니다.")
         return True
 
     @Slot(result=bool)
@@ -2209,8 +2370,9 @@ class LibraryController(QObject):
             self._status = _HOLD_REASON["duplicates"]
             self.changed.emit()
             return False
-        members, self._distinct_undo = self._distinct_undo, None
-        if not self._repository.undo_group_distinct(members, self._generation):
+        (kind, mark), self._distinct_undo = self._distinct_undo, None
+        undo = self._repository.undo_photos_distinct if kind == "photos" else self._repository.undo_group_distinct
+        if not undo(mark, self._generation):
             self._status = _DISTINCT_ERROR
             self.duplicateDistinctChanged.emit()
             self.changed.emit()

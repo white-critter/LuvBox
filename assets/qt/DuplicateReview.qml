@@ -3,7 +3,9 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // Duplicates shown one group per card: which photos are the same, which one
-// stays ("남김") and which are the copies to clear out ("사본").
+// stays ("남김") and which are the copies to clear out ("사본"). The cards come
+// from a model that changes in place, so after a group is put away the list
+// stays where it was.
 Item {
     id: review
     property var app: null
@@ -12,7 +14,8 @@ Item {
     signal previewRequested(string key)
 
     readonly property var library: app ? app.library : null
-    readonly property var groups: library ? library.duplicateGroups : []
+    // While the list is read again after a change, the cards on screen are the earlier ones.
+    readonly property bool settling: !!library && library.duplicatesSettling
     readonly property int tileHeight: Math.round(tileWidth * 0.75) + 50
 
     function requestMore() {
@@ -27,7 +30,7 @@ Item {
         clip: true
         spacing: 10
         boundsBehavior: Flickable.StopAtBounds
-        model: review.groups
+        model: review.library ? review.library.duplicateGroupModel : null
         ScrollBar.vertical: ScrollBar {
             policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
         }
@@ -37,14 +40,29 @@ Item {
 
         delegate: Card {
             id: card
-            required property var modelData
             required property int index
+            required property int group
+            required property int number
+            required property int size
+            required property var items
             objectName: "duplicateGroup"
             readonly property var copies: {
                 const keys = []
-                for (let i = 0; i < modelData.items.length; i++) {
-                    if (!modelData.items[i].keeper && !modelData.items[i].missing)
-                        keys.push(modelData.items[i].key)
+                for (let i = 0; i < items.length; i++) {
+                    if (!items[i].keeper && !items[i].missing)
+                        keys.push(items[i].key)
+                }
+                return keys
+            }
+            // The photos of this card the person picked.
+            readonly property var chosenKeys: {
+                const revision = review.library ? review.library.selectionRevision : -1
+                const keys = []
+                if (revision < 0)
+                    return keys
+                for (let i = 0; i < items.length; i++) {
+                    if (review.library.isSelected(items[i].key))
+                        keys.push(items[i].key)
                 }
                 return keys
             }
@@ -76,13 +94,24 @@ Item {
                     Label {
                         objectName: "duplicateGroupTitle"
                         Layout.fillWidth: true
-                        text: "묶음 " + card.modelData.number + " · 같은 사진 " + card.modelData.size + "장"
-                            + (card.modelData.items.length < card.modelData.size
-                               ? " (" + card.modelData.items.length + "장 표시)" : "")
+                        text: "묶음 " + card.number + " · 같은 사진 " + card.size + "장"
+                            + (card.items.length < card.size ? " (" + card.items.length + "장 표시)" : "")
                         font.bold: true
                         font.pixelSize: Theme.fontSection
                         color: Theme.text
                         elide: Text.ElideRight
+                    }
+                    FlatButton {
+                        // Some photos of the group are other pictures: only they leave it, the rest stays a group.
+                        objectName: "duplicateGroupPhotosDistinct"
+                        compact: true
+                        tone: "ghost"
+                        visible: card.chosenKeys.length > 0 && card.chosenKeys.length < card.size
+                        text: "선택한 " + card.chosenKeys.length + "장만 중복 아님"
+                        enabled: !!review.library && !review.library.copiesLocked && !review.settling
+                        tip: "고른 사진만 이 묶음에서 뺍니다. 나머지는 묶음으로 남고, 뺀 사진은 다음 검사부터 이 묶음과 묶지 않습니다. 위의 ‘되돌리기’나 ‘초기화’로 다시 볼 수 있습니다."
+                        Accessible.name: "묶음 " + card.number + " " + text
+                        onClicked: review.library.markPhotosDistinct(card.chosenKeys)
                     }
                     FlatButton {
                         // Not the same photo, or both are wanted: the group is remembered and not shown again.
@@ -90,17 +119,17 @@ Item {
                         compact: true
                         tone: "ghost"
                         text: "중복 아님"
-                        enabled: !!review.library && !review.library.copiesLocked && card.modelData.items.length > 0
+                        enabled: !!review.library && !review.library.copiesLocked && !review.settling && card.items.length > 0
                         tip: "이 묶음을 중복이 아닌 것으로 기억합니다. 다음 검사부터 묶지 않고, 위의 ‘되돌리기’나 ‘초기화’로 다시 볼 수 있습니다."
-                        Accessible.name: "묶음 " + card.modelData.number + " 중복 아님"
-                        onClicked: review.library.markGroupDistinct(card.modelData.items[0].key)
+                        Accessible.name: "묶음 " + card.number + " 중복 아님"
+                        onClicked: review.library.markGroupDistinct(card.items[0].key)
                     }
                     FlatButton {
                         objectName: "duplicateGroupSelect"
                         compact: true
                         text: card.copiesSelected ? "선택 해제" : "사본 " + card.copies.length + "장 선택"
-                        enabled: card.copies.length > 0 && !!review.library && !review.library.copiesLocked
-                        Accessible.name: "묶음 " + card.modelData.number + " " + text
+                        enabled: card.copies.length > 0 && !!review.library && !review.library.copiesLocked && !review.settling
+                        Accessible.name: "묶음 " + card.number + " " + text
                         onClicked: {
                             if (card.copiesSelected)
                                 review.library.removeFromSelection(card.copies)
@@ -114,7 +143,7 @@ Item {
                     Layout.fillWidth: true
                     spacing: 8
                     Repeater {
-                        model: card.modelData.items
+                        model: card.items
                         delegate: Rectangle {
                             id: tile
                             required property var modelData
@@ -131,7 +160,11 @@ Item {
                             border.color: Theme.accent
                             Accessible.role: Accessible.CheckBox
                             Accessible.name: (tile.modelData.keeper ? "남길 사진 " : "사본 ") + tile.modelData.caption
+                            Accessible.checkable: true
                             Accessible.checked: chosen
+                            // Picked without a mouse too: a screen reader toggles or presses the tile.
+                            Accessible.onToggleAction: tileMouse.pick()
+                            Accessible.onPressAction: tileMouse.pick()
 
                             Image {
                                 id: picture
@@ -229,8 +262,12 @@ Item {
                                 cursorShape: Qt.PointingHandCursor
                                 ToolTip.visible: containsMouse
                                 ToolTip.delay: 600
-                                ToolTip.text: "누르면 휴지통으로 보낼 사진으로 선택 · 두 번 누르면 크게 보기"
-                                onClicked: if (review.library) review.library.toggleSelection(tile.modelData.key)
+                                ToolTip.text: "누르면 선택 (휴지통으로 보내거나, 위의 ‘선택한 것만 중복 아님’) · 두 번 누르면 크게 보기"
+                                function pick() {
+                                    if (review.library && !review.settling)
+                                        review.library.toggleSelection(tile.modelData.key)
+                                }
+                                onClicked: pick()
                                 onDoubleClicked: review.previewRequested(tile.modelData.key)
                             }
                         }
@@ -244,12 +281,12 @@ Item {
         objectName: "duplicateEmptyState"
         anchors.centerIn: parent
         width: Math.max(0, parent.width - 32)
-        visible: review.groups.length === 0 && (!review.galleryModel || !review.galleryModel.busy)
+        visible: list.count === 0 && !review.settling && (!review.galleryModel || !review.galleryModel.busy)
         text: review.library && review.library.copiesLocked
             ? "같은 사진을 찾고 있습니다. 끝나면 묶음으로 보여 드립니다."
             : "찾은 중복 사진이 없습니다. 위의 ‘중복 검사’를 눌러 확인해 보세요."
               + (review.library && review.library.distinctDuplicateCount > 0
-                 ? "\n‘중복 아님’으로 표시한 묶음 " + review.library.distinctDuplicateCount.toLocaleString()
+                 ? "\n‘중복 아님’ 표시 " + review.library.distinctDuplicateCount.toLocaleString()
                    + "개는 위의 ‘초기화’로 다시 볼 수 있습니다." : "")
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap

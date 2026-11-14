@@ -3006,7 +3006,7 @@ class HistoryStore:
         # Files the owner called "not duplicates" keep the number of the group
         # they would be in, negated: nothing lists them, and taking the mark
         # back returns them to that group without another scan.
-        distinct = self._distinct_sets()
+        distinct = self._distinct_with(self._distinct_sets(), self._photo_marks())
         marked = {member for group in distinct for member in group}
         updates = []
         grouped = 0
@@ -3073,6 +3073,75 @@ class HistoryStore:
         else:
             self._db.execute("DELETE FROM catalog_meta WHERE key='duplicate_distinct'")
 
+    def _photo_marks(self) -> list[tuple[frozenset, frozenset]]:
+        """Photos the owner took out of a group: (those photos, everyone in the group then).
+
+        Each such photo is no duplicate of any other file of that group; the
+        others stay together. Kept beside the group marks under its own key, so
+        a version that knows only group marks leaves it alone. A damaged entry
+        reads as none.
+        """
+        if not self._has_table("catalog_meta"):
+            return []
+        row = self._db.execute("SELECT value FROM catalog_meta WHERE key='duplicate_distinct_photos'").fetchone()
+        if not row:
+            return []
+        try:
+            stored = json.loads(row[0])
+        except (TypeError, ValueError):
+            return []
+
+        def members(items):
+            found = set()
+            for item in items if isinstance(items, list) else ():
+                if (isinstance(item, list) and len(item) == 4 and type(item[2]) is int
+                        and all(isinstance(item[index], str) for index in (0, 1, 3))):
+                    found.add((item[0], item[1], item[2], item[3]))
+            return frozenset(found)
+
+        marks = []
+        for entry in stored if isinstance(stored, list) else ():
+            if not isinstance(entry, dict):
+                continue
+            group = members(entry.get("group"))
+            photos = members(entry.get("photos")) & group
+            if photos and len(photos) < len(group) and (photos, group) not in marks:
+                marks.append((photos, group))
+        return marks
+
+    def _store_photo_marks(self, marks) -> None:
+        """Write the photo marks; the caller holds the transaction."""
+        if marks:
+            value = json.dumps([{"photos": sorted(list(member) for member in photos),
+                                 "group": sorted(list(member) for member in group)}
+                                for photos, group in marks], ensure_ascii=False)
+            self._db.execute(
+                "INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('duplicate_distinct_photos',?)", (value,))
+        else:
+            self._db.execute("DELETE FROM catalog_meta WHERE key='duplicate_distinct_photos'")
+
+    @staticmethod
+    def _distinct_with(sets, marks) -> list:
+        """Everything that separates files: the group marks, and for each photo mark one pair
+        of the photo with every other file of its group."""
+        pairs = []
+        seen = set(sets)
+        for photos, group in marks:
+            for photo in sorted(photos):
+                for other in sorted(group):
+                    pair = frozenset((photo, other))
+                    if other != photo and pair not in seen:
+                        seen.add(pair)
+                        pairs.append(pair)
+        return list(sets) + pairs
+
+    def _group_members(self, number: int) -> list[tuple]:
+        """The listed files of stored group ``number``."""
+        return [(item["folder_mode"], item["tweet_id"], item["num"], item["media_type"]) for item in self._read_rows(
+            "SELECT h.folder_mode, h.tweet_id, h.num, h.media_type "
+            "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
+            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id=? AND " + _listed("m"), (number,))]
+
     def _regroup(self, number: int, sets) -> None:
         """Split stored group ``number`` again by the sets; the caller holds the transaction."""
         from .duplicates import split_distinct
@@ -3103,8 +3172,8 @@ class HistoryStore:
 
     @_safe
     def distinct_duplicate_count(self) -> int:
-        """How many groups the owner marked "not duplicates"."""
-        return len(self._distinct_sets())
+        """How many "not duplicates" marks there are: whole groups and photos taken out of one."""
+        return len(self._distinct_sets()) + len(self._photo_marks())
 
     @_safe
     def set_duplicate_group_distinct(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> list | None:
@@ -3123,10 +3192,7 @@ class HistoryStore:
         if not row or row[0] <= 0:
             return None
         number = row[0]
-        members = [(item["folder_mode"], item["tweet_id"], item["num"], item["media_type"]) for item in self._read_rows(
-            "SELECT h.folder_mode, h.tweet_id, h.num, h.media_type "
-            "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
-            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id=? AND " + _listed("m"), (number,))]
+        members = self._group_members(number)
         if len(members) < 2:
             return None
         sets = self._distinct_sets()
@@ -3134,8 +3200,76 @@ class HistoryStore:
             sets.append(frozenset(members))
         with self._db:
             self._store_distinct_sets(sets)
-            self._regroup(number, sets)
+            self._regroup(number, self._distinct_with(sets, self._photo_marks()))
         return sorted(list(member) for member in members)
+
+    @_safe
+    def set_duplicate_photos_distinct(self, identities) -> dict | None:
+        """Remember that these photos are no duplicates of the rest of their group.
+
+        The photos leave the group; the others stay together (a group left with
+        one file is no group any more). A later scan keeps them apart unless a
+        new file joins. The photos must belong to one group and must not be all
+        of it: a whole group is ``set_duplicate_group_distinct``. Returns the
+        mark, which is what ``undo_duplicate_photos_distinct`` takes, or None
+        when nothing was changed.
+        """
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
+            return None
+        try:
+            chosen = {(item[0], item[1], int(item[2]), item[3]) for item in identities}
+        except (TypeError, ValueError, IndexError, KeyError):
+            return None
+        numbers = set()
+        for member in chosen:
+            row = self._db.execute(
+                "SELECT cluster_id FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                member).fetchone()
+            if not row or row[0] <= 0:
+                return None
+            numbers.add(row[0])
+        if len(numbers) != 1:
+            return None
+        number = numbers.pop()
+        members = self._group_members(number)
+        photos = [member for member in members if member in chosen]
+        if len(photos) != len(chosen) or len(photos) >= len(members):
+            return None
+        marks = self._photo_marks()
+        mark = (frozenset(photos), frozenset(members))
+        if mark not in marks:
+            marks.append(mark)
+        with self._db:
+            self._store_photo_marks(marks)
+            self._regroup(number, self._distinct_with(self._distinct_sets(), marks))
+        return {"photos": sorted(list(member) for member in photos),
+                "group": sorted(list(member) for member in members)}
+
+    @_safe
+    def undo_duplicate_photos_distinct(self, mark) -> bool:
+        """Forget one photo mark; the photos return to their group."""
+        try:
+            target = (frozenset((item[0], item[1], int(item[2]), item[3]) for item in mark["photos"]),
+                      frozenset((item[0], item[1], int(item[2]), item[3]) for item in mark["group"]))
+        except (TypeError, ValueError, IndexError, KeyError):
+            return False
+        marks = self._photo_marks()
+        if target not in marks:
+            return False
+        marks.remove(target)
+        with self._db:
+            self._store_photo_marks(marks)
+            numbers = set()
+            for member in target[1]:
+                row = self._db.execute(
+                    "SELECT cluster_id FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                    member).fetchone()
+                if row and row[0]:
+                    numbers.add(abs(row[0]))
+            effective = self._distinct_with(self._distinct_sets(), marks)
+            for number in sorted(numbers):
+                self._regroup(number, effective)
+        return True
 
     @_safe
     def undo_duplicates_distinct(self, members) -> bool:
@@ -3157,22 +3291,26 @@ class HistoryStore:
                     member).fetchone()
                 if row and row[0]:
                     numbers.add(abs(row[0]))
+            effective = self._distinct_with(sets, self._photo_marks())
             for number in sorted(numbers):
-                self._regroup(number, sets)
+                self._regroup(number, effective)
         return True
 
     @_safe
     def clear_duplicates_distinct(self) -> int:
         """Forget every "not duplicates" mark; returns how many there were."""
         sets = self._distinct_sets()
-        stored = self._db.execute("SELECT 1 FROM catalog_meta WHERE key='duplicate_distinct'").fetchone()
-        if not sets and not stored:
+        marks = self._photo_marks()
+        stored = self._db.execute(
+            "SELECT 1 FROM catalog_meta WHERE key IN ('duplicate_distinct','duplicate_distinct_photos')").fetchone()
+        if not sets and not marks and not stored:
             return 0
         with self._db:
             self._store_distinct_sets([])
+            self._store_photo_marks([])
             if self._has_table("image_hashes") and self._has_column("image_hashes", "cluster_id"):
                 self._db.execute("UPDATE image_hashes SET cluster_id=-cluster_id WHERE cluster_id<0")
-        return len(sets)
+        return len(sets) + len(marks)
 
     @_safe
     def duplicate_rule(self) -> str:

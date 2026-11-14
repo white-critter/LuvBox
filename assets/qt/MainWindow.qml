@@ -1549,7 +1549,8 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’을 골라 휴지통으로 보내세요. "
                                 + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다. "
-                                + "같은 사진이 아니거나 모두 남기려면 묶음의 ‘중복 아님’을 누르세요."
+                                + "같은 사진이 아니거나 모두 남기려면 묶음의 ‘중복 아님’을, "
+                                + "몇 장만 다른 사진이면 그 사진을 고른 뒤 ‘선택한 N장만 중복 아님’을 누르세요."
                             wrapMode: Text.WordWrap
                             textFormat: Text.PlainText
                             font.pixelSize: Theme.fontSmall
@@ -1608,7 +1609,7 @@ ApplicationWindow {
                                 visible: !!window.app && window.app.library.canUndoDistinct
                                 enabled: !!window.app && !window.app.library.copiesLocked
                                 text: "중복 아님 되돌리기"
-                                tip: "방금 ‘중복 아님’으로 표시한 묶음을 다시 보입니다"
+                                tip: "방금 한 ‘중복 아님’ 표시를 되돌립니다. 표시한 묶음이나 뺀 사진이 다시 보입니다."
                                 Accessible.name: "중복 아님 표시 되돌리기"
                                 onClicked: window.app.library.undoDistinct()
                             }
@@ -1617,7 +1618,7 @@ ApplicationWindow {
                                 visible: !!window.app && window.app.library.distinctDuplicateCount > 0
                                 enabled: !!window.app && !window.app.library.copiesLocked
                                 text: "중복 아님 " + (window.app ? window.app.library.distinctDuplicateCount.toLocaleString() : "0") + "개 초기화"
-                                tip: "‘중복 아님’으로 표시한 묶음을 모두 다시 보이게 합니다. 사진은 지우지 않습니다."
+                                tip: "‘중복 아님’으로 표시한 묶음과 묶음에서 뺀 사진을 모두 다시 보이게 합니다. 사진은 지우지 않습니다."
                                 Accessible.name: "중복 아님 표시 모두 초기화"
                                 onClicked: window.app.library.clearDistinct()
                             }

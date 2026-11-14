@@ -29,10 +29,9 @@ def scene(shots=None):
 
     from PIL import Image, ImageDraw
     from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPointF, Qt, qInstallMessageHandler
-    from PySide6.QtGui import QFont, QFontDatabase
-    from PySide6.QtTest import QTest
+    from PySide6.QtGui import QFont, QFontDatabase, QMouseEvent
     from PySide6.QtWidgets import QApplication
-    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtQml import QQmlApplicationEngine, QQmlExpression, qmlContext
     from PySide6.QtQuickControls2 import QQuickStyle
     from shiboken6 import delete
 
@@ -94,8 +93,20 @@ def scene(shots=None):
             window.grabWindow().save(str(Path(shots) / (name + ".png")))
 
     def press(item):
-        point = item.mapToScene(QPointF(item.width() / 2, item.height() / 2)).toPoint()
-        QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+        # QTest.mouseClick keeps Python's global lock for as long as Qt handles the click. A click
+        # that makes the gallery ask for its thumbnails again has Qt's image thread call the
+        # provider (Python) at the same moment, and the two stopped each other in 3 of 240 cold
+        # starts of this scene. Posted events are delivered by processEvents, which lets other
+        # threads run, as the real event loop does.
+        # A control that has just appeared is placed by its layout a moment later; reading its
+        # position at once gave the row's left edge, and the click missed (1 in 20 cold starts).
+        settle(60)
+        point = item.mapToScene(QPointF(item.width() / 2, item.height() / 2))
+        position = QPointF(window.mapToGlobal(point.toPoint()))
+        for kind, held in ((QEvent.Type.MouseButtonPress, Qt.MouseButton.LeftButton),
+                           (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)):
+            QCoreApplication.postEvent(window, QMouseEvent(kind, point, position, Qt.MouseButton.LeftButton, held,
+                                                           Qt.KeyboardModifier.NoModifier))
         settle(30)
 
     def click(name):
@@ -199,6 +210,31 @@ def scene(shots=None):
         assert "완전히 같은 사진 5장" in library.status, library.status
         shot("1-exact-groups")
 
+        # One photo of a group can be taken out alone: pick it, and its card offers to do so.
+        assert not every("duplicateGroupPhotosDistinct")
+        press(every("duplicateTile")[2])
+        wait(lambda: library.selectedCount == 1 and len(every("duplicateGroupPhotosDistinct")) == 1,
+             "the card offers to take the picked photo out")
+        offer = every("duplicateGroupPhotosDistinct")[0]
+        assert offer.property("text") == "선택한 1장만 중복 아님", offer.property("text")
+        shot("1a-photo-picked")
+        press(offer)
+        wait(lambda: not model.busy and not library.duplicatesSettling and model.count == 4
+             and library.duplicateCount == 4 and library.distinctDuplicateCount == 1, "one photo taken out of its group")
+        assert [group["size"] for group in library.duplicateGroups] == [2, 2]
+        assert "묶음에서 뺐습니다" in library.status, library.status
+        assert library.selectedCount == 0 and not every("duplicateGroupPhotosDistinct")
+        wait(lambda: [item.property("text") for item in every("duplicateGroupTitle")]
+             == ["묶음 1 · 같은 사진 2장", "묶음 2 · 같은 사진 2장"], "the card shows the two that stay")
+        assert find("galleryClearDistinct").property("text") == "중복 아님 1개 초기화"
+        assert all(path.exists() for path in files.values()), "no file was touched"
+        shot("1b-photo-taken-out")
+        click("galleryUndoDistinct")
+        wait(lambda: not model.busy and not library.duplicatesSettling and model.count == 5
+             and library.duplicateCount == 5 and library.distinctDuplicateCount == 0, "the photo is back in its group")
+        wait(lambda: len(every("duplicateTile")) == 5 and len(every("duplicateGroupSelect")) == 2, "five tiles again")
+        groups = library.duplicateGroups
+
         # One button picks a group's copies; the photo to keep stays unselected.
         buttons = every("duplicateGroupSelect")
         assert buttons[0].property("text") == "사본 2장 선택"
@@ -230,6 +266,12 @@ def scene(shots=None):
         wait(lambda: library.selectedCount == 1, "one copy picked by hand")
         press(tiles[1])
         wait(lambda: library.selectedCount == 0, "picked copy released")
+        # Without a mouse: the accessibility interface toggles or presses a tile, as a screen reader does.
+        for action in ("toggleAction", "pressAction"):
+            QQmlExpression(qmlContext(tiles[1]), tiles[1], f"Accessible.{action}()").evaluate()
+            wait(lambda: library.selectedCount == 1, action + " picks the tile")
+            QQmlExpression(qmlContext(tiles[1]), tiles[1], f"Accessible.{action}()").evaluate()
+            wait(lambda: library.selectedCount == 0, action + " releases the tile")
 
         # Asked to, the scan also finds the same photo saved smaller.
         click("galleryDuplicateNear")
@@ -278,7 +320,7 @@ def scene(shots=None):
         wait(lambda: not model.busy and model.count == 0 and library.duplicateCount == 0
              and library.distinctDuplicateCount == 2, "second group marked")
         empty = find("duplicateEmptyState")
-        assert empty.property("visible") and "묶음 2개는 위의 ‘초기화’로" in empty.property("text"), empty.property("text")
+        assert empty.property("visible") and "‘중복 아님’ 표시 2개는 위의 ‘초기화’로" in empty.property("text"), empty.property("text")
         shot("5-all-marked")
         click("galleryClearDistinct")
         wait(lambda: not model.busy and model.count == 4 and library.duplicateCount == 4

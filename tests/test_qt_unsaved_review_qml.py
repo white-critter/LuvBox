@@ -33,7 +33,7 @@ def scene(shots=None):
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
-    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtQml import QQmlApplicationEngine, QQmlExpression, qmlContext
     from PySide6.QtQuickControls2 import QQuickStyle
     from shiboken6 import delete
 
@@ -212,6 +212,26 @@ def scene(shots=None):
         QTest.keyClick(window, Qt.Key.Key_Escape)
         wait(lambda: records.unsavedSelectedCount == 0, "esc cleared the selection")
         assert window.property("currentScreen") == 2
+
+        # Without a mouse: the accessibility interface toggles or presses a tile, as a screen reader does.
+        def tile_items():
+            found = []
+
+            def walk(item):
+                for child in item.childItems():
+                    if child.objectName() == "unsavedTile":
+                        found.append(child)
+                    walk(child)
+
+            walk(grid.property("contentItem"))
+            return found
+
+        some = tile_items()[0]
+        for action in ("toggleAction", "pressAction"):
+            QQmlExpression(qmlContext(some), some, f"Accessible.{action}()").evaluate()
+            wait(lambda: list(records.unsavedSelection) == [some.property("token")], action + " picks the tile")
+            QQmlExpression(qmlContext(some), some, f"Accessible.{action}()").evaluate()
+            wait(lambda: records.unsavedSelectedCount == 0, action + " releases the tile")
 
         # Dragging draws a rectangle and picks the tiles it touches.
         begin, finish = tile_point(0), tile_point(columns + 1)

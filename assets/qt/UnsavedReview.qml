@@ -312,7 +312,11 @@ Item {
                         border.color: Theme.accent
                         Accessible.role: Accessible.CheckBox
                         Accessible.name: cell.reasonLabel + " " + cell.author
+                        Accessible.checkable: true
                         Accessible.checked: cell.picked
+                        // Picked without a mouse too: a screen reader toggles or presses the tile.
+                        Accessible.onToggleAction: review.records.toggleUnsavedSelected(cell.token)
+                        Accessible.onPressAction: review.records.toggleUnsavedSelected(cell.token)
 
                         Item {
                             id: frame
