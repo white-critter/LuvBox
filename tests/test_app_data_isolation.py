@@ -96,6 +96,34 @@ class AppDataIsolationTests(unittest.TestCase):
         after = {item.name for item in cache.glob("*.qmlc")}
         self.assertEqual(len(after - before), 1, f"one new cache file for the one new QML file, got {after - before}")
 
+    def test_the_collector_runs_between_tests_on_the_main_thread_only(self):
+        # Collected on a worker thread, finished Qt controllers were destroyed off their thread and a
+        # later test crashed. While a test runs the collector is off; the wrapper runs it afterwards.
+        import gc
+        import threading
+
+        self.assertFalse(gc.isenabled())
+        self.assertIs(unittest.TestCase.run, app_data_isolation._run_then_collect)
+        ran_on = []
+        note = lambda phase, _info: ran_on.append(threading.current_thread()) if phase == "start" else None
+        gc.callbacks.append(note)
+        try:
+            class Inner(unittest.TestCase):
+                def test_garbage(self):
+                    cycle = []
+                    cycle.append(cycle)
+                    worker = threading.Thread(target=lambda: [[] for _ in range(200_000)])
+                    worker.start()
+                    worker.join()
+
+            outcome = unittest.TestResult()
+            Inner("test_garbage").run(outcome)
+        finally:
+            gc.callbacks.remove(note)
+        self.assertTrue(outcome.wasSuccessful())
+        self.assertTrue(ran_on, "the collector ran after the test")
+        self.assertEqual(set(ran_on), {threading.main_thread()})
+
     def test_both_names_of_the_module_are_one_module(self):
         self.assertIs(sys.modules["tests.app_data_isolation"], sys.modules["app_data_isolation"])
 

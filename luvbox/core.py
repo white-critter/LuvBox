@@ -1065,6 +1065,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 ignored_encountered = True
                 if identity in review_pending:
                     review_resolved.add(identity)
+                # Passed by on purpose, but its entry in the excluded list gets a
+                # small picture when it has none (a full check passes every like).
+                keep_unsaved_preview(self, url, kwdict)
                 return
             self.current_media = kwdict
             self.last_output = None

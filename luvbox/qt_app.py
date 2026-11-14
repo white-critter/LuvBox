@@ -123,6 +123,7 @@ class ApplicationController(QObject):
         self._management.changed.connect(self._state_changed)
         self._management.libraryChanged.connect(self._managed_library_changed)
         self._records.retryRequested.connect(self.retryUnsaved)
+        self._records.catalogChanged.connect(self._records_changed_gallery)
         self._download.eventReceived.connect(self._download_event)
         self._download.authenticationChanged.connect(self._accounts.updateAuthentication)
         self._download.reviewRequested.connect(self._prepare_review)
@@ -488,6 +489,16 @@ class ApplicationController(QObject):
         self._library.refresh()
         self._records.refresh()
         self.changed.emit()
+
+    def _records_changed_gallery(self):
+        # Media was excluded, or an exclusion released: the gallery lists something else now.
+        if self._closing:
+            return
+        self._gallery_dirty = True
+        if self._gallery_visible:
+            self.refreshGallery()
+        else:
+            self.changed.emit()
 
     def _managed_library_changed(self):
         # Take only the recycled tiles out, so a cleanup deep in the gallery

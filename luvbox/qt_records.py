@@ -4,7 +4,9 @@ Failed and size-limited media come from a small ledger in the app data folder.
 Media the user chose not to save again is read from that account's catalog, which
 keeps the choice when the ledger row is deleted, trimmed, or left behind a folder
 move. Forgetting a failure row does not clear a catalog skip. Releasing a skip
-clears only that choice and leaves saved files and catalog rows in place. A retry
+clears only that choice and leaves saved files and catalog rows in place. A third
+view lists media whose saved file is gone (the gallery's "파일 없음" tiles): they
+can be downloaded again or excluded, which takes them out of the gallery. A retry
 is handed to the application, which starts the same guarded save the downloader
 already uses for chosen media.
 """
@@ -34,10 +36,15 @@ _STATUS = {"finished": ("완료", "ok"), "stopped": ("중단", "muted"), "error"
            "running": ("실행 중", "muted"), "busy": ("다른 작업 중이라 건너뜀", "muted")}
 _ORIGIN = {"manual": "수동", "scheduled": "자동", "legacy": "이전 기록"}
 _MEDIA = {"photo": "사진", "video": "영상", "animated_gif": "GIF"}
-_REASON = {unsaved.FAILED: "저장 실패", unsaved.SIZE: "용량 제한", unsaved.EXCLUDED: "직접 제외"}
-# The two views of the unsaved list: media the app could not store, and media the person excluded.
-_KINDS = {"unsaved": (unsaved.FAILED, unsaved.SIZE), "excluded": (unsaved.EXCLUDED,)}
-_UNSAVED_PAGE = 50
+# A file that was saved and is no longer in the folder. It is not a ledger reason: the catalog knows it.
+MISSING = "missing"
+_REASON = {unsaved.FAILED: "저장 실패", unsaved.SIZE: "용량 제한", unsaved.EXCLUDED: "직접 제외",
+           MISSING: "파일 없음"}
+# The three views: media the app could not store, media the person excluded, and saved files that are gone.
+_KINDS = {"unsaved": (unsaved.FAILED, unsaved.SIZE), "excluded": (unsaved.EXCLUDED,), "missing": (MISSING,)}
+_UNSAVED_PAGE = 100
+_MISSING_DETAIL = "저장한 파일이 폴더에 없습니다. 앱 밖에서 지웠거나 옮긴 것으로 보입니다."
+_CATALOG_ERROR = "기록을 읽지 못했습니다. 저장 폴더와 기록 폴더를 확인해 주세요."
 # A finished run's message only repeats the standard summary; show it when it says more.
 _ROUTINE_MESSAGE = ("X가 보여 주는 좋아요 목록을 모두 확인했습니다", "새 Like 확인을 마쳤습니다")
 
@@ -70,6 +77,10 @@ class RecordsController(QObject):
     # Count refreshes also emit changed. The open page, including its preview
     # images, is replaced only when that page itself changes.
     unsavedRowsChanged = Signal()
+    # Which tiles of the open page are chosen; cleared when the page changes.
+    unsavedSelectionChanged = Signal()
+    # What the gallery lists changed (media excluded, or an exclusion released).
+    catalogChanged = Signal()
     retryRequested = Signal(object)
     shutdownFinished = Signal()
     _delivered = Signal(object)
@@ -92,6 +103,8 @@ class RecordsController(QObject):
         self._retryable_limit = None
         self._unsaved_busy, self._unsaved_error, self._unsaved_status = False, "", ""
         self._counts = {reason: 0 for reason in unsaved.REASONS}
+        self._missing_count = 0
+        self._unsaved_selected = set()
         self._condition = Condition()
         self._pending = deque()
         self._delivered.connect(self._accept, Qt.ConnectionType.QueuedConnection)
@@ -139,9 +152,19 @@ class RecordsController(QObject):
     @Property(int, notify=changed)
     def excludedCount(self): return self._counts[unsaved.EXCLUDED]
     @Property(int, notify=changed)
+    def missingCount(self):
+        """Saved files that are gone: the gallery's "파일 없음" tiles."""
+        return self._missing_count
+    @Property(int, notify=unsavedSelectionChanged)
+    def unsavedSelectedCount(self): return len(self._unsaved_selected)
+    @Property("QVariantList", notify=unsavedSelectionChanged)
+    def unsavedSelection(self): return sorted(self._unsaved_selected)
+    @Property(int, notify=changed)
     def retryableCount(self):
         if self._unsaved_view == "excluded":
             return self._counts[unsaved.EXCLUDED]
+        if self._unsaved_view == "missing":
+            return self._missing_count
         visible = sum(1 for row in self._unsaved_tokens.values() if self._can_retry(row))
         if (self._unsaved_pages <= 1 or self._retryable_total is None
                 or self._retryable_limit != self._limit_mb):
@@ -157,7 +180,9 @@ class RecordsController(QObject):
         self._generation += 1
         self._context = context
         self._counts = {reason: 0 for reason in unsaved.REASONS}
+        self._missing_count = 0
         self._unsaved_rows, self._unsaved_tokens = [], {}
+        self._clear_selection()
         self.unsavedRowsChanged.emit()
         self._unsaved_total = self._unsaved_pages = self._unsaved_page = 0
         self._run_rows, self._run_tokens = [], {}
@@ -247,6 +272,7 @@ class RecordsController(QObject):
         if view in _KINDS and view != self._unsaved_view:
             self._unsaved_view, self._unsaved_status = view, ""
             self._unsaved_rows, self._unsaved_tokens, self._unsaved_total = [], {}, 0
+            self._clear_selection()
             self.unsavedRowsChanged.emit()
             self.loadUnsaved(0)
 
@@ -263,14 +289,14 @@ class RecordsController(QObject):
     def dismiss(self, token):
         """Forget one failure or size-limit note. A catalog skip is not a note."""
         row = self._unsaved_tokens.get(token)
-        if row and row.get("reason") != unsaved.EXCLUDED:
+        if row and row.get("reason") in (unsaved.FAILED, unsaved.SIZE):
             self._unsaved_status = ""
             self._enqueue("dismiss", ([(row["tweet_id"], row["num"], row["media_type"])], None))
 
     @Slot()
     def dismissAll(self):
         """Clear the failure list only. Excluded media stays recoverable."""
-        if self._unsaved_view == "excluded":
+        if self._unsaved_view != "unsaved":
             return
         self._unsaved_status = ""
         self._enqueue("dismiss", (None, _KINDS[self._unsaved_view]))
@@ -289,6 +315,73 @@ class RecordsController(QObject):
             return
         self._unsaved_status = ""
         self._enqueue("release", None)
+
+    @Slot(str)
+    def exclude(self, token):
+        """Take one missing file out of the gallery and stop downloading it again. Its record stays."""
+        row = self._unsaved_tokens.get(token)
+        if row and row.get("reason") == MISSING:
+            self._unsaved_status = ""
+            self._enqueue("exclude", [(row["tweet_id"], row["num"], row["media_type"])])
+
+    @Slot()
+    def excludeAll(self):
+        if self._unsaved_view != "missing":
+            return
+        self._unsaved_status = ""
+        self._enqueue("exclude", None)
+
+    # -- the chosen tiles of the open page ---------------------------------------------
+
+    def _clear_selection(self):
+        if self._unsaved_selected:
+            self._unsaved_selected = set()
+            self.unsavedSelectionChanged.emit()
+
+    def _chosen(self):
+        """Rows of the chosen tiles, in the order shown."""
+        return [row for token, row in self._unsaved_tokens.items() if token in self._unsaved_selected]
+
+    @Slot(str)
+    def toggleUnsavedSelected(self, token):
+        if token in self._unsaved_tokens:
+            self._unsaved_selected ^= {token}
+            self.unsavedSelectionChanged.emit()
+
+    @Slot()
+    def selectUnsavedPage(self):
+        chosen = set(self._unsaved_tokens)
+        if chosen != self._unsaved_selected:
+            self._unsaved_selected = chosen
+            self.unsavedSelectionChanged.emit()
+
+    @Slot()
+    def clearUnsavedSelection(self):
+        self._clear_selection()
+
+    @Slot()
+    def retrySelected(self):
+        keys = tuple(archive_key(row["tweet_id"], row["num"], row["media_type"])
+                     for row in self._chosen() if self._can_retry(row))
+        if keys:
+            self.retryRequested.emit(keys)
+        else:
+            self._unsaved_status = "고른 것 가운데 다시 저장할 수 있는 미디어가 없습니다."
+            self.changed.emit()
+
+    @Slot()
+    def settleSelected(self):
+        """The view's own way to put the chosen away: forget the note, release the exclusion, or exclude."""
+        items = [(row["tweet_id"], row["num"], row["media_type"]) for row in self._chosen()]
+        if not items:
+            return
+        self._unsaved_status = ""
+        if self._unsaved_view == "excluded":
+            self._enqueue("release", items)
+        elif self._unsaved_view == "missing":
+            self._enqueue("exclude", items)
+        else:
+            self._enqueue("dismiss", (items, None))
 
     @Slot(str)
     def retry(self, token):
@@ -317,7 +410,9 @@ class RecordsController(QObject):
                                             ("약 " + size_text(row["size_bytes"])) if row["size_bytes"] else "") if part)
         can_retry = self._can_retry(row)
         hint = ""
-        if not can_retry:
+        if row["reason"] == MISSING:
+            pass
+        elif not can_retry:
             hint = "설정 › 고급에서 크기 제한을 올린 뒤 다시 저장할 수 있습니다."
         elif row["attempts"] > 1:
             hint = f"{row['attempts']}번째 시도까지 저장하지 못했습니다."
@@ -366,6 +461,9 @@ class RecordsController(QObject):
                     if view == "excluded":
                         result = dict(self._excluded_page(account, output_dir, separate, page),
                                       serial=serial, view=view)
+                    elif view == "missing":
+                        result = dict(self._missing_page(account, output_dir, separate, page),
+                                      serial=serial, view=view)
                     else:
                         result = dict(unsaved.page(account, output_dir, _KINDS[view], page, _UNSAVED_PAGE),
                                       serial=serial, view=view)
@@ -376,12 +474,15 @@ class RecordsController(QObject):
                 elif kind == "counts":
                     result = unsaved.counts(account, output_dir) if account else {}
                     result[unsaved.EXCLUDED] = self._excluded_total(account, output_dir, separate)
+                    result[MISSING] = self._missing_total(account, output_dir, separate)
                 elif kind == "dismiss":
                     items, kinds = payload
                     unsaved.remove(account, output_dir, items, kinds)
                     result = {}
                 elif kind == "release":
                     result = {"released": self._release_excluded(account, output_dir, separate, payload)}
+                elif kind == "exclude":
+                    result = {"excluded": self._exclude_missing(account, output_dir, separate, payload)}
                 else:
                     keys = self._retry_keys(account, output_dir, separate, payload)
                     result = {"keys": keys}
@@ -419,8 +520,11 @@ class RecordsController(QObject):
     def _attach_previews(self, account, result):
         """Fill previews from this PC's cache. A miss stays blank; nothing is downloaded."""
         rows = result.get("rows") or []
-        urls = thumbcache.preview_data_urls(
-            account, [(row.get("tweet_id"), row.get("num"), row.get("media_type")) for row in rows])
+        urls = {}
+        for start in range(0, len(rows), 50):          # the cache answers fifty at a time
+            urls.update(thumbcache.preview_data_urls(
+                account, [(row.get("tweet_id"), row.get("num"), row.get("media_type"))
+                          for row in rows[start:start + 50]]))
         for row in rows:
             row["preview"] = urls.get((row.get("tweet_id"), row.get("num"), row.get("media_type")), "")
 
@@ -440,6 +544,52 @@ class RecordsController(QObject):
                 for row in found["rows"]]
         found["rows"] = rows
         return found
+
+    def _catalog(self, account, output_dir, separate):
+        """Storage of this library when it has a catalog, else None."""
+        try:
+            paths = self._storage(account, output_dir, separate)
+        except (OSError, ValueError):
+            raise HistoryError(_CATALOG_ERROR) from None
+        if paths is None or not (paths.record_dir / ".luvbox-history.sqlite3").is_file():
+            return None
+        return paths
+
+    def _missing_total(self, account, output_dir, separate):
+        paths = self._catalog(account, output_dir, separate)
+        if paths is None:
+            return 0
+        with closing(_ReadOnlyHistory(paths)) as store:
+            return store.lost_count() if hasattr(store, "lost_count") else 0
+
+    def _missing_page(self, account, output_dir, separate, page):
+        paths = self._catalog(account, output_dir, separate)
+        if paths is None:
+            return {"rows": [], "total": 0, "page": 0, "pages": 0, "page_size": _UNSAVED_PAGE}
+        with closing(_ReadOnlyHistory(paths)) as store:
+            found = store.lost_media(page=page, page_size=_UNSAVED_PAGE)
+        found["rows"] = [dict(tweet_id=row["tweet_id"], num=row["num"], media_type=row["media_type"],
+                              reason=MISSING, author=row["author"], posted_at=row["posted_at"],
+                              width=0, height=0, duration=0, size_bytes=0, limit_mb=0, detail=_MISSING_DETAIL,
+                              attempts=1, first_seen=row["saved_at"], last_seen=row["saved_at"])
+                         for row in found["rows"]]
+        return found
+
+    def _exclude_missing(self, account, output_dir, separate, items):
+        paths = self._catalog(account, output_dir, separate)
+        if paths is None:
+            return 0
+        guard = AccountGuard(paths.account, sleep=lambda *_: None)
+        guard.acquire(respect_cooldown=False)
+        try:
+            store = HistoryStore(paths.record_dir, media_dir=paths.media_dir, output_dir=paths.output_dir,
+                                 legacy_dir=paths.legacy_dir)
+            try:
+                return store.exclude_lost(items)
+            finally:
+                store.close()
+        finally:
+            guard.close()
 
     def _release_excluded(self, account, output_dir, separate, items):
         paths = self._storage(account, output_dir, separate)
@@ -463,12 +613,13 @@ class RecordsController(QObject):
         return released
 
     def _retry_keys(self, account, output_dir, separate, view):
-        if view == "excluded":
+        if view in ("excluded", "missing"):
             paths = self._storage(account, output_dir, separate)
             if paths is None or not (paths.record_dir / ".luvbox-history.sqlite3").is_file():
                 return ()
             with closing(_ReadOnlyHistory(paths)) as store:
-                return store.excluded_archive_keys(RETRY_LIMIT)
+                return (store.excluded_archive_keys(RETRY_LIMIT) if view == "excluded"
+                        else store.lost_archive_keys(RETRY_LIMIT))
         keys = []
         page = 0
         while len(keys) < RETRY_LIMIT:
@@ -505,6 +656,7 @@ class RecordsController(QObject):
             self._unsaved_error = error
             if not error and result.get("view") == self._unsaved_view:
                 self._unsaved_tokens = {uuid.uuid4().hex: row for row in result.get("rows", [])}
+                self._clear_selection()
                 self._rebuild_unsaved()
                 self._unsaved_total, self._unsaved_page, self._unsaved_pages = (
                     result.get("total", 0), result.get("page", 0), result.get("pages", 0))
@@ -515,6 +667,7 @@ class RecordsController(QObject):
                 self._unsaved_error = error
             elif result:
                 self._counts = {reason: result.get(reason, 0) for reason in unsaved.REASONS}
+                self._missing_count = result.get(MISSING, 0)
         elif kind == "dismiss":
             self._unsaved_error = error
             self._unsaved_status = "" if error else "목록에서 지웠습니다. 저장된 파일에는 영향이 없습니다."
@@ -529,6 +682,22 @@ class RecordsController(QObject):
                 self._unsaved_status = "해제할 제외 항목이 없습니다."
             if not error:
                 self.refresh()
+                if result.get("released"):
+                    self.catalogChanged.emit()
+        elif kind == "exclude":
+            self._unsaved_error = error
+            count = result.get("excluded", 0)
+            if error:
+                self._unsaved_status = ""
+            elif count:
+                self._unsaved_status = (f"{count:,}개를 갤러리에서 뺐습니다. 다시 받지 않으며, "
+                                        "‘직접 제외’에서 되돌릴 수 있습니다.")
+            else:
+                self._unsaved_status = "뺄 항목이 없습니다. 파일이 다시 생겼을 수 있습니다."
+            if not error:
+                self.refresh()
+                if count:
+                    self.catalogChanged.emit()
         elif kind == "retry_keys":
             self._unsaved_error = error
             if not error:

@@ -37,6 +37,11 @@ class RecordsControllerTests(unittest.TestCase):
         legacy = patch('luvbox.activity._legacy_row', return_value=None)
         legacy.start()
         self.addCleanup(legacy.stop)
+        # These tests put a little over fifty items in a list to get a second page;
+        # the tile view shows a hundred per page.
+        paging = patch('luvbox.qt_records._UNSAVED_PAGE', 50)
+        paging.start()
+        self.addCleanup(paging.stop)
         self.records = RecordsController()
         self.addCleanup(self.close)
         self.retries = []

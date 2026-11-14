@@ -1734,6 +1734,107 @@ class HistoryStore:
             raise ValueError("invalid excluded key limit")
         return tuple(archive_key(*identity) for identity in self._excluded_identities(limit))
 
+    def _lost_items(self) -> list[dict]:
+        """Media the gallery lists although no saved file is left: its "파일 없음" tiles.
+
+        The files are looked for on disk now. With the media folder itself gone
+        (a drive that is not connected, a folder moved in Explorer) every file
+        would look deleted, so that case gives nothing.
+        """
+        try:
+            if not self.media_dir.is_dir():
+                return []
+        except OSError:
+            return []
+        where, params = self._filter_clause("all", "", include_deleted=False)
+        listed = {(row[0], row[1], row[2]) for row in self._db.execute(
+            "SELECT media.tweet_id,media.num,media.media_type FROM media" + where, params)}
+        return [item for item in self.missing_media(verify_files=True)
+                if not item["ignored"] and (item["tweet_id"], item["num"], item["media_type"]) in listed]
+
+    @_safe
+    def lost_count(self) -> int:
+        """How many "파일 없음" tiles the gallery has."""
+        return len(self._lost_items())
+
+    @_safe
+    def lost_media(self, *, page=0, page_size=50) -> dict:
+        """One page of media whose saved file is gone and that the person has not excluded."""
+        if type(page) is not int or page < 0 or type(page_size) is not int or not 1 <= page_size <= 200:
+            raise ValueError("invalid lost page")
+        items = self._lost_items()
+        total = len(items)
+        pages = (total + page_size - 1) // page_size if total else 0
+        page = min(page, max(0, pages - 1))
+        rows = [{"tweet_id": item["tweet_id"], "num": item["num"], "media_type": item["media_type"],
+                 "author": item["author"], "posted_at": item["posted_at"] or "",
+                 "saved_at": item["saved_at"] or "", "missing_since": item["missing_since"] or ""}
+                for item in items[page * page_size:(page + 1) * page_size]]
+        return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
+
+    @_safe
+    def lost_archive_keys(self, limit=2000) -> tuple:
+        """Archive keys of the lost media, for one download of the whole list."""
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2000:
+            raise ValueError("invalid lost key limit")
+        return tuple(item["archive_key"] for item in self._lost_items()[:limit])
+
+    @_safe
+    def exclude_lost(self, items=None) -> int:
+        """Take lost media out of the gallery and stop downloading them again. Records stay.
+
+        ``items`` is ``(tweet_id, num, media_type)``, or ``None`` for every lost
+        media. Only media that are lost at this moment are touched: a record
+        that points at a file which exists is never changed. Each record keeps
+        its last location, so a file that returns there is reconnected, and
+        ``release_excluded`` takes the choice back. Returns how many were excluded.
+        """
+        lost = {(item["tweet_id"], item["num"], item["media_type"]) for item in self._lost_items()}
+        if items is None:
+            targets = sorted(lost)
+        else:
+            chosen = []
+            for tweet_id, number, media_type in items:
+                tweet_id = str(tweet_id)
+                if (not re.fullmatch(r"[0-9]{1,20}", tweet_id) or isinstance(number, bool)
+                        or not isinstance(number, int) or not 1 <= number <= 10000
+                        or media_type not in _TYPES):
+                    raise HistoryError(_HISTORY_HELP)
+                chosen.append((tweet_id, number, media_type))
+            targets = [identity for identity in dict.fromkeys(chosen) if identity in lost]
+        if not targets:
+            return 0
+        stamp = _now()
+        modes = sorted(_MODES)
+        marks = ",".join("?" for _ in modes)
+        excluded = 0
+        with self._db:
+            for identity in targets:
+                rows = self._db.execute(
+                    "SELECT folder_mode,path FROM media WHERE folder_mode IN (" + marks + ") "
+                    "AND tweet_id=? AND num=? AND media_type=? AND path!=''", (*modes, *identity)).fetchall()
+                # A record in a former media folder keeps its exact place: that
+                # folder may only be out of reach (a drive that is not connected).
+                if any(not self.is_download_path(row["path"]) for row in rows):
+                    continue
+                for row in rows:
+                    record = (row["folder_mode"], *identity)
+                    self._db.execute(
+                        "UPDATE media SET last_path=path,missing_since=?,path='',filesize=NULL,updated_at=? "
+                        "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
+                        (stamp, stamp, *record, row["path"]))
+                    for table in ("image_hashes", "ai_unreadable"):
+                        if self._has_table(table):
+                            self._db.execute(
+                                "DELETE FROM " + table + " WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                                record)
+                self._db.execute(
+                    "INSERT INTO missing_choices(tweet_id,num,media_type,ignored,updated_at) VALUES (?,?,?,1,?) "
+                    "ON CONFLICT(tweet_id,num,media_type) DO UPDATE SET ignored=1,updated_at=excluded.updated_at",
+                    (*identity, stamp))
+                excluded += 1
+        return excluded
+
     @_safe
     def release_excluded(self, items=None) -> int:
         """Allow a later save to download these again. Catalog rows stay.

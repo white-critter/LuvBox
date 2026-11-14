@@ -195,6 +195,33 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(requests, [])
         self.assertEqual(previews, {})
 
+    def exclude(self, *identities):
+        from contextlib import closing
+        from luvbox.history import HistoryStore
+        from luvbox.storage import resolve_storage
+        paths = resolve_storage(self.options.output_dir, self.options.account, self.options.separate_accounts)
+        with closing(HistoryStore.for_storage(paths)) as store:
+            store.set_missing_ignored(list(identities), True)
+
+    def test_an_excluded_photo_met_again_gets_its_picture_and_stays_unsaved(self):
+        # The person chose not to download it again; the excluded list still wants a picture of it.
+        self.exclude(("100", 1, "photo"))
+        events, requests, previews = self.save(replace(self.options, unsaved_previews=True))
+        self.assertEqual((events[-1]["saved"], events[-1]["failed_media"]), (0, 0))
+        self.assertEqual(requests, ["https://pbs.twimg.com/media/100_1?format=jpg&name=small"])
+        self.assertIn(("100", 1, "photo"), previews)
+        # A second pass meets it again and asks for nothing.
+        events, requests, previews = self.save(replace(self.options, unsaved_previews=True))
+        self.assertEqual(requests, [])
+        self.assertIn(("100", 1, "photo"), previews)
+
+    def test_an_excluded_photo_is_not_pictured_without_the_option(self):
+        self.exclude(("100", 1, "photo"))
+        events, requests, previews = self.save(self.options)
+        self.assertEqual((events[-1]["saved"], events[-1]["failed_media"]), (0, 0))
+        self.assertEqual(requests, [])
+        self.assertEqual(previews, {})
+
     def test_a_failed_photo_gets_its_picture_when_the_app_asks_for_it(self):
         events, requests, previews = self.save(replace(self.options, unsaved_previews=True))
         self.assertEqual(events[-1]["failed_media"], 1)

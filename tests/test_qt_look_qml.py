@@ -280,9 +280,20 @@ def scene(shots=None):
             dialog, showing = opened(name, 1)
             assert len(showing) == 1, (name, showing)
             closed(dialog, name)
-        for name in ("connectionDialog", "scheduleDialog", "unsavedDialog"):
+        for name in ("connectionDialog", "scheduleDialog"):
             dialog, showing = opened(name, 1)
             closed(dialog, name)
+        # The unsaved media have a page of their own, laid out like the gallery: one main button at most.
+        screen = window.property("currentScreen")
+        from PySide6.QtCore import Q_ARG
+        assert QMetaObject.invokeMethod(window, "openUnsaved", Q_ARG("QVariant", ""))
+        wait(lambda: window.property("currentScreen") == 2 and find("unsavedReview").property("visible"),
+             "unsaved page opened")
+        settle(60)
+        assert set(emphasised()) <= {"unsavedRetry"}, emphasised()
+        shot("page-unsaved")
+        window.setProperty("currentScreen", screen)
+        settle(60)
         key = model._rows[0]["key"]
         controller.management.prepareDelete([key])
         confirmation = find("deleteConfirmation")

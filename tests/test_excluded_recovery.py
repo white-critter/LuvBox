@@ -57,7 +57,14 @@ class ExcludedRecoveryTests(unittest.TestCase):
         self.paths = resolve_storage(self.output, "alice")
         decline(self.paths)
         self.records = RecordsController()
-        self.addCleanup(self.records.shutdown)
+        self.addCleanup(self.close)
+
+    def close(self):
+        # Wait for the worker thread. A controller let go while its thread still runs is
+        # destroyed on that thread, and the timer shutdown() started then outlives it in
+        # the event loop: a later test crashed (access violation) while processing events.
+        self.records.shutdown()
+        self.wait(lambda: not self.records._worker.is_alive() and not self.records._shutdown_timer.isActive())
 
     def wait(self, predicate, seconds=8):
         until = time.monotonic() + seconds

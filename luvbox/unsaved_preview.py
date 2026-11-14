@@ -1,7 +1,8 @@
-"""Small pictures for media a save could not store.
+"""Small pictures for media a save could not store, or was told not to.
 
 A file that failed, or a video over the size limit, never reached the disk, so
-the unsaved list had nothing to show for it. While the save still has the
+the unsaved list had nothing to show for it. The same goes for media the
+person excluded: the save passes them by. While the save still has the
 post in hand it can fetch the smallest rendition of the photo, or a video's
 poster image, from X's image host and keep it in this PC's preview cache.
 
@@ -17,7 +18,8 @@ from urllib.parse import parse_qs, urlsplit
 
 HOST = "pbs.twimg.com"
 MAX_BYTES = 256 * 1024
-MAX_PER_RUN = 200
+# One full check may meet every excluded media of a library (over a thousand in a real one).
+MAX_PER_RUN = 1500
 _FAILURES_IN_A_ROW = 3
 _FORMATS = {"jpg": "jpg", "jpeg": "jpg", "png": "png", "webp": "webp"}
 _TYPES = {"image/jpeg", "image/png", "image/webp"}

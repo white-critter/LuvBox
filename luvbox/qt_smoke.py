@@ -165,21 +165,26 @@ class StartupProbe:
         self.later(200, self.check_records)
 
     def check_records(self):
-        for name in ("runHistoryDialog", "unsavedDialog"):
-            dialog = self.find(name)
-            if name == "unsavedDialog":
-                self.invoke(dialog, "open")
-                self.later(200, self.check_records_done)
-                return
-            if not dialog.property("visible"):
-                raise RuntimeError("The run history dialog did not open.")
-            self.invoke(dialog, "close")
+        from PySide6.QtCore import Q_ARG, QMetaObject, Qt
+
+        dialog = self.find("runHistoryDialog")
+        if not dialog.property("visible"):
+            raise RuntimeError("The run history dialog did not open.")
+        self.invoke(dialog, "close")
+        self.invoke(self.find("preferencesDialog"), "close")
+        # The unsaved media have a page of their own, shown like the gallery.
+        if not QMetaObject.invokeMethod(self.window, "openUnsaved", Qt.ConnectionType.DirectConnection,
+                                        Q_ARG("QVariant", "")):
+            raise RuntimeError("Qt action failed: openUnsaved")
+        self.later(200, self.check_records_done)
 
     def check_records_done(self):
-        if not self.find("unsavedDialog").property("visible"):
-            raise RuntimeError("The unsaved media dialog did not open.")
-        self.invoke(self.find("unsavedDialog"), "close")
-        self.invoke(self.find("preferencesDialog"), "close")
+        page = self.find("unsavedReview")
+        if self.window.property("currentScreen") != 2 or not page.property("visible"):
+            raise RuntimeError("The unsaved media page did not open.")
+        self.invoke(page, "backRequested")
+        if self.window.property("currentScreen") != 1:
+            raise RuntimeError("The unsaved media page did not return to the gallery.")
         self.report["settings_and_confirmation"] = True
         self.report["records_dialogs"] = True
         self.invoke(self.find("connectionDialog"), "open")

@@ -44,6 +44,13 @@ def scene():
 
     QQuickStyle.setStyle("Basic")
     app = QApplication([])
+    # The offscreen platform has no fonts of its own; with the app's font the captures show their text.
+    from PySide6.QtGui import QFont, QFontDatabase
+    for filename in ("Pretendard-Regular.ttf", "Pretendard-Bold.ttf"):
+        QFontDatabase.addApplicationFont(str(ROOT / "assets/fonts/Pretendard" / filename))
+    font = QFont("Pretendard")
+    font.setPixelSize(14)
+    app.setFont(font)
     messages = []
     previous = qInstallMessageHandler(lambda _level, _context, message: messages.append(message))
     controller = engine = wheel = window = None
@@ -141,6 +148,12 @@ def scene():
                 store.record_media("flat", {"tweet_id": str(ident), "num": 1, "type": "photo", "author": {"name": author},
                                             "date": datetime(2026, 10, day, 12, tzinfo=timezone(timedelta(hours=9)))}, path)
                 files.append(path)
+            # A saved photo whose file was removed in Explorer: a "파일 없음" tile in the gallery.
+            gone = paths.media_dir / "erin_400_1.png"
+            Image.new("RGB", (48, 32), (30, 200, 50)).save(gone)
+            store.record_media("flat", {"tweet_id": "400", "num": 1, "type": "photo", "author": {"name": "erin"},
+                                        "date": datetime(2026, 10, 3, 12, tzinfo=timezone(timedelta(hours=9)))}, gone)
+            gone.unlink()
             run_id = store.start_run("flat", scan_mode="full")
             store.finish_run(run_id, "finished", saved=2, skipped=0, message="이전 저장 완료")
             # A run only the catalog remembers (saved before the ledger existed).
@@ -317,99 +330,125 @@ def scene():
             wait(lambda: not history.property("visible"), "history closed")
             assert preferences.property("visible")
 
-            # Unsaved media: reasons, details, and the user's own exclusions kept apart.
+            # Unsaved media: a page of its own, shown like the gallery, reached from the settings.
             reveal(find("preferencesUnsavedButton"))
             click("preferencesUnsavedButton")
-            dialog = find("unsavedDialog")
-            wait(lambda: dialog.property("visible") and controller.records.unsavedTotal == 2
-                 and not controller.records.unsavedBusy, "unsaved list")
+            page = find("unsavedReview")
+            wait(lambda: window.property("currentScreen") == 2 and not preferences.property("visible")
+                 and page.property("visible") and controller.records.unsavedView == "unsaved"
+                 and controller.records.unsavedTotal == 2 and not controller.records.unsavedBusy, "unsaved page")
+
+            def tiles():
+                found = [item for item in items(page) if item.objectName() == "unsavedTile" and item.property("visible")]
+                return sorted(found, key=lambda item: (item.mapToScene(QPointF(0, 0)).y(), item.mapToScene(QPointF(0, 0)).x()))
+
+            def tile_of(tweet):
+                order = [row["token"] for row in controller.records.unsavedRows]
+                token = next(token for token, row in controller.records._unsaved_tokens.items() if row["tweet_id"] == tweet)
+                return tiles()[order.index(token)]
+
+            wait(lambda: len(tiles()) == 2, "two tiles")
             reasons = {row["reasonLabel"] for row in controller.records.unsavedRows}
             assert reasons == {"저장 실패", "용량 제한"}, reasons
             texts = visible_texts()
             assert any("영상 · 1280×720 · 2분 13초 · 약 340MB" in text for text in texts), texts
             assert any("설정 › 고급에서 크기 제한을 올린 뒤" in text for text in texts), texts
-            if height >= 700:
-                assert any("미리보기가 없는 항목" in text for text in texts)
             assert all(not row["preview"] for row in controller.records.unsavedRows)
-            assert dialog.property("width") >= min(940, width - 56)
-            assert dialog.property("height") >= min(700, height - 56)
-            assert dialog.property("x") >= -1 and dialog.property("y") + dialog.property("height") <= overlay.height() + 1
+            # The page uses the window, not a small box in it.
+            assert page.width() >= width - 60 and page.height() >= height - 140, (page.width(), page.height())
+            assert find("unsavedViewFailed").property("text") == "저장하지 못함 (2)"
+            assert find("unsavedViewMissing").property("text") == "없어진 파일 (1)"
+            assert find("unsavedViewExcluded").property("text") == "직접 제외 (1)"
+            assert find("unsavedRetry").property("text") == "모두 다시 저장"
             shot(f"{tag}-unsaved")
-            if width >= 1080:
-                # The same when the window shrinks under the unsaved list.
-                dialog.setProperty("chosenWidth", 800)
-                dialog.setProperty("chosenHeight", 520)
-                QTest.qWait(40)
-                window.setWidth(880)
-                window.setHeight(600)
-                wait(lambda: overlay.width() <= 880 and overlay.height() <= 600, "window made smaller")
-                QTest.qWait(40)
-                assert dialog.property("width") == 800 and dialog.property("height") == 520
-                assert dialog.property("x") >= -1 and dialog.property("y") >= -1
-                assert dialog.property("x") + dialog.property("width") <= overlay.width() + 1, (
-                    dialog.property("x"), dialog.property("width"), overlay.width())
-                assert dialog.property("y") + dialog.property("height") <= overlay.height() + 1
-                window.setWidth(width)
-                window.setHeight(height)
-                wait(lambda: overlay.width() >= width - 1, "window restored")
-                dialog.setProperty("chosenWidth", 1000)
-                dialog.setProperty("chosenHeight", 740)
-                QTest.qWait(40)
+
             click("unsavedViewExcluded")
             wait(lambda: controller.records.unsavedView == "excluded" and controller.records.unsavedTotal == 1
-                 and not controller.records.unsavedBusy, "excluded view")
+                 and not controller.records.unsavedBusy and len(tiles()) == 1, "excluded view")
             assert controller.records.unsavedRows[0]["reasonLabel"] == "직접 제외"
             assert controller.records.unsavedRows[0]["preview"].startswith("data:image/png;base64,")
-            preview = next(item for item in inside(dialog) if item.objectName() == "unsavedPreview")
+            preview = next(item for item in items(page) if item.objectName() == "unsavedPreview")
             wait(lambda: preview.property("paintedWidth") > 0, "excluded local preview")
             shot(f"{tag}-unsaved-excluded")
+
+            # A saved file that is gone: taken out of the gallery, and brought back from the excluded list.
+            click("unsavedViewMissing")
+            wait(lambda: controller.records.unsavedView == "missing" and controller.records.unsavedTotal == 1
+                 and not controller.records.unsavedBusy and len(tiles()) == 1, "missing view")
+            assert controller.records.unsavedRows[0]["reasonLabel"] == "파일 없음"
+            assert find("unsavedSettle").property("text") == "모두 갤러리에서 빼기"
+            click(tiles()[0])
+            wait(lambda: controller.records.unsavedSelectedCount == 1, "missing tile picked")
+            assert find("unsavedSettle").property("text") == "선택한 1개 갤러리에서 빼기"
+            assert find("unsavedRetry").property("text") == "선택한 1개 다시 받기"
+            assert find("unsavedOpenSource").property("visible")
+            shot(f"{tag}-unsaved-missing")
+            click("unsavedSettle")
+            wait(lambda: controller.records.missingCount == 0 and controller.records.excludedCount == 2
+                 and not controller.records.unsavedBusy, "missing file excluded")
+            assert "1개를 갤러리에서 뺐습니다" in find("unsavedMessage").property("text")
+            assert find("unsavedEmpty").property("visible")
+            click("unsavedViewExcluded")
+            wait(lambda: controller.records.unsavedView == "excluded" and controller.records.unsavedTotal == 2
+                 and not controller.records.unsavedBusy and len(tiles()) == 2, "two excluded")
+            click(tile_of("400"))
+            wait(lambda: controller.records.unsavedSelectedCount == 1, "excluded tile picked")
+            assert find("unsavedSettle").property("text") == "선택한 1개 제외 해제"
+            click("unsavedSettle")
+            wait(lambda: controller.records.missingCount == 1 and controller.records.excludedCount == 1
+                 and not controller.records.unsavedBusy, "exclusion released")
+
             click("unsavedViewFailed")
             wait(lambda: controller.records.unsavedView == "unsaved" and controller.records.unsavedTotal == 2
-                 and not controller.records.unsavedBusy, "back to failed view")
+                 and not controller.records.unsavedBusy and len(tiles()) == 2, "back to failed view")
 
             # One retry reaches the downloader as exactly that media, and the save screen takes over.
             started.clear()
-            retry_buttons = [item for item in inside(dialog) if item.objectName() == "unsavedRetry"
-                             and item.property("visible") and item.property("enabled")]
-            assert len(retry_buttons) == 1, len(retry_buttons)  # the size-limited one waits for a higher limit
-            reveal(retry_buttons[0])
-            click(retry_buttons[0])
+            click(tile_of("300"))
+            wait(lambda: controller.records.unsavedSelectedCount == 1, "failed tile picked")
+            assert find("unsavedRetry").property("text") == "선택한 1개 다시 저장"
+            click("unsavedRetry")
             wait(lambda: bool(started), "retry started")
             assert started[0].targets == ("300_1",), started[0].targets
-            assert not dialog.property("visible") and not preferences.property("visible")
             assert window.property("currentScreen") == 0
             wait(lambda: not controller.busy, "retry prepared")
 
             # Raising the limit makes the size-limited media retryable; "all" sends both.
             controller.setPreference("max_video_mb", 500)
             wait(lambda: not controller.busy, "limit saved")
-            click_text("설정")
-            wait(lambda: preferences.property("visible"), "settings reopened")
-            click("preferencesUnsavedButton")
-            wait(lambda: dialog.property("visible") and controller.records.retryableCount == 2, "both retryable")
+            window.setProperty("currentScreen", 1)
+            chip = find("galleryUnsavedButton")
+            wait(lambda: chip.property("visible") and chip.property("text") == "저장 못 한 미디어 3", "gallery button")
+            click(chip)
+            wait(lambda: window.property("currentScreen") == 2 and controller.records.unsavedView == "unsaved"
+                 and controller.records.retryableCount == 2 and not controller.records.unsavedBusy, "both retryable")
             started.clear()
-            click("unsavedRetryAll")
+            assert find("unsavedRetry").property("text") == "모두 다시 저장"
+            click("unsavedRetry")
             wait(lambda: bool(started), "retry all started")
             assert set(started[0].targets) == {"300_1", "301_video_2"}, started[0].targets
             controller.setPreference("max_video_mb", 200)
             wait(lambda: not controller.busy, "settled")
 
             # Forgetting a row changes only the list.
-            click_text("설정")
-            wait(lambda: preferences.property("visible"), "settings for dismiss")
-            click("preferencesUnsavedButton")
-            wait(lambda: dialog.property("visible") and controller.records.unsavedTotal == 2
-                 and not controller.records.unsavedBusy, "list before dismiss")
-            dismiss = next(item for item in inside(dialog) if item.objectName() == "unsavedDismiss" and item.property("visible"))
-            reveal(dismiss)
-            click(dismiss)
+            window.setProperty("currentScreen", 2)
+            wait(lambda: controller.records.unsavedTotal == 2 and not controller.records.unsavedBusy
+                 and len(tiles()) == 2, "list before dismiss")
+            click(tile_of("300"))
+            wait(lambda: controller.records.unsavedSelectedCount == 1, "tile picked for dismiss")
+            assert find("unsavedSettle").property("text") == "선택한 1개 목록에서 지우기"
+            click("unsavedSettle")
             wait(lambda: controller.records.unsavedTotal == 1 and not controller.records.unsavedBusy, "row forgotten")
             assert {path: path.read_bytes() for path in files} == original
             unsaved.record(fixture_rows[:2], account="offline", output_dir=str(paths.output_dir))
             controller.records.refresh()
             wait(lambda: controller.records.unsavedTotal == 2 and not controller.records.unsavedBusy, "restored fixture")
+            # Esc and the back button return to the gallery.
             QTest.keyClick(window, Qt.Key.Key_Escape)
-            wait(lambda: not dialog.property("visible"), "unsaved closed")
+            wait(lambda: window.property("currentScreen") == 1, "back to the gallery")
+            window.setProperty("currentScreen", 0)
+            click_text("설정")
+            wait(lambda: preferences.property("visible"), "settings for the schedule")
 
             # Automatic save is a dialog of the settings now; a confirmation still guards a change.
             reveal(find("preferencesScheduleButton"))
@@ -436,12 +475,13 @@ def scene():
             wait(lambda: schedule.property("visible"), "schedule from save screen")
             QTest.keyClick(window, Qt.Key.Key_Escape)
             wait(lambda: not schedule.property("visible"), "schedule closed again")
-            # And the unsaved summary opens its list directly.
+            # And the unsaved summary opens that page directly, on the failures.
             reveal(find("saveUnsavedButton"))
             click("saveUnsavedButton")
-            wait(lambda: dialog.property("visible"), "unsaved from save screen")
-            QTest.keyClick(window, Qt.Key.Key_Escape)
-            wait(lambda: not dialog.property("visible"), "unsaved closed again")
+            wait(lambda: window.property("currentScreen") == 2 and controller.records.unsavedView == "unsaved",
+                 "unsaved from save screen")
+            click("unsavedBack")
+            wait(lambda: window.property("currentScreen") == 1, "back button")
 
         assert {path: path.read_bytes() for path in files} == original
         controller.requestClose()

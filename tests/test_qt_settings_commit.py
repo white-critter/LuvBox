@@ -268,6 +268,22 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertEqual(asked, [True, True])
         self.wait_for(lambda: not self.controller.busy)
 
+    def test_excluding_or_releasing_media_reloads_the_gallery(self):
+        refreshed = []
+        self.controller.library.refresh = lambda: refreshed.append(True)
+        # Not looking at the gallery: it is read again when it is shown.
+        self.controller.galleryVisible(False)
+        self.controller.records.catalogChanged.emit()
+        self.assertEqual(refreshed, [])
+        self.assertTrue(self.controller._gallery_dirty)
+        self.controller.galleryVisible(True)
+        self.assertEqual(refreshed, [True])
+        self.assertFalse(self.controller._gallery_dirty)
+        # Looking at it: at once.
+        self.controller.records.catalogChanged.emit()
+        self.assertEqual(refreshed, [True, True])
+        self.wait_for(lambda: not self.controller.busy)
+
     def test_failed_details_toggle_restores_the_hidden_state(self):
         self.settings.update.side_effect = self.blocked_update
         self.controller.setPreference("detailed_progress", True)

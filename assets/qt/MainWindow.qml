@@ -31,7 +31,7 @@ ApplicationWindow {
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
         folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
-        runHistoryDialog.visible || unsavedDialog.visible || datePickerPopup.visible || statisticsDialog.visible ||
+        runHistoryDialog.visible || datePickerPopup.visible || statisticsDialog.visible ||
         tagBatchPopup.visible || aiClearConfirm.visible || teachPopup.visible || shortcutHelp.visible
     // A focused or open list takes letters for itself (jumping to "@bob" must not
     // toggle the favorites filter), so the single-letter shortcuts wait.
@@ -107,8 +107,10 @@ ApplicationWindow {
     onCurrentScreenChanged: {
         stopWheel()
         datePickerPopup.close()
-        if (app)
+        if (app) {
             app.galleryVisible(currentScreen === 1)
+            app.records.setActive("unsaved", currentScreen === 2)
+        }
         if (currentScreen === 1)
             Qt.callLater(updateFocus)
         Qt.callLater(fitSaveWindow)
@@ -402,6 +404,19 @@ ApplicationWindow {
         }
     }
 
+    // The unsaved media, shown like the gallery (screen 2). Without a view, the first list that has something.
+    function openUnsaved(view) {
+        if (!app)
+            return
+        const records = app.records
+        let chosen = view
+        if (!chosen)
+            chosen = records.unsavedCount > 0 ? "unsaved" : records.missingCount > 0 ? "missing"
+                : records.excludedCount > 0 ? "excluded" : "unsaved"
+        records.setUnsavedView(chosen)
+        currentScreen = 2
+    }
+
     function flashNotice(text) {
         transientNotice = text
         noticeTimer.restart()
@@ -495,10 +510,11 @@ ApplicationWindow {
                 text: "갤러리"
                 tone: "nav"
                 checkable: true
-                checked: window.currentScreen === 1
+                // Screen 2, the unsaved media, is reached from the gallery and belongs to it.
+                checked: window.currentScreen >= 1
                 onClicked: {
                     window.currentScreen = 1
-                    checked = Qt.binding(function() { return window.currentScreen === 1 })
+                    checked = Qt.binding(function() { return window.currentScreen >= 1 })
                 }
             }
             Item { Layout.fillWidth: true }
@@ -887,7 +903,7 @@ ApplicationWindow {
                                 FlatButton {
                                     objectName: "saveUnsavedButton"
                                     text: "확인"
-                                    onClicked: unsavedDialog.open()
+                                    onClicked: window.openUnsaved("unsaved")
                                 }
                             }
                         }
@@ -1068,6 +1084,20 @@ ApplicationWindow {
                                 window.app.library.setDuplicateOnly(!window.app.library.filterDuplicateOnly)
                                 checked = Qt.binding(function() { return window.app ? window.app.library.filterDuplicateOnly : false })
                             }
+                        }
+                        FlatButton {
+                            // What is not in the gallery: could not be saved, excluded, or its file is gone.
+                            objectName: "galleryUnsavedButton"
+                            tone: "chip"
+                            width: implicitWidth
+                            // Worth a look: failures and files that are gone. Exclusions were chosen.
+                            readonly property int attention: window.app
+                                ? window.app.records.unsavedCount + window.app.records.missingCount : 0
+                            visible: !!window.app && (attention > 0 || window.app.records.excludedCount > 0)
+                            text: attention > 0 ? "저장 못 한 미디어 " + attention.toLocaleString() : "저장 못 한 미디어"
+                            Accessible.name: "저장 못 한 미디어 보기"
+                            tip: "저장하지 못한 것, 파일이 없어진 것, 직접 제외한 것을 갤러리처럼 모아 봅니다"
+                            onClicked: window.openUnsaved("")
                         }
                         FlatButton {
                             id: aiMenuButton
@@ -2146,6 +2176,15 @@ ApplicationWindow {
                     }
                 }
             }
+
+            // Screen 2: media that is not in the gallery, looked at like the gallery.
+            UnsavedReview {
+                id: unsavedReview
+                objectName: "unsavedReview"
+                app: window.app
+                tileWidth: window.tileWidth
+                onBackRequested: window.currentScreen = 1
+            }
         }
     }
 
@@ -2168,6 +2207,11 @@ ApplicationWindow {
             if (!window.focusReady && window.currentScreen === 1)
                 window.updateFocus()
         }
+    }
+    Shortcut {
+        sequence: "Escape"
+        enabled: window.currentScreen === 2 && !window.modalOpen
+        onActivated: window.currentScreen = 1
     }
     Shortcut {
         sequence: "Ctrl+F"
@@ -3075,7 +3119,10 @@ ApplicationWindow {
         app: window.app
         onScheduleRequested: scheduleDialog.open()
         onRunHistoryRequested: runHistoryDialog.open()
-        onUnsavedRequested: unsavedDialog.open()
+        onUnsavedRequested: {
+            preferencesDialog.close()
+            window.openUnsaved("")
+        }
     }
 
     ScheduleDialog {
@@ -3356,12 +3403,6 @@ ApplicationWindow {
         }
     }
 
-    UnsavedMediaDialog {
-        id: unsavedDialog
-        parent: Overlay.overlay
-        app: window.app
-    }
-
     SaveReviewDialog {
         id: saveReviewDialog
         objectName: "saveReviewDialog"
@@ -3460,7 +3501,6 @@ ApplicationWindow {
                 teachPopup.close()
                 teachMenu.close()
                 aiMenu.close()
-                unsavedDialog.close()
                 storageDialog.close()
                 repairDialog.close()
                 folderDialog.close()
@@ -3471,7 +3511,6 @@ ApplicationWindow {
         function onLoginRequested() { connectionDialog.open() }
         // A retry runs on the save screen, where its progress shows.
         function onRetryStarted() {
-            unsavedDialog.close()
             preferencesDialog.close()
             window.currentScreen = 0
         }
