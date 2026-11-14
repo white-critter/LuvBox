@@ -31,9 +31,10 @@ _FILE_MISSING = "이 파일을 찾지 못했습니다. 저장 폴더 밖에서 �
 _CLOUD_ONLY = "이 파일은 클라우드에만 있습니다. 탐색기에서 받은 뒤 다시 열 수 있습니다."
 _POSTED = re.compile(r"(\d{4}-\d\d-\d\d)T(\d\d:\d\d)")
 MAX_SELECTION = 2000
-_EXCLUSIVE_ACTIONS = {"scan_duplicates", "scan_ai_tags", "clear_ai_tags", "teach"}
+_EXCLUSIVE_ACTIONS = {"scan_duplicates", "scan_ai_tags", "auto_ai_tags", "clear_ai_tags", "teach"}
 _EXCLUSIVE_KIND = {
-    "scan_duplicates": "duplicates", "scan_ai_tags": "ai", "clear_ai_tags": "clear", "teach": "teach",
+    "scan_duplicates": "duplicates", "scan_ai_tags": "ai", "auto_ai_tags": "ai", "clear_ai_tags": "clear",
+    "teach": "teach",
 }
 _EXCLUSIVE_BUSY = {
     "ai": "AI 자동분류가 끝난 뒤 다시 실행할 수 있습니다.",
@@ -50,6 +51,9 @@ _HOLD_REASON = {
 _CATALOG_MOVED = "저장 폴더가 바뀌어 작업을 멈췄습니다. 이미 처리한 내용은 유지됩니다."
 _TAG_LOCKED = "AI 작업이 끝난 뒤 태그를 바꿀 수 있습니다. 분류나 초기화가 끝나면 다시 시도해 주세요."
 _FAVORITE_ERROR = "즐겨찾기를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
+_DISTINCT_ERROR = "중복 아님 표시를 저장하지 못했습니다. 목록을 새로 고친 뒤 다시 시도해 주세요."
+# How the status lines of a running classification begin (see _perform).
+_AI_PROGRESS = ("AI 자동분류 중", "분류할 사진을 확인하는 중", "비슷한 사진에 분류를 맞추는 중")
 _STATISTICS_ERROR = "통계를 불러오지 못했습니다. 저장 폴더가 연결되어 있는지 확인한 뒤 다시 시도해 주세요."
 
 
@@ -758,7 +762,50 @@ class LibraryRepository:
                 "중복 검사를 끝내지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요."
             ) from exc
 
-    def scan_ai_tags(self, generation, progress_callback=None, status_callback=None, epoch=None):
+    def auto_ai_pending(self, generation):
+        """Whether an automatic classification has anything to do right now.
+
+        False when the model is not on this PC: a run that starts on its own
+        never downloads it. Cloud-only and missing files do not count, as the
+        scan does not read them, and neither do photos it could not decode.
+        """
+        request = self.current(generation)
+        if request is None:
+            return False
+        from .clip_model import model_file_present
+        if not model_file_present():
+            return False
+        try:
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                store._folder_cache = {}
+                if hasattr(store, "count_embeddings_without_labels") and store.count_embeddings_without_labels():
+                    return True
+                if not hasattr(store, "photos_without_embeddings"):
+                    return False
+                signatures = store.unreadable_signatures() if hasattr(store, "unreadable_signatures") else {}
+                for rec in store.photos_without_embeddings():
+                    if self.current(generation) is None:
+                        return False
+                    path = self._path(store, rec)
+                    if path is None:
+                        continue
+                    try:
+                        info = path.stat()
+                    except OSError:
+                        continue
+                    ident = (rec["folder_mode"], rec["tweet_id"], rec["num"], rec["media_type"])
+                    if signatures.get(ident) != (int(info.st_size), int(info.st_mtime_ns)):
+                        return True
+        except Exception:
+            return False
+        return False
+
+    def scan_ai_tags(self, generation, progress_callback=None, status_callback=None, epoch=None, download=True):
+        """Classify photos that have no AI category yet.
+
+        ``download=False`` is the run that starts on its own after a save: it
+        uses the model only when it is already on this PC.
+        """
         self._scan_note = ""
         request = self._catalog_request(generation, epoch)
         if request is None:
@@ -840,6 +887,8 @@ class LibraryRepository:
                         skipped_unreadable += 1
                         continue
                     valid_items.append((rec, path))
+                if valid_items and not download and not is_available():
+                    valid_items = []          # no model here, and this run does not fetch one
                 # Cleared tags keep their embedding and are scored without the vision model.
                 # A file that cannot be decoded is skipped until its size or time changes.
                 grand = len(valid_items) + relabel_count + skipped_unreadable
@@ -1090,6 +1139,55 @@ class LibraryRepository:
         except Exception:
             return []
 
+    def mark_group_distinct(self, key, generation):
+        """The owner says the photos grouped with this one are not duplicates.
+
+        Returns the files of that group (what ``undo_group_distinct`` takes), or
+        None when nothing was changed.
+        """
+        request = self.current(generation)
+        if request is None:
+            return None
+        match = _KEY.fullmatch(key) if isinstance(key, str) else None
+        if match is None or int(match[1]) != request.generation:
+            return None
+        try:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                return store.set_duplicate_group_distinct(match[2], match[3], int(match[4]), match[5])
+        except Exception:
+            return None
+
+    def undo_group_distinct(self, members, generation):
+        request = self.current(generation)
+        if request is None or not members:
+            return False
+        try:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                return bool(store.undo_duplicates_distinct(members))
+        except Exception:
+            return False
+
+    def clear_distinct(self, generation):
+        """Forget every "not duplicates" mark; how many there were, or None when it could not be saved."""
+        request = self.current(generation)
+        if request is None:
+            return None
+        try:
+            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                return int(store.clear_duplicates_distinct())
+        except Exception:
+            return None
+
+    def distinct_counts(self, generation=None):
+        request = self.current(generation)
+        if request is None:
+            return 0
+        try:
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                return int(store.distinct_duplicate_count()) if hasattr(store, "distinct_duplicate_count") else 0
+        except Exception:
+            return 0
+
     def deletion_manifest(self, keys):
         """Capture displayed catalog identities without accepting paths from QML."""
         if (not isinstance(keys, (list, tuple)) or not 1 <= len(keys) <= MAX_SELECTION
@@ -1239,6 +1337,7 @@ class LibraryController(QObject):
     duplicateFilterChanged = Signal()
     duplicateCountChanged = Signal()
     duplicateGroupsChanged = Signal()
+    duplicateDistinctChanged = Signal()
     duplicateScanProgress = Signal(int, int)
     aiScanProgress = Signal(int, int)
     aiScanningChanged = Signal()
@@ -1284,6 +1383,11 @@ class LibraryController(QObject):
         self._ai_counts = []
         self._duplicate_near = False
         self._duplicate_groups = []
+        self._distinct_count = 0         # groups the owner marked "not duplicates"
+        self._distinct_undo = None       # the files of the last such mark, to take it back
+        self._auto_classify = True       # classify newly saved photos without being asked
+        self._auto_ai_wanted = False     # a save ended or a library opened: look for photos to classify
+        self._auto_ai_seen = None        # the library that look was already made for at opening
         self._statistics_wanted = False
         self._ai_scanning = False
         self._ai_current = 0
@@ -1310,6 +1414,12 @@ class LibraryController(QObject):
         self._closed = False
         self._closing = False
         self._shutdown_complete = False
+        # The look for new photos waits a moment after a save or a reload, so it does not
+        # compete with the list, and several reasons in a row make one look.
+        self._auto_ai_timer = QTimer(self)
+        self._auto_ai_timer.setSingleShot(True)
+        self._auto_ai_timer.setInterval(1500)
+        self._auto_ai_timer.timeout.connect(self._look_for_new_photos)
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.setInterval(50)
         self._shutdown_timer.timeout.connect(self._poll_shutdown)
@@ -1402,6 +1512,15 @@ class LibraryController(QObject):
     def duplicateGroups(self):
         """Loaded duplicates as groups: [{group, size, items: [{key, caption, detail, thumbUrl, keeper, ...}]}]."""
         return self._duplicate_groups
+
+    @Property(int, notify=duplicateDistinctChanged)
+    def distinctDuplicateCount(self):
+        """Groups the owner marked "not duplicates"; a scan leaves them out until the marks are cleared."""
+        return self._distinct_count
+
+    @Property(bool, notify=duplicateDistinctChanged)
+    def canUndoDistinct(self):
+        return bool(self._distinct_undo)
 
     def _rebuild_duplicate_groups(self):
         groups = []
@@ -1639,7 +1758,15 @@ class LibraryController(QObject):
         self.userTagsChanged.emit()
         self._duplicate_count = 0
         self.duplicateCountChanged.emit()
+        self._distinct_count = 0
+        self._distinct_undo = None
+        self.duplicateDistinctChanged.emit()
         self._refresh(reload_authors=True)
+        library = (self._account, self._output_dir, bool(self._separate_accounts))
+        if self._account and self._output_dir and library != self._auto_ai_seen:
+            # Scheduled saves run while the app is closed; their photos are classified now.
+            self._auto_ai_seen = library
+            self.classifyNewPhotos()
 
     @Slot()
     def refresh(self):
@@ -1697,6 +1824,7 @@ class LibraryController(QObject):
                     self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
                 if reload_authors:
                     self._interactive.append(("duplicate_counts", self._generation, self._selection_serial, ""))
+                    self._interactive.append(("distinct_counts", self._generation, self._selection_serial, ""))
                     self._interactive.append(("ai_counts", self._generation, self._selection_serial, ""))
                 self._condition.notify_all()
         if request is not None and self._statistics_wanted:
@@ -1704,6 +1832,8 @@ class LibraryController(QObject):
             with self._condition:
                 self._interactive.append(("statistics", self._generation, self._selection_serial, ""))
                 self._condition.notify_all()
+        if self._auto_ai_wanted:
+            self._auto_ai_timer.start()
         self.provider.clear_registry()
         self.model.search(str(self._generation))
         self.changed.emit()
@@ -1926,7 +2056,8 @@ class LibraryController(QObject):
             self._ai_current = 0
             self._ai_total = 0
             self.aiScanningChanged.emit()
-        self._status = status
+        if status is not None:
+            self._status = status
         epoch = self._repository.catalog_epoch() if hasattr(self._repository, "catalog_epoch") else None
         with self._condition:
             self._pending.append((action, self._generation, self._selection_serial, "", epoch))
@@ -1993,6 +2124,38 @@ class LibraryController(QObject):
             self._status = "중복 검사를 중단하는 중… 현재 파일 확인이 끝나면 멈춥니다."
             self.changed.emit()
 
+    def setAutoClassify(self, enabled):
+        """Preference: classify newly saved photos on their own, with the model already on this PC."""
+        enabled = bool(enabled)
+        turned_on = enabled and not self._auto_classify
+        self._auto_classify = enabled
+        if not enabled:
+            self._auto_ai_wanted = False
+            self._auto_ai_timer.stop()
+        elif turned_on:
+            self.classifyNewPhotos()
+
+    @Slot()
+    def classifyNewPhotos(self):
+        """A save ended or a library opened: classify photos that have no category yet.
+
+        Quiet when there is nothing to do, and it waits for a running job.
+        """
+        if self._closed or not self._auto_classify:
+            return
+        self._auto_ai_wanted = True
+        self._auto_ai_timer.start()
+
+    def _look_for_new_photos(self):
+        if self._closed or not self._auto_classify or not self._auto_ai_wanted:
+            return
+        if self._exclusive or not (self._account and self._output_dir):
+            return                      # asked again when the running job ends
+        with self._condition:
+            if not any(item[0] == "auto_ai_check" for item in self._pending):
+                self._pending.append(("auto_ai_check", self._generation, self._selection_serial, "", None))
+                self._condition.notify_all()
+
     @Slot(result=bool)
     def scanAiTags(self):
         if not self._exclusive and hasattr(self._repository, "_ai_cancel"):
@@ -2009,6 +2172,75 @@ class LibraryController(QObject):
     @Slot(result=bool)
     def clearAiTags(self):
         return self._begin_exclusive("clear", "clear_ai_tags", "AI 자동분류 태그를 초기화하는 중…")
+
+    def _duplicate_marks_changed(self, status):
+        """Reload the duplicate list and its counts after a "not duplicates" mark changed."""
+        self.duplicateDistinctChanged.emit()
+        self._refresh(reload_authors=False, status=status)
+        with self._condition:
+            for action in ("duplicate_counts", "distinct_counts"):
+                self._interactive.append((action, self._generation, self._selection_serial, ""))
+            self._condition.notify_all()
+
+    @Slot(str, result=bool)
+    def markGroupDistinct(self, key):
+        """The photos grouped with this one are not duplicates: stop listing and grouping them."""
+        if self._closed or not isinstance(key, str) or not key:
+            return False
+        if self._exclusive == "duplicates":
+            self._status = _HOLD_REASON["duplicates"]
+            self.changed.emit()
+            return False
+        members = self._repository.mark_group_distinct(key, self._generation)
+        if not members:
+            self._status = _DISTINCT_ERROR
+            self.changed.emit()
+            return False
+        self._distinct_undo = members
+        self._distinct_count += 1
+        self._duplicate_marks_changed(
+            f"사진 {len(members):,}장을 중복 아님으로 표시했습니다. 다음 검사부터 묶지 않습니다.")
+        return True
+
+    @Slot(result=bool)
+    def undoDistinct(self):
+        """Take back the last "not duplicates" mark."""
+        if self._closed or not self._distinct_undo:
+            return False
+        if self._exclusive == "duplicates":
+            self._status = _HOLD_REASON["duplicates"]
+            self.changed.emit()
+            return False
+        members, self._distinct_undo = self._distinct_undo, None
+        if not self._repository.undo_group_distinct(members, self._generation):
+            self._status = _DISTINCT_ERROR
+            self.duplicateDistinctChanged.emit()
+            self.changed.emit()
+            return False
+        self._distinct_count = max(0, self._distinct_count - 1)
+        self._duplicate_marks_changed("중복 아님 표시를 되돌렸습니다. 묶음이 다시 보입니다.")
+        return True
+
+    @Slot(result=int)
+    def clearDistinct(self):
+        """Forget every "not duplicates" mark; the groups are listed again."""
+        if self._closed:
+            return 0
+        if self._exclusive == "duplicates":
+            self._status = _HOLD_REASON["duplicates"]
+            self.changed.emit()
+            return 0
+        count = self._repository.clear_distinct(self._generation)
+        if count is None:
+            self._status = _DISTINCT_ERROR
+            self.changed.emit()
+            return 0
+        self._distinct_undo = None
+        self._distinct_count = 0
+        self._duplicate_marks_changed(
+            f"중복 아님 표시 {count:,}개를 초기화했습니다. 묶음이 다시 보입니다." if count
+            else "초기화할 중복 아님 표시가 없습니다.")
+        return count
 
     @Slot(result=int)
     def selectDuplicateCopies(self):
@@ -2450,6 +2682,12 @@ class LibraryController(QObject):
             elif action == "duplicate_counts":
                 reader = getattr(self._repository, "duplicate_counts", None)
                 selection = reader(generation) if callable(reader) else 0
+            elif action == "auto_ai_check":
+                reader = getattr(self._repository, "auto_ai_pending", None)
+                selection = bool(reader(generation)) if callable(reader) else False
+            elif action == "distinct_counts":
+                reader = getattr(self._repository, "distinct_counts", None)
+                selection = reader(generation) if callable(reader) else 0
             elif action == "statistics":
                 reader = getattr(self._repository, "overview", None)
                 selection = reader(generation) if callable(reader) else None
@@ -2480,7 +2718,7 @@ class LibraryController(QObject):
                         selection = count
                         kind = "같은 사진(크기·화질만 다른 것 포함)" if near else "완전히 같은 사진"
                         message = f"{kind} {count:,}장을 찾았습니다." if count else f"{kind}이 없습니다."
-            elif action == "scan_ai_tags":
+            elif action in ("scan_ai_tags", "auto_ai_tags"):
                 progress_state = {"cur": 0, "tot": 0}
                 def on_ai_progress(cur, tot):
                     progress_state["cur"] = cur
@@ -2493,11 +2731,14 @@ class LibraryController(QObject):
                         (progress_state["cur"], progress_state["tot"]), msg, epoch,
                     )
                 try:
+                    # The run that starts on its own never downloads the model.
+                    extra = {"download": False} if action == "auto_ai_tags" else {}
                     count = self._repository.scan_ai_tags(
                         generation,
                         progress_callback=on_ai_progress,
                         status_callback=on_ai_status,
                         epoch=epoch,
+                        **extra,
                     )
                     if not self._same_catalog(epoch):
                         selection, message = None, _CATALOG_MOVED
@@ -2505,7 +2746,12 @@ class LibraryController(QObject):
                         selection = count
                         seen = progress_state["tot"]
                         note = getattr(self._repository, "_scan_note", "")
-                        if count:
+                        if action == "auto_ai_tags":
+                            # Nothing new is the usual case; it is not worth a line.
+                            message = (f"새로 저장한 사진을 AI로 분류했습니다: {seen:,}장을 확인했고, "
+                                       f"{count:,}장에 태그를 적용했습니다." if count else "")
+                            note = note if count else ""
+                        elif count:
                             message = f"AI 자동분류 완료: {seen:,}장을 확인했고, 사진 {count:,}장에 태그를 적용했습니다."
                         elif seen:
                             message = f"AI 자동분류 완료: {seen:,}장을 확인했습니다. 새로 붙인 태그는 없습니다."
@@ -2576,8 +2822,10 @@ class LibraryController(QObject):
         except Exception:
             if action in {"authors", "hashtags", "user_tags"}:
                 selection = []
-            elif action == "duplicate_counts":
+            elif action in {"duplicate_counts", "distinct_counts"}:
                 selection = 0
+            elif action == "auto_ai_check":
+                selection = False
             elif action == "statistics":
                 selection = {"error": _STATISTICS_ERROR}
             elif action == "ai_counts":
@@ -2653,6 +2901,8 @@ class LibraryController(QObject):
         self.aiScanningChanged.emit()
         self.aiScanProgress.emit(0, 0)
         self.duplicateScanProgress.emit(0, 0)
+        if self._auto_ai_wanted:
+            self._auto_ai_timer.start()
 
     @Slot(object)
     def _accept(self, result):
@@ -2710,6 +2960,34 @@ class LibraryController(QObject):
                 self._duplicate_count = count
                 self.duplicateCountChanged.emit()
                 self.changed.emit()
+            return
+        if action == "auto_ai_check":
+            if not selection or not self._auto_classify:
+                self._auto_ai_wanted = False
+            elif not self._exclusive:
+                self._auto_ai_wanted = False
+                self._begin_exclusive("ai", "auto_ai_tags", None)
+            return                      # busy: asked again when the running job ends
+        if action == "auto_ai_tags":
+            self._release_exclusive()
+            if selection is None:
+                self._status = message
+                self.changed.emit()
+                return
+            if message:
+                self._user_tags_loaded = False
+                self._settle(message, reload=bool(self._ai_category))
+            else:
+                # Nothing to report; do not leave the run's own progress line standing.
+                if self._status.startswith(_AI_PROGRESS):
+                    self._status = ""
+                self.changed.emit()
+            return
+        if action == "distinct_counts":
+            count = int(selection) if isinstance(selection, int) else 0
+            if count != self._distinct_count:
+                self._distinct_count = count
+                self.duplicateDistinctChanged.emit()
             return
         if action == "statistics":
             self._statistics_wanted = False

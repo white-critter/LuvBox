@@ -30,6 +30,9 @@ def default_settings() -> dict:
         # Look for a newer release once a day at start; when that was last done (UTC, ISO 8601);
         # and the newer release it found: {"version", "notes", "installable", "size"} or empty.
         "update_check": True, "update_checked_at": "", "update_found": {},
+        # Give newly saved photos their AI category without being asked. It needs the model that the
+        # first classification downloads; nothing is fetched for it.
+        "auto_classify": True,
     }
 
 

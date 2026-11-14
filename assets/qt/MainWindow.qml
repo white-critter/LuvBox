@@ -1507,14 +1507,19 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.leftMargin: Theme.gapLarge
                         anchors.rightMargin: Theme.gap
-                        columns: parent.width >= 900 ? 2 : 1
+                        // The buttons for "중복 아님" marks appear only while there are marks; with them
+                        // the guide needs a wider window to stay beside the buttons.
+                        readonly property bool marks: !!window.app && (window.app.library.canUndoDistinct
+                                                                      || window.app.library.distinctDuplicateCount > 0)
+                        columns: parent.width >= (marks ? 1240 : 900) ? 2 : 1
                         columnSpacing: Theme.gapLarge
                         rowSpacing: Theme.gapSmall
                         Label {
                             objectName: "duplicateGuide"
                             Layout.fillWidth: true
                             text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’을 골라 휴지통으로 보내세요. "
-                                + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다."
+                                + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다. "
+                                + "같은 사진이 아니거나 모두 남기려면 묶음의 ‘중복 아님’을 누르세요."
                             wrapMode: Text.WordWrap
                             textFormat: Text.PlainText
                             font.pixelSize: Theme.fontSmall
@@ -1566,6 +1571,25 @@ ApplicationWindow {
                                     else
                                         window.flashNotice(window.app.library.status)
                                 }
+                            }
+                            // "중복 아님" marks: take the last one back, or forget them all.
+                            FlatButton {
+                                objectName: "galleryUndoDistinct"
+                                visible: !!window.app && window.app.library.canUndoDistinct
+                                enabled: !!window.app && !window.app.library.copiesLocked
+                                text: "중복 아님 되돌리기"
+                                tip: "방금 ‘중복 아님’으로 표시한 묶음을 다시 보입니다"
+                                Accessible.name: "중복 아님 표시 되돌리기"
+                                onClicked: window.app.library.undoDistinct()
+                            }
+                            FlatButton {
+                                objectName: "galleryClearDistinct"
+                                visible: !!window.app && window.app.library.distinctDuplicateCount > 0
+                                enabled: !!window.app && !window.app.library.copiesLocked
+                                text: "중복 아님 " + (window.app ? window.app.library.distinctDuplicateCount.toLocaleString() : "0") + "개 초기화"
+                                tip: "‘중복 아님’으로 표시한 묶음을 모두 다시 보이게 합니다. 사진은 지우지 않습니다."
+                                Accessible.name: "중복 아님 표시 모두 초기화"
+                                onClicked: window.app.library.clearDistinct()
                             }
                         }
                     }

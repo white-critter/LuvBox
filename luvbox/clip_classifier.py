@@ -29,6 +29,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from . import __version__
+from .clip_model import MODEL_FILENAME, MODEL_SIZE, bundled_model_path, default_cache_dir
 from .duplicates import _safe_local_file
 from .preview import MAX_PIXELS, MAX_RASTER_BYTES, PHOTO_FORMATS, _BoundedRasterReader, _prepare_decoders
 
@@ -40,10 +41,8 @@ except ImportError:
     _ONNXRUNTIME_AVAILABLE = False
 
 
-MODEL_FILENAME = "clip_vit_b32_vision.onnx"
 MODEL_URL = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx"
 MODEL_SHA256 = "583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299"
-MODEL_SIZE = 89117001
 MAX_DOWNLOAD = 120 * 1024 * 1024
 
 CATEGORIES = [
@@ -102,19 +101,6 @@ def get_category_embeddings() -> np.ndarray:
         arr = np.frombuffer(raw, dtype=np.float32).reshape(len(CATEGORIES), 512)
         _CATEGORY_EMBEDDINGS = arr
     return _CATEGORY_EMBEDDINGS
-
-
-def default_cache_dir() -> Path:
-    """Return user app data directory for model storage."""
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "LuvBox" / "models" / "clip"
-    return Path.home() / ".luvbox" / "models" / "clip"
-
-
-def bundled_model_path() -> Path:
-    """Return project runtime directory for pre-bundled model if present."""
-    return Path(__file__).resolve().parents[1] / "tools" / "clip" / "runtime" / MODEL_FILENAME
 
 
 def resolve_model_path() -> Path:

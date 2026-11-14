@@ -245,6 +245,47 @@ def scene(shots=None):
         assert "크기·화질만 다른 것 포함" in library.status
         shot("3-near-groups")
 
+        # "중복 아님": the group leaves the view, stays out after another scan, and can be taken back.
+        assert not find("galleryUndoDistinct").property("visible")
+        assert not find("galleryClearDistinct").property("visible")
+        wait(lambda: len(every("duplicateGroupDistinct")) == 2, "a 'not duplicates' button on each group")
+        marked = {item["key"].split("_")[2] for item in library.duplicateGroups[0]["items"]}
+        press(every("duplicateGroupDistinct")[0])
+        wait(lambda: not model.busy and model.count == 2 and library.duplicateCount == 2
+             and library.distinctDuplicateCount == 1, "group marked 'not duplicates'")
+        left = {item["key"].split("_")[2] for group in library.duplicateGroups for item in group["items"]}
+        assert len(left) == 2 and not marked & left, (marked, left)
+        assert "중복 아님으로 표시" in library.status, library.status
+        assert find("galleryUndoDistinct").property("visible")
+        assert find("galleryClearDistinct").property("text") == "중복 아님 1개 초기화"
+        assert all(path.exists() for path in files.values() if path.name not in {"user_101_1.jpg", "user_102_1.jpg"})
+        shot("4-marked-not-duplicates")
+        click("galleryScanDuplicates")
+        wait(lambda: not library.busy and "같은 사진" in library.status and not model.busy and model.count == 2
+             and library.duplicateCount == 2, "another scan leaves the marked group out")
+        assert {item["key"].split("_")[2] for group in library.duplicateGroups for item in group["items"]} == left
+        click("galleryUndoDistinct")
+        wait(lambda: not model.busy and model.count == 4 and library.duplicateCount == 4
+             and library.distinctDuplicateCount == 0, "the mark taken back without a scan")
+        assert not find("galleryUndoDistinct").property("visible")
+        assert not find("galleryClearDistinct").property("visible")
+        # Both groups marked: the empty view says how to get them back, and "초기화" returns both.
+        wait(lambda: len(every("duplicateGroupDistinct")) == 2, "both groups shown again")
+        press(every("duplicateGroupDistinct")[0])
+        wait(lambda: not model.busy and model.count == 2 and library.distinctDuplicateCount == 1, "first group marked")
+        wait(lambda: len(every("duplicateGroupDistinct")) == 1, "one group left")
+        press(every("duplicateGroupDistinct")[0])
+        wait(lambda: not model.busy and model.count == 0 and library.duplicateCount == 0
+             and library.distinctDuplicateCount == 2, "second group marked")
+        empty = find("duplicateEmptyState")
+        assert empty.property("visible") and "묶음 2개는 위의 ‘초기화’로" in empty.property("text"), empty.property("text")
+        shot("5-all-marked")
+        click("galleryClearDistinct")
+        wait(lambda: not model.busy and model.count == 4 and library.duplicateCount == 4
+             and library.distinctDuplicateCount == 0, "every mark cleared")
+        assert "초기화했습니다" in library.status, library.status
+        assert not find("galleryUndoDistinct").property("visible")
+
         # Leaving the view brings the grid back.
         click("galleryDuplicateFilter")
         wait(lambda: not library.filterDuplicateOnly and not model.busy and model.count == 6, "grid restored")

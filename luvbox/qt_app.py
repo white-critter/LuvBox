@@ -33,10 +33,11 @@ _CHOICES = {
     "gif_format": {"gif", "mp4"},
     "gif_size": {"original", "720", "480"},
 }
-_BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_each", "detailed_progress"}
+_BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_each", "detailed_progress",
+             "auto_classify"}
 _PUBLIC_PREFERENCES = {*_CHOICES, *_BOOLEANS, "max_video_mb", "gallery_density"}
 # Screen-only choices: they change nothing a save reads, so a running save does not lock them.
-_VIEW_PREFERENCES = {"confirm_each", "detailed_progress", "gallery_density"}
+_VIEW_PREFERENCES = {"confirm_each", "detailed_progress", "gallery_density", "auto_classify"}
 _SETTINGS_ERROR = "설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요."
 _REPAIR_ERROR = ("기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
                  "저장 폴더 권한을 확인하고 다시 시도해 주세요.")
@@ -108,6 +109,8 @@ class ApplicationController(QObject):
         self._download = DownloadController(self)
         self._download.setDetailsEnabled(self._preferences["detailed_progress"])
         self._library = LibraryController(self)
+        # Newly saved photos get their AI category without being asked, unless switched off.
+        self._library.setAutoClassify(self._preferences.get("auto_classify") is not False)
         self._management = ManagementController(self._library, self)
         self._records = RecordsController(self)
         self._records.setVideoLimit(self._preferences["max_video_mb"])
@@ -348,6 +351,8 @@ class ApplicationController(QObject):
                     self._download.setReviewEnabled(bool(value))
                 if name == "detailed_progress":
                     self._download.setDetailsEnabled(bool(value))
+                if name == "auto_classify":
+                    self._library.setAutoClassify(value is not False)
             for field, (name, value) in fields.items():
                 if self._settings_versions.get(name) == revision:
                     if field == "_account" and self._accounts.identity:
@@ -429,6 +434,8 @@ class ApplicationController(QObject):
             self._download.setReviewEnabled(value)
         if name == "detailed_progress":
             self._download.setDetailsEnabled(value)
+        if name == "auto_classify":
+            self._library.setAutoClassify(value)
         if name == "separate_accounts":
             self._load_library()
         if name == "max_video_mb":
@@ -778,6 +785,8 @@ class ApplicationController(QObject):
                            skipped=self._download.skippedCount)
             self._record_manual_outcome(outcome)
             self._records.refresh()
+            if self._download.savedCount and not self._closing:
+                self._library.classifyNewPhotos()       # what this save brought, when the model is here
             if not self._gallery_visible and not self._closing:
                 self.refreshGallery()
 

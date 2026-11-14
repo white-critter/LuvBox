@@ -85,6 +85,17 @@ Item {
                         elide: Text.ElideRight
                     }
                     FlatButton {
+                        // Not the same photo, or both are wanted: the group is remembered and not shown again.
+                        objectName: "duplicateGroupDistinct"
+                        compact: true
+                        tone: "ghost"
+                        text: "중복 아님"
+                        enabled: !!review.library && !review.library.copiesLocked && card.modelData.items.length > 0
+                        tip: "이 묶음을 중복이 아닌 것으로 기억합니다. 다음 검사부터 묶지 않고, 위의 ‘되돌리기’나 ‘초기화’로 다시 볼 수 있습니다."
+                        Accessible.name: "묶음 " + card.modelData.number + " 중복 아님"
+                        onClicked: review.library.markGroupDistinct(card.modelData.items[0].key)
+                    }
+                    FlatButton {
                         objectName: "duplicateGroupSelect"
                         compact: true
                         text: card.copiesSelected ? "선택 해제" : "사본 " + card.copies.length + "장 선택"
@@ -237,6 +248,9 @@ Item {
         text: review.library && review.library.copiesLocked
             ? "같은 사진을 찾고 있습니다. 끝나면 묶음으로 보여 드립니다."
             : "찾은 중복 사진이 없습니다. 위의 ‘중복 검사’를 눌러 확인해 보세요."
+              + (review.library && review.library.distinctDuplicateCount > 0
+                 ? "\n‘중복 아님’으로 표시한 묶음 " + review.library.distinctDuplicateCount.toLocaleString()
+                   + "개는 위의 ‘초기화’로 다시 볼 수 있습니다." : "")
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap
         color: Theme.textMuted

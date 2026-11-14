@@ -230,6 +230,24 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertFalse(self.controller.preferences["confirm_each"])
         self.assertFalse(self.controller.download._service._review_enabled)
 
+    def test_automatic_classification_follows_its_switch_and_a_failed_save_restores_it(self):
+        library = self.controller.library
+        self.assertTrue(library._auto_classify)                 # on unless switched off
+        self.controller.setPreference("auto_classify", False)
+        self.assertFalse(library._auto_classify)
+        self.wait_for(lambda: not self.controller.busy)
+        self.assertFalse(self.controller.preferences["auto_classify"])
+        self.settings.update.assert_called_with({"auto_classify": False})
+        # A save that fails puts the switch, and what the gallery does, back.
+        self.settings.update.side_effect = self.blocked_update
+        self.controller.setPreference("auto_classify", True)
+        self.assertTrue(self.entered.wait(1))
+        self.assertTrue(library._auto_classify)
+        self.release.set()
+        self.wait_for(lambda: not self.controller.busy)
+        self.assertFalse(self.controller.preferences["auto_classify"])
+        self.assertFalse(library._auto_classify)
+
     def test_failed_details_toggle_restores_the_hidden_state(self):
         self.settings.update.side_effect = self.blocked_update
         self.controller.setPreference("detailed_progress", True)

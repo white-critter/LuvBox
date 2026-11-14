@@ -376,6 +376,44 @@ def _remember_outcome(outcome: dict) -> None:
         pass
 
 
+# An unattended run classifies what it saved, but does not stay busy with a large backlog:
+# the app continues with the rest when it is opened.
+_CLASSIFY_SECONDS = 600
+
+
+def _classify_saved(options, write) -> None:
+    """Give the photos this run saved their AI category, when the model is already on this PC.
+
+    Never part of the run's outcome: the files are saved, and anything left is
+    classified when the app is opened. Nothing is downloaded for this.
+    """
+    try:
+        from .clip_model import model_file_present
+
+        if not model_file_present():
+            return
+        import threading
+
+        from .duplicates import ScanCancelled
+        from .qt_library import LibraryRepository, _Request
+
+        repository = LibraryRepository()
+        repository.configure(_Request(1, options.account, options.output_dir, bool(options.separate_accounts)))
+        limit = threading.Timer(_CLASSIFY_SECONDS, repository._ai_cancel.set)
+        limit.daemon = True
+        limit.start()
+        try:
+            count = repository.scan_ai_tags(1, download=False)
+            write(f"AI 분류 · 새 사진 {count}장에 분류를 붙였습니다")
+        except ScanCancelled:
+            write("AI 분류 · 오래 걸려 멈췄습니다. 남은 사진은 앱을 열면 이어서 분류합니다.")
+        finally:
+            limit.cancel()
+            repository.configure(None)
+    except Exception:
+        write("AI 분류를 마치지 못했습니다. 저장한 파일에는 영향이 없습니다.")
+
+
 def run_saved(*, full: bool = False) -> int:
     """Run once and return the worker's exit code; 1 when nothing could start."""
     outcome = {"run_id": uuid.uuid4().hex, "started_at": datetime.now(_KOREA).isoformat(timespec="seconds"),
@@ -466,6 +504,9 @@ def run_saved(*, full: bool = False) -> int:
             except Exception:
                 code = 1
                 outcome.update(status="error", message="자동 저장을 마치지 못했습니다. 앱에서 연결 상태와 저장 폴더를 확인해 주세요.")
+            else:
+                if code == 0 and outcome["saved"] and settings.get("auto_classify") is not False:
+                    _classify_saved(options, write)
     finally:
         try:
             stream.close()

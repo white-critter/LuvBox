@@ -122,7 +122,19 @@ ApplicationWindow {
     fixture.set_error('')
     QTest.qWait(50)
     assert not error.property('visible')
-    warnings = [m for m in messages if any(x in m for x in ('.qml', 'QQml', 'ReferenceError', 'TypeError', 'Binding loop'))]
+    # Newly saved photos are classified on their own unless this is switched off.
+    from PySide6.QtCore import QMetaObject
+    automatic = dialog.findChild(QQuickItem, 'autoClassifySwitch')
+    hint = dialog.findChild(QQuickItem, 'autoClassifyHint')
+    assert automatic is not None and hint is not None
+    assert automatic.property('checked') is True, "on until the owner switches it off"
+    assert '알아서 분류' in hint.property('text')
+    automatic.setProperty('checked', False)
+    QMetaObject.invokeMethod(automatic, 'toggled')
+    QTest.qWait(50)
+    assert fixture.writes[-1] == ('auto_classify', False), fixture.writes
+    assert automatic.property('checked') is False            # follows the stored value again
+    warnings =[m for m in messages if any(x in m for x in ('.qml', 'QQml', 'ReferenceError', 'TypeError', 'Binding loop'))]
     assert not warnings, warnings
     window.close()
     qInstallMessageHandler(previous)

@@ -151,6 +151,26 @@ FlatDialog {
                         checked = Qt.binding(function() { return dialog.pref("confirm_each", false) === true })
                     }
                 }
+                FlatSwitch {
+                    objectName: "autoClassifySwitch"
+                    Layout.fillWidth: true
+                    trailing: true
+                    text: "저장한 사진 자동 AI 분류"
+                    checked: dialog.pref("auto_classify", true) === true
+                    onToggled: {
+                        dialog.app.setPreference("auto_classify", checked)
+                        checked = Qt.binding(function() { return dialog.pref("auto_classify", true) === true })
+                    }
+                }
+                Label {
+                    objectName: "autoClassifyHint"
+                    Layout.fillWidth: true
+                    text: "‘AI 분류’를 한 번 실행한 뒤부터, 저장이 끝나면 새 사진을 알아서 분류해요. 자동 저장도 같아요."
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    font.pixelSize: Theme.fontCaption
+                    color: Theme.textFaint
+                }
                 SettingRow {
                     label: "폴더 구성"
                     Layout.topMargin: 2

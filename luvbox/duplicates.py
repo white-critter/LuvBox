@@ -316,6 +316,44 @@ def cluster_images(items: Sequence[dict], *, near: bool = False, vector_for=pixe
     return groups
 
 
+def split_distinct(members: Sequence, distinct: Sequence) -> list[list]:
+    """What is left of one group once some members were declared "not duplicates".
+
+    ``distinct`` holds sets of members. Two members stop being a pair when one
+    set contains both; members still linked to another, directly or through a
+    third, stay together. Returns the remaining groups of two or more, each in
+    the order of ``members``. A member left alone is in none of them.
+    """
+    members = list(members)
+    if len(members) < 2:
+        return []
+    marks: dict = {}
+    for number, group in enumerate(distinct):
+        for member in group:
+            marks.setdefault(member, set()).add(number)
+    parent = list(range(len(members)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    for first in range(len(members)):
+        mine = marks.get(members[first])
+        for second in range(first + 1, len(members)):
+            theirs = marks.get(members[second])
+            if mine and theirs and not mine.isdisjoint(theirs):
+                continue
+            left, right = find(first), find(second)
+            if left != right:
+                parent[right] = left
+    groups: dict[int, list] = {}
+    for index, member in enumerate(members):
+        groups.setdefault(find(index), []).append(member)
+    return [group for group in groups.values() if len(group) >= 2]
+
+
 def hamming_distance(hex1: str, hex2: str) -> int:
     """Compute Hamming distance between two 16-hex (64-bit) hashes."""
     if not hex1 or not hex2 or len(hex1) != 16 or len(hex2) != 16:
