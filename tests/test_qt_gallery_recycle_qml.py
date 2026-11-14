@@ -61,6 +61,15 @@ def scene(shots=None):
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
         time.sleep(.003)
 
+    def pause(milliseconds):
+        # Let timers and events run for a while. QTest.qWait did this inside one call that kept
+        # Python's global lock, and 1 of 360 cold starts stopped in the pause after the thumbnail
+        # size changed (the grid asks for every picture again then). processEvents lets the
+        # other threads run, as in press_key.
+        until = time.monotonic() + milliseconds / 1000
+        while time.monotonic() < until:
+            settle()
+
     def wait(predicate, label):
         until = time.monotonic() + 8
         while time.monotonic() < until:
@@ -87,12 +96,12 @@ def scene(shots=None):
 
     def shot(name):
         if shots is not None:
-            QTest.qWait(150)
+            pause(150)
             settle()
             window.grabWindow().save(str(Path(shots) / (name + ".png")))
 
     def click(name):
-        QTest.qWait(30)
+        pause(30)
         item = find(name)
         assert item.property("visible") and item.property("enabled"), name
         point = item.mapToScene(QPointF(item.width() / 2, item.height() / 2)).toPoint()
@@ -168,16 +177,26 @@ def scene(shots=None):
         assert grid.property("cellHeight") < large
         assert json.loads((base / "LuvBox/settings.json").read_text(encoding="utf-8"))["gallery_density"] == 0
         # Changing the size re-anchors the grid on a short timer; let it finish before moving the highlight.
-        QTest.qWait(120)
+        pause(120)
         wait(lambda: grid.property("highlightFollowsCurrentItem"), "grid re-anchored after the size change")
         generation = library._generation
 
         def keys():
             return [row["key"] for row in model._rows]
 
-        # Go deep into the list and highlight a tile there.
-        grid.setProperty("currentIndex", 50)
+        # Go deep into the list and highlight a tile there, with the keyboard, as a person does.
+        # Writing currentIndex from here moved the grid fifty tiles inside one call that keeps
+        # Python's global lock; 2 of 120 cold starts stopped in that call. Keys are posted and
+        # delivered by processEvents (see press_key), which lets the other threads run.
         QMetaObject.invokeMethod(grid, "forceActiveFocus")
+        settle()
+        columns = max(1, int(grid.width() // grid.property("cellWidth")))
+        for _ in range(90):
+            current = grid.property("currentIndex")
+            if current == 50:
+                break
+            press_key(Qt.Key.Key_Down if 0 <= current <= 50 - columns else Qt.Key.Key_Right)
+        assert grid.property("currentIndex") == 50, (grid.property("currentIndex"), columns)
         wait(lambda: library.selectedKey == keys()[50] and not library.selectionBusy, "deep tile selected")
         wait(lambda: grid.property("contentY") - grid.property("originY") > grid.property("cellHeight"),
              "grid scrolled to the tile")
@@ -238,7 +257,7 @@ def scene(shots=None):
         wait(lambda: confirmation.property("visible"), "grid confirmation")
         QTest.keyClick(window, Qt.Key.Key_Escape)
         wait(lambda: not controller.management.deleteConfirmationPending, "grid move cancelled")
-        QTest.qWait(60)
+        pause(60)
         assert not preview.property("visible") and model.count == 58
 
         # A multi-selection leaves together and the remaining tiles keep their order.
