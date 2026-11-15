@@ -188,10 +188,12 @@ class Features152Tests(unittest.TestCase):
         self.assertEqual(dup_count, 2)
         self.assertEqual(compared[-1], (1, 1))
 
-        copy_keys = repo.duplicate_copy_keys(1)
-        self.assertEqual(len(copy_keys), 1)
-        # Larger filesize (601) is preserved as primary; 602 is the copy
-        self.assertIn("602", copy_keys[0])
+        # A resized copy has bytes of its own (1.10.4): it groups, but is not offered as a copy to clear.
+        self.assertEqual(repo.duplicate_copy_keys(1), [])
+        # The larger file (601) is still the one the group keeps.
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            ranks = {row["tweet_id"]: row["cluster_rank"] for row in store.duplicate_page(0, 10)["rows"]}
+        self.assertEqual(ranks, {"601": 1, "602": 2})
 
     def test_cached_user_tag_decrement_and_removal(self):
         from luvbox.qt_library import LibraryController

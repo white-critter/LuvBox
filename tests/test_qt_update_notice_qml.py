@@ -241,8 +241,9 @@ class UpdateNoticeQmlTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         report = json.loads(run.stdout.strip().splitlines()[-1])
         self.assertTrue(report["installed"] and report["restart_requested"])
+        # Two checks, then the click reads the latest release once more before it downloads (1.10.4).
         self.assertEqual(report["requests"], [
-            "/latest", "/latest", "/download/v1.9.1/SHA256-1.9.1.txt", "/download/v1.9.1/LuvBox.exe"])
+            "/latest", "/latest", "/latest", "/download/v1.9.1/SHA256-1.9.1.txt", "/download/v1.9.1/LuvBox.exe"])
 
 
 if __name__ == "__main__":

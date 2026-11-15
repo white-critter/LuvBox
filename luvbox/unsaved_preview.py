@@ -8,7 +8,12 @@ poster image, from X's image host and keep it in this PC's preview cache.
 
 This is the only preview that makes a request. It is bounded on purpose: one
 host, one small image per media, a byte limit, a per-run count, and it stops
-after a few failures in a row. Nothing here can fail or delay a save.
+after a few failures in a row. Nothing here can fail a save. The request goes
+through the save's protected session and is paced like its media requests;
+the save puts the protection's state back afterwards, and after one request
+that went wrong (refused, cut off or limited) it asks for no more pictures in
+that run. A 429 still leaves its cooldown for the next save, which the save's
+result then names.
 """
 
 from pathlib import Path

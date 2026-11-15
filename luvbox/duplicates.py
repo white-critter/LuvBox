@@ -1,12 +1,16 @@
 """Duplicate image detection engine for LuvBox.
 
-Uses SHA-256 for exact binary duplicates and dHash (difference hash)
-via Pillow for perceptual duplicates (resized, re-encoded, slightly modified images).
+Uses SHA-256 for exact binary duplicates. With the near rule, dHash
+(difference hash) via Pillow finds candidates for the same picture saved at
+another size or quality, and their pixels decide.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
+from contextlib import ExitStack
 import hashlib
+import math
 import os
 import re
 from pathlib import Path
@@ -146,9 +150,10 @@ NEAR_CANDIDATE_BITS = 4
 _VECTOR_SIDE = 32
 # Measured on 32x32 RGB reductions. The same picture saved again at another
 # quality or size stays under 0.4% mean, 1.6% at the 99th percentile and 3.1%
-# at its worst pixel. A different caption on the same template, or a small
-# watermark, also stays under 1% on average but exceeds 15% locally, so the
-# average alone is not enough.
+# at its worst pixel. A large change on the same template also stays under 1%
+# on average but exceeds 15% locally, so the average alone is not enough.
+# Text a few dozen pixels high is a grey smear at this size, so a pair that
+# passes is looked at again in detail (``same_in_detail``).
 _NEAR_MEAN = 0.01
 _NEAR_PERCENTILE = 0.06
 _NEAR_WORST = 0.15
@@ -207,6 +212,241 @@ def nearly_identical(first, second) -> bool:
     return float(difference.max()) / 255 <= _NEAR_WORST
 
 
+# The second look, at the smaller file's own size. Weekly schedules drawn on
+# one template, with every line of 32 px text changed, pass the 32x32 test.
+# Here the grey pictures are compared in windows of 10 pixels, half a window
+# apart. A window scores its mean difference times how little the two vary
+# together (one minus the structure term of SSIM): the same edges drawn a
+# little sharper or softer cost little, other glyphs in the same place cost a
+# lot. Measured on 1080-2048 px text pages, schedules, chat shots, line art
+# and photos: of 921 copies brought to 1/3-0.9 of their size (Lanczos,
+# bicubic, bilinear, Hamming or box), to 1/4 as WebP, or saved again at
+# quality 60-95, as PNG or as WebP, 911 scored under the limit; line art with
+# screentone made smaller by box, Hamming or bilinear did not and is not
+# grouped. Another row or week of text on one template and a faint watermark
+# did not pass. One changed character in text up to about 18 px high at the
+# compared size often does (a word, when the text is only 6-7 px high), and
+# no pixel measure tried kept those apart from real copies, so a group made
+# this way is never proof for the Recycle Bin (``deletion.kept_copy`` asks
+# for the same bytes).
+_DETAIL_WINDOW = 10
+_DETAIL_LIMIT = 0.035
+_DETAIL_FLAT = (0.03 * 255) ** 2      # windows where both pictures barely vary do not decide
+_DETAIL_MAX_PIXELS = 2048 * 2048      # compared at most at this size,
+_DETAIL_MAX_REDUCTION = 2             # and never below half the smaller file's own size
+_DETAIL_BAND = 16                     # rows of cells scored at a time
+_DETAIL_CACHE_PIXELS = 64 * 1024 * 1024   # decoded grey pixels one scan keeps
+_DETAIL_BLOCK = 8                     # photos whose pairs are compared together (see cluster_images)
+
+
+def _oriented_size(image) -> tuple[int, int]:
+    """Width and height as shown, after the EXIF orientation."""
+    if image.getexif().get(0x0112) in (5, 6, 7, 8):
+        return image.height, image.width
+    return image.width, image.height
+
+
+def _grey(image, size: tuple[int, int]):
+    """The picture in grey and upright; a JPEG is decoded no smaller than ``size``."""
+    width, height = size
+    if _oriented_size(image) != image.size:
+        width, height = height, width
+    image.draft("L", (width, height))
+    grey = image.convert("L")
+    ImageOps.exif_transpose(grey, in_place=True)
+    return grey
+
+
+def _detail_band(first, second, cell: int) -> float:
+    """The worst window score of two grey uint8 arrays whose sides are multiples of ``cell``.
+
+    A window scores less than twice its mean difference, so only windows whose
+    mean difference reaches half the limit are scored in full; the rest count
+    as 0. Most windows of the same picture saved again are left out that way.
+    """
+    import numpy as np
+
+    rows, cols = first.shape[0] // cell, first.shape[1] // cell
+    paired = rows > 1 and cols > 1
+    count = cell * cell * (4 if paired else 1)
+
+    def windows(part):
+        return part[:-1, :-1] + part[1:, :-1] + part[:-1, 1:] + part[1:, 1:] if paired else part
+
+    distance = np.maximum(first, second) - np.minimum(first, second)
+    difference = windows(distance.reshape(rows, cell, cols, cell).sum(axis=(1, 3), dtype=np.int64)) / (count * 255)
+    chosen = difference * 2 > _DETAIL_LIMIT
+    if not chosen.any():
+        return 0.0
+    needed = chosen
+    if paired:
+        needed = np.zeros((rows, cols), dtype=bool)
+        for row in (0, 1):
+            for col in (0, 1):
+                needed[row:row + rows - 1, col:col + cols - 1] |= chosen
+    blocks_a = first.reshape(rows, cell, cols, cell).swapaxes(1, 2)[needed].astype(np.int32)
+    blocks_b = second.reshape(rows, cell, cols, cell).swapaxes(1, 2)[needed].astype(np.int32)
+
+    def means(values):
+        part = np.zeros((rows, cols), dtype=np.int64)
+        part[needed] = values.sum(axis=(1, 2))
+        return windows(part)[chosen] / count
+
+    mean_a, mean_b = means(blocks_a), means(blocks_b)
+    spread = means(blocks_a * blocks_a) - mean_a * mean_a + means(blocks_b * blocks_b) - mean_b * mean_b
+    together = means(blocks_a * blocks_b) - mean_a * mean_b
+    structure = (2 * together + _DETAIL_FLAT) / (spread + _DETAIL_FLAT)
+    return float((difference[chosen] * (1 - structure)).max())
+
+
+def _detail_difference(first, second) -> float:
+    """The worst window score of two grey uint8 arrays of one shape (see ``_DETAIL_LIMIT``).
+
+    Scored a band of rows at a time; the first band over the limit decides, so
+    a picture with other text costs only the rows down to that text.
+    """
+    import numpy as np
+
+    height, width = first.shape
+    cell = max(1, min(_DETAIL_WINDOW // 2, height // 2, width // 2))
+    rows, cols = -(-height // cell), -(-width // cell)
+    padding = ((0, rows * cell - height), (0, cols * cell - width))
+    if any(after for _, after in padding):
+        # Repeat the last row and column so the edges are compared as well.
+        first, second = np.pad(first, padding, mode="edge"), np.pad(second, padding, mode="edge")
+    worst = 0.0
+    for top in range(0, max(1, rows - 1), _DETAIL_BAND):
+        # One more row of cells for the windows across the band's lower edge.
+        band = slice(top * cell, min(rows, top + _DETAIL_BAND + 1) * cell)
+        worst = max(worst, _detail_band(first[band], second[band], cell))
+        if worst > _DETAIL_LIMIT:
+            break
+    return worst
+
+
+class _GreyCache:
+    """What ``same_in_detail`` read during one scan, kept for the next pairs.
+
+    The shown size of each file, and its grey pixels decoded for a comparison
+    size, so one template met in many pairs is read a few times rather than
+    once per pair. Pixels are bounded by count; the least recently used
+    picture goes first.
+    """
+
+    def __init__(self, budget: int | None = None):
+        self._pictures: OrderedDict = OrderedDict()
+        self._budget = _DETAIL_CACHE_PIXELS if budget is None else budget
+        self._used = 0
+        self._sizes: dict = {}
+
+    def size(self, key):
+        """The shown size of a file, False when it may not be read, None when not known yet."""
+        return self._sizes.get(key)
+
+    def remember(self, key, size) -> None:
+        self._sizes[key] = size
+
+    def get(self, key):
+        picture = self._pictures.get(key)
+        if picture is not None:
+            self._pictures.move_to_end(key)
+        return picture
+
+    def put(self, key, picture) -> None:
+        if key in self._pictures or picture.size > self._budget:
+            return
+        self._pictures[key] = picture
+        self._used += picture.size
+        while self._used > self._budget:
+            _, oldest = self._pictures.popitem(last=False)
+            self._used -= oldest.size
+
+
+def _resized(picture, size: tuple[int, int], resample):
+    """A grey uint8 array brought to ``size`` (width, height)."""
+    import numpy as np
+
+    with Image.fromarray(picture) as grey, grey.resize(size, resample) as resized:
+        return np.asarray(resized, dtype=np.uint8)
+
+
+def same_in_detail(first: Path | str, second: Path | str, *, greys: _GreyCache | None = None) -> bool:
+    """True when two pictures still agree near the smaller one's own resolution.
+
+    The second look for a pair that passed ``nearly_identical``: other text
+    on one template shows here. The larger picture is brought to the smaller
+    one's size twice, sharply (Lanczos) and by averaging (box), as a copy may
+    have been made either way. Unreadable pictures, and pictures that cannot
+    be compared within half the smaller one's size, never agree. It decides
+    what is shown as one photo, not what may be deleted: one changed
+    character of small text can still pass (see ``_DETAIL_LIMIT``).
+    ``greys`` keeps what was read for the other pairs of one scan.
+    """
+    import numpy as np
+
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(warnings.catch_warnings())
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            _prepare_decoders(False)
+            opened: dict = {}
+
+            def picture_of(path: Path):
+                """The file opened for decoding, or None when it may not be read."""
+                if path not in opened:
+                    opened[path] = None
+                    if _safe_local_file(path):
+                        source = stack.enter_context(path.open("rb"))
+                        if os.fstat(source.fileno()).st_size <= MAX_RASTER_BYTES:
+                            image = stack.enter_context(
+                                Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS))
+                            if image.width * image.height <= MAX_PIXELS:
+                                opened[path] = image
+                return opened[path]
+
+            files = [(Path(value), os.path.normcase(os.path.abspath(value))) for value in (first, second)]
+            sizes = []
+            for path, name in files:
+                shown = greys.size(name) if greys is not None else None
+                if shown is None:
+                    image = picture_of(path)
+                    shown = _oriented_size(image) if image is not None else False
+                    if greys is not None:
+                        greys.remember(name, shown)
+                if not shown:
+                    return False
+                sizes.append(shown)
+            width, height = min(sizes, key=lambda shown: shown[0] * shown[1])
+            scale = min(1.0, math.sqrt(_DETAIL_MAX_PIXELS / max(1, width * height)))
+            if scale * _DETAIL_MAX_REDUCTION < 1:
+                return False
+            size = (max(1, round(width * scale)), max(1, round(height * scale)))
+            shape = (size[1], size[0])
+            pictures = []
+            for path, name in files:
+                picture = greys.get((name, size)) if greys is not None else None
+                if picture is None:
+                    image = picture_of(path)
+                    if image is None:
+                        return False
+                    with _grey(image, size) as grey:
+                        picture = np.asarray(grey, dtype=np.uint8)
+                    if greys is not None:
+                        greys.put((name, size), picture)
+                pictures.append(picture)
+            for resample in (Image.Resampling.LANCZOS, Image.Resampling.BOX):
+                arrays = [picture if picture.shape == shape else _resized(picture, size, resample)
+                          for picture in pictures]
+                if _detail_difference(*arrays) <= _DETAIL_LIMIT:
+                    return True
+                if all(picture.shape == shape for picture in pictures):
+                    break                       # nothing was resized, so another filter changes nothing
+            return False
+    except (OSError, ValueError, TypeError, SyntaxError, UnidentifiedImageError,
+            Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return False
+
+
 def _close_hash_pairs(hashes: list[tuple[int, int]], max_distance: int, check_cancel=None) -> list[tuple[int, int]]:
     """Index pairs whose 64-bit hashes differ by at most ``max_distance`` bits."""
     pairs = set()
@@ -237,13 +477,16 @@ def _close_hash_pairs(hashes: list[tuple[int, int]], max_distance: int, check_ca
 
 
 def cluster_images(items: Sequence[dict], *, near: bool = False, vector_for=pixel_vector,
-                   check_cancel=None, progress=None) -> list[list[dict]]:
+                   detail_for=None, check_cancel=None, progress=None) -> list[list[dict]]:
     """Group duplicate photos.
 
     Always: files with the same SHA-256 and size. With ``near``: also photos
     whose perceptual hashes are close AND whose pixels confirm it is the same
-    picture saved at another size or quality. A close hash alone never groups
-    two photos; that produced groups of merely similar pictures.
+    picture saved at another size or quality, first on a small reduction and
+    then in detail, where other text on one template shows. A close hash
+    alone never groups two photos; that produced groups of merely similar
+    pictures. Such a group is what the view shows as one photo; recycling a
+    member still needs a file with the same bytes (``deletion.kept_copy``).
 
     Each item needs 'key', 'file_hash', 'filesize'; ``near`` also uses 'dhash'
     and 'path'. ``progress(done, total)`` reports the pixel checks.
@@ -284,7 +527,16 @@ def cluster_images(items: Sequence[dict], *, near: bool = False, vector_for=pixe
                 hashes.append((int(value, 16), index))
         candidates = [pair for pair in _close_hash_pairs(hashes, NEAR_CANDIDATE_BITS, check_cancel)
                       if find(pair[0]) != find(pair[1])]
+        # Compared a block of photos against another at a time, so the pictures
+        # of both blocks stay decoded meanwhile: a template met in a hundred
+        # pairs is read a few times instead of once per pair. The groups do not
+        # depend on the order.
+        compared = sorted({index for pair in candidates for index in pair})
+        rank = {index: number for number, index in enumerate(compared)}
+        candidates.sort(key=lambda pair: (rank[pair[0]] // _DETAIL_BLOCK, rank[pair[1]] // _DETAIL_BLOCK, pair))
         vectors: dict[int, object] = {}
+        greys = _GreyCache()
+        detail = detail_for or (lambda first, second: same_in_detail(first, second, greys=greys))
 
         def vector(index: int):
             if index not in vectors:
@@ -299,7 +551,8 @@ def cluster_images(items: Sequence[dict], *, near: bool = False, vector_for=pixe
                 progress(done, total)
             if find(left) == find(right):
                 continue
-            if nearly_identical(vector(left), vector(right)):
+            if (nearly_identical(vector(left), vector(right))
+                    and detail(valid[left]["path"], valid[right]["path"])):
                 union(left, right)
         if progress and total:
             progress(total, total)

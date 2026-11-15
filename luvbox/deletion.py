@@ -15,22 +15,25 @@ from .storage import OutputGuard, StoragePaths, publish_snapshot
 
 
 _NO_OTHER_COPY = "같은 내용의 다른 파일이 남는지 확인하지 못해 그대로 두었습니다."
+_NEAR_ONLY = "‘화질만 다른 사진 포함’으로 묶인 사진은 내용이 완전히 같은 파일이 남을 때만 휴지통으로 보냅니다."
 
 
-def _same_content(first: Path, second: Path, rule: str) -> bool:
-    """The two files hold the same photo, read now rather than taken from stored hashes."""
-    from .duplicates import compute_file_hash, nearly_identical, pixel_vector
+def _same_content(first: Path, second: Path) -> bool:
+    """The two files hold the same bytes, read now rather than taken from stored hashes.
+
+    Only that proves a copy. Groups made with "the same photo at another size
+    or quality" also hold files whose bytes differ, and no comparison of their
+    pixels tells every such copy from another picture on the same template
+    with one character of small text changed, so those files stay.
+    """
+    from .duplicates import compute_file_hash
 
     digest = compute_file_hash(first)
-    if digest and digest == compute_file_hash(second):
-        return True
-    # Groups made with "the same photo at another size or quality" hold files
-    # whose bytes differ; the scan's own pixel comparison decides again.
-    return rule == "near" and nearly_identical(pixel_vector(first), pixel_vector(second))
+    return bool(digest) and digest == compute_file_hash(second)
 
 
-def kept_copy(store: HistoryStore, path: str, signature, keepers, rule: str) -> str:
-    """A different file with the same content that exists right now, or ''.
+def kept_copy(store: HistoryStore, path: str, signature, keepers) -> str:
+    """A different file with the same bytes that exists right now, or ''.
 
     A file sent away as "a copy" must leave such a file behind. Another record
     of the same file, another spelling of its path or a hard link to it is the
@@ -48,7 +51,7 @@ def kept_copy(store: HistoryStore, path: str, signature, keepers, rule: str) -> 
                 continue                            # the same file number on the same volume
             if file_signature(path) != tuple(signature):
                 return ""                           # the file to move changed meanwhile
-            if _same_content(Path(path), Path(keeper), rule) and file_signature(keeper) == other:
+            if _same_content(Path(path), Path(keeper)) and file_signature(keeper) == other:
                 return keeper
         except (OSError, ValueError, TypeError):
             continue
@@ -65,9 +68,10 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
 
     A row from the duplicate view carries ``_copy_keepers``, the other files of
     its group. It moves only while one of them is, at that moment, a different
-    file with the same content; otherwise it stays and is counted in
+    file with the same bytes; otherwise it stays and is counted in
     ``protected``. Each file is checked when its turn comes, so the last file
-    of a group can never go.
+    of a group can never go. A photo grouped only as the same picture at
+    another size or quality (``_copy_rule`` "near") therefore stays.
     """
     unique = {}
     for row in rows:
@@ -82,6 +86,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
     processed = 0
     warnings = []
     failures = []
+    near_kept = False
     batch = uuid.uuid4().hex
 
     def progress(message):
@@ -96,6 +101,8 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
             result["message"] += f" · 처리하지 않은 파일 {result['cancelled']:,}개"
         if result["protected"]:
             result["message"] += "\n" + _NO_OTHER_COPY
+            if near_kept:
+                result["message"] += "\n" + _NEAR_ONLY
         if failures:
             # The results are not kept in a separate list; name a few here.
             result["message"] += "\n" + "\n".join(failures[:3])
@@ -173,10 +180,10 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 failures.append(f"{Path(path).name}: {error}")
                 progress(failures[-1])
                 continue
-            if "_copy_keepers" in row and not kept_copy(store, path, signature, row.get("_copy_keepers"),
-                                                        row.get("_copy_rule") or "exact"):
+            if "_copy_keepers" in row and not kept_copy(store, path, signature, row.get("_copy_keepers")):
                 # Nothing is recorded: the file and its records stay as they are.
                 result["protected"] += 1
+                near_kept = near_kept or row.get("_copy_rule") == "near"
                 processed += 1
                 progress(f"{Path(path).name}: {_NO_OTHER_COPY}")
                 continue

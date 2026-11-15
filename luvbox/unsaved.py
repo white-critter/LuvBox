@@ -7,8 +7,14 @@ is keyed by account, save folder and media identity: repeating a failing save
 updates one row instead of adding more, and saving the media later removes it.
 Failed and size-limited rows are kept to the newest MAX_ITEMS per account and
 folder. An older excluded row may still be here, but the excluded screen reads
-the catalog, so trimming this ledger cannot hide that choice. Nothing here
-decides what is saved.
+the catalog, so trimming this ledger cannot hide that choice.
+
+A listed media may also carry a count of the saves that X's image host
+stopped by refusing it (``refusals``): a reply that the file is not served,
+such as 403, never a server error. After a few, a save passes that media by
+without asking (core.REFUSED_LIMIT); only a retry the person starts asks
+again. The count goes with its row: saving the media, removing the row, or
+trimming it forgets the count. Nothing else here decides what is saved.
 """
 
 from contextlib import closing
@@ -86,14 +92,31 @@ def _prepare(database):
                      "limit_mb INTEGER NOT NULL, detail TEXT NOT NULL, attempts INTEGER NOT NULL,"
                      "first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,"
                      "PRIMARY KEY(account, folder, tweet_id, media_type, num))")
+    database.execute("CREATE TABLE IF NOT EXISTS refused ("
+                     "account TEXT NOT NULL, folder TEXT NOT NULL, tweet_id TEXT NOT NULL,"
+                     "media_type TEXT NOT NULL, num INTEGER NOT NULL, runs INTEGER NOT NULL,"
+                     "PRIMARY KEY(account, folder, tweet_id, media_type, num))")
+
+
+def _forget_orphan_refusals(database, account, folder):
+    """A refusal count lives only as long as its media is listed."""
+    database.execute("DELETE FROM refused WHERE account=? AND folder=? AND NOT EXISTS ("
+                     "SELECT 1 FROM unsaved WHERE unsaved.account=refused.account AND unsaved.folder=refused.folder "
+                     "AND unsaved.tweet_id=refused.tweet_id AND unsaved.media_type=refused.media_type "
+                     "AND unsaved.num=refused.num)", (account, folder))
 
 
 def _scope(account, output_dir):
     return str(account or "").strip().lstrip("@").lower(), folder_key(output_dir)
 
 
-def record(items, *, account, output_dir, resolved=()) -> None:
-    """Add or refresh unsaved media and forget the ones that were saved meanwhile."""
+def record(items, *, account, output_dir, resolved=(), refused=None) -> None:
+    """Add or refresh unsaved media and forget the ones that were saved meanwhile.
+
+    ``refused`` is the (tweet_id, num, media_type) whose refusal by X's image
+    host (the file is not served, not a server error) stopped this save; its
+    count goes up by one.
+    """
     account, folder = _scope(account, output_dir)
     rows = [row for row in (_item(item, account, folder) for item in list(items)[:MAX_ITEMS]) if row]
     gone = [(account, folder, str(tweet_id), media_type, num) for tweet_id, num, media_type in resolved]
@@ -125,6 +148,12 @@ def record(items, *, account, output_dir, resolved=()) -> None:
                     "WHERE account=? AND folder=? AND reason IN (?,?) "
                     "ORDER BY last_seen DESC,rowid DESC LIMIT -1 OFFSET ?)",
                     (account, folder, FAILED, SIZE, MAX_ITEMS))
+                if refused is not None:
+                    tweet_id, num, media_type = refused
+                    database.execute("INSERT INTO refused(account,folder,tweet_id,media_type,num,runs) "
+                                     "VALUES (?,?,?,?,?,1) ON CONFLICT(account,folder,tweet_id,media_type,num) "
+                                     "DO UPDATE SET runs=runs+1", (account, folder, str(tweet_id), media_type, num))
+                _forget_orphan_refusals(database, account, folder)
     except (OSError, ValueError, sqlite3.Error):
         raise UnsavedError(_ERROR) from None
 
@@ -155,6 +184,15 @@ def identities(account, output_dir) -> set:
     account, folder = _scope(account, output_dir)
     rows = _read("SELECT tweet_id,num,media_type FROM unsaved WHERE account=? AND folder=?", (account, folder))
     return {(row["tweet_id"], row["num"], row["media_type"]) for row in rows}
+
+
+def refusals(account, output_dir) -> dict:
+    """{(tweet_id, num, media_type): saves stopped} for listed media X's image host refused."""
+    account, folder = _scope(account, output_dir)
+    rows = _read("SELECT refused.tweet_id,refused.num,refused.media_type,refused.runs FROM refused "
+                 "JOIN unsaved USING(account,folder,tweet_id,media_type,num) "
+                 "WHERE refused.account=? AND refused.folder=?", (account, folder))
+    return {(row["tweet_id"], row["num"], row["media_type"]): row["runs"] for row in rows}
 
 
 def counts(account, output_dir) -> dict:
@@ -219,6 +257,7 @@ def remove(account, output_dir, items=None, kinds=None) -> int:
                     removed = database.execute(
                         "DELETE FROM unsaved WHERE account=? AND folder=? AND reason IN (%s)" % ",".join("?" for _ in kinds),
                         (account, folder, *kinds)).rowcount
+                _forget_orphan_refusals(database, account, folder)
                 return removed
     except (OSError, ValueError, sqlite3.Error):
         raise UnsavedError(_ERROR) from None

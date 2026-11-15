@@ -97,31 +97,44 @@ class AccountGuard:
         self.sleep = sleep
         self.failure = ""
         self.until = 0.0
+        # The latest deadline this guard wrote to the state file. A save may put
+        # ``until`` back after an optional request (a preview); a later write
+        # must still never shorten the deadline the next run honours.
+        self.recorded_until = 0.0
+        # The HTTP status of the media reply that was refused as a failure (a 4xx
+        # other than 404, 416 and 429, or a 5xx), else 0. The save tells a
+        # refusal of the file itself from a server error by this status.
+        self.refused = 0
         self._lock_file = None
         self._last_send = {}
         self._last_limit_headers = {}
 
     @property
     def retry_at(self) -> str:
-        if self.until <= time.time():
+        until = max(self.until, self.recorded_until)
+        if until <= time.time():
             return ""
         try:
-            return datetime.fromtimestamp(self.until, _KOREA).isoformat()
+            return datetime.fromtimestamp(until, _KOREA).isoformat()
         except (ValueError, OverflowError, OSError):
             return ""
 
-    def _cooldown_message(self) -> str:
-        stamp = self.retry_at
+    @property
+    def retry_label(self) -> str:
         try:
-            label = datetime.fromisoformat(stamp).strftime("%Y-%m-%d %H:%M:%S")
+            return datetime.fromisoformat(self.retry_at).strftime("%Y-%m-%d %H:%M:%S")
         except ValueError:
-            label = "서버가 정한 요청 재개 시각"
-        return f"X 요청 한도 때문에 멈췄습니다. {label}(한국 시간) 이후에 다시 실행해 주세요."
+            return "서버가 정한 요청 재개 시각"
+
+    def _cooldown_message(self) -> str:
+        return f"X 요청 한도 때문에 멈췄습니다. {self.retry_label}(한국 시간) 이후에 다시 실행해 주세요."
 
     def acquire(self, *, respect_cooldown: bool = True) -> None:
         """An OS file lock releases automatically when the worker exits."""
         self.failure = ""
         self.until = 0.0
+        self.recorded_until = 0.0
+        self.refused = 0
         fp = None
         try:
             self.root.mkdir(parents=True, exist_ok=True)
@@ -199,15 +212,17 @@ class AccountGuard:
         if headers is None:
             headers = self._last_limit_headers
         self.until = max(self.until, cooldown_until(headers, time.time()))
+        deadline = max(self.until, self.recorded_until)
         temporary = None
         try:
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=self.root,
                                              prefix="cooldown-", suffix=".tmp", delete=False) as fp:
                 temporary = Path(fp.name)
-                json.dump({"until": self.until}, fp)
+                json.dump({"until": deadline}, fp)
                 fp.flush()
                 os.fsync(fp.fileno())
             replace_file(temporary, self.state_path)
+            self.recorded_until = deadline
         except OSError:
             self.failure = _STATE_HELP
             raise ProtectionError(self.failure) from None
@@ -239,6 +254,7 @@ class AccountGuard:
                 raise ProtectionError(self.failure)
             if status >= 400 and status != 404:
                 response.close()
+                self.refused = status
                 self.failure = _MEDIA_ERROR_HELP
                 raise ProtectionError(self.failure)
             return

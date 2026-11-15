@@ -490,6 +490,7 @@ class GalleryModel(QAbstractListModel):
     GroupRole = KeyRole + 6
     KeeperRole = KeyRole + 7
     DetailRole = KeyRole + 8
+    CopyRole = KeyRole + 9
 
     def __init__(self, reader, *, provider=None, batch_size=200, parent=None):
         super().__init__(parent)
@@ -544,7 +545,8 @@ class GalleryModel(QAbstractListModel):
         return {self.KeyRole: b"key", self.CaptionRole: b"caption",
                 self.ThumbUrlRole: b"thumbUrl", self.ThumbReadyRole: b"thumbReady",
                 self.ThumbMissingRole: b"thumbMissing", self.FavoriteRole: b"favorite",
-                self.GroupRole: b"group", self.KeeperRole: b"keeper", self.DetailRole: b"detail"}
+                self.GroupRole: b"group", self.KeeperRole: b"keeper", self.DetailRole: b"detail",
+                self.CopyRole: b"copy"}
 
     def rowCount(self, parent=QModelIndex()):
         return 0 if parent.isValid() else len(self._rows)
@@ -571,6 +573,8 @@ class GalleryModel(QAbstractListModel):
             return bool(row.get("keeper", False))
         if role == self.DetailRole:
             return row.get("detail", "")
+        if role == self.CopyRole:
+            return bool(row.get("copy", False))
         return None
 
     def thumb_url(self, key):
@@ -686,11 +690,13 @@ class GalleryModel(QAbstractListModel):
                     entry = {"key": key, "caption": caption[:500],
                              "missing": bool(row.get("missing", False)),
                              "favorite": bool(row.get("favorite", False))}
-                    # Duplicate view only: which group a row belongs to and whether it is the one to keep.
+                    # Duplicate view only: which group a row belongs to, whether it is the one to
+                    # keep, and whether it is a copy (a photo before it has its bytes).
                     group = row.get("group", 0)
                     if type(group) is int and group > 0:
                         size = row.get("group_size", 0)
                         entry.update(group=group, keeper=bool(row.get("keeper", False)),
+                                     copy=bool(row.get("copy", False)),
                                      group_size=size if type(size) is int and size > 0 else 0)
                     detail = row.get("detail", "")
                     if isinstance(detail, str) and detail:

@@ -988,7 +988,7 @@ class HistoryStore:
 
     @_safe
     def review_pending(self) -> set | None:
-        """Files skipped in a save review, which the next quick run must reach.
+        """Media the next quick run must reach: skipped in a save review, or released from exclusion.
 
         They are neither saved nor in the archive, so a later run of saved
         files could otherwise hide them. ``None`` means the value is damaged;
@@ -1084,6 +1084,65 @@ class HistoryStore:
         row["author_metadata_status"] = author_status
         with self._db:
             self._upsert(row)
+            if actual_path:
+                self._leave_moved_records(row)
+
+    def _leave_moved_records(self, row: dict) -> None:
+        """Other layouts' records of this media whose file is gone no longer stand for it.
+
+        A photo saved in one layout and moved in Explorer into another
+        layout's folder is found there by a later save. Its old record would
+        otherwise be a '파일 없음' tile of its own and count the photo twice.
+        The same holds when a file comes back to a record's last location
+        (``_restore_known_paths``) after another layout's record followed it.
+        Only a path in the current media folder that is verifiably gone is
+        cleared: a former folder or a drive that is not connected keeps its
+        place. The record keeps its last location, so a file that comes back
+        is connected again. What the person set on the photo (a star, a tag
+        they typed, a taught category) belongs to the file and is carried to
+        the record that has it now; the old record keeps its copy.
+        """
+        others = sorted(_MODES - {row["folder_mode"]})
+        identity = (row["tweet_id"], row["num"], row["media_type"])
+        key = self._file_key(row["path"])
+        # Usually there is none, or it is a record of this same file.
+        gone = [old for old in self._db.execute(
+                    "SELECT folder_mode,path FROM media WHERE folder_mode IN (" + ",".join("?" for _ in others) + ") "
+                    "AND tweet_id=? AND num=? AND media_type=? AND path!=''", (*others, *identity)).fetchall()
+                if self._file_key(old["path"]) != key and self.is_download_path(old["path"])
+                and self._deletion_path_absent(old["path"])]
+        if not gone:
+            return
+        target = (row["folder_mode"], *identity)
+        where = "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?"
+        stamp = _now()
+        for old in gone:
+            record = (old["folder_mode"], *identity)
+            self._db.execute(
+                "UPDATE media SET last_path=path,missing_since=?,path='',filesize=NULL,updated_at=? "
+                + where + " AND path=?", (stamp, stamp, *record, old["path"]))
+            self._db.execute(
+                "INSERT INTO favorites(folder_mode,tweet_id,num,media_type,created_at) "
+                "SELECT ?,tweet_id,num,media_type,created_at FROM favorites " + where + " ON CONFLICT DO NOTHING",
+                (row["folder_mode"], *record))
+            self._db.execute(
+                "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                "SELECT ?,tweet_id,num,media_type,tag,source,created_at FROM media_tags " + where +
+                " AND source='user' AND tag!='' "
+                "ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO UPDATE SET source='user'",
+                (row["folder_mode"], *record))
+            taught = self._db.execute(
+                "INSERT INTO ai_feedback(folder_mode,tweet_id,num,media_type,category,updated_at) "
+                "SELECT ?,tweet_id,num,media_type,category,updated_at FROM ai_feedback " + where +
+                " ON CONFLICT DO NOTHING", (row["folder_mode"], *record)).rowcount
+            if taught:
+                # As set_taught_categories leaves it: the taught label replaces the estimate.
+                self._db.execute("DELETE FROM media_tags " + where + " AND source IN ('ai','confirmed')", target)
+                self._db.execute(
+                    "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                    "SELECT ?,tweet_id,num,media_type,tag,source,created_at FROM media_tags " + where +
+                    " AND source='confirmed' ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO NOTHING",
+                    (row["folder_mode"], *record))
 
     @_safe
     def record_declined(self, folder_mode: str, metadata: dict, path: Path | str) -> None:
@@ -1214,12 +1273,19 @@ class HistoryStore:
         in short batches. A download worker sharing this catalog must never wait
         for a whole-library scan (it would exceed SQLite's busy timeout). Every
         batch is an idempotent merge and the completion marker is written last.
+
+        After the first import every call (each save starts with one) still
+        reconnects files that came back to their last location: a photo
+        restored from the Recycle Bin, or a removed file put back. That reads
+        only records without a file, never the whole folder.
         """
         imported = self._db.execute("SELECT value FROM catalog_meta WHERE key='legacy_imported'").fetchone()
-        if imported is not None and not refresh:
-            return {"imported": False, "records": 0, "warnings": []}
         self._folder_cache = {}
         try:
+            if imported is not None and not refresh:
+                self._restore_known_paths()
+                self._release_restored_choices()
+                return {"imported": False, "records": 0, "warnings": []}
             return self._import_legacy(refresh)
         finally:
             self._folder_cache = None
@@ -1230,6 +1296,13 @@ class HistoryStore:
         Former roots are never scanned wholesale. Only a catalog row's saved
         last location may be probed, after the same folder/link checks used
         for current media. The conditional update preserves concurrent saves.
+
+        A file that is back where one layout's record had it may have been
+        found elsewhere meanwhile by a save in another layout, as after a move
+        in Explorer that was then undone. That record's place, if it is in
+        the current media folder and verifiably gone, then no longer stands
+        for the photo (see ``_leave_moved_records``), so the photo counts
+        once from the start of the save, whether or not the save reaches it.
         """
         restored = []
         for row in self._db.execute(
@@ -1237,6 +1310,18 @@ class HistoryStore:
                 "WHERE path='' AND last_path!=''").fetchall():
             if not Path(row["last_path"]).is_absolute():
                 continue
+            # Every save starts with this, and most of these files are still
+            # gone. One look settles that, at the point where the full check
+            # would look first: only inside a media root.
+            supplied = os.path.abspath(row["last_path"])
+            if not any(_within(Path(supplied), root) for root in self.media_roots):
+                continue
+            try:
+                os.lstat(supplied)
+            except (FileNotFoundError, ValueError):
+                continue  # gone, or not a path the system can look at (a NUL from a damaged copy)
+            except OSError:
+                pass
             for root in self.media_roots:
                 candidate = self._path_in_root(row["last_path"], root)
                 if candidate is not None:
@@ -1251,10 +1336,16 @@ class HistoryStore:
                 restored.append((str(candidate), info.st_size, _now(), row["folder_mode"],
                                  row["tweet_id"], row["num"], row["media_type"],
                                  row["last_path"], row["updated_at"]))
-        self._write_batches(restored, lambda values: self._db.execute(
-            "UPDATE media SET path=?,filesize=?,updated_at=?,missing_since='' "
-            "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-            "AND path='' AND last_path=? AND updated_at=?", values))
+
+        def reconnect(values):
+            if self._db.execute(
+                    "UPDATE media SET path=?,filesize=?,updated_at=?,missing_since='' "
+                    "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND path='' AND last_path=? AND updated_at=?", values).rowcount:
+                self._leave_moved_records({"folder_mode": values[3], "tweet_id": values[4], "num": values[5],
+                                           "media_type": values[6], "path": values[0]})
+
+        self._write_batches(restored, reconnect)
 
     def _import_legacy(self, refresh: bool) -> dict:
         before = self._db.execute("SELECT COUNT(*) FROM media").fetchone()[0]
@@ -1843,7 +1934,9 @@ class HistoryStore:
         merely described a failure. Archive entries are removed only when no
         saved path remains, so a file that is still on disk is not fetched again
         over itself. ``items`` is ``(tweet_id, num, media_type)`` or ``None``
-        for every current skip.
+        for every current skip. Media released without a file are remembered
+        like files skipped in a save review, so the next quick save goes on
+        until it has met them instead of stopping at a run of saved files.
         """
         targets = []
         if items is None:
@@ -1860,6 +1953,8 @@ class HistoryStore:
             return 0
         stamp = _now()
         released = []
+        # The layout list lets SQLite use the primary key for each lookup.
+        modes = sorted(_MODES)
         with self._db:
             for tweet_id, number, media_type in targets:
                 row = self._db.execute(
@@ -1868,13 +1963,21 @@ class HistoryStore:
                 if row is None or not row["ignored"]:
                     continue
                 present = self._db.execute(
-                    "SELECT 1 FROM media WHERE tweet_id=? AND num=? AND media_type=? AND path!='' LIMIT 1",
-                    (tweet_id, number, media_type)).fetchone()
+                    "SELECT 1 FROM media WHERE folder_mode IN (" + ",".join("?" for _ in modes) + ") "
+                    "AND tweet_id=? AND num=? AND media_type=? AND path!='' LIMIT 1",
+                    (*modes, tweet_id, number, media_type)).fetchone()
                 self._db.execute(
                     "UPDATE missing_choices SET ignored=0,updated_at=? "
                     "WHERE tweet_id=? AND num=? AND media_type=? AND ignored=1",
                     (stamp, tweet_id, number, media_type))
                 released.append((tweet_id, number, media_type, present is None))
+            wanted = {tuple(identity) for *identity, drop in released if drop}
+            remembered = self._db.execute("SELECT value FROM catalog_meta WHERE key='review_pending'").fetchone()
+            pending = set() if remembered is None else _review_pending_items(remembered[0])
+            # A damaged value already makes the next save check the whole list.
+            if pending is not None and wanted - pending:
+                self._db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('review_pending',?)",
+                                 (json.dumps(sorted(pending | wanted), separators=(",", ":")),))
         self._drop_archive_skips([identity for *identity, drop in released if drop])
         return len(released)
 
@@ -3354,15 +3457,40 @@ class HistoryStore:
         self.set_duplicate_rule("exact")
         return self.duplicate_counts()
 
+    def _ranked_duplicates(self) -> str:
+        """``WITH ranked AS (...)``: every present file of a stored group, as the duplicate view orders it.
+
+        ``cluster_rank`` 1 is the photo to keep: a favorite, then the larger
+        file. ``cluster_copy`` is 1 for a copy, a file whose bytes (SHA-256) a
+        file ranked before it in its group also has. A photo grouped as the
+        same picture at another size or quality has bytes of its own, so it is
+        no copy: the check before the Recycle Bin would keep it anyway
+        (``deletion.kept_copy``). In a group of identical files every photo
+        but the first is a copy.
+        """
+        favorite = ("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark", "m") + ")"
+                    if self._has_table("favorites") else "0")
+        order = f"{favorite} DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"
+        return (
+            "WITH ranked AS (SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id, "
+            f"ROW_NUMBER() OVER (PARTITION BY h.cluster_id ORDER BY {order}) AS cluster_rank, "
+            f"(h.file_hash!='' AND ROW_NUMBER() OVER (PARTITION BY h.cluster_id, h.file_hash ORDER BY {order})>1) "
+            "AS cluster_copy, "
+            "COUNT(*) OVER (PARTITION BY h.cluster_id) AS cluster_size "
+            "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
+            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND " + _listed("m") + ") ")
+
     @_safe
     def duplicate_page(self, page=0, page_size=100, media_type="all", query="", *, period=None, author="",
                        hashtag="", favorite_only=False, user_tag="", ai_category="", ai_origin="") -> dict:
         """Duplicates in group order: each group together, the photo to keep first.
 
         Every row carries ``cluster_id``, ``cluster_rank`` (1 is the photo to
-        keep: a favorite, then the larger file) and ``cluster_size``. The
-        ranking counts every present member, so a filter that hides part of a
-        group does not promote a copy to "keep".
+        keep: a favorite, then the larger file), ``cluster_copy`` (1 when a
+        photo before it in the group has the same bytes, see
+        ``_ranked_duplicates``) and ``cluster_size``. The ranking counts every
+        present member, so a filter that hides part of a group does not
+        promote a copy to "keep".
         """
         if (isinstance(page, bool) or not isinstance(page, int) or page < 0 or
                 isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000):
@@ -3373,15 +3501,7 @@ class HistoryStore:
         where, params = self._filter_clause(media_type, query, period, author, False, hashtag=hashtag,
                                             favorite_only=favorite_only, user_tag=user_tag,
                                             ai_category=ai_category, ai_origin=ai_origin)
-        favorite = ("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark", "m") + ")"
-                    if self._has_table("favorites") else "0")
-        ranked = (
-            "WITH ranked AS (SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id, "
-            f"ROW_NUMBER() OVER (PARTITION BY h.cluster_id ORDER BY {favorite} DESC, h.filesize DESC, "
-            "h.tweet_id DESC, h.num DESC) AS cluster_rank, "
-            "COUNT(*) OVER (PARTITION BY h.cluster_id) AS cluster_size "
-            "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
-            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND " + _listed("m") + ") ")
+        ranked = self._ranked_duplicates()
         source = ("FROM ranked JOIN media ON media.folder_mode=ranked.folder_mode AND media.tweet_id=ranked.tweet_id "
                   "AND media.num=ranked.num AND media.media_type=ranked.media_type "
                   "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
@@ -3395,7 +3515,7 @@ class HistoryStore:
             rows = self._read_rows(
                 ranked + "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,"
                 + hashtags_col + ",ranked.cluster_id AS cluster_id,ranked.cluster_rank AS cluster_rank,"
-                "ranked.cluster_size AS cluster_size " + source + condition +
+                "ranked.cluster_copy AS cluster_copy,ranked.cluster_size AS cluster_size " + source + condition +
                 " ORDER BY ranked.cluster_id, ranked.cluster_rank LIMIT ? OFFSET ?",
                 (*params, page_size, page * page_size))
         return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
@@ -3416,34 +3536,20 @@ class HistoryStore:
 
     @_safe
     def duplicate_copy_identities(self) -> list[tuple] | None:
-        """Copies from the last scan, leaving the favorite or largest file in each cluster.
+        """Copies from the last scan: what the duplicate view calls '사본', group by group.
 
+        The favorite or largest file of each group stays, and so does every
+        photo whose bytes no photo before it in the group has (one grouped as
+        the same picture at another size or quality); see ``_ranked_duplicates``.
         Returns an empty list when the last scan stored no clusters. Returns None
         only when this catalog has no cluster column, so the caller can fall back.
         """
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return None
-        fav_col = ("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark", "m") + ") AS favorite"
-                   if self._has_table("favorites") else "0 AS favorite")
         rows = self._read_rows(
-            "SELECT h.folder_mode AS folder_mode, h.tweet_id AS tweet_id, h.num AS num, "
-            "h.media_type AS media_type, h.filesize AS filesize, h.cluster_id AS cluster_id, "
-            f"{fav_col} "
-            "FROM image_hashes h "
-            "JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
-            "AND m.num=h.num AND m.media_type=h.media_type "
-            "WHERE " + _listed("m") + " AND h.cluster_id>0 "
-            "ORDER BY h.cluster_id ASC, favorite DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"
-        )
-        copies: list[tuple] = []
-        current_cluster = None
-        for row in rows:
-            cluster_id = row["cluster_id"]
-            if cluster_id != current_cluster:
-                current_cluster = cluster_id
-            else:
-                copies.append((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
-        return copies
+            self._ranked_duplicates() + "SELECT folder_mode, tweet_id, num, media_type FROM ranked "
+            "WHERE cluster_copy ORDER BY cluster_id, cluster_rank")
+        return [(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows]
 
     @_safe
     def duplicate_members(self) -> dict[int, list[dict]]:

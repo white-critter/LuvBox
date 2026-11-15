@@ -19,7 +19,7 @@ from unittest.mock import patch
 from urllib.parse import urlsplit
 
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
-from luvbox.browser_bridge import (BrowserBridge, BrowserBridgeError, _decrypt, _decrypt_progress,
+from luvbox.browser_bridge import (_PAGE, BrowserBridge, BrowserBridgeError, _decrypt, _decrypt_progress,
                                    _decode, _derive_key, _session, extension_directory)
 
 
@@ -191,6 +191,16 @@ class BrowserBridgeTests(unittest.TestCase):
         self.assertIn("default-src 'none'", headers["Content-Security-Policy"])
         self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
         self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+
+    def test_bridge_page_names_the_help_the_connection_dialog_shows(self):
+        # The page stays only when the extension is missing. By the time the
+        # person looks at the app, the dialog has opened its help by itself
+        # (no answer for 8 s), so the page names the help by its open label.
+        dialog = (Path(__file__).resolve().parents[1] / "assets/qt/ConnectionDialog.qml").read_text(encoding="utf-8")
+        self.assertIn('checked ? "확장 설치·연결 도움말 ▾"', dialog)
+        self.assertIn("‘확장 설치·연결 도움말’".encode(), _PAGE)
+        self.assertNotIn("<script".encode(), _PAGE)
+        self.assertNotIn(b"src=", _PAGE)
 
     def test_origin_and_capability_are_both_required(self):
         for origin in ("https://x.com", "https://evil.example", "null", "", ORIGIN + "/", "moz-extension://uuid/path"):
@@ -442,6 +452,82 @@ class BrowserBridgeExtensionTests(unittest.TestCase):
                 self.assertEqual(len(context.pages), 1)
             finally:
                 context.close()
+
+
+def _installed_browsers():
+    """Chrome and Edge as installed for every user (never a profile or user data)."""
+    found = {}
+    for name, relative in (("chrome", r"Google\Chrome\Application\chrome.exe"),
+                           ("edge", r"Microsoft\Edge\Application\msedge.exe")):
+        for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+            if root and os.path.isfile(os.path.join(root, relative)):
+                found[name] = os.path.join(root, relative)
+                break
+    return found
+
+
+@unittest.skipUnless(shutil.which("node") and os.name == "nt", "Node drives an installed Windows browser")
+class InstalledBrowserExtensionTests(unittest.TestCase):
+    """The shipped extension, end to end, in each installed Chrome/Edge.
+
+    A headless browser with a new throwaway profile loads the extension over a
+    DevTools pipe; x.com is answered locally and other host names do not
+    resolve, and the X cookies are synthetic (tests/browser_extension_real_check.js).
+    """
+
+    def test_extension_pairs_in_each_installed_browser(self):
+        browsers = _installed_browsers()
+        if not browsers:
+            self.skipTest("Neither Chrome nor Edge is installed")
+        check = Path(__file__).with_name("browser_extension_real_check.js")
+        for name, executable in browsers.items():
+            with self.subTest(browser=name), \
+                    tempfile.TemporaryDirectory(prefix="luvbox-browser-", ignore_cleanup_errors=True) as profile, \
+                    BrowserBridge(timeout=60) as bridge:
+                captured, stages, outcome = [], [], {}
+                bridge.open_browser(opener=lambda url: captured.append(url) or True)
+                code = bridge.pairing_code
+
+                def receive():
+                    try:
+                        outcome["session"] = bridge.wait(on_progress=stages.append)
+                    except BrowserBridgeError as error:
+                        outcome["error"] = str(error)
+
+                waiter = threading.Thread(target=receive, daemon=True)
+                waiter.start()
+                try:
+                    run = subprocess.run([shutil.which("node"), str(check), executable,
+                                          str(extension_directory() / "chromium"), profile, captured[0]],
+                                         capture_output=True, text=True, encoding="utf-8", timeout=90)
+                finally:
+                    if "session" not in outcome:
+                        waiter.join(2)
+                    bridge.close()
+                    waiter.join(5)
+                lines = run.stdout.strip().splitlines()
+                self.assertTrue(lines, run.stderr)
+                report = json.loads(lines[-1])
+                if "disabled by" in report.get("error", "") or "policy" in report.get("error", ""):
+                    self.skipTest(f"{name}: the browser's policy blocks unpacked extensions")
+                self.assertTrue(report["ok"], report)
+                self.assertEqual(report["code"], code)
+                self.assertEqual(report["stateBefore"], "code")
+                self.assertEqual(report["stateReady"], "ready")
+                self.assertEqual(report["accountName"], "오프라인 계정")
+                self.assertEqual(report["accountHandle"], "@Offline_User")
+                self.assertEqual(report["connectLabel"], "@Offline_User 연결")
+                self.assertEqual(report["pagesAfterCheck"], 1, "the X tab opened for the check is closed again")
+                self.assertGreaterEqual(report["xRequests"], 1)
+                self.assertEqual(report["stateDone"], "done")
+                self.assertTrue(report["consentTabClosed"])
+                session = outcome.get("session")
+                self.assertIsNotNone(session, outcome)
+                self.assertEqual((session.username, session.user_id, session.display_name),
+                                 ("offline_user", "123456789", "오프라인 계정"))
+                self.assertEqual(session.auth_token, "synthetic-bridge-token")
+                self.assertEqual(stages[:2], ["extension_ready", "checking_account"])
+                self.assertIn("awaiting_approval", stages)
 
 
 if __name__ == "__main__":

@@ -179,7 +179,9 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertEqual(controller.progress, 1.0)
         self.assertTrue(controller.noticeVisible)
         self.assertEqual(controller.status, "1.9.0 준비 완료 · 다시 시작하면 바뀌어요")
-        self.assertEqual(self.paths(), ["/latest", "/download/v1.9.0/SHA256-1.9.0.txt", "/download/v1.9.0/LuvBox.exe"])
+        # The click reads the latest release once more before it downloads (1.10.4).
+        self.assertEqual(self.paths(), ["/latest", "/latest", "/download/v1.9.0/SHA256-1.9.0.txt",
+                                        "/download/v1.9.0/LuvBox.exe"])
         self.assertNotIn("failed", states)
         # Restarting is the application's decision; nothing is pending until it says so.
         self.assertFalse(controller.restart_pending)

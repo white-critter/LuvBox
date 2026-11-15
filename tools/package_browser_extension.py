@@ -115,7 +115,12 @@ def package():
             or manifest.get("host_permissions") != ["https://x.com/*", "http://127.0.0.1/*"]):
         raise ValueError("Permission changes require updating the store submission disclosures")
     icons = _icon_payloads()
-    manifest["icons"] = {str(size): f"icons/icon-{size}.png" for size in ICON_SIZES}
+    # The unpacked extension carries the same icons; they must not drift apart.
+    for name, payload in icons.items():
+        if _read_input(SOURCE / name) != payload:
+            raise ValueError(f"{name} differs from the icon drawn from assets/icons/luvbox.png")
+    if manifest.get("icons") != {str(size): f"icons/icon-{size}.png" for size in ICON_SIZES}:
+        raise ValueError("The extension manifest must name the four icons")
     payloads["manifest.json"] = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     payloads.update(icons)
     archive = _archive_payload(payloads)

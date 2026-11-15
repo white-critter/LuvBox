@@ -46,7 +46,9 @@ class BrowserExtensionPackagingTests(unittest.TestCase):
                 folder = f"assets/browser-extension/{browser}"
                 manifest = json.loads((root / folder / "manifest.json").read_text(encoding="utf-8"))
                 background = manifest["background"]
-                resources = {"manifest.json", "connect.html", *background.get("scripts", [])}
+                resources = {"manifest.json", "connect.html", *background.get("scripts", []),
+                             *manifest.get("icons", {}).values()}
+                self.assertEqual(sorted(manifest.get("icons", {})), ["128", "16", "32", "48"])
                 if "service_worker" in background:
                     resources.add(background["service_worker"])
                 for script in manifest["content_scripts"]:
@@ -59,6 +61,16 @@ class BrowserExtensionPackagingTests(unittest.TestCase):
                     name = f"{folder}/{resource}"
                     self.assertIn(name, shipped, name)
                     self.assertTrue((root / name).is_file(), name)
+
+    def test_extension_icons_are_the_ones_drawn_from_the_app_icon(self):
+        from tools import package_browser_extension
+        root = Path(__file__).resolve().parents[1]
+        drawn = package_browser_extension._icon_payloads()
+        self.assertEqual(sorted(drawn), [f"icons/icon-{size}.png" for size in (128, 16, 32, 48)])
+        for browser in ("chromium", "firefox"):
+            for name, payload in drawn.items():
+                with self.subTest(browser=browser, icon=name):
+                    self.assertEqual((root / "assets/browser-extension" / browser / name).read_bytes(), payload)
 
     def test_windows_build_bundles_each_extension_resource_and_login_guide_explicitly(self):
         root = Path(__file__).resolve().parents[1]

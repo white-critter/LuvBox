@@ -2,7 +2,7 @@
 
 2026-10-24 공식 문서 확인 기준입니다. 이 문서는 Chrome용 패키지와 제출 문안의 준비 자료입니다. 스토어 등록·업로드·심사·게시는 수행하지 않았습니다. 실제 등록된 항목 ID와 스토어 주소가 없으므로 앱에 설치 링크를 추가하지 않습니다. 공개되기 전에는 앱의 기존 수동 확장 설치 안내를 사용합니다.
 
-LuvBox 1.1.8에 맞춘 확장 버전은 **1.1.0**입니다. 코드 확인 체크 후 계정 자동 확인·다시 확인과 암호화된 연결 단계 표시를 포함합니다. 앱 릴리스와 제출 패키지를 만드는 것은 브라우저 스토어에 등록·공개하는 것과 별개입니다. 개발자 계정·실제 공개 정책 주소·지원 연락처·심사 결과 없이 설치 링크나 등록 완료를 표시하지 않습니다.
+현재 확장 버전은 **1.2.0**입니다(LuvBox 1.10.4). 코드 확인 체크 후 계정 자동 확인·다시 확인과 암호화된 연결 단계 표시를 포함하고, 1.2.0부터 LuvBox 모양의 연결 화면과 확장 아이콘을 갖습니다. 앱 릴리스와 제출 패키지를 만드는 것은 브라우저 스토어에 등록·공개하는 것과 별개입니다. 개발자 계정·실제 공개 정책 주소·지원 연락처·심사 결과 없이 설치 링크나 등록 완료를 표시하지 않습니다.
 
 ## 로컬 제출 파일 만들기
 
@@ -22,7 +22,7 @@ LuvBox 1.1.8에 맞춘 확장 버전은 **1.1.0**입니다. 코드 확인 체크
 
 버전은 `assets/browser-extension/chromium/manifest.json`의 숫자형 `version`을 그대로 사용합니다. 앱 버전과 별도이며, 이미 업로드한 확장을 갱신할 때는 기존보다 큰 숫자를 설정해야 합니다. Chrome의 버전은 점으로 나눈 1~4개 정수이며 각 값은 0~65535, 불필요한 앞자리 0 없이 전체가 0이 아니어야 합니다. [공식 버전 규칙](https://developer.chrome.com/docs/extensions/reference/manifest/version)
 
-빌더는 아래 7개 파일만 읽고, 기존 `assets/icons/luvbox.png`에서 PNG 아이콘 16·32·48·128px를 메모리로 생성합니다. 폴더 전체 검색, 브라우저 프로필·사용자 데이터 접근, 네트워크 요청은 하지 않습니다.
+빌더는 아래 7개 파일과 같은 폴더의 `icons/` 아이콘 4개만 읽고, 기존 `assets/icons/luvbox.png`에서 PNG 아이콘 16·32·48·128px를 메모리로 다시 그려 그 4개와 비교합니다. 폴더 전체 검색, 브라우저 프로필·사용자 데이터 접근, 네트워크 요청은 하지 않습니다.
 
 ```text
 assets/browser-extension/chromium/manifest.json
@@ -34,7 +34,7 @@ assets/browser-extension/chromium/connect.css
 assets/browser-extension/chromium/extension-page.js
 ```
 
-ZIP의 최상위에 `manifest.json`과 확장 파일을 두며, `icons/icon-16.png`, `icons/icon-32.png`, `icons/icon-48.png`, `icons/icon-128.png`를 추가합니다. 패키지에 들어가는 manifest에만 `icons` 항목을 넣고 원본 파일은 바꾸지 않습니다. 개인정보 안내 초안과 제출 가이드는 확장 실행 파일에 포함하지 않습니다. 정렬 순서·파일 시각·권한·ZIP 저장 방식을 고정하므로 동일한 입력 파일과 고정된 Python/Pillow 환경에서 같은 ZIP 바이트를 생성합니다. 앱 아이콘의 실제 도형을 96×96 안에 배치하고 128×128 PNG에 투명 여백을 둡니다. [패키지 준비](https://developer.chrome.com/docs/webstore/prepare), [아이콘 요구사항](https://developer.chrome.com/docs/webstore/images)
+ZIP의 최상위에 `manifest.json`과 확장 파일을 두며, `icons/icon-16.png`, `icons/icon-32.png`, `icons/icon-48.png`, `icons/icon-128.png`를 넣습니다. 1.2.0부터 원본 확장 폴더에도 같은 아이콘과 manifest의 `icons` 항목이 있어 압축 해제로 불러온 확장도 LuvBox 아이콘을 보입니다. 빌더는 아이콘을 앱 아이콘에서 다시 그려 원본 폴더의 아이콘과 바이트가 같은지 확인하고, 다르면 멈춥니다. 개인정보 안내 초안과 제출 가이드는 확장 실행 파일에 포함하지 않습니다. 정렬 순서·파일 시각·권한·ZIP 저장 방식을 고정하므로 동일한 입력 파일과 고정된 Python/Pillow 환경에서 같은 ZIP 바이트를 생성합니다. 앱 아이콘의 실제 도형을 96×96 안에 배치하고 128×128 PNG에 투명 여백을 둡니다. [패키지 준비](https://developer.chrome.com/docs/webstore/prepare), [아이콘 요구사항](https://developer.chrome.com/docs/webstore/images)
 
 ## 등록 문안 초안
 
@@ -77,7 +77,7 @@ ZIP의 최상위에 `manifest.json`과 확장 파일을 두며, `icons/icon-16.p
 | 개발자 계정 | 등록·공개 연락처·해당 등록 수수료 처리를 발행자가 직접 진행해야 합니다. 이번 준비 과정에서는 계정 생성이나 결제를 하지 않습니다. [공식 등록 안내](https://developer.chrome.com/docs/webstore/register) |
 | 실제 스크린샷 | 아직 없습니다. 사용자가 실제 확장 화면에서 최소 1장, 1280×800 또는 640×400으로 촬영해야 합니다. 연결 코드·쿠키·연결 주소가 노출되지 않은 장면을 사용하세요. 가짜 로그인·승인 화면으로 대체하지 않습니다. [공식 이미지 안내](https://developer.chrome.com/docs/webstore/images) |
 | 공개 정책·앱 주소 | 실제 개인정보처리방침 URL, 지원 연락처, 동작 확인용 LuvBox 다운로드 URL이 필요합니다. 이 저장소의 문안만으로 공개 URL이 생기지 않습니다. |
-| 실제 동작 확인 | 개발 중 브라우저·사용자 계정을 실행하지 않았습니다. 제출 전 발행자가 본인의 일반 프로필에서 설치, 코드 확인, 계정 확인, 두 단계 승인, 취소·만료·해제를 확인해야 합니다. [공식 준비 안내](https://developer.chrome.com/docs/webstore/prepare) |
+| 실제 동작 확인 | 실제 X 계정과 사용자의 일반 프로필로는 확인하지 않았습니다. 1.10.4부터 설치된 Chrome·Edge에서 새 임시 프로필과 합성 X 페이지·쿠키로 실제 확장을 돌리는 검사(`InstalledBrowserExtensionTests`)가 있지만, 이는 실제 계정 연결을 대신하지 않습니다. 제출 전 발행자가 본인의 일반 프로필에서 설치, 코드 확인, 계정 확인, 두 단계 승인, 취소·만료·해제를 확인해야 합니다. [공식 준비 안내](https://developer.chrome.com/docs/webstore/prepare) |
 | 루프백 전송에 대한 정책 적용 | 현재 전송은 `http://127.0.0.1:<임시 포트>/session`과 `/progress`를 사용하며 본문을 경로별 AES-GCM으로 암호화하고 HMAC-SHA-256으로 인증합니다. 공식 FAQ는 안전한 연결(예: HTTPS/WSS)을 요구합니다. 이 문서만으로 해당 HTTP 루프백 설계의 심사 수용 여부를 확정할 수 없으며, 발행자는 정확한 구조를 설명하고 정책 적용을 검토해야 합니다. 루프백 HTTP 자체가 금지된다고 단정하는 근거로 이 문서를 사용하지 않습니다. [공식 보안 처리 FAQ 8~9](https://developer.chrome.com/docs/webstore/program-policies/user-data-faq) |
 | 심사·스토어 주소 | ZIP 생성은 제출 완료를 뜻하지 않습니다. 발행자가 업로드·신고·심사 요청을 직접 완료해야 하며 승인 여부와 일정은 미정입니다. 실제 등록 주소가 확정된 뒤에만 앱 설치 링크를 추가할 수 있습니다. [공식 게시 절차](https://developer.chrome.com/docs/webstore/publish) |
 

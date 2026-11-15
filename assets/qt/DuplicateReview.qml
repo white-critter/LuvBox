@@ -3,9 +3,12 @@ import QtQuick.Controls
 import QtQuick.Layouts
 
 // Duplicates shown one group per card: which photos are the same, which one
-// stays ("남김") and which are the copies to clear out ("사본"). The cards come
-// from a model that changes in place, so after a group is put away the list
-// stays where it was.
+// stays ("남김") and which are the copies to clear out ("사본": a photo before
+// it in the group has the very same file). A photo found as the same picture
+// at another size or quality is only "비슷함": it is not offered as a copy,
+// because the Recycle Bin check keeps it unless a file with its bytes stays.
+// The cards come from a model that changes in place, so after a group is put
+// away the list stays where it was.
 Item {
     id: review
     property var app: null
@@ -17,6 +20,10 @@ Item {
     // While the list is read again after a change, the cards on screen are the earlier ones.
     readonly property bool settling: !!library && library.duplicatesSettling
     readonly property int tileHeight: Math.round(tileWidth * 0.75) + 50
+    // The photo the last single click was on, and whether it was picked before that click:
+    // a double-click opens the photo large and takes that click's pick back.
+    property string clickedKey: ""
+    property bool clickedWasChosen: false
 
     function requestMore() {
         if (galleryModel && list.contentY - list.originY + list.height + 600 >= list.contentHeight)
@@ -49,7 +56,7 @@ Item {
             readonly property var copies: {
                 const keys = []
                 for (let i = 0; i < items.length; i++) {
-                    if (!items[i].keeper && !items[i].missing)
+                    if (items[i].copy && !items[i].missing)
                         keys.push(items[i].key)
                 }
                 return keys
@@ -155,11 +162,14 @@ Item {
                             width: review.tileWidth
                             height: review.tileHeight
                             radius: Theme.radiusCard
-                            color: chosen ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.raised : Theme.well)
+                            color: chosen ? Theme.accentSoft
+                                : (tileMouse.containsMouse || roleHover.hovered ? Theme.raised : Theme.well)
                             border.width: chosen ? 1 : 0
                             border.color: Theme.accent
                             Accessible.role: Accessible.CheckBox
-                            Accessible.name: (tile.modelData.keeper ? "남길 사진 " : "사본 ") + tile.modelData.caption
+                            Accessible.name: (tile.modelData.keeper ? "남길 사진 " : tile.modelData.copy ? "사본 " : "비슷한 사진 ")
+                                + tile.modelData.caption
+                            Accessible.description: roleBadge.tip
                             Accessible.checkable: true
                             Accessible.checked: chosen
                             // Picked without a mouse too: a screen reader toggles or presses the tile.
@@ -189,18 +199,28 @@ Item {
                             }
                             // What to do with this one, in words and colour.
                             Rectangle {
+                                id: roleBadge
                                 objectName: "duplicateRole"
+                                // Only a photo that is neither kept nor a copy says more: why it is not offered.
+                                readonly property string tip: tile.modelData.keeper || tile.modelData.copy ? ""
+                                    : "크기나 화질만 다른 비슷한 사진입니다. 남길 사진과 내용이 완전히 같지 않아 사본으로 고르지 않습니다. "
+                                      + "필요 없으면 중복 보기를 끈 갤러리에서 지울 수 있습니다."
                                 anchors.left: parent.left
                                 anchors.top: parent.top
                                 anchors.margins: 12
                                 width: roleLabel.implicitWidth + 14
                                 height: 22
                                 radius: height / 2
-                                color: tile.modelData.keeper ? Theme.keepFill : Theme.accentLine
+                                color: tile.modelData.keeper ? Theme.keepFill
+                                    : tile.modelData.copy ? Theme.accentLine : Theme.lineStrong
+                                ToolTip.visible: roleHover.hovered && tip.length > 0
+                                ToolTip.delay: 500
+                                ToolTip.text: tip
                                 Label {
                                     id: roleLabel
+                                    objectName: "duplicateRoleLabel"
                                     anchors.centerIn: parent
-                                    text: tile.modelData.keeper ? "남김" : "사본"
+                                    text: tile.modelData.keeper ? "남김" : tile.modelData.copy ? "사본" : "비슷함"
                                     font.pixelSize: Theme.fontTiny
                                     font.bold: true
                                     color: "white"
@@ -267,8 +287,32 @@ Item {
                                     if (review.library && !review.settling)
                                         review.library.toggleSelection(tile.modelData.key)
                                 }
-                                onClicked: pick()
-                                onDoubleClicked: review.previewRequested(tile.modelData.key)
+                                onClicked: {
+                                    review.clickedKey = tile.modelData.key
+                                    review.clickedWasChosen = tile.chosen
+                                    pick()
+                                }
+                                onDoubleClicked: {
+                                    // The first click of the two picked or let go of the photo; looking
+                                    // at it large leaves it as it was before.
+                                    const key = tile.modelData.key
+                                    if (review.clickedKey === key && review.library
+                                            && review.library.isSelected(key) !== review.clickedWasChosen)
+                                        pick()
+                                    review.clickedKey = ""
+                                    review.previewRequested(key)
+                                }
+                            }
+                            // The pointer on the badge of a similar photo. The tile's mouse area takes the hover
+                            // from what lies under it, so this sits above it. It takes no clicks: they still pick
+                            // the tile.
+                            Item {
+                                anchors.fill: roleBadge
+                                visible: roleBadge.tip.length > 0
+                                HoverHandler {
+                                    id: roleHover
+                                    cursorShape: Qt.PointingHandCursor
+                                }
                             }
                         }
                     }

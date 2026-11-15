@@ -1,10 +1,11 @@
 """Find a newer LuvBox release, fetch its program and put it in the launcher's place.
 
 Nothing about this PC or its user is sent: one anonymous read of the public
-release description, then (only after a click) the release's `LuvBox.exe` and
-checksum file. The names and the checksum format below are a contract between
-releases: `tools/package_release.py` writes them from here, and tests pin them,
-so a later release cannot ship something an installed version fails to read.
+release description, then (only after a click) that description once more and
+the release's `LuvBox.exe` and checksum file. The names and the checksum
+format below are a contract between releases: `tools/package_release.py`
+writes them from here, and tests pin them, so a later release cannot ship
+something an installed version fails to read.
 
 The checksum file must carry a signature by a key this version trusts
 (luvbox/release_signature.py); without it nothing large is fetched. The
@@ -58,6 +59,8 @@ MESSAGES = {
     "space": "받은 파일을 저장하지 못했어요. 디스크 여유 공간을 확인해 주세요.",
     "replace": "LuvBox.exe를 바꾸지 못했어요. 파일이 있는 폴더에 쓸 수 있는지 확인하거나, 릴리스 페이지에서 직접 받아 주세요.",
     "cancelled": "업데이트 받기를 멈췄어요.",
+    # Its release was deleted (the tag stays): not the connection's fault.
+    "gone": "받으려던 버전이 릴리스에서 내려졌어요. 새 버전을 다시 확인했어요.",
 }
 
 
@@ -309,6 +312,9 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
             listing = _read_limited(response, _CHECKSUM_LIMIT).decode("utf-8", errors="replace")
     except UpdateError:
         raise
+    except _Refused as error:
+        # Every published release has this file: without it, the release is no longer there.
+        raise UpdateError("gone" if error.status in (404, 410) else "download") from None
     except (OSError, ValueError):
         raise UpdateError("download") from None
     rows = parse_checksums(listing)

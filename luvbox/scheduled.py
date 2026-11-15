@@ -331,6 +331,16 @@ def _busy(message: str) -> bool:
     return message in {_BUSY_HELP, OUTPUT_BUSY_HELP}
 
 
+def _failure_text(outcome: dict) -> str:
+    when = str(outcome.get("finished_at", ""))[:16].replace("T", " ")
+    if outcome.get("status") == "finished":
+        # The run finished, but every new media it tried failed for the first time.
+        heading = f"{when} 자동 저장에서 새 미디어를 하나도 받지 못했습니다."
+    else:
+        heading = f"{when} 자동 저장을 마치지 못했습니다."
+    return f"{heading}\n\n{outcome.get('message', '')}"
+
+
 def _notify_failure(outcome: dict) -> None:
     """Tell the signed-in user right away; a scheduled run has no window."""
     try:
@@ -346,8 +356,7 @@ def _notify_failure(outcome: dict) -> None:
         dialog.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[1] / "assets/icons/luvbox.ico")))
         dialog.setIcon(QMessageBox.Icon.Warning)
         dialog.setTextFormat(Qt.TextFormat.PlainText)
-        dialog.setText(f"{outcome['finished_at'][:16].replace('T', ' ')} 자동 저장을 마치지 못했습니다.\n\n"
-                       f"{outcome['message']}")
+        dialog.setText(_failure_text(outcome))
         dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         open_button = dialog.addButton("앱 열기", QMessageBox.ButtonRole.AcceptRole)
         close_button = dialog.addButton("닫기", QMessageBox.ButtonRole.RejectRole)
@@ -443,6 +452,8 @@ def run_saved(*, full: bool = False) -> int:
     outcome["log"] = str(path)
     log_failed = False
     code = 1
+    # Failed media the unsaved list did not hold before this run.
+    failed_new = 0
     try:
         def write(text: str) -> None:
             nonlocal log_failed
@@ -457,6 +468,7 @@ def run_saved(*, full: bool = False) -> int:
         def emit(event: dict) -> None:
             # Events are already secret-free; progress and per-file skips are
             # omitted so a large library does not produce a huge log.
+            nonlocal failed_new
             kind = event.get("type")
             if kind == "log":
                 write(str(event.get("message", "")))
@@ -471,6 +483,7 @@ def run_saved(*, full: bool = False) -> int:
                                skipped=int(event.get("skipped") or 0), size_skipped=int(event.get("size_skipped") or 0),
                                failed_media=int(event.get("failed_media") or 0), visited=int(event.get("visited") or 0), message=str(event.get("message", "")),
                                retry_at=str(event.get("retry_at") or ""), history_run_id=event.get("history_run_id"))
+                failed_new = int(event.get("failed_new_media") or 0)
                 write(f"종료 · {event.get('status')} · 저장 {event.get('saved', 0)}개 · 기존 {event.get('skipped', 0)}개 · "
                       f"용량 초과 {event.get('size_skipped', 0)}개 · 저장 실패 {event.get('failed_media', 0)}개")
                 write(str(event.get("message", "")))
@@ -524,6 +537,10 @@ def run_saved(*, full: bool = False) -> int:
             outcome["message"] = (outcome["message"] + " 자동 저장 로그를 끝까지 기록하지 못했습니다. "
                                   "앱 데이터 폴더의 권한과 디스크 여유 공간을 확인해 주세요.").strip()
     failed = ((code != 0 or outcome["status"] == "error") and not busy) or log_failed
+    # Media that failed on their own are listed and do not fail the run. Every
+    # new media failing with nothing saved is still worth the dialog, once:
+    # the same listed failures on later days are not.
+    failed = failed or (code == 0 and outcome["status"] == "finished" and not outcome["saved"] and failed_new > 0)
     outcome.update(finished_at=datetime.now(_KOREA).isoformat(timespec="seconds"), code=code,
                    failed=failed, busy=busy, log=str(path), seen=False)
     _remember_outcome(outcome)

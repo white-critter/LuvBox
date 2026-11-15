@@ -73,6 +73,10 @@ try {
     --add-data "$PSScriptRoot\assets\browser-extension\chromium\connect.html;assets/browser-extension/chromium" `
     --add-data "$PSScriptRoot\assets\browser-extension\chromium\connect.css;assets/browser-extension/chromium" `
     --add-data "$PSScriptRoot\assets\browser-extension\chromium\extension-page.js;assets/browser-extension/chromium" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\icons\icon-16.png;assets/browser-extension/chromium/icons" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\icons\icon-32.png;assets/browser-extension/chromium/icons" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\icons\icon-48.png;assets/browser-extension/chromium/icons" `
+    --add-data "$PSScriptRoot\assets\browser-extension\chromium\icons\icon-128.png;assets/browser-extension/chromium/icons" `
     --add-data "$PSScriptRoot\assets\browser-extension\firefox\manifest.json;assets/browser-extension/firefox" `
     --add-data "$PSScriptRoot\assets\browser-extension\firefox\background.js;assets/browser-extension/firefox" `
     --add-data "$PSScriptRoot\assets\browser-extension\firefox\profile.js;assets/browser-extension/firefox" `
@@ -80,6 +84,10 @@ try {
     --add-data "$PSScriptRoot\assets\browser-extension\firefox\connect.html;assets/browser-extension/firefox" `
     --add-data "$PSScriptRoot\assets\browser-extension\firefox\connect.css;assets/browser-extension/firefox" `
     --add-data "$PSScriptRoot\assets\browser-extension\firefox\extension-page.js;assets/browser-extension/firefox" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\icons\icon-16.png;assets/browser-extension/firefox/icons" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\icons\icon-32.png;assets/browser-extension/firefox/icons" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\icons\icon-48.png;assets/browser-extension/firefox/icons" `
+    --add-data "$PSScriptRoot\assets\browser-extension\firefox\icons\icon-128.png;assets/browser-extension/firefox/icons" `
     --add-data "$PSScriptRoot\docs\browser-login.md;docs" `
     --add-data "$PSScriptRoot\README.md;." --add-data "$PSScriptRoot\CHANGELOG.md;." `
     --add-data "$PSScriptRoot\LICENSE;." --add-data "$PSScriptRoot\THIRD_PARTY_NOTICES.md;." entry.py

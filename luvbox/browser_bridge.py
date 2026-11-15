@@ -37,15 +37,36 @@ _HANDLE = re.compile(r"[A-Za-z0-9_]{1,15}\Z")
 _USER_ID = re.compile(r"[1-9][0-9]{0,31}\Z")
 _EXTENSION_HOST = re.compile(r"[a-zA-Z0-9-]{1,128}\Z")
 _BASE64URL_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+# The extension replaces this page at once. It stays only when the extension is
+# missing or off, so it says what to do then. Dark like the consent page, so the
+# hand-over does not flash white; inline style only (the policy allows nothing else).
 _PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>LuvBox · 브라우저 연결</title></head><body>
-<main><h1>LuvBox에 X 계정 연결</h1>
-<p>현재 브라우저의 X 로그인을 사용합니다. 연결할 계정은 다음 화면에서 확인합니다.</p>
-<p id="extension-status">LuvBox 연결 확장을 확인하고 있습니다. 확장이 없다면 앱에서
-‘확장 설치·연결 도움말’을 열어 안내에 따라 설치하세요. 이미 설치했다면 같은 브라우저 프로필인지 확인하고 확장을 새로고침하세요.</p>
-<p>브라우저의 비밀번호는 LuvBox에 전달되지 않습니다. 연결을 승인하면 X 로그인 쿠키와
-계정 정보가 이 컴퓨터의 LuvBox에 전달됩니다. 창을 닫거나 앱에서 취소할 수 있습니다.</p>
+<meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
+<title>LuvBox · 브라우저 연결</title>
+<style>
+*{box-sizing:border-box}html{background:#0e0e0e}
+body{margin:0;min-height:100vh;padding:56px 20px 40px;color:#f4f1f1;font:15px/1.6 "Pretendard Variable",Pretendard,"Malgun Gothic",system-ui,sans-serif;
+background:radial-gradient(620px 340px at 50% -40px,rgba(226,58,76,.17),transparent 72%),linear-gradient(#151414,#0e0e0e 360px) #0e0e0e}
+main{max-width:560px;margin:0 auto;padding:28px 28px 22px;border-radius:16px;border:1px solid #2a2a2a;
+background:linear-gradient(#1f1e1e,#171717 200px);box-shadow:inset 0 1px 0 rgba(255,255,255,.07),0 24px 64px rgba(0,0,0,.5)}
+header{display:flex;align-items:center;gap:14px;margin-bottom:18px}
+svg{flex:none;width:44px;height:44px;padding:10px;border-radius:12px;background:#111;fill:none;stroke:#ff5a62;stroke-width:2.1;
+stroke-linejoin:round;box-shadow:0 0 0 1px #2a2a2a,0 0 26px rgba(226,58,76,.32)}
+.eyebrow{margin:0;font-size:12px;font-weight:600;letter-spacing:.08em;color:#8a8284}
+h1{margin:0;font-size:22px;font-weight:700;line-height:1.3}
+.status{margin:0 0 18px;padding:10px 14px;border-radius:10px;border:1px solid #2a2a2a;background:#131313;color:#b9afb1;font-size:14px}
+p{overflow-wrap:anywhere}.guide{margin:0 0 12px;color:#f4f1f1}.guide b{font-weight:650}
+.help{margin:20px 0 0;padding-top:14px;border-top:1px solid #2a2a2a;color:#8a8284;font-size:12.5px;line-height:1.65}
+@media (max-width:480px){body{padding:20px 12px}main{padding:22px 18px 18px}}
+</style></head><body>
+<main><header><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20 4.6 12.7a4.6 4.6 0 0 1 6.5-6.5l.9.9.9-.9a4.6 4.6 0 0 1 6.5 6.5z"/></svg>
+<div><p class="eyebrow">LuvBox</p><h1>X 계정 연결</h1></div></header>
+<p id="extension-status" class="status">LuvBox 연결 확장을 기다리는 중… 확장이 있으면 곧 연결 확인 화면으로 바뀝니다.</p>
+<p class="guide">이 화면이 그대로라면 이 브라우저 프로필에 확장이 없거나 꺼져 있습니다. LuvBox의 X 연결 창에 있는
+<b>‘확장 설치·연결 도움말’</b>을 따르세요. 확장의 응답이 없으면 그 도움말이 저절로 펼쳐집니다.</p>
+<p class="guide">이미 설치했다면 같은 프로필인지 확인하고, 확장 관리에서 LuvBox 확장을 새로고침한 뒤 앱에서 연결을 취소하고 다시 시작하세요.</p>
+<p class="help">브라우저의 비밀번호는 LuvBox에 전달되지 않습니다. 연결을 승인하면 X 로그인 쿠키와 계정 정보가 이 컴퓨터의 LuvBox에만
+전달됩니다. 이 탭을 닫거나 앱에서 취소하면 연결이 중단됩니다.</p>
 </main></body></html>""".encode("utf-8")
 
 

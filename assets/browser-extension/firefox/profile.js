@@ -18,8 +18,9 @@
       const lines = (switcher?.innerText || "").split("\n").map(x => x.trim()).filter(Boolean);
       const handles = [...(switcher?.textContent || "").matchAll(/@([A-Za-z0-9_]{1,15})/g)].map(x => x[1].toLowerCase());
       if (handles.length && !handles.includes(handle.toLowerCase())) throw new Error();
+      // A name and its handle can share one line; keep only the name.
       const displayName = (lines.find(x => x !== "@" + handle && !x.startsWith("@")) || "")
-        .replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 200);
+        .replace(new RegExp(`@${handle}(?![A-Za-z0-9_])`, "gi"), "").replace(/[\x00-\x1f\x7f-\x9f]/g, "").trim().slice(0, 200);
       respond({ready: true, username: handle, display_name: displayName});
     } catch { respond({ready: false}); }
     return false;

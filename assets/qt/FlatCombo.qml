@@ -11,6 +11,19 @@ ComboBox {
     property bool chip: false
     property bool chosen: false
     readonly property real labelWidth: label.length ? prefix.implicitWidth + 8 : 0
+    // Esc on the closed list hands the keys to this item (the gallery's lists: to the grid).
+    property Item escapeFocus: null
+    // Letters typed quickly one after another find a row together ("bo" finds "@bob"), and
+    // the "@" or "#" in front of a row's name does not count. A closed list opens on the row
+    // it found: only Enter or a click applies a choice, typing alone never does.
+    property bool typeAhead: false
+    property string typedText: ""
+    property double typedAt: 0
+    // The item that had the keys when the mouse opened the list (see the popup).
+    property bool keysBorrowed: false
+    property Item keysBefore: null
+    // While the highlight is stepped to a typed row, the open list waits for the last step.
+    property bool stepping: false
     implicitHeight: chip ? Theme.controlHeight : Theme.inputHeight
     leftPadding: 14
     rightPadding: 30
@@ -22,6 +35,79 @@ ComboBox {
     implicitContentWidthPolicy: ComboBox.WidestText
     HoverHandler {
         cursorShape: control.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+    }
+
+    // A row's text for type-ahead: without the "@" or "#" in front, in lower case.
+    function bareText(index) {
+        return String(textAt(index)).replace(/^[@#]+/, "").toLowerCase()
+    }
+    // The first row from `from` on (wrapping around) whose text starts with `typed`.
+    function typedRow(typed, from) {
+        for (let step = 0; step < count; step++) {
+            const index = (from + step) % count
+            if (bareText(index).startsWith(typed))
+                return index
+        }
+        return -1
+    }
+    function inside(item, ancestor) {
+        for (let node = item; node; node = node.parent) {
+            if (node === ancestor)
+                return true
+        }
+        return false
+    }
+    // Moves the open list's highlight, which only the list's own steps can do.
+    function highlightRow(index) {
+        if (!popup.visible || index < 0 || index >= count)
+            return
+        let steps = count
+        stepping = true
+        while (highlightedIndex < index && steps-- > 0)
+            incrementCurrentIndex()
+        while (highlightedIndex > index && steps-- > 0)
+            decrementCurrentIndex()
+        stepping = false
+    }
+    Keys.onPressed: event => {
+        if (!control.typeAhead || control.editable)
+            return
+        const letter = event.text
+        if (letter.length !== 1 || letter <= " " || letter === "\u007f")
+            return
+        // Taken here, so the list's own one-letter search never applies a row of a closed list.
+        event.accepted = true
+        // Ctrl, Alt or Meta alone make a shortcut, not a letter (Ctrl with Alt is AltGr, which
+        // types "@" on some keyboards).
+        const held = event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)
+        if (held && held !== (Qt.ControlModifier | Qt.AltModifier))
+            return
+        const now = Date.now()
+        const fresh = now - control.typedAt > 1000
+        control.typedAt = now
+        control.typedText = (fresh ? "" : control.typedText) + letter.toLowerCase()
+        const typed = control.typedText.replace(/^[@#]+/, "")
+        if (!typed.length)
+            return
+        const start = control.popup.visible ? control.highlightedIndex : control.currentIndex
+        // The first letter of a word looks past the row it is on; more letters may keep that row.
+        let found = control.typedRow(typed, typed.length === 1 ? start + 1 : Math.max(0, start))
+        // The same letter again and again steps through the rows that start with it.
+        if (found < 0 && typed.length > 1 && typed.split("").every(c => c === typed[0]))
+            found = control.typedRow(typed[0], start + 1)
+        if (found < 0)
+            return
+        if (!control.popup.visible)
+            control.popup.open()
+        control.highlightRow(found)
+    }
+    Keys.onEscapePressed: event => {
+        if (control.escapeFocus && !control.popup.visible) {
+            control.escapeFocus.forceActiveFocus()
+            event.accepted = true
+        } else {
+            event.accepted = false
+        }
     }
 
     background: Rectangle {
@@ -130,6 +216,38 @@ ComboBox {
         margins: 8
         padding: 4
         implicitHeight: Math.min(280, contentItem.implicitHeight + 8)
+        // A list that does not take the keys on a click still takes them while the mouse has it
+        // open, for the arrows, letters and Enter, and gives them back when it closes. A list
+        // the keyboard reached keeps them.
+        onAboutToShow: {
+            if (!control.activeFocus) {
+                let before = control.Window.activeFocusItem
+                // Keys on a picture of the grid go back to the grid itself: the choice may read
+                // the list again and put that picture away.
+                if (before && control.escapeFocus && control.inside(before, control.escapeFocus))
+                    before = control.escapeFocus
+                control.keysBefore = before
+                control.keysBorrowed = true
+                control.forceActiveFocus(Qt.PopupFocusReason)
+            }
+        }
+        onClosed: {
+            let back = control.keysBefore
+            const borrowed = control.keysBorrowed
+            control.keysBefore = null
+            control.keysBorrowed = false
+            // Typing after the list closed starts a new word.
+            control.typedText = ""
+            control.typedAt = 0
+            if (!borrowed || !control.activeFocus)
+                return
+            while (back && !back.visible)
+                back = back.parent
+            if (back)
+                back.forceActiveFocus(Qt.PopupFocusReason)
+            if (control.activeFocus)
+                control.focus = false
+        }
         background: Rectangle {
             radius: Theme.radiusControl + 2
             color: Theme.field
@@ -142,7 +260,7 @@ ComboBox {
             clip: true
             implicitHeight: contentHeight
             model: control.popup.visible ? control.delegateModel : null
-            currentIndex: control.highlightedIndex
+            currentIndex: control.stepping ? -1 : control.highlightedIndex
             boundsBehavior: Flickable.StopAtBounds
             // The bar can be dragged. The wheel is accepted here, including at
             // the first and last row, so it does not fall through to a list behind.

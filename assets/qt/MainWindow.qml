@@ -997,6 +997,9 @@ ApplicationWindow {
 
             ColumnLayout {
                 spacing: Theme.gapSmall
+                // The lists and buttons of these rows take the keys only from Tab. After a click,
+                // the arrows, Space, Enter and the letters still go to the pictures, and Esc on a
+                // list hands the keys back to them, as Esc in the search field does.
                 // Row 1: what to look for and how the grid shows it.
                 RowLayout {
                     objectName: "gallerySearchRow"
@@ -1082,6 +1085,8 @@ ApplicationWindow {
                         model: ["최근 저장", "최신 게시물", "오래된 게시물", "좋아요 순"]
                         enabled: !window.duplicateMode
                         implicitWidth: 172
+                        focusPolicy: Qt.TabFocus
+                        escapeFocus: gallery
                         Accessible.name: "사진 정렬"
                         onActivated: window.app.library.setFilters(
                             ["all", "photo", "video", "animated_gif"][mediaFilter.currentIndex],
@@ -1094,6 +1099,8 @@ ApplicationWindow {
                         label: "종류"
                         model: ["전체", "사진", "영상", "GIF"]
                         implicitWidth: 116
+                        focusPolicy: Qt.TabFocus
+                        escapeFocus: gallery
                         Accessible.name: "미디어 종류"
                         onActivated: window.app.library.setFilters(
                             ["all", "photo", "video", "animated_gif"][currentIndex],
@@ -1106,6 +1113,8 @@ ApplicationWindow {
                         model: ["작게", "보통", "크게"]
                         currentIndex: window.densityChoice
                         implicitWidth: 116
+                        focusPolicy: Qt.TabFocus
+                        escapeFocus: gallery
                         Accessible.name: "미리보기 크기"
                         onActivated: {
                             window.setDensity(currentIndex)
@@ -1132,6 +1141,7 @@ ApplicationWindow {
                         FlatButton {
                             id: favoriteFilterButton
                             objectName: "galleryFavoriteFilter"
+                            focusPolicy: Qt.TabFocus
                             tone: "chip"
                             width: implicitWidth
                             checkable: true
@@ -1147,6 +1157,7 @@ ApplicationWindow {
                         FlatButton {
                             id: duplicateFilterButton
                             objectName: "galleryDuplicateFilter"
+                            focusPolicy: Qt.TabFocus
                             tone: "chip"
                             width: implicitWidth
                             checkable: true
@@ -1165,6 +1176,7 @@ ApplicationWindow {
                         FlatButton {
                             // What is not in the gallery: could not be saved, excluded, or its file is gone.
                             objectName: "galleryUnsavedButton"
+                            focusPolicy: Qt.TabFocus
                             tone: "chip"
                             width: implicitWidth
                             // Worth a look: failures and files that are gone. Exclusions were chosen.
@@ -1179,6 +1191,7 @@ ApplicationWindow {
                         FlatButton {
                             id: aiMenuButton
                             objectName: "galleryAiMenuButton"
+                            focusPolicy: Qt.TabFocus
                             tone: "chip"
                             width: implicitWidth
                             readonly property string applied: window.app ? window.app.library.filterAiCategory : ""
@@ -1202,6 +1215,9 @@ ApplicationWindow {
                             // The closed chip names the author; the count belongs to the list.
                             displayText: currentIndex > 0 && model[currentIndex] ? "@" + model[currentIndex].value : "작성자"
                             Accessible.name: "작성자 선택"
+                            focusPolicy: Qt.TabFocus
+                            escapeFocus: gallery
+                            typeAhead: true
                             textRole: "label"
                             valueRole: "value"
                             readonly property string applied: window.app ? window.app.library.filterAuthor : ""
@@ -1255,6 +1271,9 @@ ApplicationWindow {
                             height: implicitHeight
                             displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].value : "해시태그"
                             Accessible.name: "해시태그 선택"
+                            focusPolicy: Qt.TabFocus
+                            escapeFocus: gallery
+                            typeAhead: true
                             textRole: "label"
                             valueRole: "value"
                             readonly property string applied: window.app ? window.app.library.filterHashtag : ""
@@ -1306,6 +1325,9 @@ ApplicationWindow {
                             height: implicitHeight
                             displayText: currentIndex > 0 && model[currentIndex] ? "#" + model[currentIndex].value : "내 태그"
                             Accessible.name: "내 태그 선택"
+                            focusPolicy: Qt.TabFocus
+                            escapeFocus: gallery
+                            typeAhead: true
                             textRole: "label"
                             valueRole: "value"
                             readonly property string applied: window.app ? window.app.library.filterUserTag : ""
@@ -1352,6 +1374,7 @@ ApplicationWindow {
                         FlatButton {
                             id: filterToggle
                             objectName: "galleryFilterToggle"
+                            focusPolicy: Qt.TabFocus
                             tone: "chip"
                             width: implicitWidth
                             checkable: true
@@ -1377,6 +1400,8 @@ ApplicationWindow {
                                 currentIndex: window.app && window.app.library.dateField === "saved" ? 1 : 0
                                 implicitHeight: Theme.controlHeight
                                 implicitWidth: 96
+                                focusPolicy: Qt.TabFocus
+                                escapeFocus: gallery
                                 Accessible.name: "날짜 필터 기준"
                                 onActivated: index => {
                                     window.applyFilters({ dateField: index === 1 ? "saved" : "posted" })
@@ -1430,6 +1455,7 @@ ApplicationWindow {
                         FlatButton {
                             id: filterReset
                             objectName: "galleryFilterReset"
+                            focusPolicy: Qt.TabFocus
                             tone: "ghost"
                             width: implicitWidth
                             leftPadding: 10
@@ -1451,6 +1477,7 @@ ApplicationWindow {
                     // after it never move when it appears.
                     FlatButton {
                         objectName: "galleryOpenPreview"
+                        focusPolicy: Qt.TabFocus
                         Layout.alignment: Qt.AlignTop
                         text: "미리보기"
                         visible: gallery.currentIndex >= 0 && !window.duplicateMode
@@ -1460,6 +1487,7 @@ ApplicationWindow {
                     FlatButton {
                         id: refreshButton
                         objectName: "galleryRefresh"
+                        focusPolicy: Qt.TabFocus
                         Layout.alignment: Qt.AlignTop
                         // New files saved while the gallery was open light the button up.
                         readonly property bool fresh: !!window.app && window.app.galleryChanged
@@ -1473,6 +1501,7 @@ ApplicationWindow {
                     FlatButton {
                         id: selectionToggle
                         objectName: "gallerySelectionToggle"
+                        focusPolicy: Qt.TabFocus
                         Layout.alignment: Qt.AlignTop
                         readonly property bool choosing: !!window.app && window.app.library.selectionMode
                         tone: choosing ? "chip" : "quiet"
@@ -1624,7 +1653,8 @@ ApplicationWindow {
                         Label {
                             objectName: "duplicateGuide"
                             Layout.fillWidth: true
-                            text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’을 골라 휴지통으로 보내세요. "
+                            text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’(내용이 완전히 같은 파일)을 골라 휴지통으로 보내세요. "
+                                + "크기·화질만 다른 ‘비슷함’은 사본으로 고르지 않으니, 필요 없으면 중복 보기를 끈 갤러리에서 지우세요. "
                                 + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다. "
                                 + "같은 사진이 아니거나 모두 남기려면 묶음의 ‘중복 아님’을, "
                                 + "몇 장만 다른 사진이면 그 사진을 고른 뒤 ‘선택한 N장만 중복 아님’을 누르세요."
@@ -1645,7 +1675,9 @@ ApplicationWindow {
                                 checked: window.duplicateNear
                                 text: checked ? "✓ 화질만 다른 사진 포함" : "화질만 다른 사진 포함"
                                 Accessible.name: "크기나 화질만 다른 같은 사진도 찾기"
-                                tip: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 묶습니다. 두 사진의 화면을 직접 비교해 99% 이상 같을 때만 묶습니다."
+                                tip: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 묶어 ‘비슷함’으로 보여 줍니다. "
+                                    + "두 사진을 작게 줄여 비교한 뒤 작은 쪽 사진의 크기에서 한 번 더 비교해, 같을 때만 묶습니다. "
+                                    + "휴지통으로는 내용이 완전히 같은 파일만 사본으로 보냅니다."
                                 onClicked: {
                                     window.duplicateNear = !window.duplicateNear
                                     checked = Qt.binding(function() { return window.duplicateNear })
@@ -1670,14 +1702,15 @@ ApplicationWindow {
                                 enabled: !!window.app && !window.app.library.copiesLocked && window.galleryModel.count > 0
                                 tip: window.app && window.app.library.copiesLocked
                                     ? window.app.library.holdReason
-                                    : "가장 화질이 좋거나 즐겨찾기한 원본 1장씩만 남기고 나머지 사본을 선택합니다"
+                                    : "묶음마다 즐겨찾기하거나 용량이 가장 큰 사진을 남기고, 내용이 완전히 같은 ‘사본’만 선택합니다. "
+                                      + "크기·화질만 다른 ‘비슷함’은 고르지 않습니다"
                                 text: "사본 일괄 선택"
                                 onClicked: {
+                                    // The status says how many copies were picked and how many similar photos were left.
                                     const count = window.app.library.selectDuplicateCopies()
-                                    if (count > 0)
-                                        window.flashNotice(count + "개의 중복 사본이 선택되었습니다. '휴지통으로'를 누르면 정리됩니다.")
-                                    else
-                                        window.flashNotice(window.app.library.status)
+                                    window.flashNotice(count > 0
+                                        ? window.app.library.status + " ‘휴지통으로’를 누르면 정리됩니다."
+                                        : window.app.library.status)
                                 }
                             }
                             // "중복 아님" marks: take the last one back, or forget them all.
@@ -1887,6 +1920,15 @@ ApplicationWindow {
                         })
                     }
                     onCurrentItemChanged: window.refreshSelection(currentItem)
+                    // A list read again (another sort, filter or search, or the same one after a
+                    // change) starts with no picture highlighted. The old row number would name
+                    // another picture in the new list, which Enter, Space, F and Delete would then
+                    // act on, and opening it would wipe the status the reload just set. Rows taken
+                    // out in place (a move to the Recycle Bin) keep the highlight.
+                    Connections {
+                        target: window.galleryModel
+                        function onModelReset() { gallery.currentIndex = -1 }
+                    }
                     Keys.onPressed: (event) => {
                         window.stopWheel()
                         event.accepted = false
@@ -2163,7 +2205,13 @@ ApplicationWindow {
                                 return "중복 사진을 찾는 중 · 끝나면 여기에 모아 둘게요"
                             if (window.app && window.app.library.filterDuplicateOnly)
                                 return "중복 사진이 없어요 · 위의 ‘중복 검사’로 다시 찾아볼 수 있어요"
-                            if (window.app && window.app.library.filterFavoriteOnly)
+                            // Only when nothing else narrows the list: otherwise there may well be
+                            // favorites, just none that meet the other conditions too.
+                            if (window.app && window.app.library.filterFavoriteOnly && !search.text.length
+                                    && mediaFilter.currentIndex === 0 && !window.app.library.filterAuthor
+                                    && !window.app.library.filterHashtag && !window.app.library.filterUserTag
+                                    && !window.app.library.filterAiCategory && !window.app.library.dateFrom
+                                    && !window.app.library.dateTo)
                                 return "아직 즐겨찾기가 없어요 · 사진의 ★이나 F 키로 담아 보세요"
                             return search.text.length || (window.app && (window.app.library.filterSummary.length > 0
                                 || mediaFilter.currentIndex > 0)) ? "조건에 맞는 사진이 없어요"

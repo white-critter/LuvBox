@@ -55,7 +55,8 @@ _COPY_ERRORS = {
 _MANAGERS = {"chrome": "chrome://extensions", "edge": "edge://extensions",
              "firefox": "about:debugging#/runtime/this-firefox"}
 _EXTENSION_FILES = ("manifest.json", "background.js", "profile.js", "connect.js", "connect.html",
-                    "connect.css", "extension-page.js")
+                    "connect.css", "extension-page.js", "icons/icon-16.png", "icons/icon-32.png",
+                    "icons/icon-48.png", "icons/icon-128.png")
 
 
 def plan_extension_launch(browser, running, folder):
@@ -196,13 +197,16 @@ class BrowserSetupController(QObject):
         if not (bundled / "manifest.json").is_file():
             raise OSError("missing extension assets")
         target = app_directory() / "browser-extension" / kind
-        for folder in (target.parent, target):
+        for folder in (target.parent, target, target / "icons"):
             if folder.is_symlink() or getattr(folder, "is_junction", lambda: False)():
                 raise OSError("linked extension folder")
         target.mkdir(parents=True, exist_ok=True)
         for name in _EXTENSION_FILES:
             content = (bundled / name).read_bytes()
             destination = target / name
+            if destination.parent != target:
+                # Only the icons folder sits below; it was refused above if linked.
+                destination.parent.mkdir(exist_ok=True)
             if destination.is_symlink():
                 raise OSError("linked extension file")
             try:
@@ -210,7 +214,7 @@ class BrowserSetupController(QObject):
                     continue
             except FileNotFoundError:
                 pass
-            descriptor, staged = tempfile.mkstemp(prefix=".extension-", dir=target)
+            descriptor, staged = tempfile.mkstemp(prefix=".extension-", dir=destination.parent)
             try:
                 with os.fdopen(descriptor, "wb") as stream:
                     stream.write(content)

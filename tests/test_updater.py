@@ -242,8 +242,9 @@ class DownloadTests(ReleaseServerCase):
                 self.server.files["/download/v1.9.0/SHA256-1.9.0.txt"] = text
                 self.fails("unexpected", updater.download, "1.9.0", self.downloads, self.server.source)
                 self.assertEqual([path for path, _headers in self.server.requests], ["/download/v1.9.0/SHA256-1.9.0.txt"])
+        # A checksum file that is not there any more is a release taken down (1.10.4), not a network failure.
         del self.server.files["/download/v1.9.0/SHA256-1.9.0.txt"]
-        self.fails("download", updater.download, "1.9.0", self.downloads, self.server.source)
+        self.fails("gone", updater.download, "1.9.0", self.downloads, self.server.source)
         self.server.files["/download/v1.9.0/SHA256-1.9.0.txt"] = b"x" * (64 * 1024 + 1)
         self.fails("unexpected", updater.download, "1.9.0", self.downloads, self.server.source)
 

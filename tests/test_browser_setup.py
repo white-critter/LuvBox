@@ -1,6 +1,7 @@
 """The extension setup helper: manager address, and a copy that outlives app versions."""
 
 from importlib.util import find_spec
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -49,7 +50,35 @@ class BrowserSetupTests(unittest.TestCase):
         self.assertEqual([path.name for path in target.iterdir() if path.name.startswith(".")], [])
 
     def test_every_bundled_extension_file_is_copied(self):
-        self.assertEqual(sorted(_EXTENSION_FILES), sorted(path.name for path in self.bundled.iterdir()))
+        for kind in ("chromium", "firefox"):
+            bundled = self.bundled.parent / kind
+            files = [path.relative_to(bundled).as_posix() for path in bundled.rglob("*") if path.is_file()]
+            self.assertEqual(sorted(_EXTENSION_FILES), sorted(files))
+
+    def test_the_icons_the_manifest_names_are_copied(self):
+        from PIL import Image
+        for kind in ("chromium", "firefox"):
+            target = BrowserSetupController._extension_folder(kind)
+            manifest = json.loads((target / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(sorted(manifest["icons"]), ["128", "16", "32", "48"])
+            for size, name in manifest["icons"].items():
+                self.assertIn(name, _EXTENSION_FILES)
+                self.assertEqual((target / name).read_bytes(), (self.bundled.parent / kind / name).read_bytes())
+                with Image.open(target / name) as image:
+                    self.assertEqual(image.size, (int(size), int(size)))
+            self.assertEqual([path.name for path in (target / "icons").iterdir() if path.name.startswith(".")], [])
+
+    @unittest.skipUnless(os.name == "nt", "Windows junction")
+    def test_a_redirected_icons_folder_is_refused(self):
+        import _winapi
+        elsewhere = self.folder / "elsewhere"
+        elsewhere.mkdir()
+        target = self.folder / "LuvBox" / "browser-extension" / "chromium"
+        target.mkdir(parents=True)
+        _winapi.CreateJunction(str(elsewhere), str(target / "icons"))
+        with self.assertRaises(OSError):
+            BrowserSetupController._extension_folder()
+        self.assertEqual(list(elsewhere.iterdir()), [])
 
     @unittest.skipUnless(os.name == "nt", "Windows junction")
     def test_a_redirected_extension_folder_is_refused(self):

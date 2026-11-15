@@ -11,15 +11,18 @@ const {webcrypto} = require("node:crypto");
   const extensionId = "abcdefghijklmnopabcdefghijklmnop";
   const extensionUrl = `chrome-extension://${extensionId}/connect.html`;
   const token = "synthetic-bridge-token";
-  let currentToken = token, signedIn = true;
+  let currentToken = token, signedIn = true, refused = false, checkTabClosed = false;
+  const updates = [];
   const tabs = new Map([[1, {id: 1, url: "http://127.0.0.1:49123/connect"}]]);
   const api = {
     runtime: {id: extensionId, getURL: file => `chrome-extension://${extensionId}/${file}`,
       onMessage: {addListener: callback => { listener = callback; }}},
     tabs: {
-      get: async id => tabs.get(id),
-      update: async (id, changes) => { Object.assign(tabs.get(id), changes); },
-      create: async ({url}) => { created++; const tab = {id: 2, url}; tabs.set(2, tab); return tab; },
+      get: async id => { if (!tabs.has(id)) throw new Error(`No tab with id: ${id}.`); return tabs.get(id); },
+      update: async (id, changes) => { updates.push([id, changes]); Object.assign(tabs.get(id), changes); },
+      // The check tab opens in front; checkTabClosed acts as if the person closed it at once.
+      create: async ({url, active}) => { created++; const tab = {id: 2, url, active};
+        if (!checkTabClosed) tabs.set(2, tab); return tab; },
       remove: async id => { closed++; tabs.delete(id); },
       sendMessage: async () => ({ready: true, username: "Offline_User", display_name: "Offline Name"}),
       onRemoved: {addListener: () => {}}
@@ -33,7 +36,9 @@ const {webcrypto} = require("node:crypto");
   };
   const sandbox = {chrome: api, URL, Map, Date, TextEncoder, Uint8Array, crypto: webcrypto, btoa,
     AbortSignal, setTimeout: () => {}, fetch: async (url, options) => {
-      requests.push({url, options}); return {ok: true, json: async () => ({ok: true})};
+      // A closed listener refuses the connection; fetch rejects with a TypeError.
+      if (refused) throw new TypeError("Failed to fetch");
+      requests.push({url, options}); return {ok: true, status: 200, json: async () => ({ok: true})};
     }};
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(process.argv[2], "background.js"), "utf8"), sandbox);
@@ -102,14 +107,52 @@ const {webcrypto} = require("node:crypto");
   }
   assert.deepEqual(stages, ["extension_ready", "checking_account", "awaiting_approval", "account_changed",
     "checking_account", "login_required", "checking_account", "awaiting_approval"]);
+  // The check tab was in front when it closed, so the consent tab came back to the front.
+  assert.ok(updates.some(([id, changes]) => id === 1 && changes.active === true), "consent tab re-activated");
+
+  // The app stopped listening (cancelled, closed or timed out): say so, end the
+  // pairing, and do not open an X tab for nothing.
+  const pairAgain = async () => {
+    tabs.get(1).url = "http://127.0.0.1:49123/connect";
+    assert.equal((await send({type: "luvbox-pair", secret}, local)).ok, true);
+  };
+  await pairAgain();
+  refused = true;
+  const openedBefore = created;
+  const gone = await send({type: "luvbox-inspect", tabId: 1}, owned);
+  assert.equal(gone.ok, false);
+  assert.equal(gone.code, "app_gone");
+  assert.equal(created, openedBefore, "no X tab for an app that is gone");
+  assert.equal((await send({type: "luvbox-status", tabId: 1}, owned)).code, "expired", "pairing ended");
+  refused = false;
+  await pairAgain();
+  assert.equal((await send({type: "luvbox-inspect", tabId: 1}, owned)).ok, true);
+  refused = true;
+  const goneAtConnect = await send({type: "luvbox-connect", tabId: 1, confirmed: true}, owned);
+  assert.equal(goneAtConnect.code, "app_gone");
+  assert.equal((await send({type: "luvbox-status", tabId: 1}, owned)).code, "expired", "pairing ended");
+  refused = false;
+
+  // The person closed the check tab: stop at once instead of waiting 25 s.
+  await pairAgain();
+  checkTabClosed = true;
+  const closedTab = await send({type: "luvbox-inspect", tabId: 1}, owned);
+  assert.equal(closedTab.code, "tab_closed");
+  checkTabClosed = false;
+  assert.equal((await send({type: "luvbox-inspect", tabId: 1}, owned)).ok, true, "a new check works");
 
   // Programmatic DOM clicks cannot approve even in the extension-owned page.
   const elements = new Map();
-  for (const id of ["status", "inspect", "account", "connect", "confirm-code", "pairing-code"]) {
-    elements.set(id, {checked: false, addEventListener(type, callback) { this[type] = callback; }});
+  for (const id of ["card", "status", "inspect", "account", "account-hint", "account-name", "account-handle",
+    "connect", "close", "confirm-code", "pairing-code"]) {
+    // Hidden as connect.html starts them.
+    const hidden = ["inspect", "account-name", "account-handle", "close"].includes(id);
+    elements.set(id, {checked: false, hidden, dataset: {}, addEventListener(type, callback) { this[type] = callback; }});
   }
   const uiMessages = [];
-  const uiApi = {tabs: {getCurrent: async () => ({id: 1})}, runtime: {sendMessage: async message => {
+  const removed = [];
+  const uiApi = {tabs: {getCurrent: async () => ({id: 1}), remove: async id => { removed.push(id); }},
+    runtime: {sendMessage: async message => {
     uiMessages.push(message);
     if (message.type === "luvbox-status") return {ok: true, code: "AAAAAAAA"};
     return {ok: true, username: "Offline_User"};
@@ -120,6 +163,9 @@ const {webcrypto} = require("node:crypto");
   vm.createContext(ui);
   vm.runInContext(fs.readFileSync(path.join(process.argv[2], "extension-page.js"), "utf8"), ui);
   await new Promise(resolve => setImmediate(resolve));
+  assert.equal(elements.get("card").dataset.state, "code", "the code step is lit once the code is shown");
+  assert.equal(elements.get("pairing-code").textContent, "AAAAAAAA");
+  assert.equal(elements.get("connect").disabled, true);
   elements.get("confirm-code").checked = true;
   await elements.get("confirm-code").change({isTrusted: false});
   assert.equal(uiMessages.filter(x => x.type === "luvbox-inspect").length, 0);
@@ -127,11 +173,48 @@ const {webcrypto} = require("node:crypto");
   assert.equal(uiMessages.filter(x => x.type === "luvbox-inspect").length, 0);
   await elements.get("confirm-code").change({isTrusted: true});
   assert.equal(uiMessages.filter(x => x.type === "luvbox-inspect").length, 1, "trusted code confirmation checks account automatically");
+  assert.equal(elements.get("card").dataset.state, "ready");
+  assert.equal(elements.get("account-handle").textContent, "@Offline_User");
+  assert.equal(elements.get("account-name").hidden, true, "no display name, no empty name line");
+  assert.equal(elements.get("inspect").hidden, false, "re-check appears after the first check");
+  assert.equal(elements.get("connect").textContent, "@Offline_User 연결");
+  assert.equal(elements.get("connect").disabled, false);
   await elements.get("inspect").click({isTrusted: true});
   assert.equal(uiMessages.filter(x => x.type === "luvbox-inspect").length, 2);
   await elements.get("connect").click({isTrusted: false});
   assert.equal(uiMessages.filter(x => x.type === "luvbox-connect").length, 0);
+  await elements.get("close").click({isTrusted: true});
+  assert.equal(removed.length, 0, "a hidden close button does nothing before the hand-over");
   await elements.get("connect").click({isTrusted: true});
   assert.equal(uiMessages.filter(x => x.type === "luvbox-connect").length, 1);
+  assert.equal(elements.get("card").dataset.state, "done");
+  assert.equal(elements.get("connect").hidden, true);
+  assert.equal(elements.get("close").hidden, false);
+  await elements.get("close").click({isTrusted: false});
+  assert.equal(removed.length, 0, "a scripted click cannot close the tab");
+  await elements.get("close").click({isTrusted: true});
+  assert.deepEqual(removed, [1]);
+
+  // A code that ends the pairing ends the page too: no re-check loop.
+  for (const code of ["app_gone", "expired"]) {
+    const ended = new Map();
+    for (const id of elements.keys()) {
+      const hidden = ["inspect", "account-name", "account-handle", "close"].includes(id);
+      ended.set(id, {checked: false, hidden, dataset: {}, addEventListener(type, callback) { this[type] = callback; }});
+    }
+    const endApi = {tabs: {getCurrent: async () => ({id: 1})}, runtime: {sendMessage: async message =>
+      message.type === "luvbox-status" ? {ok: true, code: "AAAAAAAA"} : {ok: false, code}}};
+    const endUi = {window, chrome: endApi, setInterval: () => 0, clearInterval: () => {},
+      document: {getElementById: id => ended.get(id)}};
+    vm.createContext(endUi);
+    vm.runInContext(fs.readFileSync(path.join(process.argv[2], "extension-page.js"), "utf8"), endUi);
+    await new Promise(resolve => setImmediate(resolve));
+    ended.get("confirm-code").checked = true;
+    await ended.get("confirm-code").change({isTrusted: true});
+    assert.equal(ended.get("card").dataset.state, "expired", code);
+    assert.equal(ended.get("confirm-code").disabled, true, code);
+    assert.equal(ended.get("inspect").hidden, true, code);
+    assert.equal(ended.get("connect").disabled, true, code);
+  }
   process.stdout.write(JSON.stringify({session: envelope, progress}));
 })().catch(error => { process.stderr.write(error.stack + "\n"); process.exitCode = 1; });

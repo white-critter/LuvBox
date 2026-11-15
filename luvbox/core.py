@@ -58,6 +58,13 @@ _RETRY_KEY = re.compile(r"([0-9]{1,20})_(?:(video|animated_gif)_)?([0-9]{1,5})\Z
 # listed newest-like first, so this is the point where the previous complete
 # run left off. Unsaved files never count toward the streak.
 QUICK_STOP_AFTER = 100
+# X's image host refusing one media (403, 5xx) still stops the save, which then
+# checks the whole list next time and meets it again. Only a reply that the file
+# is not served to this account counts (see _not_served): after it has stopped
+# this many saves, a Like save passes the media by without asking; '다시 저장'
+# still asks. A server error (5xx) is an outage that usually passes, so a few
+# quick saves during one must never make saves skip a media for good.
+REFUSED_LIMIT = 3
 _KOREA = timezone(timedelta(hours=9))
 _RECORD_ERROR = ("저장 기록을 읽거나 갱신하지 못했습니다. "
                  "저장 폴더의 권한과 다른 실행 중인 프로그램을 확인해 주세요.")
@@ -75,6 +82,21 @@ _REVIEW_ERROR = ("저장 여부 확인을 완료하지 못해 멈췄습니다. �
 _FAILED_DETAIL = "파일을 받지 못했습니다. 연결 상태나 저장 폴더를 확인한 뒤 다시 시도해 주세요."
 _SIZE_DETAIL = "크기 제한({limit:,}MB)을 넘어 저장하지 않았습니다."
 _EXCLUDED_DETAIL = "저장 확인에서 ‘저장 안 함’으로 골랐습니다."
+_REFUSED_DETAIL = (f"사진 서버가 이 파일을 거부해 저장을 멈췄습니다. 같은 파일에서 {REFUSED_LIMIT}번 멈추면 "
+                   "그다음 저장부터는 건너뜁니다.")
+_PASSED_BY_DETAIL = (f"사진 서버가 이 파일을 거부해 저장이 {REFUSED_LIMIT}번 멈췄습니다. 이제 저장할 때 건너뜁니다. "
+                     "‘다시 저장’은 지금 다시 요청합니다.")
+_SERVER_ERROR_DETAIL = "사진 서버 오류로 저장을 멈췄습니다. 서버 오류는 대개 잠시 뒤 풀리므로 다음 저장에서 다시 요청합니다."
+
+
+def _not_served(status: int) -> bool:
+    """Whether a media reply says the file is not served to this account (401, 403, 410, 451, ...).
+
+    Only such a refusal counts toward passing the media by (REFUSED_LIMIT).
+    A 5xx is the host's own outage, a 404 never stops a save, and 416 and 429
+    are about the request rather than the file.
+    """
+    return 400 <= status < 500 and status not in {404, 416, 429}
 
 
 def _save_day() -> date:
@@ -637,6 +659,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
     saved = skipped = size_skipped = review_skipped = review_never = 0
     failed = 0
+    # Failed media the unsaved list did not hold before this run.
+    failed_new = 0
+    # The run finished past files that failed, because they are in the unsaved list.
+    failures_listed = False
+    # Listed media X's image host refused, with the saves each one stopped, and
+    # the one whose refusal stops this run.
+    refused_runs = {}
+    refused_now = None
     metadata_failed = 0
     metadata_available = False
     metadata_warned = False
@@ -753,12 +783,21 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             size_bytes=size, limit_mb=normalized.max_video_mb if reason == unsaved.SIZE else 0, detail=detail)
 
     unsaved_previews = None
+    previews_stopped = False
+    # A preview's 429 left a cooldown that the next save will honour.
+    preview_limited = False
 
     def keep_unsaved_preview(active, url, media):
-        """Give an unsaved media a small picture for its list. Never affects the save."""
-        nonlocal unsaved_previews
-        if previews is None or not normalized.unsaved_previews:
+        """Give an unsaved media a small picture for its list. Never changes this save's result."""
+        nonlocal unsaved_previews, previews_stopped, preview_limited
+        if previews is None or not normalized.unsaved_previews or previews_stopped:
             return
+        # The picture is asked for through the save's protected session, whose
+        # guard takes a refused, failed or limited reply as the end of the run.
+        # A picture is optional: such an error ends only the pictures of this
+        # run, never the save. A 429 still leaves its cooldown for the next run,
+        # and the guard never writes a shorter one over it later in this run.
+        failure, until, refused = guard.failure, guard.until, guard.refused
         try:
             if unsaved_previews is None:
                 from .unsaved_preview import UnsavedPreviews
@@ -768,16 +807,24 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 unsaved_previews.keep(session, url, media)
         except Exception:
             pass
+        finally:
+            if (guard.failure, guard.until) != (failure, until):
+                previews_stopped = True
+                preview_limited = preview_limited or guard.until != until
+                guard.failure, guard.until, guard.refused = failure, until, refused
 
     def remember_unsaved():
+        """Write the unsaved list once at the end; False when it could not be written."""
         if not unsaved_items and not unsaved_resolved:
-            return
+            return True
         try:
             unsaved.record(unsaved_items.values(), account=normalized.account, output_dir=normalized.output_dir,
-                           resolved=unsaved_resolved)
+                           resolved=unsaved_resolved, refused=refused_now)
         except OSError:
             emit({"type": "log", "level": "warning", "message":
                   "저장하지 못한 미디어 목록을 갱신하지 못했습니다. 저장한 파일에는 영향이 없습니다."})
+            return False
+        return True
 
     progress_fields = {}
     progress_written = 0.0
@@ -878,6 +925,25 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                       "message": f"{_METADATA_ERROR} {failure_message(metadata_reason)}",
                       **_media_details(kwdict)})
 
+    def skipped_file_places(recorded, destination):
+        """Where a file this save skips may be: its recorded place, then today's destination.
+
+        A retry looks at today's destination too: a chosen missing file may
+        have been copied to the current output since the library was
+        refreshed. Other saves look there only when the recorded file is
+        verifiably gone from the current media folder, as after a move in
+        Explorer into this layout's folder; the record then follows the file,
+        and the other layouts' records of the old place stop standing for it.
+        A former save folder, or a place that cannot be checked (a drive that
+        is not connected), keeps its record as it is.
+        """
+        yield recorded
+        if not destination or destination == recorded:
+            return
+        if targets or (recorded and history.is_download_path(recorded)
+                       and history._deletion_path_absent(recorded)):
+            yield destination
+
     class SizeLimit(exception.ControlException):
         default = "media size exceeded"
 
@@ -900,6 +966,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             super().__init__(url)
             self.out = EventsOutput()
             self.current_media = {}
+            # (tweet_id, num, media_type) of current_media, and whether it was
+            # passed by without a request because X's image host kept refusing it.
+            self.identity = None
+            self.passed_by = False
             self.last_output = None
             self.progress_bytes = self.progress_total = 0
             self.progress_started = self.progress_last = None
@@ -1024,7 +1094,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
 
         def handle_url(self, url, kwdict):
             nonlocal stop_reason, saved, skipped, size_skipped, review_skipped, review_never, existing_streak
-            nonlocal ignored_encountered, failed
+            nonlocal ignored_encountered, failed, failed_new
             check_stop()
             media_type = kwdict.get("type")
             if media_type not in {"photo", "video", "animated_gif"}:
@@ -1070,6 +1140,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 keep_unsaved_preview(self, url, kwdict)
                 return
             self.current_media = kwdict
+            self.identity = identity
+            self.passed_by = False
             self.last_output = None
             self.progress_started = self.progress_last = None
             self.progress_bytes = self.progress_total = 0
@@ -1112,6 +1184,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             if (not history.is_download_path(self.pathfmt.path) or
                     not history.is_download_path(self.pathfmt.path + ".part")):
                 raise exception.AbortExtraction("permissionerror unsafe media output")
+            status_before = self.status
             try:
                 super().handle_url(url, kwdict)
             except ReviewNever as declined:
@@ -1204,13 +1277,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             previous = history.media_record(normalized.folder_mode, kwdict)
                         except HistoryError:
                             raise exception.AbortExtraction("history store unavailable") from None
-                        # A selected missing file may have been copied to the
-                        # current output since the library was refreshed. Its
-                        # absent former location must not mask that file hit.
+                        # An absent recorded place must not mask a file at
+                        # today's destination (see skipped_file_places).
                         known_path = previous.get("path") if previous is not None else media_path
-                        candidates = [known_path]
-                        if targets and media_path and media_path != known_path:
-                            candidates.append(media_path)
+                        candidates = skipped_file_places(known_path, media_path)
                         media_path = ""
                         for known_path in candidates:
                             if not known_path:
@@ -1272,9 +1342,23 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 else:
                     # The downloader gave up on this file without a stop, a size
                     # limit or a choice: it stays unsaved and is listed for a retry.
+                    # gallery-dl also marks the whole job failed (status 4) for it.
+                    # Keep that out of the job's status, which then still tells
+                    # whether anything else went wrong: one file X no longer
+                    # serves must not make every later quick save a full check.
+                    self.status = status_before
                     failed += 1
-                    note_unsaved(unsaved.FAILED, _FAILED_DETAIL, media=kwdict)
-                    keep_unsaved_preview(self, url, kwdict)
+                    failed_new += identity not in unsaved_known
+                    if identity in review_pending:
+                        # Met and listed for '다시 저장': the next quick save need
+                        # not walk down to it again only to have it fail again.
+                        review_resolved.add(identity)
+                    if self.passed_by:
+                        # Not asked for at all: its own host refuses it, so no picture either.
+                        note_unsaved(unsaved.FAILED, _PASSED_BY_DETAIL, media=kwdict)
+                    else:
+                        note_unsaved(unsaved.FAILED, _FAILED_DETAIL, media=kwdict)
+                        keep_unsaved_preview(self, url, kwdict)
                     emit({"type": "failed", "path": "", **_media_details(kwdict)})
             finally:
                 if self.gif_finalize is not None:
@@ -1334,6 +1418,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             # gallery-dl's media downloader catches exceptions from request()
             # and returns False. Re-raise a protection failure before its parent
             # attempts other image sizes or the next photo.
+            nonlocal failed, failed_new, refused_now
             media_type = self.current_media.get("type")
             is_gif = media_type == "animated_gif"
             # gallery-dl's HTTP downloader writes every transfer to its .part
@@ -1358,9 +1443,29 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     raise SizeLimit()
                 self.progress(local_source.stat().st_size, local_source.stat().st_size, force=True)
                 result = True
+            elif not targets and refused_runs.get(self.identity, 0) >= REFUSED_LIMIT:
+                # X's image host refused this media and so stopped REFUSED_LIMIT
+                # saves. Pass it by without a request (gallery-dl then counts it
+                # failed, with no fallback size), so older likes are reached again.
+                self.passed_by = True
+                raise exception.StopDownload()
             else:
+                guard.refused = 0
                 result = super().download(url)
             if guard.failure:
+                if guard.refused and not targets:
+                    # The host refused this very media, or failed on it. The
+                    # stop stays, as the protection means it to, but the media
+                    # is listed with why. Only a refusal of the file itself is
+                    # counted toward passing it by; a server error is not.
+                    counted = _not_served(guard.refused)
+                    if counted:
+                        refused_now = self.identity
+                    failed += 1
+                    failed_new += self.identity not in unsaved_known
+                    note_unsaved(unsaved.FAILED, _REFUSED_DETAIL if counted else _SERVER_ERROR_DETAIL,
+                                 media=self.current_media)
+                    emit({"type": "failed", "path": "", **_media_details(self.current_media)})
                 raise exception.AbortExtraction(guard.failure)
             if self.size_exceeded:
                 raise SizeLimit()
@@ -1726,8 +1831,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         ignored = history.ignored_media()
         try:
             unsaved_known = unsaved.identities(normalized.account, normalized.output_dir)
+            refused_runs = unsaved.refusals(normalized.account, normalized.output_dir)
         except OSError:
             unsaved_known = set()  # the list is only a convenience; saving never waits for it
+            refused_runs = {}
         if not targets:
             remembered = history.review_pending()
             review_unknown = remembered is None
@@ -1747,7 +1854,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 "records-changed": "다른 계정의 저장 기록을 합쳐 이번만 전체 목록을 확인합니다.",
             }.get(readiness, "이전 확인이 끝까지 되지 않아(첫 실행·중단·오류·시험 저장) 이번만 전체 목록을 확인합니다.")
             if quick_scan and review_pending:
-                scan_note += f" 지난번에 건너뛴 파일 {len(review_pending):,}개가 나올 때까지는 이어서 확인합니다."
+                # Files skipped in a save review, and media released from '직접 제외'.
+                scan_note += f" 지난번에 건너뛰었거나 제외를 해제한 파일 {len(review_pending):,}개가 나올 때까지는 이어서 확인합니다."
         run_id = history.start_run(normalized.folder_mode,
                                    scan_mode="retry" if targets else "quick" if quick_scan else "full",
                                    media_signature=normalized.media_signature)
@@ -1817,6 +1925,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         every_download_failed = bool(failed) and found_nothing
         failed_download_message = (f"미디어를 찾았지만 {failed:,}개를 저장하지 못했습니다. "
                                    "연결이 끊겼거나 파일을 쓰지 못했을 수 있습니다.")
+        if not targets and failed and not exit_code and (handler.fatal or every_download_failed):
+            # Files that failed are listed for another try and do not end the
+            # run by themselves. A run-ending cause logged with them (storage,
+            # login, a limit), or no file stored at all, still makes it an error.
+            exit_code = 4
         if stop_reason == "user":
             status, exit_code = "stopped", 0
             message = "저장을 중단했습니다. 다시 실행하면 저장한 파일은 건너뜁니다."
@@ -1854,9 +1967,15 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         if review_never:
             message += (f" ‘저장 안 함’으로 고른 파일 {review_never:,}개는 다시 묻지 않습니다. "
                         "필요하면 ‘저장 못 한 미디어’의 ‘직접 제외’에서 다시 받을 수 있습니다.")
+        if failed and status == "finished" and not targets:
+            failures_listed = True
+            message += f" 받지 못한 미디어 {failed:,}개는 건너뛰고 다른 Like를 이어서 확인했습니다."
         if size_skipped or failed:
             message += (f" 저장하지 못한 미디어 {size_skipped + failed:,}개는 ‘설정 › 고급 › 저장 못 한 미디어’에서 "
                         "이유를 확인하고 다시 시도할 수 있습니다.")
+        if preview_limited and status == "finished" and guard.retry_at:
+            # The save went on, but the next one is refused until this time.
+            message += f" 미리보기 요청이 X 요청 한도에 걸려 {guard.retry_label}(한국 시간) 이후에 다시 저장할 수 있습니다."
     except exception.StopExtraction:
         status, exit_code = "stopped", 0
         message = "저장을 중단했습니다."
@@ -1892,7 +2011,17 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             error_kind = "authentication"
         exit_code = 1
     finally:
-        remember_unsaved()
+        listed = remember_unsaved()
+        if not listed and failures_listed and status == "finished":
+            # The run finished past its failed files because they are listed for
+            # another try. Unlisted, they would hide behind the next quick save's
+            # stop: the run stays an error, so the next save checks the whole list.
+            status, exit_code = "error", 4
+            message = (f"미디어 {failed:,}개를 받지 못했고 ‘저장 못 한 미디어’ 목록에도 남기지 못했습니다. "
+                       "앱 데이터 폴더의 권한과 디스크 여유 공간을 확인해 주세요. 다음 저장에서 전체 목록을 다시 확인합니다.")
+        elif (listed and refused_now in unsaved_items and status == "error"
+              and refused_runs.get(refused_now, 0) + 1 >= REFUSED_LIMIT):
+            message += f" 같은 미디어에서 {REFUSED_LIMIT}번 멈춰 다음 저장부터는 이 미디어를 건너뜁니다."
         if history is not None:
             try:
                 # Persist completed retries even if a later tweet was stopped
@@ -1975,7 +2104,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         authentication_changed(handler.auth_state)
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,
           "history_run_id": run_id,
-          "size_skipped": size_skipped, "failed_media": failed,
+          "size_skipped": size_skipped, "failed_media": failed, "failed_new_media": failed_new,
           "review_skipped": review_skipped, "review_never": review_never,
           "metadata_failed": metadata_failed, "author_deferred": author_deferred,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,

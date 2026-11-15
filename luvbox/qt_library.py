@@ -347,7 +347,10 @@ class LibraryRepository:
                     entry = {"key": key, "caption": caption, "missing": kind != "ready", "favorite": is_fav}
                     if grouped:
                         size = stamp[2] if stamp is not None else row.get("filesize")
+                        # copy: a photo before it in the group has its bytes. Others that are not
+                        # kept are only alike (another size or quality) and are not offered as copies.
                         entry.update(group=int(row.get("cluster_id") or 0), keeper=row.get("cluster_rank") == 1,
+                                     copy=bool(row.get("cluster_copy")),
                                      group_size=int(row.get("cluster_size") or 0), detail=_format_size(size))
                     rows.append(entry)
                     last = row
@@ -1134,8 +1137,13 @@ class LibraryRepository:
                 clusters = cluster_duplicates(items, max_distance=4)
                 copy_keys = []
                 for group in clusters:
-                    for duplicate in group[1:]:
-                        copy_keys.append(duplicate["key"])
+                    # As the stored groups offer them: only a file whose bytes a photo before it has.
+                    seen = set()
+                    for member in group:
+                        digest = member["file_hash"]
+                        if digest and digest in seen:
+                            copy_keys.append(member["key"])
+                        seen.add(digest)
                 return copy_keys
         except Exception:
             return []
@@ -1260,11 +1268,15 @@ class LibraryRepository:
         the deletion worker moves a copy only while one of those is, at that
         moment, a different file with the same content. A group chosen whole
         keeps its first photo, so the view can never remove the last one.
+        A photo the view shows as only alike ('비슷함': neither kept nor a copy)
+        is marked ``_copy_near``; it stays unless a file with its bytes does.
         Returns the rows to move and how many chosen photos were kept back.
         """
         rule = store.duplicate_rule() if hasattr(store, "duplicate_rule") else "exact"
         groups = store.duplicate_members() if hasattr(store, "duplicate_members") else {}
         member_of = {member["identity"]: number for number, members in groups.items() for member in members}
+        first = {members[0]["identity"] for members in groups.values() if members}
+        copies = set(store.duplicate_copy_identities() or ()) if groups else set()
         chosen = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows}
         spared = set()
         for members in groups.values():
@@ -1278,7 +1290,8 @@ class LibraryRepository:
             keepers = [member["path"] for member in groups.get(member_of.get(identity), ())
                        if member["identity"] != identity and (member["identity"] not in chosen
                                                               or member["identity"] in spared)]
-            marked.append(dict(row, _copy_keepers=keepers, _copy_rule=rule or "exact"))
+            near = identity in member_of and identity not in first and identity not in copies
+            marked.append(dict(row, _copy_keepers=keepers, _copy_rule=rule or "exact", _copy_near=near))
         return marked, len(spared)
 
     def forget(self, keys, generation):
@@ -1492,6 +1505,7 @@ class LibraryController(QObject):
         self._duplicate_groups = []
         self._duplicate_model = DuplicateGroupModel(self)
         self._duplicate_hold = None      # rows to read again before the cards are redrawn in place
+        self._duplicate_return = None    # (opened, picked) to find again once the cards are read; keys without "g<n>_"
         self._distinct_count = 0         # "not duplicates" marks: whole groups and photos taken out of one
         self._distinct_undo = None       # the last such mark as (kind, what the catalog takes back)
         self._auto_classify = True       # classify newly saved photos without being asked
@@ -1619,7 +1633,7 @@ class LibraryController(QObject):
 
     @Property("QVariantList", notify=duplicateGroupsChanged)
     def duplicateGroups(self):
-        """Loaded duplicates as groups: [{group, size, items: [{key, caption, detail, thumbUrl, keeper, ...}]}]."""
+        """Loaded duplicates as groups: [{group, size, items: [{key, caption, detail, thumbUrl, keeper, copy, ...}]}]."""
         return self._duplicate_groups
 
     @Property(QObject, constant=True)
@@ -1672,6 +1686,7 @@ class LibraryController(QObject):
                 current["items"].append({
                     "key": row["key"], "caption": row["caption"], "detail": row.get("detail", ""),
                     "thumbUrl": self.model.thumb_url(row["key"]), "keeper": bool(row.get("keeper", False)),
+                    "copy": bool(row.get("copy", False)),
                     "favorite": bool(row.get("favorite", False)), "missing": bool(row.get("missing", False))})
             for index, group in enumerate(groups):
                 group["number"] = index + 1
@@ -1679,6 +1694,25 @@ class LibraryController(QObject):
             self._duplicate_groups = groups
             self._duplicate_model.adopt(groups)
             self.duplicateGroupsChanged.emit()
+        if self._duplicate_return is not None:
+            self._return_to_duplicates()
+
+    def _return_to_duplicates(self):
+        """The cards were read again with the same photos: open and pick them again under their new keys."""
+        (opened, picked), self._duplicate_return = self._duplicate_return, None
+        prefix = f"g{self._generation}_"
+        found = [prefix + key for key in picked if prefix + key in self.model._keys]
+        if found:
+            self._extend_selection(found, self._selection_keys)
+        if opened and prefix + opened in self.model._keys:
+            self.selectItem(prefix + opened)
+        elif opened:
+            # The photo left the list (a favorites filter): its preview closes instead of waiting.
+            self._selection_serial += 1
+            self._selected = {}
+            self._selection_key = ""
+            self._busy = False
+            self.changed.emit()
 
     @Slot("QVariantList", result=int)
     def addToSelection(self, keys):
@@ -1910,13 +1944,25 @@ class LibraryController(QObject):
         # The same listing read again (files were recycled, a save ended): duplicate cards keep their place.
         self._refresh(reload_authors=True, keep_place=True)
 
-    def _refresh(self, *, reload_authors=True, status="", keep_place=False):
+    def _refresh(self, *, reload_authors=True, status="", keep_place=False, keep_opened=False):
         if self._closed:
             return
-        # keep_place: the listing is the same one, minus what was just put away. In the duplicate
-        # view the cards then wait for the rows that were loaded before (see _rebuild_duplicate_groups).
-        self._hold_duplicates(max(self.model.count, self._duplicate_hold or 0)
-                              if keep_place and self._duplicate_only and self._duplicate_groups else None)
+        # keep_place: the listing is the same one, minus what was just put away (or, after a favorite,
+        # with another photo first in its group). In the duplicate view the cards then wait for the
+        # rows that were loaded before (see _rebuild_duplicate_groups).
+        holding = bool(keep_place and self._duplicate_only and self._duplicate_groups)
+        self._hold_duplicates(max(self.model.count, self._duplicate_hold or 0) if holding else None)
+        # keep_opened: the same photos come back (a favorite changed only which one a group keeps).
+        # Once the cards have been read again, the opened photo opens again and the picked photos
+        # are picked again (see _return_to_duplicates); until then the preview waits for its photo.
+        # A return still waiting carries over to the next reading of the same cards.
+        if not holding:
+            self._duplicate_return = None
+        elif keep_opened and self._duplicate_return is None:
+            prefix = f"g{self._generation}_"
+            opened = self._selection_key or self.selectedKey
+            picked = [key[len(prefix):] for key in self._selected_keys_order if key.startswith(prefix)]
+            self._duplicate_return = (opened[len(prefix):] if opened.startswith(prefix) else "", picked)
         self._generation += 1
         self._selection_serial += 1
         self._selected = {}
@@ -1924,16 +1970,15 @@ class LibraryController(QObject):
         self._navigation = None
         self._selection_anchor = ""
         self._band_base = None
+        self._busy = bool(self._duplicate_return and self._duplicate_return[0])
         self.clearSelection()
         # A folder-wide scan keeps running while the grid reloads. Clearing the
         # flag here let a second scan start and left the first one's button stuck.
         if self._exclusive:
-            self._busy = False
             if status:
                 self._status = status
         else:
             self._status = status
-            self._busy = False
         with self._condition:
             self._pending = deque(item for item in self._pending if item[0] in _EXCLUSIVE_ACTIONS)
             self._interactive.clear()
@@ -2216,7 +2261,11 @@ class LibraryController(QObject):
         if count:
             self._upsert_cached_user_tag(clean, delta=count)
             self._user_tags_loaded = False
-            self._refresh(reload_authors=False, status=f"선택한 {count:,}개 사진에 #{clean} 태그를 추가했습니다.")
+            # A tag does not change which photos are listed, so the place, the selection and an
+            # open preview stay. Only a tag named like the AI category on screen does: that label
+            # becomes the person's own tag and those photos leave the AI list.
+            self._settle(f"선택한 {count:,}개 사진에 #{clean} 태그를 추가했습니다.",
+                         reload=bool(self._ai_category) and clean == self._ai_category)
         return count
 
     @Slot()
@@ -2412,8 +2461,12 @@ class LibraryController(QObject):
             self.changed.emit()
             return 0
         copy_keys = self._repository.duplicate_copy_keys(self._generation)
+        # Photos of a group that are only alike (another size or quality) are never copies.
+        similar = sum(1 for row in self.model._rows
+                      if row.get("group") and not row.get("keeper") and not row.get("copy"))
+        left = f" 크기·화질만 다른 ‘비슷함’ {similar:,}장은 사본이 아니어서 고르지 않았습니다." if similar else ""
         if not copy_keys:
-            self._status = "선택할 중복 사본이 없습니다."
+            self._status = "선택할 중복 사본이 없습니다." + left
             self.changed.emit()
             return 0
         loaded_copies = [k for k in copy_keys if k in self.model._keys and k not in self._selection_keys]
@@ -2422,7 +2475,7 @@ class LibraryController(QObject):
         copy_keys = selectable[:capacity]
         if not copy_keys:
             self._status = ("한 번에 최대 2,000개를 선택할 수 있습니다." if not capacity else
-                            "현재 목록에 새로 선택할 중복 사본이 없습니다.")
+                            "현재 목록에 새로 선택할 중복 사본이 없습니다." + left)
             self.changed.emit()
             return 0
         self._selection_mode = True
@@ -2431,6 +2484,7 @@ class LibraryController(QObject):
         self._status = f"중복 사본 {len(copy_keys):,}개를 선택했습니다."
         if len(selectable) > capacity:
             self._status += " 한 번에 최대 2,000개를 선택할 수 있습니다."
+        self._status += left
         self.changed.emit()
         return len(copy_keys)
 
@@ -2457,7 +2511,9 @@ class LibraryController(QObject):
             self.changed.emit()
         self.model.setFavorite(key, new_state)
         if self._duplicate_only:
-            self._refresh(reload_authors=False)
+            # A favorite is the photo its group keeps. The groups stay: their cards are redrawn in
+            # place, and the photo opened and the photos picked are found again under the new keys.
+            self._refresh(reload_authors=False, keep_place=True, keep_opened=True)
         return new_state
 
     @Slot(str, result=str)

@@ -6,9 +6,15 @@ const wait = milliseconds => new Promise(resolve => setTimeout(resolve, millisec
 const publicError = "연결하지 못했습니다. X 로그인과 앱의 연결 대기 상태를 확인한 뒤 다시 시도해 주세요.";
 const progressStages = new Set(["extension_ready", "checking_account", "login_required",
   "account_changed", "account_error", "awaiting_approval"]);
-const errorCode = error => ["login_required", "account_changed", "account_error", "expired"].includes(error?.code)
-  ? error.code : "account_error";
+// app_gone: the app no longer listens (cancelled, closed or timed out); tab_closed:
+// the person closed the X tab the check opened. Neither is an X account problem.
+const errorCode = error => ["login_required", "account_changed", "account_error", "expired", "app_gone",
+  "tab_closed"].includes(error?.code) ? error.code : "account_error";
+// The app knows only the fixed progress stages; the others are told to it as account_error.
+const progressStage = code => progressStages.has(code) ? code : "account_error";
 function failure(code) { const error = new Error(); error.code = code; return error; }
+// A refused connection (TypeError) means nothing listens on the pairing port any more.
+const unreachable = error => error?.name === "TypeError";
 
 function pairingSource(sender) {
   if (sender.frameId !== 0 || !sender.tab || !Number.isInteger(sender.tab.id) || typeof sender.url !== "string") throw new Error();
@@ -87,19 +93,22 @@ function reportProgress(pairing, stage) {
   const sequence = pairing.sequence = (pairing.sequence || 0) + 1;
   // Serial delivery keeps stages ordered without retaining any cookie in the
   // progress payload. Older apps can reject /progress and still accept /session.
+  // Resolves to "gone" when the app has stopped listening (refused, or 410 for an
+  // ended pairing); anything else, including an older app's 400, is not that.
   pairing.progress = (pairing.progress || Promise.resolve()).then(async () => {
-    if (Date.now() > pairing.expires) return;
+    if (Date.now() > pairing.expires) return undefined;
     const envelope = await encryptPayload(pairing, {version: 1, stage, sequence}, "/progress");
-    await fetch(`http://127.0.0.1:${pairing.port}/progress`, {
+    const response = await fetch(`http://127.0.0.1:${pairing.port}/progress`, {
       method: "POST", mode: "cors", cache: "no-store", credentials: "omit", redirect: "error",
       referrerPolicy: "no-referrer", signal: AbortSignal.timeout(1500),
       headers: {"Content-Type": "application/json"}, body: JSON.stringify(envelope)
     });
-  }).catch(() => {});
+    return response.status === 410 ? "gone" : undefined;
+  }).catch(error => unreachable(error) ? "gone" : undefined);
   return pairing.progress;
 }
 
-async function inspectAccount(pairing) {
+async function inspectAccount(pairing, consentTabId) {
   // Opening a fresh same-profile tab avoids an old tab's stale account handle
   // being associated with the current account cookie after an X account switch.
   // The browser retains its existing login; no profile directory is accessed.
@@ -116,7 +125,8 @@ async function inspectAccount(pairing) {
     let profile;
     while (Date.now() < deadline && Date.now() < pairing.expires) {
       try {
-        const current = await api.tabs.get(tab.id);
+        let current;
+        try { current = await api.tabs.get(tab.id); } catch { throw failure("tab_closed"); }
         if (current.url) {
           const url = new URL(current.url);
           if (url.origin !== "https://x.com") throw failure("account_error");
@@ -141,7 +151,15 @@ async function inspectAccount(pairing) {
       display_name: pairing.session.display_name};
   } finally {
     if (tab?.id !== undefined) {
+      // Closing the check tab would show its left neighbour, which may be an X
+      // tab the person signed in with; bring the consent page back instead,
+      // unless the person had moved to another tab meanwhile.
+      let wasActive = false;
+      try { wasActive = (await api.tabs.get(tab.id)).active === true; } catch { /* Already closed. */ }
       try { await api.tabs.remove(tab.id); } catch { /* Already closed by user. */ }
+      if (wasActive && Number.isInteger(consentTabId)) {
+        try { await api.tabs.update(consentTabId, {active: true}); } catch { /* Consent tab closed. */ }
+      }
     }
   }
 }
@@ -167,13 +185,15 @@ async function dispatch(message, sender) {
     pairing.busy = true;
     pairing.session = undefined;
     try {
-      await reportProgress(pairing, "checking_account");
-      const result = await inspectAccount(pairing);
+      // Do not open an X tab for an app that has already stopped waiting.
+      if (await reportProgress(pairing, "checking_account") === "gone") throw failure("app_gone");
+      const result = await inspectAccount(pairing, tabId);
       await reportProgress(pairing, "awaiting_approval");
       return result;
     } catch (error) {
       const code = errorCode(error);
-      await reportProgress(pairing, code === "expired" ? "account_error" : code);
+      if (code === "app_gone") pairings.delete(tabId);
+      else await reportProgress(pairing, progressStage(code));
       throw failure(code);
     }
     finally { pairing.busy = false; }
@@ -186,18 +206,28 @@ async function dispatch(message, sender) {
       if (current.auth_token !== pairing.session.auth_token || current.user_id !== pairing.session.user_id) throw failure("account_changed");
       if (Date.now() > pairing.expires) throw failure("expired");
       const envelope = await encryptSession(pairing);
-      const response = await fetch(`http://127.0.0.1:${pairing.port}/session`, {
-        method: "POST", mode: "cors", cache: "no-store", credentials: "omit", redirect: "error",
-        referrerPolicy: "no-referrer", signal: AbortSignal.timeout(5000),
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(envelope)
-      });
+      let response;
+      try {
+        response = await fetch(`http://127.0.0.1:${pairing.port}/session`, {
+          method: "POST", mode: "cors", cache: "no-store", credentials: "omit", redirect: "error",
+          referrerPolicy: "no-referrer", signal: AbortSignal.timeout(5000),
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(envelope)
+        });
+      } catch (error) {
+        // Refused or never answered: the app has stopped waiting for this pairing.
+        if (unreachable(error) || error?.name === "TimeoutError") throw failure("app_gone");
+        throw error;
+      }
+      // 409/410: the app already ended this pairing (cancelled, answered or timed out).
+      if (response.status === 409 || response.status === 410) throw failure("app_gone");
       if (!response.ok || !(await response.json()).ok) throw new Error();
       pairings.delete(tabId);
       return {ok: true};
     } catch (error) {
       const code = errorCode(error);
-      await reportProgress(pairing, code === "expired" ? "account_error" : code);
+      if (code === "app_gone") pairings.delete(tabId);
+      else await reportProgress(pairing, progressStage(code));
       throw failure(code);
     } finally {
       // Every submission requires a new account check, including a failed one.

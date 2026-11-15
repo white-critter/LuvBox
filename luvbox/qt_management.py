@@ -69,6 +69,12 @@ class ManagementController(QObject):
         if any("_copy_keepers" in row for row in self._delete["rows"]):
             # From the duplicate view: say what protects the last file of a group.
             summary += "보내기 직전에 같은 내용의 다른 파일이 남는지 하나씩 확인하고, 확인되지 않으면 그대로 둡니다.\n"
+            # Photos shown as only alike ('비슷함'): no file before them has their bytes, so they
+            # usually stay. Said before the move, not only in the result.
+            similar = sum(1 for row in self._delete["rows"] if row.get("_copy_near"))
+            if similar:
+                summary += (f"그중 {similar:,}장은 크기·화질만 다른 ‘비슷함’ 사진이라, "
+                            "내용이 완전히 같은 파일이 남지 않으면 휴지통으로 보내지 않습니다.\n")
         kept = self._delete.get("kept") or 0
         if kept:
             # A whole group was chosen in the duplicate view: its first photo stays.

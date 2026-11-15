@@ -41,6 +41,9 @@ class UpdateController(QObject):
         self._error = ""
         self._progress = 0.0
         self._dismissed = False
+        # The release a click was fetching turned out to be taken down, and nothing
+        # newer replaced it: the notice stays to say so instead of vanishing.
+        self._withdrawn = False
         self._manual = False
         self._restart = False
         self._closing = False
@@ -108,7 +111,7 @@ class UpdateController(QObject):
 
     @Property(bool, notify=changed)
     def noticeVisible(self):
-        return bool(self._found and not self._dismissed and not self._closing
+        return bool((self._found or self._withdrawn) and not self._dismissed and not self._closing
                     and self._state in {"available", "downloading", "ready", "failed"})
 
     @Property(str, notify=changed)
@@ -175,13 +178,15 @@ class UpdateController(QObject):
             return
         self._manual = True
         self._error = ""
+        self._withdrawn = False
         if self._queue("check"):
             self._state = "checking"
             self.changed.emit()
 
     @Slot()
     def install(self):
-        """The click: fetch the release's program, verify it and put it in the launcher's place."""
+        """The click: read the latest release again, fetch its program, verify it and put it in the
+        launcher's place."""
         if self._closing or self._state not in {"available", "failed"} or not self.canInstall:
             return
         launcher = self._launcher()
@@ -200,7 +205,8 @@ class UpdateController(QObject):
 
     @Slot()
     def dismiss(self):
-        """Hide the notice until the next start; settings keep showing the new version."""
+        """Hide the notice until the next start or a check by hand that finds a release;
+        settings keep showing the new version."""
         if not self._dismissed:
             self._dismissed = True
             self.changed.emit()
@@ -256,13 +262,7 @@ class UpdateController(QObject):
                 continue
             try:
                 if kind == "check":
-                    found = updater.check(self._current, self._source)
-                    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-                    remembered = ({"version": found["version"], "notes": found["notes"],
-                                   "installable": found["installable"], "size": found["size"]}
-                                  if found["newer"] else {})
-                    self._remember({"update_checked_at": stamp, "update_found": remembered})
-                    result = ("checked", found, stamp)
+                    result = ("checked", *self._check())
                 else:
                     result = self._install(**details)
             except updater.UpdateError as error:
@@ -271,7 +271,34 @@ class UpdateController(QObject):
                 result = ("failed", kind, "unexpected", updater.MESSAGES["unexpected"])
             self._delivered.emit(result)
 
+    def _check(self):
+        """Read the latest release and remember what it says for the next start: (found, stamp)."""
+        found = updater.check(self._current, self._source)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        remembered = ({"version": found["version"], "notes": found["notes"],
+                       "installable": found["installable"], "size": found["size"]}
+                      if found["newer"] else {})
+        self._remember({"update_checked_at": stamp, "update_found": remembered})
+        return found, stamp
+
     def _install(self, version, size, launcher):
+        # The release on offer may come from a check hours ago, and since then been
+        # replaced by a newer one and deleted. Read the latest again (one small
+        # request) and fetch what it names. When it cannot be read just now, the
+        # one on offer is fetched; its download tells whether it is still there.
+        try:
+            found, stamp = self._check()
+        except updater.UpdateError:
+            found = None
+        if found is not None:
+            if not (found["newer"] and found["installable"]):
+                # Nothing here to fetch: a release for the release page, or the one
+                # on offer was taken down and the running version is the latest.
+                return ("renewed", found, stamp, False, "" if found["newer"] else version)
+            self._delivered.emit(("renewed", found, stamp, True, ""))
+            version, size = found["version"], found["size"]
+        if self._cancel.is_set():
+            raise updater.UpdateError("cancelled")   # 받기 취소, or closing, while it was read
         folder = self._folder_path()
         updater.clear_downloads(folder)
         last = [0.0, -1.0]
@@ -283,8 +310,19 @@ class UpdateController(QObject):
                 last[0], last[1] = now, fraction
                 self._delivered.emit(("progress", fraction))
 
-        path, digest = updater.download(version, folder, self._source, size=size, progress=progress,
-                                        cancelled=self._cancel.is_set)
+        try:
+            path, digest = updater.download(version, folder, self._source, size=size, progress=progress,
+                                            cancelled=self._cancel.is_set)
+        except updater.UpdateError as error:
+            if error.kind != "gone":
+                raise
+            # No longer published: never offer it again, and look for what replaced
+            # it. When that look fails, its own reason is what the person sees.
+            self._remember({"update_found": {}})
+            found, stamp = self._check()
+            if found["version"] == version:
+                self._remember({"update_found": {}})   # still named the latest, but not there
+            return ("renewed", found, stamp, False, version)
         with self._lock:
             if self._closing or self._cancel.is_set():
                 raise updater.UpdateError("cancelled")
@@ -311,8 +349,10 @@ class UpdateController(QObject):
             found, self._checked_at = result[1], result[2]
             if self._state in {"downloading", "ready"}:
                 return
+            self._withdrawn = False
             if found["newer"]:
-                if not self._found or self._found["version"] != found["version"]:
+                # A different release, or the person asking (지금 확인) after "나중에".
+                if self._manual or not self._found or self._found["version"] != found["version"]:
                     self._dismissed = False
                 self._found = {name: found[name] for name in ("version", "notes", "installable", "size")}
                 self._state = "available"
@@ -320,6 +360,22 @@ class UpdateController(QObject):
                 self._found = None
                 self._state = "current"
             self._error = ""
+        elif kind == "renewed":
+            # The click read the latest release again: (found, stamp, fetching it now,
+            # the version that turned out to be taken down or "").
+            found, self._checked_at, fetching, gone = result[1], result[2], result[3], result[4]
+            if self._state != "downloading":
+                return
+            if found["newer"] and found["version"] != gone:
+                self._found = {name: found[name] for name in ("version", "notes", "installable", "size")}
+            else:
+                self._found = None
+            if not fetching:
+                self._progress = 0.0
+                self._error = updater.MESSAGES["gone"] if gone else ""
+                self._state = "available" if self._found else "failed"
+                self._withdrawn = not self._found
+                self._dismissed = False
         elif kind == "installed":
             self._progress = 1.0
             self._state = "ready"

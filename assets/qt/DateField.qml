@@ -86,8 +86,9 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
+        // A click does not take the keys: once the calendar closes they are back where they
+        // were (in the gallery, with the pictures). Tab reaches the field for the keyboard.
         onClicked: event => {
-            field.forceActiveFocus()
             if (field.text.length > 0 && event.x >= field.width - 26)
                 field.cleared()
             else
