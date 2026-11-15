@@ -49,7 +49,7 @@ ApplicationWindow {
     color: Theme.window
     // The window is lit like the startup screen: a little lighter at the top, with
     // that screen's red light falling in from above. While a save runs on the
-    // save screen the light breathes, as it does while the app is starting.
+    // save screen the light breathes; the startup screen's light stays still.
     readonly property bool lightBreathing: !!app && app.download.running && currentScreen === 0 && active
     background: Rectangle {
         gradient: Gradient {

@@ -327,13 +327,6 @@ namespace LuvBox
         public readonly string AppRoot;
         public readonly string VersionRoot;
 
-        // Read by the splash while a worker thread unpacks.
-        public long VerifiedBytes;
-        public long WrittenBytes;
-        public long TotalBytes = 1;
-        public volatile bool Waiting;
-        public volatile bool Updating;
-
         // The one handle the archive is checked and then unpacked through. An
         // update may rename LuvBox.exe and put a newer file under its name at
         // any moment; this handle keeps reading the file that was checked.
@@ -358,17 +351,6 @@ namespace LuvBox
         public string InnerPath
         {
             get { return Path.Combine(VersionRoot, InnerName); }
-        }
-
-        public double Progress
-        {
-            get
-            {
-                // Checking the archive is quick; unpacking is most of the wait.
-                double verified = Footer.Length > 0 ? (double)Interlocked.Read(ref VerifiedBytes) / Footer.Length : 1;
-                double written = (double)Interlocked.Read(ref WrittenBytes) / Math.Max(1, Interlocked.Read(ref TotalBytes));
-                return Math.Max(0, Math.Min(1, 0.08 * verified + 0.92 * written));
-            }
         }
 
         /// <summary>This exact archive is already unpacked and can be started.</summary>
@@ -408,7 +390,6 @@ namespace LuvBox
                 if (Ready())
                     return;
                 RemoveLeftovers();
-                Updating = OtherVersionExists();
                 using (FileStream source = OpenSelf())
                 {
                     // This handle stays open from the check to the last file and
@@ -499,21 +480,15 @@ namespace LuvBox
             {
                 try
                 {
-                    FileStream gate = new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
-                    Waiting = false;
-                    return gate;
+                    return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
                 }
                 catch (IOException)
                 {
+                    // Finished by the other launcher; no need for the gate.
                     if (Ready())
-                    {
-                        // Finished by the other launcher; no need for the gate.
-                        Waiting = false;
                         return null;
-                    }
                     if (DateTime.UtcNow > limit)
                         throw new LauncherError(ExitCodes.Busy, Messages.Busy);
-                    Waiting = true;
                     Thread.Sleep(200);
                 }
                 catch (UnauthorizedAccessException)
@@ -523,14 +498,17 @@ namespace LuvBox
             }
         }
 
-        bool OtherVersionExists()
+        /// <summary>An earlier version is unpacked here: starting this one is an update.</summary>
+        public bool OlderVersionExists()
         {
             try
             {
+                Version current = new Version(Footer.Version);
                 foreach (string folder in Directory.GetDirectories(AppRoot))
                 {
                     string name = Path.GetFileName(folder);
-                    if (VersionFolder.IsMatch(name) && name != Footer.Version && File.Exists(Path.Combine(folder, Marker)))
+                    if (VersionFolder.IsMatch(name) && File.Exists(Path.Combine(folder, Marker))
+                            && new Version(name) < current)
                         return true;
                 }
             }
@@ -552,7 +530,6 @@ namespace LuvBox
                         throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
                     hash.TransformBlock(buffer, 0, read, null, 0);
                     remaining -= read;
-                    Interlocked.Add(ref VerifiedBytes, read);
                 }
                 hash.TransformFinalBlock(buffer, 0, 0);
                 byte[] actual = hash.Hash;
@@ -606,7 +583,6 @@ namespace LuvBox
         {
             string prefix = root.EndsWith("\\", StringComparison.Ordinal) ? root : root + "\\";
             List<string> targets = new List<string>();
-            long total = 0;
             using (ZipArchive archive = OpenArchive())
             {
                 HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -625,12 +601,10 @@ namespace LuvBox
                             throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
                     }
                     targets.Add(entry.FullName.EndsWith("/", StringComparison.Ordinal) ? null : target);
-                    total += entry.Length;
                 }
             }
             if (targets.Count == 0)
                 throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
-            Interlocked.Exchange(ref TotalBytes, Math.Max(1, total));
 
             int next = -1;
             Exception failure = null;
@@ -668,7 +642,6 @@ namespace LuvBox
                                     {
                                         output.Write(buffer, 0, read);
                                         written += read;
-                                        Interlocked.Add(ref WrittenBytes, read);
                                     }
                                 }
                                 if (written != entry.Length)
@@ -965,11 +938,6 @@ namespace LuvBox
             return values.ContainsKey(key) ? values[key][0] : "";
         }
 
-        public List<string> Lines(string key)
-        {
-            return values.ContainsKey(key) ? values[key] : new List<string>();
-        }
-
         public int[] Numbers(string key)
         {
             string[] parts = Text(key).Split(',');
@@ -990,7 +958,6 @@ namespace LuvBox
     {
         public Installation Installation;
         public string Arguments;
-        public volatile bool Unpacking;
         public volatile bool Finished;
         public volatile LauncherError Error;
         public volatile int ExitCode;
@@ -1012,7 +979,6 @@ namespace LuvBox
         readonly PrivateFontCollection fonts = new PrivateFontCollection();
         IntPtr fontMemory = IntPtr.Zero;
         Font statusFont;
-        Font tipFont;
         Font versionFont;
 
         IntPtr screen = IntPtr.Zero;
@@ -1021,16 +987,9 @@ namespace LuvBox
         IntPtr previous = IntPtr.Zero;
         Bitmap canvas;
 
-        string status = "";
-        string statusBefore = "";
-        double statusChanged = -10;
-        List<string> tips = new List<string>();
-        int tipIndex;
-        string tipBefore = "";
-        double tipChanged = -10;
-        double shown;
+        readonly string status;
         double finishedAt = -1;
-        double openSince = -1;
+        int presented = -1;
         bool closing;
 
         public Splash(Session session)
@@ -1046,6 +1005,11 @@ namespace LuvBox
             glow = Layer(assembly, "LuvBox.glow.png");
             mark = Layer(assembly, "LuvBox.mark.png");
             LoadFonts(assembly);
+            // One line, chosen before the card shows and kept until the window
+            // is up: this version replacing an earlier one, or any other start.
+            Installation installation = session.Installation;
+            status = settings.Text(!installation.Ready() && installation.OlderVersionExists()
+                                   ? "status.update" : "status.open");
 
             Text = "LuvBox";
             FormBorderStyle = FormBorderStyle.None;
@@ -1120,7 +1084,6 @@ namespace LuvBox
             if (family == null)
                 family = new FontFamily("Malgun Gothic");
             statusFont = new Font(family, (float)(settings.Number("status_size") * scale), FontStyle.Regular, GraphicsUnit.Pixel);
-            tipFont = new Font(family, (float)(settings.Number("tip_size") * scale), FontStyle.Regular, GraphicsUnit.Pixel);
             versionFont = new Font(family, (float)(settings.Number("version_size") * scale), FontStyle.Regular, GraphicsUnit.Pixel);
         }
 
@@ -1138,8 +1101,10 @@ namespace LuvBox
             IntPtr bits;
             surface = Native.CreateDIBSection(screen, ref header, 0, out bits, IntPtr.Zero, 0);
             previous = Native.SelectObject(memory, surface);
-            // Draw straight into the memory Windows blends from: no copy per frame.
+            // Draw once, straight into the memory Windows blends from. Nothing on
+            // the card moves; the timer only fades the whole card in and out.
             canvas = new Bitmap(pixelWidth, pixelHeight, pixelWidth * 4, PixelFormat.Format32bppPArgb, bits);
+            Render();
             Advance();
             timer.Start();
             Thread worker = new Thread(Work);
@@ -1178,11 +1143,7 @@ namespace LuvBox
             {
                 Installation installation = session.Installation;
                 if (!installation.Ready())
-                {
-                    session.Unpacking = true;
                     installation.Prepare();
-                    session.Unpacking = false;
-                }
                 session.ExitCode = Program.RunInteractive(installation, session.Arguments);
             }
             catch (LauncherError error)
@@ -1193,58 +1154,17 @@ namespace LuvBox
             {
                 session.Error = new LauncherError(ExitCodes.StartFailed, Messages.StartFailed);
             }
-            session.Unpacking = false;
             session.Finished = true;
-        }
-
-        void SetStatus(string text, double now)
-        {
-            if (text == status)
-                return;
-            statusBefore = status;
-            status = text;
-            statusChanged = now;
-        }
-
-        void SetTips(List<string> lines, double now)
-        {
-            if (ReferenceEquals(lines, tips) || lines.Count == 0)
-                return;
-            tipBefore = tips.Count > 0 ? tips[tipIndex % tips.Count] : "";
-            tips = lines;
-            tipIndex = 0;
-            tipChanged = now;
         }
 
         void Advance()
         {
             double now = clock.Elapsed.TotalSeconds;
-            Installation installation = session.Installation;
             if (session.Error != null)
             {
                 closing = true;
                 Close();
                 return;
-            }
-            if (session.Unpacking)
-            {
-                SetStatus(settings.Text(installation.Waiting ? "status.wait"
-                                        : installation.Updating ? "status.update" : "status.first"), now);
-                SetTips(settings.Lines("tip.unpack"), now);
-                shown += (installation.Progress - shown) * 0.25;
-            }
-            else
-            {
-                SetStatus(settings.Text("status.open"), now);
-                SetTips(settings.Lines("tip.open"), now);
-                if (openSince < 0)
-                    openSince = now;
-            }
-            if (tips.Count > 1 && now - tipChanged > 2.6)
-            {
-                tipBefore = tips[tipIndex % tips.Count];
-                tipIndex = (tipIndex + 1) % tips.Count;
-                tipChanged = now;
             }
 
             double opacity = Math.Min(1.0, now / 0.18);
@@ -1260,47 +1180,29 @@ namespace LuvBox
                     return;
                 }
             }
-            Render(now);
-            Present((byte)Math.Round(255 * Math.Max(0, Math.Min(1, opacity))));
+            int alpha = (int)Math.Round(255 * Math.Max(0, Math.Min(1, opacity)));
+            if (alpha != presented)
+            {
+                presented = alpha;
+                Present((byte)alpha);
+            }
         }
 
-        static double Ease(double value)
-        {
-            value = Math.Max(0, Math.Min(1, value));
-            return value * value * (3 - 2 * value);
-        }
-
-        void Render(double now)
+        void Render()
         {
             using (Graphics graphics = Graphics.FromImage(canvas))
             {
                 graphics.CompositingMode = CompositingMode.SourceCopy;
                 graphics.DrawImageUnscaled(card, 0, 0);
                 graphics.CompositingMode = CompositingMode.SourceOver;
-                // The light behind the heart breathes slowly.
-                float breath = (float)(0.62 + 0.30 * Math.Sin(now * 2 * Math.PI / 3.2));
-                using (ImageAttributes attributes = new ImageAttributes())
-                {
-                    ColorMatrix matrix = new ColorMatrix();
-                    matrix.Matrix33 = breath;
-                    attributes.SetColorMatrix(matrix);
-                    graphics.DrawImage(glow, new Rectangle(0, 0, pixelWidth, pixelHeight), 0, 0, pixelWidth, pixelHeight,
-                                       GraphicsUnit.Pixel, attributes);
-                }
+                // The red light behind the heart, at the strength drawn into it.
+                graphics.DrawImageUnscaled(glow, 0, 0);
                 graphics.DrawImageUnscaled(mark, 0, 0);
 
                 graphics.SmoothingMode = SmoothingMode.AntiAlias;
                 graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 graphics.TextRenderingHint = TextRenderingHint.AntiAlias;
-                double statusFade = Ease((now - statusChanged) / 0.30);
-                DrawLine(graphics, statusBefore, statusFont, settings.Number("status_y"), Color.FromArgb(244, 241, 241), 1 - statusFade);
-                DrawLine(graphics, status, statusFont, settings.Number("status_y"), Color.FromArgb(244, 241, 241), statusFade);
-                double tipFade = Ease((now - tipChanged) / 0.35);
-                DrawLine(graphics, tipBefore, tipFont, settings.Number("tip_y"), Color.FromArgb(142, 132, 134), 1 - tipFade);
-                if (tips.Count > 0)
-                    DrawLine(graphics, tips[tipIndex % tips.Count], tipFont, settings.Number("tip_y"),
-                             Color.FromArgb(142, 132, 134), tipFade);
-                DrawBar(graphics, now);
+                DrawLine(graphics, status, statusFont, settings.Number("status_y"), Color.FromArgb(214, 206, 208));
                 using (Brush brush = new SolidBrush(Color.FromArgb(104, 96, 98)))
                 using (StringFormat format = new StringFormat(StringFormat.GenericTypographic))
                 {
@@ -1313,11 +1215,11 @@ namespace LuvBox
             }
         }
 
-        void DrawLine(Graphics graphics, string text, Font font, int centerY, Color color, double strength)
+        void DrawLine(Graphics graphics, string text, Font font, int centerY, Color color)
         {
-            if (string.IsNullOrEmpty(text) || strength <= 0.01)
+            if (string.IsNullOrEmpty(text))
                 return;
-            using (Brush brush = new SolidBrush(Color.FromArgb((int)Math.Round(255 * Math.Min(1, strength)), color)))
+            using (Brush brush = new SolidBrush(color))
             using (StringFormat format = new StringFormat(StringFormat.GenericTypographic))
             {
                 format.Alignment = StringAlignment.Center;
@@ -1325,51 +1227,6 @@ namespace LuvBox
                 format.FormatFlags |= StringFormatFlags.NoWrap;
                 graphics.DrawString(text, font, brush, pixelWidth / 2f, (float)(centerY * scale), format);
             }
-        }
-
-        static GraphicsPath Pill(RectangleF bounds)
-        {
-            GraphicsPath path = new GraphicsPath();
-            float diameter = Math.Min(bounds.Height, bounds.Width);
-            if (diameter <= 0.01f)
-                return path;
-            path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 90, 180);
-            path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 180);
-            path.CloseFigure();
-            return path;
-        }
-
-        void DrawBar(Graphics graphics, double now)
-        {
-            int[] bar = settings.Numbers("bar");
-            RectangleF track = new RectangleF((float)(bar[0] * scale), (float)(bar[1] * scale),
-                                              (float)(bar[2] * scale), (float)(bar[3] * scale));
-            using (GraphicsPath path = Pill(track))
-            using (Brush brush = new SolidBrush(Color.FromArgb(42, 42, 42)))
-                graphics.FillPath(brush, path);
-            RectangleF fill;
-            if (session.Unpacking)
-            {
-                fill = new RectangleF(track.Left, track.Top, (float)Math.Max(track.Height, track.Width * shown), track.Height);
-            }
-            else
-            {
-                // Nothing to count while the application loads: a short light
-                // glides across instead of a bar that pretends to know.
-                double phase = ((now - openSince) % 1.5) / 1.5;
-                double width = track.Width * 0.32;
-                double left = track.Left - width + (track.Width + width) * Ease(phase);
-                float start = (float)Math.Max(track.Left, left);
-                float end = (float)Math.Min(track.Right, left + width);
-                fill = new RectangleF(start, track.Top, Math.Max(0, end - start), track.Height);
-            }
-            if (fill.Width < track.Height)
-                return;
-            using (GraphicsPath path = Pill(fill))
-            using (LinearGradientBrush brush = new LinearGradientBrush(
-                new RectangleF(fill.Left - 1, fill.Top, fill.Width + 2, fill.Height),
-                Color.FromArgb(217, 54, 69), Color.FromArgb(255, 77, 79), LinearGradientMode.Horizontal))
-                graphics.FillPath(brush, path);
         }
 
         void Present(byte opacity)
@@ -1545,9 +1402,19 @@ namespace LuvBox
                             return child.ExitCode;
                         // An application that never signals (an error box, an
                         // older build) still ends the splash soon after a window shows.
-                        child.Refresh();
-                        if (windowSeen < 0 && child.MainWindowHandle != IntPtr.Zero)
-                            windowSeen = waited.ElapsedMilliseconds;
+                        try
+                        {
+                            child.Refresh();
+                            if (windowSeen < 0 && child.MainWindowHandle != IntPtr.Zero)
+                                windowSeen = waited.ElapsedMilliseconds;
+                        }
+                        catch (InvalidOperationException)
+                        {
+                            // It ended after HasExited was read (Windows can drop an
+                            // ending process from its list first): the next round
+                            // reports its signal or its own code, not a failed start.
+                            continue;
+                        }
                         if (windowSeen >= 0 && waited.ElapsedMilliseconds - windowSeen > 2500)
                             return 0;
                         if (waited.ElapsedMilliseconds > 120000)

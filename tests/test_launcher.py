@@ -63,6 +63,49 @@ static class StandIn
 """
 
 
+# Calls the launcher's own plain-start wait (Program.RunInteractive) without the
+# splash, many times, against the stand-in ending on its own after a stay that
+# steps through a range. Prints each result with how often it came back.
+POLL_HARNESS = r"""
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+
+static class PollHarness
+{
+    static int Main(string[] args)
+    {
+        string program = args[0];
+        int runs = int.Parse(args[1]), from = int.Parse(args[2]), to = int.Parse(args[3]);
+        Assembly launcher = Assembly.LoadFrom(program);
+        Type footerType = launcher.GetType("LuvBox.Footer", true);
+        Type installationType = launcher.GetType("LuvBox.Installation", true);
+        object footer = footerType.GetMethod("Read", new Type[] { typeof(string) }).Invoke(null, new object[] { program });
+        object installation = Activator.CreateInstance(installationType,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, new object[] { program, footer }, null);
+        if (!(bool)installationType.GetMethod("Ready").Invoke(installation, null))
+            return 2;
+        MethodInfo wait = launcher.GetType("LuvBox.Program", true).GetMethod("RunInteractive",
+            BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
+        SortedDictionary<string, int> results = new SortedDictionary<string, int>();
+        for (int index = 0; index < runs; index++)
+        {
+            Environment.SetEnvironmentVariable("STANDIN_STAY_MS", (from + (to - from) * index / Math.Max(1, runs - 1)).ToString());
+            string result;
+            try { result = wait.Invoke(null, new object[] { installation, "" }).ToString(); }
+            catch (TargetInvocationException error) { result = error.InnerException.GetType().Name; }
+            int seen;
+            results.TryGetValue(result, out seen);
+            results[result] = seen + 1;
+        }
+        foreach (KeyValuePair<string, int> pair in results)
+            Console.Write(pair.Key + ":" + pair.Value + " ");
+        return 0;
+    }
+}
+"""
+
+
 def _compiler():
     try:
         return build_launcher.compiler()
@@ -177,6 +220,31 @@ class LauncherTests(unittest.TestCase):
         code, report = self.run_program(STANDIN_EXIT=5)
         self.assertEqual(code, 5)
         self.assertIsNotNone(report)
+
+    def test_an_application_ending_while_it_is_polled_is_never_reported_as_a_failed_start(self):
+        # Windows can drop an ending process from its list before HasExited
+        # turns true; reading MainWindowHandle then throws. 1.10.2 turned that
+        # into "start failed" (75) for about one start in seven whose
+        # application ended on its own. The plain-start wait is called here
+        # without its splash, so no window shows, with ends spread over every
+        # point of its 100 ms round.
+        code, _report = self.run_program("--check")
+        self.assertEqual(code, 0)
+        harness = self.work / "poll-harness.exe"
+        if not harness.exists():
+            source = self.work / "poll-harness.cs"
+            source.write_text(POLL_HARNESS, encoding="utf-8")
+            result = subprocess.run([str(_compiler()), "/nologo", "/target:exe", "/platform:x64",
+                                     f"/out:{harness}", str(source)], capture_output=True, text=True,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        environment, _report = self.environment(STANDIN_EXIT=5)
+        environment.pop("STANDIN_REPORT")
+        result = subprocess.run([str(harness), str(self.program), "60", "60", "160"], env=environment,
+                                capture_output=True, text=True, timeout=300,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.split(), ["5:60"])
 
     def damaged_copy(self, change):
         data = bytearray(self.program.read_bytes())

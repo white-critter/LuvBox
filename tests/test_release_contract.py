@@ -161,21 +161,25 @@ class ReleaseContractTests(unittest.TestCase):
 class SplashAssetTests(unittest.TestCase):
     def test_wording_and_layout_come_from_one_file_with_every_line_the_launcher_asks_for(self):
         settings = draw_splash.read_settings()
-        self.assertEqual(settings["status.first"], ["처음 실행 준비 중 · 한 번만 걸려요"])
+        # One fixed line that only tells an update from any other start:
+        # no lines taking turns, no progress bar.
+        self.assertEqual(settings["status.update"], ["새 버전으로 업데이트하는 중"])
         self.assertEqual(settings["status.open"], ["보관함을 여는 중"])
-        for key in ("status.update", "status.wait", "wordmark", "tagline"):
-            self.assertEqual(len(settings[key]), 1, key)
-            self.assertTrue(settings[key][0])
-        for key in ("tip.unpack", "tip.open"):
-            self.assertGreaterEqual(len(settings[key]), 3, key)
-            self.assertEqual(len(set(settings[key])), len(settings[key]), key)
-            for line in settings[key]:
-                # Short lines: they must fit the card at the tip size.
-                self.assertLessEqual(len(line), 22, line)
-        source = (ROOT / "tools" / "launcher" / "Launcher.cs").read_text(encoding="utf-8")
-        asked = set(re.findall(r'settings\.(?:Text|Lines|Number|Numbers)\("([^"]+)"\)', source))
-        self.assertTrue(asked)
+        self.assertEqual({key for key in settings if key.startswith(("status.", "tip."))},
+                         {"status.update", "status.open"})
+        self.assertNotIn("bar", settings)
+        for key, values in settings.items():
+            self.assertEqual(len(values), 1, key)
+            self.assertTrue(values[0], key)
+        launcher = (ROOT / "tools" / "launcher" / "Launcher.cs").read_text(encoding="utf-8")
+        drawer = (ROOT / "tools" / "draw_splash.py").read_text(encoding="utf-8")
+        asked = set(re.findall(r'settings\.(?:Text|Number|Numbers)\("([^"]+)"\)', launcher))
+        asked |= set(re.findall(r'"(status\.[a-z]+)"', launcher))
+        self.assertLessEqual({"status.update", "status.open", "status_y", "version_y"}, asked)
         self.assertEqual(asked - set(settings), set())
+        # Every value is read by one side or the other: no wording left behind.
+        for key in settings:
+            self.assertTrue(f'"{key}"' in launcher or f'"{key}"' in drawer, key)
 
     def test_layers_are_twice_the_layout_size_with_transparent_corners(self):
         settings = draw_splash.read_settings()
