@@ -471,9 +471,13 @@ class OtherScreenTests(unittest.TestCase):
         # Without a GUI application there are no screens: the place is handed back unchanged.
         application = QCoreApplication.instance() or QCoreApplication([])
         self.assertNotIsInstance(application, QGuiApplication)
-        # The method uses nothing of the controller itself.
+        # The methods use nothing of the controller itself.
         self.assertEqual(qt_app.ApplicationController.normalPlaceOnScreen(None, 300, 200, 980, 680, 3500, 1100),
                          [300, 200, 980, 680])
+        # Nor is there a free area to grow the window for a saved-file card into: the window then
+        # uses the whole screen's height (MainWindow.qml's screenHeightLimit).
+        self.assertEqual(qt_app.ApplicationController.screenArea(None, 3500, 1100), [])
+        self.assertIsNone(qt_app._screen_at(3500, 1100))
 
 
 @unittest.skipUnless(_QT_AVAILABLE, "optional Qt dependencies are not installed")

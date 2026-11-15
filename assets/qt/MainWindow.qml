@@ -180,15 +180,40 @@ ApplicationWindow {
         })
     }
 
+    // The part of this window's screen that the taskbar leaves, as [x, y, width, height]. QML
+    // knows the screen's whole area but not that part, so the controller is asked; without an
+    // answer, the whole screen counts.
+    function screenFreeArea() {
+        const screen = window.screen
+        if (!screen || screen.width <= 0 || screen.height <= 0)
+            return []
+        const area = app ? app.screenArea(screen.virtualX + Math.floor(screen.width / 2),
+                                          screen.virtualY + Math.floor(screen.height / 2)) : []
+        if (area.length === 4 && area[2] > 0 && area[3] > 0)
+            return area
+        return [screen.virtualX, screen.virtualY, screen.width, screen.height]
+    }
+
     function screenHeightLimit() {
-        // The virtual desktop spans every monitor. Grow only within the screen this window is on.
+        // The virtual desktop spans every monitor. No taller than the free part of the screen this
+        // window is on, less some room.
         let available = Screen.desktopAvailableHeight
-        const geometry = window.screen ? window.screen.availableGeometry : null
-        if (geometry && geometry.height > 0)
-            available = Math.min(available, geometry.height)
+        const area = screenFreeArea()
+        if (area.length === 4)
+            available = Math.min(available, area[3])
         if (available < minimumHeight)
             return height
         return Math.max(minimumHeight, available - 48)
+    }
+
+    function saveGrowLimit() {
+        // Growing for a card also stops at the bottom of that free part: the window's top stays
+        // where it is, so a window lower down gets less.
+        const limit = screenHeightLimit()
+        const area = screenFreeArea()
+        if (area.length !== 4)
+            return limit
+        return Math.max(minimumHeight, Math.min(limit, area[1] + area[3] - y))
     }
 
     function saveNeededHeight() {
@@ -220,7 +245,7 @@ ApplicationWindow {
         const needed = saveNeededHeight()
         const limit = screenHeightLimit()
         if (needed > height + 4 && needed > fittedSaveNeed + 4) {
-            const next = Math.min(Math.max(needed, minimumHeight), limit)
+            const next = Math.min(Math.max(needed, minimumHeight), saveGrowLimit())
             if (next > height + 4) {
                 if (!saveHeightExpanded)
                     saveRestoreHeight = height

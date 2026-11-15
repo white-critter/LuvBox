@@ -34,8 +34,16 @@ same size (it fits), centred in its free area, and opens maximized there; one ma
 it was keeps its place. The arithmetic itself (taskbars, sizes too large for the screen) is
 checked in tests/test_window_memory.py; offscreen screens have no taskbar.
 
-The card's growth is set on the window's own properties rather than produced by a save. The
-windows are offscreen, on the platform's 800x800 screen, which every size here fits.
+A run on a tall screen beside a short one, with a card made the way a save makes it (a saved
+item in the download controller, then the details switched on): a card that needs more height
+than the short screen has grows the window there only to that screen's free height less the
+usual room (up to and including 1.10.1 the limit was the whole desktop's height). Lower down on
+the tall screen, it grows the window only to that screen's bottom. Each time the window goes
+back to its own height when the card goes.
+
+In the ten starts the card's growth is set on the window's own properties rather than produced
+by a save, and the windows are offscreen on the platform's 800x800 screen, which every size
+there fits. The runs on two screens use the screen files in SCREENS below.
 
 A second test starts the app through ``qt_app.launch`` itself, as entry.py does, once on a
 remembered window and once on a damaged one, and closes it through the real event loop.
@@ -64,7 +72,7 @@ def scene(layout="one"):
     import time
     from unittest.mock import patch
 
-    from PySide6.QtCore import qInstallMessageHandler
+    from PySide6.QtCore import QObject, qInstallMessageHandler
     from PySide6.QtGui import QWindow
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
@@ -101,6 +109,23 @@ def scene(layout="one"):
     def geometry(window):
         return {"x": window.x(), "y": window.y(), "width": window.width(), "height": window.height(),
                 "maximized": window.visibility() == QWindow.Visibility.Maximized}
+
+    def tracked(window):
+        place = window.property("normalPlace")
+        return [round(place.x()), round(place.y()), round(place.width()), round(place.height())]
+
+    # The window keeps its normal place 250 ms after a change (a QML Timer). A busy machine can stretch
+    # any fixed pause past that, so the steps wait for what they need instead of for a span of time.
+    def follows(window, expected, what):
+        """Wait until the window has kept `expected` as its normal place."""
+        wait(lambda: tracked(window) == list(expected), what)
+
+    def settled(window, what):
+        """Let pending changes reach the window, then wait until its normal-place timer is idle."""
+        timer = window.findChild(QObject, "normalPlaceTimer")
+        for _ in range(5):
+            application.processEvents()
+        wait(lambda: not timer.property("running"), what)
 
     def session(act):
         """Start as the app does, let `act` use and close the window, and say what was kept."""
@@ -196,22 +221,24 @@ def scene(layout="one"):
         # from the taskbar. A minimized window still reports the maximized area.
         window.showNormal()
         wait(lambda: window.visibility() == QWindow.Visibility.Windowed, "the normal window")
-        pause(400)
-
-        def tracked():
-            place = window.property("normalPlace")
-            return [round(place.x()), round(place.y()), round(place.width()), round(place.height())]
+        place = [60, 50, 700, 500]                 # the remembered normal place it opens with
+        follows(window, place, "the normal place after the restore")
+        # The start-up placement already gave that place; let the restore's own wait end too, so that
+        # each change below is followed through its own signal.
+        settled(window, "the restored window to settle")
 
         # One change at a time: the window follows each of them.
-        followed = [tracked()]
-        for change, value in ((window.setX, 90), (window.setY, 70), (window.setWidth, 760), (window.setHeight, 540)):
+        followed = [tracked(window)]
+        for index, change, value in ((0, window.setX, 90), (1, window.setY, 70), (2, window.setWidth, 760),
+                                     (3, window.setHeight, 540)):
             change(value)
-            pause(400)
-            followed.append(tracked())
+            place[index] = value
+            follows(window, place, f"the normal place after one change ({value})")
+            followed.append(tracked(window))
         window.showMaximized()
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
-        pause(400)                                  # it stays maximized for a while
-        followed.append(tracked())
+        settled(window, "the maximized window to settle")      # it stays maximized for a while
+        followed.append(tracked(window))
         window.showMinimized()
         wait(lambda: window.visibility() == QWindow.Visibility.Minimized, "the minimized window")
         before = geometry(window)
@@ -223,18 +250,19 @@ def scene(layout="one"):
         # still a normal window, the maximized state a moment later.
         window.showNormal()
         wait(lambda: window.visibility() == QWindow.Visibility.Windowed, "the normal window")
-        pause(400)
+        follows(window, [90, 70, 760, 540], "the normal place after the restore")
+        settled(window, "the restored window to settle")       # so that the timer below is the new size's
         normal = geometry(window)
         area = window.screen().availableGeometry()
+        timer = window.findChild(QObject, "normalPlaceTimer")
         window.setGeometry(area)
-        # Let the new size arrive while the window is a normal one: a few passes, not a span of time,
-        # so a busy machine cannot stretch this to the window's 250 ms wait.
-        for _ in range(5):
-            application.processEvents()
-        assert window.visibility() == QWindow.Visibility.Windowed and window.width() == area.width(), geometry(window)
+        # The maximized state follows as soon as the new size has reached the window as a normal one
+        # (its timer has started), well inside the window's 250 ms wait.
+        wait(lambda: timer.property("running") and window.width() == area.width(), "the new size as a normal window")
+        assert window.visibility() == QWindow.Visibility.Windowed, geometry(window)
         window.showMaximized()
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
-        pause(400)
+        settled(window, "the maximized window to settle")
         window.close()
         return {"made_normal": normal}
 
@@ -246,7 +274,7 @@ def scene(layout="one"):
         window.setY(80)
         window.setWidth(700)
         window.setHeight(520)
-        pause(400)
+        follows(window, [100, 80, 700, 520], "the normal place after the move")
         window.showMinimized()
         wait(lambda: window.visibility() == QWindow.Visibility.Minimized, "the minimized window")
         window.close()
@@ -261,23 +289,20 @@ def scene(layout="one"):
         window.setHeight(lowest + 150)
         window.setProperty("saveRestoreHeight", lowest)
         window.setProperty("saveHeightExpanded", True)
-        pause(400)
+        # Kept with the height from before the card.
+        follows(window, [window.x(), window.y(), window.width(), lowest], "the normal place with the card")
         window.showMaximized()
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
-        pause(400)
+        settled(window, "the maximized window to settle")
         window.setProperty("saveHeightExpanded", False)
         window.close()
         return {"minimum": lowest}
-
-    def tracked(window):
-        place = window.property("normalPlace")
-        return [round(place.x()), round(place.y()), round(place.width()), round(place.height())]
 
     def across(window):
         # A normal window on the left screen, then dragged to the right one and maximized there in one
         # go, without resting there as a normal window: the size it had, centred on the right screen.
         window.setGeometry(100, 80, 900, 600)
-        pause(400)
+        follows(window, [100, 80, 900, 600], "the normal place on the left screen")
         right = next(screen for screen in application.screens() if screen.name() == "right")
         area = right.availableGeometry()
         window.setGeometry(area.x() + 40, area.y() + 40, 900, 600)
@@ -289,7 +314,7 @@ def scene(layout="one"):
                 application.processEvents()
         window.showMaximized()
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
-        pause(400)
+        settled(window, "the maximized window to settle")
         notes = {"screen": window.screen().name(), "tracked": tracked(window),
                  "area": [area.x(), area.y(), area.width(), area.height()]}
         window.close()
@@ -301,11 +326,92 @@ def scene(layout="one"):
         window.showNormal()
         wait(lambda: window.visibility() == QWindow.Visibility.Windowed, "the normal window")
         window.setGeometry(120, 90, 880, 580)
-        pause(400)
+        follows(window, [120, 90, 880, 580], "the normal place back on the left screen")
         window.showMaximized()
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
-        pause(400)
+        settled(window, "the maximized window to settle")
         notes = {"screen": window.screen().name()}
+        window.close()
+        return notes
+
+    def card(window):
+        # On the short right screen, a saved-file card asks for more height than that screen has.
+        from unittest.mock import patch as patched
+        from PySide6.QtCore import QRect
+        from PIL import Image
+        from luvbox.qt_download import _saved_item
+
+        right = next(screen for screen in application.screens() if screen.name() == "right")
+        # Offscreen screens have no taskbar. Give each a 40 px taskbar at the bottom where the controller
+        # reads screens, so the window has to use the controller's answer, not the screen's own area.
+        real_screen_at = qt_app._screen_at
+
+        class WithTaskbar:
+            def __init__(self, screen):
+                self._screen = screen
+
+            def geometry(self):
+                return self._screen.geometry()
+
+            def availableGeometry(self):
+                free = self._screen.availableGeometry()
+                return QRect(free.x(), free.y(), free.width(), free.height() - 40)
+
+        def screen_at(x, y):
+            screen = real_screen_at(x, y)
+            return WithTaskbar(screen) if screen is not None else None
+
+        taskbar = patched("luvbox.qt_app._screen_at", screen_at)
+        taskbar.start()
+        area = WithTaskbar(right).availableGeometry()
+        lowest = window.minimumHeight()
+        window.setGeometry(area.x() + 40, area.y() + 20, 760, lowest)
+        for _ in range(5):
+            application.processEvents()
+        if window.screen().name() != "right":
+            window.setScreen(right)
+        pause(400)
+        picture = Path(tempfile.mkdtemp(prefix="luvbox-card-", dir=os.environ["LOCALAPPDATA"])) / "tall.png"
+        Image.new("RGB", (600, 1800), "teal").save(picture)
+        download = window.property("appController").download
+        download._running = True                              # as during a save
+        download._current_saved = _saved_item({
+            "path": str(picture), "author": "example", "display_name": "Example",
+            "body": "\n".join(f"line {number}" for number in range(40)), "media_type": "photo"})
+        download.savedItemChanged.emit()
+        download.setDetailsEnabled(True)
+        wait(lambda: bool(download.currentSavedItem.get("preview_url")), "the card's picture")
+        pause(800)
+        scroll = window.findChild(QObject, "saveScroll")
+        notes = {"screen": window.screen().name(), "area": [area.x(), area.y(), area.width(), area.height()],
+                 "minimum": lowest, "grown": window.height(),
+                 "needed": round(window.height() + scroll.property("contentHeight") - scroll.property("height"))}
+        download.setDetailsEnabled(False)
+        pause(400)
+        notes["after_card"] = window.height()
+        # Lower down on the tall left screen, which starts below the right one: the card grows the
+        # window only to the bottom of that screen's free area, above its taskbar, since the window's
+        # top stays where it is. The free area's top is not 0 and its bottom is not the screen's.
+        left = next(screen for screen in application.screens() if screen.name() == "left")
+        free = WithTaskbar(left).availableGeometry()
+        window.setGeometry(free.x() + 100, free.y() + 500, 760, lowest)
+        for _ in range(5):
+            application.processEvents()
+        if window.screen().name() != "left":
+            window.setScreen(left)
+        pause(400)
+        download.setDetailsEnabled(True)
+        wait(lambda: bool(download.currentSavedItem.get("preview_url")), "the card's picture again")
+        pause(800)
+        whole = left.geometry()
+        notes["low"] = {"screen": window.screen().name(), "y": window.y(), "grown": window.height(),
+                        "bottom": free.y() + free.height(), "screen_bottom": whole.y() + whole.height(),
+                        "free_height": free.height()}
+        download.setDetailsEnabled(False)
+        pause(400)
+        notes["low"]["after_card"] = window.height()
+        download._running = False
+        taskbar.stop()
         window.close()
         return notes
 
@@ -326,6 +432,27 @@ def scene(layout="one"):
             warnings = [message for message in messages if any(
                 mark in message for mark in (".qml", "QQml", "ReferenceError", "TypeError", "Binding loop"))]
             assert not warnings, warnings
+
+        if layout == "card":
+            names = [entry.name() for entry in application.screens()]
+            assert names == ["left", "right"], names
+            session(card)
+            notes = report["sessions"][0]
+            left, top, width, height = notes["area"]
+            # The card needs more than the short screen has: the window grows, but only within it.
+            assert notes["screen"] == "right" and notes["needed"] > height, report
+            assert notes["minimum"] < notes["grown"] <= height - 48, report
+            assert notes["after_card"] == notes["minimum"], report       # and goes back when it goes
+            low = notes["low"]
+            assert low["screen"] == "left", report
+            assert low["grown"] == low["bottom"] - low["y"] < notes["needed"], report
+            # Neither the screen's own bottom nor the free area's height alone would give that.
+            assert low["grown"] not in (low["screen_bottom"] - low["y"], low["free_height"] - low["y"]), report
+            assert low["after_card"] == notes["minimum"], report
+            no_warnings()
+            report["ok"] = True
+            qInstallMessageHandler(previous)
+            return report
 
         if layout == "two":
             names = [entry.name() for entry in application.screens()]
@@ -506,20 +633,15 @@ class WindowMemorySceneTests(unittest.TestCase):
         self.assertEqual([session["remembered"]["maximized"] for session in report["sessions"]],
                          [False, True, False, False, True, True, True, True, False, True])
 
-    def test_a_window_maximized_on_another_screen_is_remembered_there(self):
+    def run_on_screens(self, layout):
         # Two screens side by side, as the offscreen platform makes them from a file; it reads the
         # file's name relative to the folder it starts in (a drive letter breaks the option).
-        with tempfile.TemporaryDirectory(prefix="luvbox-two-screens-") as folder:
-            Path(folder, "screens.json").write_text(json.dumps({
-                "synchronousWindowSystemEvents": False, "windowFrameMargins": False,
-                "screens": [{"name": "left", "x": 0, "y": 0, "width": 1280, "height": 800, "logicalDpi": 96,
-                             "logicalBaseDpi": 96, "dpr": 1},
-                            {"name": "right", "x": 1280, "y": 100, "width": 1024, "height": 768, "logicalDpi": 96,
-                             "logicalBaseDpi": 96, "dpr": 1}]}), encoding="utf-8")
+        with tempfile.TemporaryDirectory(prefix="luvbox-screens-") as folder:
+            Path(folder, "screens.json").write_text(json.dumps(SCREENS[layout]), encoding="utf-8")
             environment = dict(os.environ, QT_QPA_PLATFORM="offscreen:configfile=screens.json",
                                QT_QUICK_BACKEND="software", PYTHONIOENCODING="utf-8")
             try:
-                run = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scene", "two"], cwd=folder,
+                run = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scene", layout], cwd=folder,
                                      env=environment, capture_output=True, text=True, encoding="utf-8",
                                      errors="replace", timeout=120)
             except subprocess.TimeoutExpired as error:
@@ -527,13 +649,39 @@ class WindowMemorySceneTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         report = json.loads(run.stdout.strip().splitlines()[-1])
         self.assertTrue(report["ok"])
+        return report
+
+    def test_a_window_maximized_on_another_screen_is_remembered_there(self):
+        report = self.run_on_screens("two")
         self.assertEqual([session["screen"] for session in report["sessions"]], ["right", "left"])
+
+    def test_a_saved_file_card_grows_the_window_only_within_its_own_screen(self):
+        # A tall screen beside a short one: the desktop is as tall as the tall one, the window's
+        # screen is not.
+        report = self.run_on_screens("card")
+        notes = report["sessions"][0]
+        self.assertEqual(notes["screen"], "right")
+        self.assertEqual(notes["grown"], notes["area"][3] - 48)
+
+
+def _screen(name, x, y, width, height):
+    return {"name": name, "x": x, "y": y, "width": width, "height": height, "logicalDpi": 96,
+            "logicalBaseDpi": 96, "dpr": 1}
+
+
+# The offscreen platform's screen files for the runs on two screens.
+SCREENS = {
+    "two": {"synchronousWindowSystemEvents": False, "windowFrameMargins": False,
+            "screens": [_screen("left", 0, 0, 1280, 800), _screen("right", 1280, 100, 1024, 768)]},
+    "card": {"synchronousWindowSystemEvents": False, "windowFrameMargins": False,
+             "screens": [_screen("left", 0, 200, 1280, 1400), _screen("right", 1280, 0, 1024, 600)]},
+}
 
 
 if __name__ == "__main__":
     if "--scene" in sys.argv:
         layout = sys.argv[sys.argv.index("--scene") + 1] if len(sys.argv) > sys.argv.index("--scene") + 1 else "one"
-        print(json.dumps(scene(layout if layout in ("one", "two") else "one"), ensure_ascii=False))
+        print(json.dumps(scene(layout if layout in ("one", "two", "card") else "one"), ensure_ascii=False))
     elif "--launch" in sys.argv:
         print(json.dumps(launched(sys.argv[sys.argv.index("--launch") + 1]), ensure_ascii=False))
     else:

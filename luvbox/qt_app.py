@@ -251,13 +251,25 @@ class ApplicationController(QObject):
         QML knows a screen's whole area but not the part the taskbar leaves, so the window asks
         here; see `_onto_screen`. Without such a screen the place comes back as it was.
         """
-        application = QGuiApplication.instance()
-        screen = (application.screenAt(QPoint(screen_x, screen_y))
-                  if isinstance(application, QGuiApplication) else None)
+        screen = _screen_at(screen_x, screen_y)
         if screen is None:
             return [x, y, width, height]
         return [int(value) for value in _onto_screen((x, y, width, height), screen.geometry(),
                                                      screen.availableGeometry())]
+
+    @Slot(int, int, result="QVariantList")
+    def screenArea(self, x, y):
+        """The part of the screen at (x, y) that the taskbar leaves, as [x, y, width, height].
+
+        MainWindow.qml grows the window for a saved-file card no taller than this part and not past
+        its bottom; QML knows a screen's whole area but not this part. Without such a screen the
+        answer is [].
+        """
+        screen = _screen_at(x, y)
+        if screen is None:
+            return []
+        area = screen.availableGeometry()
+        return [area.x(), area.y(), area.width(), area.height()]
 
     @Property(str, notify=changed)
     def account(self):
@@ -946,6 +958,14 @@ def _place_window(application, window, saved):
             # A place on no connected screen is not handed on: closing maximized then keeps it.
             window.setProperty("normalPlace", QRectF(window.x(), window.y(), window.width(), window.height()))
         window.showMaximized()
+
+
+def _screen_at(x, y):
+    """The connected screen at (x, y), or None; a process without a GUI application has none."""
+    application = QGuiApplication.instance()
+    if not isinstance(application, QGuiApplication):
+        return None
+    return application.screenAt(QPoint(x, y))
 
 
 def _onto_screen(place, geometry, available):
