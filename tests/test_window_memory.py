@@ -6,9 +6,13 @@ and writes them on the storage thread. The next start reads them with ``window_g
 and places the window with ``qt_app._place_window`` (tests/test_window_placement.py).
 
 The settings file can hold anything (an older version, a hand edit, a damaged write), so
-reading keeps only whole numbers inside wide limits and a true or false for "maximized". A
-normal window outside those limits is not remembered at all; a maximized one keeps the
-normal size and place it had before. The write is deliberately not a pending settings
+reading keeps only whole numbers inside wide limits and a true or false for "maximized". The
+numbers handed over are always the normal window's: MainWindow.qml keeps them while the
+window is maximized or minimized. A normal window outside the limits is not remembered at
+all; a maximized one without usable numbers (a zero size: it opened maximized without a usable
+remembered place and was never a normal window since) keeps the size and place read at start.
+A window that closes maximized on another screen than its normal place is moved onto that
+screen (qt_app._onto_screen). The write is deliberately not a pending settings
 change: it shows no "saving", locks no control, rolls nothing back and reports no failure.
 It still goes through the storage thread's queue, so closing lets it land before that thread
 ends, and a failed write does not keep the window from closing.
@@ -34,6 +38,7 @@ except ModuleNotFoundError:      # run as a script: the tests folder is the path
 _QT_AVAILABLE = find_spec("PySide6") is not None
 if _QT_AVAILABLE:
     from PySide6.QtCore import QCoreApplication, QRect
+    from PySide6.QtGui import QGuiApplication
     from luvbox import qt_app
     from luvbox.app_settings import default_settings
     from luvbox.qt_app import ApplicationController
@@ -222,22 +227,28 @@ class RememberWindowTests(_ControllerCase):
         self.controller.rememberWindow(140, 90, 1100, 760, False)
         self.assertEqual(self.window_writes(), [])
 
-    def test_a_maximized_window_keeps_its_normal_size_and_place(self):
+    def test_a_maximized_window_keeps_the_normal_size_and_place_it_is_given(self):
         self.controller.rememberWindow(140, 90, 1100, 760, False)
-        # Maximized, the window covers the screen; those numbers are not its own size.
-        self.controller.rememberWindow(-8, -8, 1936, 1056, True)
-        maximized = dict(NORMAL, maximized=True)
+        # Moved and resized as a normal window, then maximized: the window sends that normal place.
+        self.controller.rememberWindow(300, 200, 1000, 700, True)
+        maximized = {"x": 300, "y": 200, "width": 1000, "height": 700, "maximized": True}
         self.assertEqual(self.controller.window_geometry(), maximized)
-        self.controller.rememberWindow(140, 90, 1100, 760, False)
-        self.assertEqual(self.window_writes(), [NORMAL, maximized, NORMAL])
+        self.controller.rememberWindow(300, 200, 1000, 700, False)
+        self.assertEqual(self.window_writes(), [NORMAL, maximized, dict(maximized, maximized=False)])
 
-    def test_maximized_after_a_start_keeps_the_size_it_started_with(self):
+    def test_a_maximized_window_without_a_usable_normal_size_keeps_the_one_read_at_start(self):
         self.start(dict(NORMAL))
-        self.controller.rememberWindow(-8, -8, 2576, 1416, True)
+        # No normal place to give (opened maximized on no usable place): a zero size. Any number out of its limits counts the same,
+        # and none of them is taken on its own.
+        for place in [(0, 0, 0, 0), (-20001, 0, 1000, 700), (0, 20001, 1000, 700), (0, 0, 199, 700),
+                      (0, 0, 1000, 20001)]:
+            with self.subTest(place=place):
+                self.controller.rememberWindow(*place, True)
+                self.assertEqual(self.controller.window_geometry(), dict(NORMAL, maximized=True))
         self.assertEqual(self.window_writes(), [dict(NORMAL, maximized=True)])
 
     def test_maximized_with_nothing_before_keeps_only_that(self):
-        self.controller.rememberWindow(-32000, -32000, 0, 0, True)
+        self.controller.rememberWindow(0, 0, 0, 0, True)
         self.assertEqual(self.window_writes(), [{"maximized": True}])
 
     def test_a_normal_window_outside_the_limits_is_not_kept(self):
@@ -272,7 +283,7 @@ class RememberWindowTests(_ControllerCase):
 
     def test_a_damaged_value_is_mended_by_the_next_close(self):
         self.start({"width": "wide", "height": 700, "x": 10, "y": 20, "maximized": "yes", "monitor": 2})
-        self.controller.rememberWindow(-8, -8, 1936, 1056, True)
+        self.controller.rememberWindow(0, 0, 0, 0, True)
         self.controller.rememberWindow(140, 90, 1100, 760, False)
         self.assertEqual(self.window_writes(), [{"height": 700, "x": 10, "y": 20, "maximized": True}, NORMAL])
 
@@ -371,14 +382,14 @@ class RoundTripTests(_ControllerCase):
 
     def test_a_window_closed_maximized_opens_maximized_over_its_normal_size(self):
         self.controller.rememberWindow(300, 200, 1100, 760, False)
-        self.controller.rememberWindow(-8, -8, 1936, 1056, True)
+        self.controller.rememberWindow(320, 210, 1000, 700, True)
         self.start(self.window_writes()[-1])
         window = self.place(self.controller.window_geometry())
-        self.assertEqual(window.rect(), QRect(300, 200, 1100, 760))
+        self.assertEqual(window.rect(), QRect(320, 210, 1000, 700))
         self.assertEqual(window.calls[-1], "maximized")
 
     def test_maximized_with_nothing_before_opens_at_the_first_size_then_maximized(self):
-        self.controller.rememberWindow(-32000, -32000, 0, 0, True)
+        self.controller.rememberWindow(0, 0, 0, 0, True)
         self.start(self.window_writes()[-1])
         width, height, _minimum_width, _minimum_height = declared_window()
         window = self.place(self.controller.window_geometry())
@@ -394,6 +405,75 @@ class RoundTripTests(_ControllerCase):
                 self.assertEqual(written, dict(zip(("x", "y", "width", "height"), place), maximized=False))
                 self.start(written)
                 self.assertEqual(self.controller.window_geometry(), written)
+
+
+@unittest.skipUnless(_QT_AVAILABLE, "optional Qt dependencies are not installed")
+class OtherScreenTests(unittest.TestCase):
+    """A window that closes maximized on another screen than its normal place (qt_app._onto_screen)."""
+
+    # This PC's kind of layout: a 1440p monitor, and a 1080p one to its right, lower down.
+    FIRST = (QRect(0, 0, 2560, 1440), QRect(0, 0, 2560, 1392)) if _QT_AVAILABLE else None
+    SECOND = (QRect(2560, 585, 1920, 1080), QRect(2560, 585, 1920, 1032)) if _QT_AVAILABLE else None
+
+    def test_a_place_on_the_screen_it_closes_on_is_kept(self):
+        # Partly off the screen is still on it while the middle is (2500,1350 for the last).
+        for place in [(300, 200, 1000, 700), (-200, -100, 1000, 700), (2000, 1000, 1000, 700)]:
+            with self.subTest(place=place):
+                self.assertEqual(qt_app._onto_screen(place, *self.FIRST), place)
+
+    def test_the_middle_decides_and_the_far_edges_are_outside(self):
+        geometry, available = QRect(0, 0, 1000, 800), QRect(0, 0, 1000, 760)
+        # Middles at 999.5 and 799.5 are on the screen; at 1000 or 800 they are not.
+        self.assertEqual(qt_app._onto_screen((499, 100, 1001, 600), geometry, available), (499, 100, 1001, 600))
+        self.assertEqual(qt_app._onto_screen((100, 499, 600, 601), geometry, available), (100, 499, 600, 601))
+        self.assertNotEqual(qt_app._onto_screen((500, 100, 1000, 600), geometry, available), (500, 100, 1000, 600))
+        self.assertNotEqual(qt_app._onto_screen((100, 500, 600, 600), geometry, available), (100, 500, 600, 600))
+        self.assertNotEqual(qt_app._onto_screen((-501, 100, 1000, 600), geometry, available), (-501, 100, 1000, 600))
+
+    def test_a_place_on_another_screen_is_centred_in_the_part_the_taskbar_leaves(self):
+        self.assertEqual(qt_app._onto_screen((300, 200, 980, 680), *self.SECOND),
+                         (2560 + (1920 - 980) // 2, 585 + (1032 - 680) // 2, 980, 680))
+        # A taskbar at the top or on the left: the place starts below or beside it.
+        geometry = QRect(0, 0, 1920, 1080)
+        for available in (QRect(0, 40, 1920, 1040), QRect(60, 0, 1860, 1080)):
+            with self.subTest(available=available):
+                x, y, width, height = qt_app._onto_screen((3000, 200, 980, 680), geometry, available)
+                self.assertEqual((width, height), (980, 680))
+                self.assertEqual((x, y), (available.left() + (available.width() - 980) // 2,
+                                          available.top() + (available.height() - 680) // 2))
+
+    def test_a_place_too_large_for_the_other_screen_is_limited_as_at_a_first_start(self):
+        laptop = (QRect(0, 0, 1536, 864), QRect(0, 0, 1536, 816))    # 1920x1080 at 125%
+        self.assertEqual(qt_app._onto_screen((2000, 100, 1800, 1300), *laptop), (12, 24, 1512, 768))
+        # Room is left above for the title bar, which sits over the window's own top edge.
+        self.assertEqual(qt_app._onto_screen((2000, 100, 1500, 800), *laptop), (18, 24, 1500, 768))
+
+    def test_without_a_size_the_place_comes_back_as_it_was(self):
+        for place in [(0, 0, 0, 0), (5000, 5000, 0, 700), (5000, 5000, 900, 0)]:
+            with self.subTest(place=place):
+                self.assertEqual(qt_app._onto_screen(place, *self.SECOND), place)
+
+    def test_the_next_start_takes_the_moved_place_as_it_is(self):
+        # What is remembered after the move opens there, the same size, on that screen.
+        first, second = Screen(0, 0, 2560, 1392), Screen(2560, 585, 1920, 1032)
+        laptop = Screen(2560, 0, 1536, 816)
+        width, height, minimum_width, minimum_height = declared_window()
+        for target, geometry in ((second, self.SECOND[0]), (laptop, QRect(2560, 0, 1536, 864))):
+            with self.subTest(screen=target.area):
+                x, y, across, down = qt_app._onto_screen((300, 200, 1800, 1300), geometry, target.area)
+                window = Window(first, width, height, minimum_width, minimum_height)
+                qt_app._place_window(Application(first, target), window,
+                                     {"x": x, "y": y, "width": across, "height": down, "maximized": True})
+                self.assertEqual(window.rect(), QRect(x, y, across, down))
+                self.assertEqual(window.calls[-1], "maximized")
+
+    def test_the_window_asks_the_controller_which_needs_screens(self):
+        # Without a GUI application there are no screens: the place is handed back unchanged.
+        application = QCoreApplication.instance() or QCoreApplication([])
+        self.assertNotIsInstance(application, QGuiApplication)
+        # The method uses nothing of the controller itself.
+        self.assertEqual(qt_app.ApplicationController.normalPlaceOnScreen(None, 300, 200, 980, 680, 3500, 1100),
+                         [300, 200, 980, 680])
 
 
 @unittest.skipUnless(_QT_AVAILABLE, "optional Qt dependencies are not installed")
@@ -448,7 +528,7 @@ class SettingsFileTests(unittest.TestCase):
         self.assertEqual(stored["kept_for_a_newer_version"], {"a": 1})
         self.assertEqual(self.run_controller(lambda controller: controller.window_geometry()), NORMAL)
         # Maximized and closed again: the same file, the same normal size.
-        self.run_controller(lambda controller: controller.rememberWindow(-8, -8, 1936, 1056, True))
+        self.run_controller(lambda controller: controller.rememberWindow(0, 0, 0, 0, True))
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["window"], dict(NORMAL, maximized=True))
         self.assertEqual(self.run_controller(lambda controller: controller.window_geometry()),
                          dict(NORMAL, maximized=True))

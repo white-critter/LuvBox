@@ -1,7 +1,7 @@
 """The real main window remembers its own size and place when it closes.
 
 tests/test_window_memory.py checks the controller's side with direct calls. This runs the
-real MainWindow.qml and controller against a private settings file, and six times starts
+real MainWindow.qml and controller against a private settings file, and ten times starts
 the window, uses it and closes it the way its close button does. Each time the window must
 stay on screen until the controller has finished closing.
 
@@ -18,16 +18,27 @@ stay on screen until the controller has finished closing.
    real height is remembered.
 5. Full screen and closed: remembered as maximized, again over the normal size.
 6. The next start opens maximized and is closed at once: the settings file is not written.
+7. Made normal, moved and resized, maximized, then minimized and closed (as from the
+   taskbar): remembered as maximized over the moved normal place. A minimized window still
+   reports the maximized area, which is not its own size.
+8. Made normal, then given the maximized area as a normal window a moment before the
+   maximized state, the order in which Windows reports a maximize made by a person: the
+   normal place from before is kept.
+9. A normal window minimized and closed: its own size and place, not maximized.
+10. A card grew the normal window, which was then maximized, and the card went while it
+    stayed maximized: the height from before the card is kept.
+
+A run on two simulated screens side by side (the offscreen platform's screen file): a window
+dragged to the other screen and maximized there in one go is remembered on that screen, the
+same size (it fits), centred in its free area, and opens maximized there; one maximized where
+it was keeps its place. The arithmetic itself (taskbars, sizes too large for the screen) is
+checked in tests/test_window_memory.py; offscreen screens have no taskbar.
 
 The card's growth is set on the window's own properties rather than produced by a save. The
 windows are offscreen, on the platform's 800x800 screen, which every size here fits.
 
 A second test starts the app through ``qt_app.launch`` itself, as entry.py does, once on a
 remembered window and once on a damaged one, and closes it through the real event loop.
-
-Not covered: a window closed while minimized. Qt then reports it as minimized, with the size
-and place it had when it was last shown; for a window that was maximized before, that is
-the maximized area (seen on Windows 11 with Qt 6.10). See docs/verification.md.
 """
 
 from importlib.util import find_spec
@@ -36,6 +47,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 try:
     from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
@@ -46,7 +58,7 @@ except ModuleNotFoundError:      # run as a script: the tests folder is the path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def scene():
+def scene(layout="one"):
     from contextlib import ExitStack
     import tempfile
     import time
@@ -179,6 +191,124 @@ def scene():
     def sixth(window):
         window.close()
 
+    def seventh(window):
+        # Made normal, moved and resized; after a moment maximized, then minimized, and closed
+        # from the taskbar. A minimized window still reports the maximized area.
+        window.showNormal()
+        wait(lambda: window.visibility() == QWindow.Visibility.Windowed, "the normal window")
+        pause(400)
+
+        def tracked():
+            place = window.property("normalPlace")
+            return [round(place.x()), round(place.y()), round(place.width()), round(place.height())]
+
+        # One change at a time: the window follows each of them.
+        followed = [tracked()]
+        for change, value in ((window.setX, 90), (window.setY, 70), (window.setWidth, 760), (window.setHeight, 540)):
+            change(value)
+            pause(400)
+            followed.append(tracked())
+        window.showMaximized()
+        wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
+        pause(400)                                  # it stays maximized for a while
+        followed.append(tracked())
+        window.showMinimized()
+        wait(lambda: window.visibility() == QWindow.Visibility.Minimized, "the minimized window")
+        before = geometry(window)
+        window.close()
+        return {"closed": before, "followed": followed}
+
+    def eighth(window):
+        # Windows reports a maximize made by a person in this order: the new size while the window is
+        # still a normal window, the maximized state a moment later.
+        window.showNormal()
+        wait(lambda: window.visibility() == QWindow.Visibility.Windowed, "the normal window")
+        pause(400)
+        normal = geometry(window)
+        area = window.screen().availableGeometry()
+        window.setGeometry(area)
+        # Let the new size arrive while the window is a normal one: a few passes, not a span of time,
+        # so a busy machine cannot stretch this to the window's 250 ms wait.
+        for _ in range(5):
+            application.processEvents()
+        assert window.visibility() == QWindow.Visibility.Windowed and window.width() == area.width(), geometry(window)
+        window.showMaximized()
+        wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
+        pause(400)
+        window.close()
+        return {"made_normal": normal}
+
+    def ninth(window):
+        # A normal window minimized and closed from the taskbar: it reports its own size and place.
+        window.showNormal()
+        wait(lambda: window.visibility() == QWindow.Visibility.Windowed, "the normal window")
+        window.setX(100)
+        window.setY(80)
+        window.setWidth(700)
+        window.setHeight(520)
+        pause(400)
+        window.showMinimized()
+        wait(lambda: window.visibility() == QWindow.Visibility.Minimized, "the minimized window")
+        window.close()
+
+    def tenth(window):
+        # A saved-file card grew the normal window from the lowest height it allows; the window was
+        # maximized, and the card went while it stayed maximized (a new save started, or the details
+        # were switched off), which clears the card's mark.
+        lowest = window.minimumHeight()
+        window.setProperty("currentScreen", 1)
+        pause(150)
+        window.setHeight(lowest + 150)
+        window.setProperty("saveRestoreHeight", lowest)
+        window.setProperty("saveHeightExpanded", True)
+        pause(400)
+        window.showMaximized()
+        wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
+        pause(400)
+        window.setProperty("saveHeightExpanded", False)
+        window.close()
+        return {"minimum": lowest}
+
+    def tracked(window):
+        place = window.property("normalPlace")
+        return [round(place.x()), round(place.y()), round(place.width()), round(place.height())]
+
+    def across(window):
+        # A normal window on the left screen, then dragged to the right one and maximized there in one
+        # go, without resting there as a normal window: the size it had, centred on the right screen.
+        window.setGeometry(100, 80, 900, 600)
+        pause(400)
+        right = next(screen for screen in application.screens() if screen.name() == "right")
+        area = right.availableGeometry()
+        window.setGeometry(area.x() + 40, area.y() + 40, 900, 600)
+        for _ in range(5):
+            application.processEvents()
+        if window.screen().name() != "right":
+            window.setScreen(right)
+            for _ in range(5):
+                application.processEvents()
+        window.showMaximized()
+        wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
+        pause(400)
+        notes = {"screen": window.screen().name(), "tracked": tracked(window),
+                 "area": [area.x(), area.y(), area.width(), area.height()]}
+        window.close()
+        return notes
+
+    def stayed(window):
+        # Opened maximized on the right screen. Made normal, moved back to the left screen, and
+        # maximized there without leaving it: that normal place is kept as it is.
+        window.showNormal()
+        wait(lambda: window.visibility() == QWindow.Visibility.Windowed, "the normal window")
+        window.setGeometry(120, 90, 880, 580)
+        pause(400)
+        window.showMaximized()
+        wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
+        pause(400)
+        notes = {"screen": window.screen().name()}
+        window.close()
+        return notes
+
     resources = ExitStack()
     with resources:
         folder = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix="luvbox-window-memory-qml-")))
@@ -191,6 +321,30 @@ def scene():
         screen = application.primaryScreen().availableGeometry()
         report["screen"] = [screen.x(), screen.y(), screen.width(), screen.height()]
         assert screen.width() >= 800 and screen.height() >= 800, report["screen"]
+
+        def no_warnings():
+            warnings = [message for message in messages if any(
+                mark in message for mark in (".qml", "QQml", "ReferenceError", "TypeError", "Binding loop"))]
+            assert not warnings, warnings
+
+        if layout == "two":
+            names = [entry.name() for entry in application.screens()]
+            assert names == ["left", "right"], names
+            remembered = session(across)
+            notes = report["sessions"][0]
+            assert notes["screen"] == "right" and notes["tracked"] == [100, 80, 900, 600], report
+            left, top, width, height = notes["area"]
+            assert remembered == {"x": left + (width - 900) // 2, "y": top + (height - 600) // 2,
+                                  "width": 900, "height": 600, "maximized": True}, report
+            assert session(stayed) == {"x": 120, "y": 90, "width": 880, "height": 580, "maximized": True}, report
+            # The next start opened maximized on the right screen, where the window was closed.
+            opened = report["sessions"][1]["opened"]
+            assert opened["maximized"] and opened["x"] >= left, report
+            assert report["sessions"][1]["screen"] == "left", report
+            no_warnings()
+            report["ok"] = True
+            qInstallMessageHandler(previous)
+            return report
 
         remembered = session(first)
         lowest = report["sessions"][0]["minimum"]
@@ -216,15 +370,33 @@ def scene():
         assert session(fifth) == {"x": 60, "y": 50, "width": 700, "height": 500, "maximized": True}, report
         assert session(sixth) == {"x": 60, "y": 50, "width": 700, "height": 500, "maximized": True}, report
         assert report["sessions"][5]["opened"]["maximized"], report
+
+        # Moved, maximized, minimized, closed: the moved normal place and "maximized" are kept.
+        assert session(seventh) == {"x": 90, "y": 70, "width": 760, "height": 540, "maximized": True}, report
+        closed = report["sessions"][6]["closed"]
+        assert not closed["maximized"] and closed["width"] > 760, report      # what the window reported
+        # Made normal at the remembered 60,50 700x500, changed one number at a time, then maximized.
+        assert report["sessions"][6]["followed"] == [
+            [60, 50, 700, 500], [90, 50, 700, 500], [90, 70, 700, 500], [90, 70, 760, 500], [90, 70, 760, 540],
+            [90, 70, 760, 540]], report
+        # The maximized size arriving before the state is not taken for the normal one.
+        assert session(eighth) == {"x": 90, "y": 70, "width": 760, "height": 540, "maximized": True}, report
+        assert report["sessions"][7]["made_normal"] == {
+            "x": 90, "y": 70, "width": 760, "height": 540, "maximized": False}, report
+        # Minimized from a normal window: its own size and place, not maximized.
+        assert session(ninth) == {"x": 100, "y": 80, "width": 700, "height": 520, "maximized": False}, report
+        # The card went while the window was maximized: the person's own height is still the one kept.
+        remembered = session(tenth)
+        lowest = report["sessions"][9]["minimum"]
+        assert remembered == {"x": 100, "y": 80, "width": 700, "height": lowest, "maximized": True}, report
+
         # Closed as it opened: the settings file is not written again.
-        assert [entry["rewritten"] for entry in report["sessions"]] == [True] * 5 + [False], report
+        assert [entry["rewritten"] for entry in report["sessions"]] == [True] * 5 + [False, True, False, True, True], report
         assert all(entry["stayed_open"] for entry in report["sessions"]), report
 
         stored = json.loads(path.read_text(encoding="utf-8"))
         assert stored["gallery_density"] == 2, stored          # the other preferences stay
-        warnings = [message for message in messages if any(
-            mark in message for mark in (".qml", "QQml", "ReferenceError", "TypeError", "Binding loop"))]
-        assert not warnings, warnings
+        no_warnings()
         report["ok"] = True
     qInstallMessageHandler(previous)
     return report
@@ -332,12 +504,36 @@ class WindowMemorySceneTests(unittest.TestCase):
         report = json.loads(run.stdout.strip().splitlines()[-1])
         self.assertTrue(report["ok"])
         self.assertEqual([session["remembered"]["maximized"] for session in report["sessions"]],
-                         [False, True, False, False, True, True])
+                         [False, True, False, False, True, True, True, True, False, True])
+
+    def test_a_window_maximized_on_another_screen_is_remembered_there(self):
+        # Two screens side by side, as the offscreen platform makes them from a file; it reads the
+        # file's name relative to the folder it starts in (a drive letter breaks the option).
+        with tempfile.TemporaryDirectory(prefix="luvbox-two-screens-") as folder:
+            Path(folder, "screens.json").write_text(json.dumps({
+                "synchronousWindowSystemEvents": False, "windowFrameMargins": False,
+                "screens": [{"name": "left", "x": 0, "y": 0, "width": 1280, "height": 800, "logicalDpi": 96,
+                             "logicalBaseDpi": 96, "dpr": 1},
+                            {"name": "right", "x": 1280, "y": 100, "width": 1024, "height": 768, "logicalDpi": 96,
+                             "logicalBaseDpi": 96, "dpr": 1}]}), encoding="utf-8")
+            environment = dict(os.environ, QT_QPA_PLATFORM="offscreen:configfile=screens.json",
+                               QT_QUICK_BACKEND="software", PYTHONIOENCODING="utf-8")
+            try:
+                run = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--scene", "two"], cwd=folder,
+                                     env=environment, capture_output=True, text=True, encoding="utf-8",
+                                     errors="replace", timeout=120)
+            except subprocess.TimeoutExpired as error:
+                self.fail("scene timed out: " + str(error.stdout or "") + str(error.stderr or ""))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        report = json.loads(run.stdout.strip().splitlines()[-1])
+        self.assertTrue(report["ok"])
+        self.assertEqual([session["screen"] for session in report["sessions"]], ["right", "left"])
 
 
 if __name__ == "__main__":
     if "--scene" in sys.argv:
-        print(json.dumps(scene(), ensure_ascii=False))
+        layout = sys.argv[sys.argv.index("--scene") + 1] if len(sys.argv) > sys.argv.index("--scene") + 1 else "one"
+        print(json.dumps(scene(layout if layout in ("one", "two") else "one"), ensure_ascii=False))
     elif "--launch" in sys.argv:
         print(json.dumps(launched(sys.argv[sys.argv.index("--launch") + 1]), ensure_ascii=False))
     else:

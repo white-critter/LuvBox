@@ -116,7 +116,54 @@ ApplicationWindow {
         Qt.callLater(fitSaveWindow)
     }
     onSavedDetailVisibleChanged: Qt.callLater(fitSaveWindow)
+    // The size and place the window last had as a normal window, kept for when it closes
+    // maximized or minimized: then it reports the screen's area, or the numbers it had when it
+    // was last shown. Windows sends a maximize's new size before the new state, so a size is
+    // kept only once the window has stayed a normal window for a moment. A window that opens
+    // maximized at a remembered place is given that place by the start-up placement
+    // (qt_app._place_window).
+    property rect normalPlace: Qt.rect(0, 0, 0, 0)
+    // Whether the window was maximized (or full screen) before it was minimized.
+    property bool lastMaximized: false
+    // The person's own height: a saved-file card may have grown the window for a while.
+    function ownHeight() {
+        return saveHeightExpanded && saveRestoreHeight >= minimumHeight ? saveRestoreHeight : height
+    }
+    // The normal size and place to remember for a window that closes maximized. One moved to
+    // another screen while it stayed maximized (Win+Shift+arrow, or dragged there in one go)
+    // opens on that screen next time, centred in the part the taskbar leaves. QML does not know
+    // that part, so the controller works it out (qt_app._onto_screen).
+    function maximizedNormalPlace() {
+        const place = normalPlace
+        const screen = window.screen
+        if (!app || !screen || place.width <= 0 || place.height <= 0)
+            return place
+        const moved = app.normalPlaceOnScreen(place.x, place.y, place.width, place.height,
+                                              screen.virtualX + Math.floor(screen.width / 2),
+                                              screen.virtualY + Math.floor(screen.height / 2))
+        return Qt.rect(moved[0], moved[1], moved[2], moved[3])
+    }
+    onXChanged: normalPlaceTimer.restart()
+    onYChanged: normalPlaceTimer.restart()
+    onWidthChanged: normalPlaceTimer.restart()
+    onVisibilityChanged: () => {
+        if (window.visibility === Window.Maximized || window.visibility === Window.FullScreen)
+            window.lastMaximized = true
+        else if (window.visibility === Window.Windowed)
+            window.lastMaximized = false
+        normalPlaceTimer.restart()
+    }
+    Timer {
+        id: normalPlaceTimer
+        objectName: "normalPlaceTimer"
+        interval: 250
+        onTriggered: {
+            if (window.visibility === Window.Windowed)
+                window.normalPlace = Qt.rect(window.x, window.y, window.width, window.ownHeight())
+        }
+    }
     onHeightChanged: {
+        normalPlaceTimer.restart()
         if (applyingSaveHeight || !saveFitReady || height === appliedSaveHeight)
             return
         // The person resized the window. Keep that choice until the open detail changes.
@@ -237,9 +284,14 @@ ApplicationWindow {
         if (app && !app.shutdownReady) {
             close.accepted = false
             if (!app.closing) {
-                // The height grown for a saved-file card is temporary; keep the person's own.
-                const own = saveHeightExpanded && saveRestoreHeight >= minimumHeight ? saveRestoreHeight : height
-                app.rememberWindow(x, y, width, own, visibility === Window.Maximized || visibility === Window.FullScreen)
+                // Always the normal window's size and place. A window minimized from a normal one
+                // still reports those; a maximized one, or one minimized from it, does not.
+                const minimized = visibility === Window.Minimized
+                const maximized = visibility === Window.Maximized || visibility === Window.FullScreen
+                    || (minimized && lastMaximized)
+                // The height grown for a saved-file card is temporary; the person's own is kept.
+                const place = maximized ? maximizedNormalPlace() : Qt.rect(x, y, width, ownHeight())
+                app.rememberWindow(place.x, place.y, place.width, place.height, maximized)
             }
             app.requestClose()
         }

@@ -23,7 +23,7 @@ except ModuleNotFoundError:      # run as a script: the tests folder is the path
 
 _QT_AVAILABLE = find_spec("PySide6") is not None
 if _QT_AVAILABLE:
-    from PySide6.QtCore import QRect
+    from PySide6.QtCore import QRect, QRectF
     from luvbox import qt_app
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,6 +66,13 @@ class Window:
         self._minimum = (minimum_width, minimum_height)
         self._x = self._y = None
         self.calls = []
+        self.properties = {}
+
+    def x(self):
+        return self._x
+
+    def y(self):
+        return self._y
 
     def width(self):
         return self._width
@@ -100,6 +107,11 @@ class Window:
 
     def showMaximized(self):
         self.calls.append("maximized")
+
+    def setProperty(self, name, value):
+        # MainWindow.qml's own properties; only normalPlace is set by the placement.
+        self.calls.append(name)
+        self.properties[name] = value
 
     # For the assertions only.
     def rect(self):
@@ -311,8 +323,13 @@ class RememberedTests(PlacementCase):
         self.assertEqual((window.size(), window.place()), ((1100, 600), (40, 30)))
         self.assertEqual(window.calls[-1], "maximized")
         self.assertEqual(window.calls.count("maximized"), 1)
+        # The window keeps them while it is maximized (MainWindow.qml's normalPlace), given just before.
+        self.assertEqual(window.calls[-2], "normalPlace")
+        self.assertEqual(window.properties["normalPlace"], QRectF(40, 30, 1100, 600))
         for saved in ({"width": 1100, "height": 600, "maximized": False}, {"width": 1100, "height": 600}):
-            self.assertNotIn("maximized", self.place(self.window(self.screen), saved).calls)
+            window = self.place(self.window(self.screen), saved)
+            self.assertNotIn("maximized", window.calls)
+            self.assertEqual(window.properties, {})
 
     def test_only_part_of_a_geometry_may_have_been_kept(self):
         # The settings drop any value that is not a sensible whole number.
@@ -328,6 +345,17 @@ class RememberedTests(PlacementCase):
         window = self.place(self.window(self.screen), {"maximized": True})
         self.assertEqual(window.size(), (width, height))
         self.assertEqual(window.calls[-1], "maximized")
+        # No place was remembered, so none is handed to the window for its maximized close.
+        self.assertEqual(window.properties, {})
+
+    def test_a_maximized_window_whose_place_is_on_no_screen_is_not_given_that_place(self):
+        # Closed maximized on a monitor that is not connected now: the window opens maximized here,
+        # and is not told a normal place, so closing it maximized keeps the remembered one.
+        window = self.place(self.window(self.screen),
+                            {"width": 1100, "height": 600, "x": 5000, "y": 30, "maximized": True})
+        self.assert_centred(window, self.screen.area)
+        self.assertEqual(window.calls[-1], "maximized")
+        self.assertEqual(window.properties, {})
 
 
 if __name__ == "__main__":

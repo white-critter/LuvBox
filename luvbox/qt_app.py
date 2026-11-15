@@ -8,8 +8,8 @@ from queue import Queue
 import threading
 import uuid
 
-from PySide6.QtCore import QObject, Property, QTimer, Qt, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPalette
+from PySide6.QtCore import QObject, Property, QPoint, QRectF, QTimer, Qt, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QIcon, QPalette
 
 from . import __version__
 from .app_settings import SettingsRepository, default_settings
@@ -220,21 +220,44 @@ class ApplicationController(QObject):
 
     @Slot(int, int, int, int, bool)
     def rememberWindow(self, x, y, width, height, maximized):
-        """Keep the window's size and place for the next start. A maximized window keeps its earlier normal size."""
+        """Keep the window's normal size and place, and whether it was maximized, for the next start.
+
+        The numbers are the normal window's, also for a window that closes maximized or minimized
+        (MainWindow.qml keeps them). A maximized window that has none to give sends a zero size and
+        keeps the size and place read at start: one that opened maximized without a usable
+        remembered place and was never a normal window since, or that was maximized within a
+        moment of opening.
+        """
         if any(type(value) is not int for value in (x, y, width, height)) or type(maximized) is not bool:
             return
         geometry = self.window_geometry()
-        if not maximized:
-            if not (200 <= width <= 20000 and 200 <= height <= 20000 and -20000 <= x <= 20000 and -20000 <= y <= 20000):
-                return
+        if 200 <= width <= 20000 and 200 <= height <= 20000 and -20000 <= x <= 20000 and -20000 <= y <= 20000:
             geometry.update(x=x, y=y, width=width, height=height)
+        elif not maximized:
+            return
         geometry["maximized"] = maximized
         if geometry == self._preferences.get("window"):
             return
         self._preferences["window"] = geometry
-        # Written on the storage thread like other preferences, but not as a
-        # pending change: closing must not wait on it or show "saving".
+        # Written on the storage thread like other preferences, but not as a pending change: it
+        # shows no "saving", locks nothing and reports no failure. Closing still lets it land
+        # before that thread ends.
         self._commands.put(("settings", (0, {"window": dict(geometry)})))
+
+    @Slot(int, int, int, int, int, int, result="QVariantList")
+    def normalPlaceOnScreen(self, x, y, width, height, screen_x, screen_y):
+        """The normal place of a window closing maximized on the screen at (screen_x, screen_y).
+
+        QML knows a screen's whole area but not the part the taskbar leaves, so the window asks
+        here; see `_onto_screen`. Without such a screen the place comes back as it was.
+        """
+        application = QGuiApplication.instance()
+        screen = (application.screenAt(QPoint(screen_x, screen_y))
+                  if isinstance(application, QGuiApplication) else None)
+        if screen is None:
+            return [x, y, width, height]
+        return [int(value) for value in _onto_screen((x, y, width, height), screen.geometry(),
+                                                     screen.availableGeometry())]
 
     @Property(str, notify=changed)
     def account(self):
@@ -917,7 +940,32 @@ def _place_window(application, window, saved):
         window.setX(available.left() + max(0, (available.width() - window.width()) // 2))
         window.setY(available.top() + max(0, (available.height() - window.height()) // 2))
     if saved.get("maximized"):
+        if "x" in saved and "y" in saved:
+            # MainWindow.qml keeps the normal size and place while the window is maximized; one that
+            # opens maximized has not been a normal window yet, so it is given the remembered ones.
+            # A place on no connected screen is not handed on: closing maximized then keeps it.
+            window.setProperty("normalPlace", QRectF(window.x(), window.y(), window.width(), window.height()))
         window.showMaximized()
+
+
+def _onto_screen(place, geometry, available):
+    """The normal place to remember for a window that closes maximized on the screen `geometry`.
+
+    `place` (x, y, width, height) is kept while its middle is on that screen. A window maximized
+    onto another screen (Win+Shift+arrow, or dragged there in one go) gets its size, limited as at a
+    first start, centred in that screen's free area `available`, so its title bar can be reached.
+    """
+    x, y, width, height = place
+    if width <= 0 or height <= 0:
+        return place
+    middle_x, middle_y = x + width / 2, y + height / 2
+    if (geometry.left() <= middle_x < geometry.left() + geometry.width()
+            and geometry.top() <= middle_y < geometry.top() + geometry.height()):
+        return place
+    width = min(width, available.width() - 24)
+    height = min(height, available.height() - 48)
+    return (available.left() + max(0, (available.width() - width) // 2),
+            available.top() + max(0, (available.height() - height) // 2), width, height)
 
 
 class _FirstFrame(QObject):
