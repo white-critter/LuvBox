@@ -110,8 +110,13 @@ class Pipe {
       fs.writeFileSync(path.join(shotsDir, name), Buffer.from(data, "base64"));
     };
     const click = async selector => {
-      const point = await evaluate(`(() => { const r = document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();
-        return {x: r.x + r.width / 2, y: r.y + r.height / 2}; })()`);
+      const {result: {objectId}} = await pipe.send("Runtime.evaluate", {expression: "document"}, session);
+      const {result: {value: point}} = await pipe.send("Runtime.callFunctionOn", {
+        objectId,
+        functionDeclaration: "function(selector) { const r = this.querySelector(selector).getBoundingClientRect(); return {x: r.x + r.width / 2, y: r.y + r.height / 2}; }",
+        arguments: [{value: selector}],
+        returnByValue: true
+      }, session);
       for (const type of ["mousePressed", "mouseReleased"])
         await pipe.send("Input.dispatchMouseEvent", {type, x: point.x, y: point.y, button: "left", clickCount: 1}, session);
     };
