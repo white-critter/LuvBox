@@ -7,6 +7,7 @@ import QtQuick.Layouts
 // it in the group has the very same file). A photo found as the same picture
 // at another size or quality is only "비슷함": it is not offered as a copy,
 // because the Recycle Bin check keeps it unless a file with its bytes stays.
+// Its "비교" opens it beside the photo kept, and a person can send it alone.
 // The cards come from a model that changes in place, so after a group is put
 // away the list stays where it was.
 Item {
@@ -204,7 +205,7 @@ Item {
                                 // Only a photo that is neither kept nor a copy says more: why it is not offered.
                                 readonly property string tip: tile.modelData.keeper || tile.modelData.copy ? ""
                                     : "크기나 화질만 다른 비슷한 사진입니다. 남길 사진과 내용이 완전히 같지 않아 사본으로 고르지 않습니다. "
-                                      + "필요 없으면 중복 보기를 끈 갤러리에서 지울 수 있습니다."
+                                      + "필요 없으면 ‘비교’를 눌러 남길 사진과 나란히 본 뒤 이 사진만 휴지통으로 보낼 수 있습니다."
                                 anchors.left: parent.left
                                 anchors.top: parent.top
                                 anchors.margins: 12
@@ -312,6 +313,55 @@ Item {
                                 HoverHandler {
                                     id: roleHover
                                     cursorShape: Qt.PointingHandCursor
+                                }
+                            }
+                            // A similar photo is never a copy; this opens it beside the photo kept, to send it
+                            // alone. Above the tile's mouse area, so its click does not pick the tile.
+                            Rectangle {
+                                id: compare
+                                objectName: "duplicateCompare"
+                                readonly property bool available: !!review.app && !review.settling && !review.app.busy
+                                    && !review.library.filesLocked && !review.app.management.mutating
+                                anchors.left: roleBadge.right
+                                anchors.leftMargin: Theme.gapTiny
+                                anchors.verticalCenter: roleBadge.verticalCenter
+                                visible: !tile.modelData.keeper && !tile.modelData.copy && !tile.modelData.missing
+                                width: compareLabel.implicitWidth + 16
+                                height: 22
+                                radius: height / 2
+                                color: compareMouse.containsMouse && available ? Theme.accent : Theme.scrim
+                                border.width: 1
+                                border.color: Theme.accentLine
+                                opacity: available ? 1 : 0.5
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "묶음 " + card.number + " 비슷한 사진 " + tile.modelData.caption
+                                    + " 남길 사진과 비교 후 휴지통으로"
+                                Accessible.onPressAction: compareMouse.open()
+                                Label {
+                                    id: compareLabel
+                                    anchors.centerIn: parent
+                                    text: "비교"
+                                    font.pixelSize: Theme.fontTiny
+                                    font.bold: true
+                                    color: compareMouse.containsMouse && compare.available ? "white" : Theme.accentText
+                                }
+                                MouseArea {
+                                    id: compareMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: compare.available ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                    ToolTip.visible: containsMouse
+                                    ToolTip.delay: 500
+                                    ToolTip.text: compare.available
+                                        ? "남길 사진과 나란히 비교한 뒤 이 사진만 휴지통으로 보낼 수 있습니다"
+                                        : "작업이 끝난 뒤 비교할 수 있습니다"
+                                    function open() {
+                                        if (compare.available && compare.visible)
+                                            review.app.management.prepareAlikeDelete(tile.modelData.key)
+                                    }
+                                    onClicked: open()
+                                    // A double-click here is two presses of this button, not "look at it large".
+                                    onDoubleClicked: {}
                                 }
                             }
                         }

@@ -1294,6 +1294,91 @@ class LibraryRepository:
             marked.append(dict(row, _copy_keepers=keepers, _copy_rule=rule or "exact", _copy_near=near))
         return marked, len(spared)
 
+    def alike_manifest(self, key):
+        """One photo the duplicate view shows only as alike, beside the photo its group keeps.
+
+        For a person to compare the two and send this one alone to the Recycle
+        Bin: '비슷함' photos have bytes of their own, so no copy check lets
+        them go (``_copies_only``). The row carries the photo kept
+        (``_alike_keeper``) and its file signature as shown, and the deletion
+        worker checks both again right before the move
+        (``deletion.kept_alike``). Refused, with the reason, for a photo kept
+        or offered as a copy, one outside a group, a file changed or missing,
+        a photo kept that is gone or is this very file, or a pair the near
+        rule no longer finds to be one picture.
+        """
+        from .duplicates import nearly_identical, pixel_vector, same_in_detail
+
+        if not isinstance(key, str) or not key:
+            raise ValueError("비교할 사진을 다시 골라 주세요.")
+        with self._condition:
+            request = self._request
+            if request is None or not request.duplicate_only or key not in self._served:
+                raise ValueError("목록이 바뀌었습니다. 사진을 다시 골라 주세요.")
+            previous_path, previous_signature = self._served[key]
+        with closing(_ReadOnlyHistory(request.location())) as store:
+            store._folder_cache = {}
+            row = self._row(store, key, request)
+            path = self._path(store, row) if row is not None else None
+            if path is None or str(path) != previous_path or previous_signature is None:
+                raise ValueError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
+            signature = file_signature(path)
+            if signature != previous_signature:
+                raise ValueError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+            identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+            groups = store.duplicate_members() if hasattr(store, "duplicate_members") else {}
+            members = next((members for members in groups.values()
+                            if any(member["identity"] == identity for member in members)), None)
+            copies = set(store.duplicate_copy_identities() or ()) if members else set()
+            if not members or members[0]["identity"] == identity or identity in copies:
+                raise ValueError("‘비슷함’으로 표시된 사진만 남길 사진과 비교해 휴지통으로 보낼 수 있습니다.")
+            mode, tweet, number, kind = members[0]["identity"]
+            keeper_row = store.media_record(mode, {"tweet_id": tweet, "num": number, "type": kind})
+            keeper = self._path(store, keeper_row) if keeper_row is not None else None
+            if keeper is None:
+                raise ValueError("남길 사진 파일이 없어 이 사진을 보낼 수 없습니다.")
+            keeper_signature = file_signature(keeper)
+            if (os.path.normcase(os.path.realpath(keeper)) == os.path.normcase(os.path.realpath(path))
+                    or (keeper_signature[1] and keeper_signature[:2] == signature[:2])):
+                raise ValueError("남길 사진이 이 사진과 같은 파일이라 보낼 수 없습니다.")
+            if not (nearly_identical(pixel_vector(path), pixel_vector(keeper)) and same_in_detail(path, keeper)):
+                # In a group joined through a third photo, this one can be the same picture as that
+                # photo and still not pass beside the photo kept: say what can be done either way.
+                raise ValueError("남길 사진과 같은 사진으로 다시 확인되지 않아 여기서는 보낼 수 없습니다. "
+                                 "다른 사진이면 그 사진을 눌러 고른 뒤 ‘선택한 1장만 중복 아님’을, "
+                                 "필요 없는 사진이면 중복 보기를 끈 갤러리의 ‘휴지통으로’를 쓰세요.")
+            if file_signature(path) != signature or file_signature(keeper) != keeper_signature:
+                raise ValueError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+            favorites = store.favorite_identities_among([identity, members[0]["identity"]])
+            shown = {"alike": self._compared(path, row, signature, identity in favorites),
+                     "keeper": self._compared(keeper, keeper_row, keeper_signature,
+                                              members[0]["identity"] in favorites)}
+        with self._condition:
+            if self._request is not request:
+                raise ValueError("목록이 바뀌었습니다. 사진을 다시 골라 주세요.")
+        marked = dict(row, _delete_signature=signature, _key=key,
+                      _alike_keeper=str(keeper), _alike_keeper_signature=keeper_signature)
+        return {"location": request.location(), "rows": [marked], "generation": request.generation,
+                "kept": 0, "alike": shown}
+
+    @staticmethod
+    def _compared(path, row, signature, favorite):
+        """What the comparison shows of one photo: the picture, its size in pixels and bytes, who and when."""
+        from .preview import photo_info
+
+        try:
+            size = photo_info(path) if row.get("media_type") == "photo" else {}
+        except OSError:
+            size = {}
+        width, height = size.get("pixel_width", 0), size.get("pixel_height", 0)
+        author = row.get("author") or ""
+        posted = _posted(row.get("posted_at"), time=True)
+        return {"url": QUrl.fromLocalFile(str(path)).toString(), "name": path.name,
+                "pixels": f"{width}×{height}" if width and height else "",
+                "bytes": _format_size(signature[2]),
+                "caption": " · ".join(part for part in (("@" + author) if author else "", posted) if part),
+                "favorite": bool(favorite)}
+
     def forget(self, keys, generation):
         """Rows the gallery dropped after their files went to the Recycle Bin.
 
@@ -2730,6 +2815,26 @@ class LibraryController(QObject):
     def deletionManifest(self, keys):
         # Called on the management worker; filesystem checks never run in QML.
         return self._repository.deletion_manifest(keys)
+
+    def alikeManifest(self, key):
+        # Called on the management worker: it reads both photos to compare them.
+        return self._repository.alike_manifest(key)
+
+    def _alike(self, key):
+        """The duplicate view shows this photo only as alike ('비슷함'): in a group, neither kept nor a copy."""
+        if not self._duplicate_only or not isinstance(key, str) or not key:
+            return False
+        position = self.model._positions.get(key)
+        if position is None or not 0 <= position < len(self.model._rows):
+            return False
+        row = self.model._rows[position]
+        return (row.get("key") == key and bool(row.get("group")) and not row.get("keeper")
+                and not row.get("copy") and not row.get("missing"))
+
+    @Property(bool, notify=changed)
+    def selectedAlike(self):
+        """The photo open in the preview is one the duplicate view shows as '비슷함'."""
+        return self._alike(self.selectedKey)
 
     def removeDeleted(self, keys):
         """Take recycled files out of the shown list without reloading it.

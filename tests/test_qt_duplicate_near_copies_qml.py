@@ -246,7 +246,7 @@ def scene(shots=None):
         similar = every("duplicateTile", near_card)[2]
         assert attached(similar, "Accessible.name").startswith("비슷한 사진 "), attached(similar, "Accessible.name")
         tip = every("duplicateRole", near_card)[2].property("tip")
-        assert "완전히 같지 않아" in tip and "사본으로 고르지 않" in tip and "갤러리" in tip, tip
+        assert "완전히 같지 않아" in tip and "사본으로 고르지 않" in tip and "‘비교’" in tip, tip
         shot("1-near-and-exact-groups")
 
         # The badge of the similar photo says why when the pointer rests on it, instead of the tile's line.

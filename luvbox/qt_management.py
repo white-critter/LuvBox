@@ -61,9 +61,17 @@ class ManagementController(QObject):
     def deleteConfirmationPending(self): return self._delete is not None
     @Property(int, notify=changed)
     def deleteCount(self): return len(self._delete["rows"]) if self._delete else 0
+    @Property("QVariantMap", notify=changed)
+    def deleteAlike(self):
+        """The two photos a '비슷함' move is compared on ({alike, keeper}: url, pixels, bytes, ...), or empty."""
+        return dict(self._delete.get("alike") or {}) if self._delete else {}
     @Property(str, notify=changed)
     def deleteSummary(self):
         if not self._delete: return ""
+        if self._delete.get("alike"):
+            # One '비슷함' photo compared with the photo its group keeps: never more than this one.
+            return ("오른쪽 ‘비슷함’ 사진 한 장만 Windows 휴지통으로 이동합니다. 왼쪽 ‘남김’ 사진은 그대로 둡니다.\n"
+                    "보내기 직전에 남길 사진이 그대로 있는지, 같은 사진인지 다시 확인하고, 아니면 그대로 둡니다.")
         names = [row.get("filename") or Path(row["path"]).name for row in self._delete["rows"][:5]]
         summary = f"선택한 파일 {self.deleteCount:,}개를 Windows 휴지통으로 이동합니다.\n"
         if any("_copy_keepers" in row for row in self._delete["rows"]):
@@ -74,7 +82,8 @@ class ManagementController(QObject):
             similar = sum(1 for row in self._delete["rows"] if row.get("_copy_near"))
             if similar:
                 summary += (f"그중 {similar:,}장은 크기·화질만 다른 ‘비슷함’ 사진이라, "
-                            "내용이 완전히 같은 파일이 남지 않으면 휴지통으로 보내지 않습니다.\n")
+                            "내용이 완전히 같은 파일이 남지 않으면 휴지통으로 보내지 않습니다. "
+                            "필요 없으면 그 사진의 ‘비교’로 한 장씩 보내세요.\n")
         kept = self._delete.get("kept") or 0
         if kept:
             # A whole group was chosen in the duplicate view: its first photo stays.
@@ -120,6 +129,21 @@ class ManagementController(QObject):
         self._error = ""
         self._status = "휴지통으로 이동할 파일을 확인합니다"
         self._enqueue("prepare_delete", tuple(keys))
+
+    @Slot(str)
+    def prepareAlikeDelete(self, key):
+        """One '비슷함' photo of the duplicate view, to be compared with the photo its group keeps."""
+        if self.locked or self._mutating or self._closing or not key: return
+        if getattr(self._library, "filesLocked", False):
+            self._error = self._library.holdReason or "라이브러리 작업이 끝난 뒤 휴지통으로 이동할 수 있습니다."
+            self._status = ""
+            self.changed.emit()
+            return
+        self._mutating = True
+        self._stop.clear()
+        self._error = ""
+        self._status = "남길 사진과 비교할 준비를 합니다"
+        self._enqueue("prepare_alike", str(key))
 
     @Slot()
     def cancelDelete(self):
@@ -170,12 +194,21 @@ class ManagementController(QObject):
                 if kind == "prepare_delete":
                     result = self._library.deletionManifest(payload)
                     if self._stop.is_set(): result = {"rows": [], "cancelled": True}
+                elif kind == "prepare_alike":
+                    try:
+                        result = self._library.alikeManifest(payload)
+                    except (ValueError, OSError) as exc:
+                        # Why this photo cannot be sent is the person's to read: the manifest says it in words.
+                        self._delivered.emit((kind, generation, {}, str(exc) or "사진을 비교하지 못했습니다."))
+                        continue
+                    if self._stop.is_set(): result = {"rows": [], "cancelled": True}
                 else:
                     from .deletion import run_deletion
                     manifest, keep = payload
                     result = run_deletion(manifest["location"], manifest["rows"], keep, self._stop,
                                           lambda event: self._delivered.emit(("progress", generation, event, "")))
-                    result = dict(result, keys=_recycled_keys(manifest["rows"], result.get("paths")))
+                    result = dict(result, keys=_recycled_keys(manifest["rows"], result.get("paths")),
+                                  alike=bool(manifest.get("alike")))
                 self._delivered.emit((kind, generation, result, ""))
             except Exception:
                 self._delivered.emit((kind, generation, {}, "작업을 마치지 못했습니다. 계정·폴더·파일 상태를 확인해 주세요."))
@@ -193,22 +226,28 @@ class ManagementController(QObject):
             return
         if kind == "progress":
             self._status = str(value.get("message", ""))
-        elif kind == "prepare_delete":
+        elif kind in ("prepare_delete", "prepare_alike"):
             self._error = error
             if self._stop.is_set() or value.get("cancelled"):
                 self._mutating = False
                 self._status = "파일 이동을 취소했습니다"
             elif error or not value.get("rows"):
                 self._mutating = False
-                self._status = "이동할 파일이 없습니다"
+                # A refused comparison says why in the error; "nothing to move" would read as a result.
+                self._status = "" if kind == "prepare_alike" and error else "이동할 파일이 없습니다"
             else:
                 self._delete = value
-                self._status = "휴지통으로 이동할지 확인해 주세요"
+                self._status = ("남길 사진과 비교한 뒤 휴지통으로 보낼지 정해 주세요" if kind == "prepare_alike"
+                                else "휴지통으로 이동할지 확인해 주세요")
                 self.deleteConfirmationRequested.emit()
         else:
             self._mutating = False
             self._error = error
             self._status = str(value.get("message") or ("작업을 마쳤습니다" if not error else ""))
+            if not error and value.get("alike") and value.get("protected"):
+                # The one compared photo stayed: what the person asked for did not happen, and why
+                # reads as an error, not as a result.
+                self._error, self._status = self._status, ""
             # A failed or unprocessed file may have changed on disk, so only a
             # clean result removes single tiles; anything else reloads the list.
             keys = value.get("keys")

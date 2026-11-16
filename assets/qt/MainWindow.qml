@@ -30,7 +30,7 @@ ApplicationWindow {
     readonly property var app: appController
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
-        folderDialog.visible || deleteConfirmation.visible || scheduleDialog.visible ||
+        folderDialog.visible || deleteConfirmation.visible || alikeConfirmation.visible || scheduleDialog.visible ||
         runHistoryDialog.visible || datePickerPopup.visible || statisticsDialog.visible ||
         tagBatchPopup.visible || aiClearConfirm.visible || teachPopup.visible || shortcutHelp.visible
     // A focused or open list takes letters for itself (jumping to "@bob" must not
@@ -478,6 +478,10 @@ ApplicationWindow {
             window.seenManagementStatus = text
             if (text.length > 0)
                 window.statusSource = "management"
+            // A move asked for in the preview and refused while that photo is open: say why there too.
+            if (previewDialog.visible && window.app.management.error.length > 0
+                    && previewDialog.noticeKey.length > 0 && previewDialog.noticeKey === previewDialog.openedKey)
+                previewDialog.notice = window.app.management.error
         }
     }
 
@@ -497,6 +501,19 @@ ApplicationWindow {
     function flashNotice(text) {
         transientNotice = text
         noticeTimer.restart()
+    }
+
+    // The photo open in the preview to the Recycle Bin. A '비슷함' photo of the duplicate view is
+    // shown beside the photo its group keeps first, and goes alone.
+    function recycleOpened() {
+        if (!app || !app.library.selectedKey)
+            return
+        if (previewDialog.visible)
+            previewDialog.noticeKey = app.library.selectedKey
+        if (app.library.selectedAlike)
+            app.management.prepareAlikeDelete(app.library.selectedKey)
+        else
+            app.management.prepareDelete([app.library.selectedKey])
     }
 
     function teachCategory(category, selection) {
@@ -1654,7 +1671,8 @@ ApplicationWindow {
                             objectName: "duplicateGuide"
                             Layout.fillWidth: true
                             text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’(내용이 완전히 같은 파일)을 골라 휴지통으로 보내세요. "
-                                + "크기·화질만 다른 ‘비슷함’은 사본으로 고르지 않으니, 필요 없으면 중복 보기를 끈 갤러리에서 지우세요. "
+                                + "크기·화질만 다른 ‘비슷함’은 사본으로 고르지 않습니다. 필요 없으면 그 사진의 ‘비교’를 눌러 "
+                                + "남길 사진과 나란히 본 뒤 한 장씩 휴지통으로 보내세요. "
                                 + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다. "
                                 + "같은 사진이 아니거나 모두 남기려면 묶음의 ‘중복 아님’을, "
                                 + "몇 장만 다른 사진이면 그 사진을 고른 뒤 ‘선택한 N장만 중복 아님’을 누르세요."
@@ -1677,7 +1695,7 @@ ApplicationWindow {
                                 Accessible.name: "크기나 화질만 다른 같은 사진도 찾기"
                                 tip: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 묶어 ‘비슷함’으로 보여 줍니다. "
                                     + "두 사진을 작게 줄여 비교한 뒤 작은 쪽 사진의 크기에서 한 번 더 비교해, 같을 때만 묶습니다. "
-                                    + "휴지통으로는 내용이 완전히 같은 파일만 사본으로 보냅니다."
+                                    + "사본으로는 내용이 완전히 같은 파일만 휴지통으로 보내고, ‘비슷함’은 남길 사진과 비교한 뒤 한 장씩 보냅니다."
                                 onClicked: {
                                     window.duplicateNear = !window.duplicateNear
                                     checked = Qt.binding(function() { return window.duplicateNear })
@@ -2416,6 +2434,17 @@ ApplicationWindow {
         parent: Overlay.overlay
         property bool detailsVisible: false
         readonly property bool textInputFocused: bodyText.activeFocus || inlineTagField.activeFocus
+        // Why the last move started here did not happen (a refused comparison, say). The status line
+        // that says it lies under this window; the note goes with the photo it was about.
+        property string notice: ""
+        // The photo the last move from here was asked for; a reason that arrives after the person
+        // went on to another photo stays in the status line.
+        property string noticeKey: ""
+        readonly property string openedKey: window.app ? window.app.library.selectedKey : ""
+        onOpenedKeyChanged: {
+            notice = ""
+            noticeKey = ""
+        }
         title: "미리보기"
         anchors.centerIn: parent
         width: Math.max(0, parent.width - 24)
@@ -2497,13 +2526,14 @@ ApplicationWindow {
                     window.flashNotice("작업이 끝난 뒤 휴지통으로 이동할 수 있습니다.")
                     return
                 }
-                if (!window.app.library.selectedMissing) {
-                    window.app.management.prepareDelete([window.app.library.selectedKey])
-                }
+                if (!window.app.library.selectedMissing)
+                    window.recycleOpened()
             }
         }
         onAboutToShow: {
             detailsVisible = false
+            notice = ""
+            noticeKey = ""
             inlineTagField.text = ""
             window.stopWheel()
         }
@@ -2547,6 +2577,18 @@ ApplicationWindow {
         footer: ColumnLayout {
             width: parent ? parent.width : 0
             spacing: 8
+            Label {
+                objectName: "previewNotice"
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                visible: previewDialog.notice.length > 0
+                text: previewDialog.notice
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: Theme.error
+                font.pixelSize: Theme.fontSmall
+            }
             Flow {
                 visible: !!window.app
                 Layout.fillWidth: true
@@ -2558,10 +2600,14 @@ ApplicationWindow {
                 FlatButton {
                     objectName: "previewRecycle"
                     tone: "danger"
-                    text: "휴지통으로"
+                    // A '비슷함' photo of the duplicate view is compared with the photo its group keeps first.
+                    readonly property bool alike: !!window.app && window.app.library.selectedAlike
+                    text: alike ? "남김과 비교 후 휴지통으로" : "휴지통으로"
                     enabled: window.app && !window.app.busy && !window.app.library.filesLocked && !window.app.library.selectedMissing
-                    tip: window.app && window.app.library.filesLocked ? (window.app ? window.app.library.holdReason : "") : ""
-                    onClicked: window.app.management.prepareDelete([window.app.library.selectedKey])
+                    tip: window.app && window.app.library.filesLocked ? window.app.library.holdReason
+                        : alike ? "크기·화질만 다른 ‘비슷함’ 사진입니다. 묶음에 남길 사진과 나란히 비교한 뒤 이 사진만 휴지통으로 보냅니다 (Delete)"
+                        : ""
+                    onClicked: window.recycleOpened()
                 }
                 FlatButton { text: "원문 보기"; enabled: window.app && window.app.library.selectedSource.length > 0; onClicked: window.app.library.openSource() }
                 FlatButton {
@@ -3200,6 +3246,11 @@ ApplicationWindow {
         parent: Overlay.overlay
         app: window.app
     }
+    AlikeConfirmation {
+        id: alikeConfirmation
+        parent: Overlay.overlay
+        app: window.app
+    }
 
     // A move to the Recycle Bin that started in the preview returns to it:
     // on the next photo after the move, on the same one after a cancel.
@@ -3212,7 +3263,12 @@ ApplicationWindow {
             selectedMedia.release()
             previewDialog.close()
             Qt.callLater(function() {
-                if (window.app && !window.app.closing && window.app.management.deleteConfirmationPending)
+                if (!window.app || window.app.closing || !window.app.management.deleteConfirmationPending)
+                    return
+                // One '비슷함' photo is confirmed beside the photo its group keeps.
+                if (window.app.management.deleteAlike.alike)
+                    alikeConfirmation.open()
+                else
                     deleteConfirmation.open()
             })
         }
@@ -3637,6 +3693,7 @@ ApplicationWindow {
                 repairDialog.close()
                 folderDialog.close()
                 deleteConfirmation.close()
+                alikeConfirmation.close()
                 datePickerPopup.close()
             }
         }

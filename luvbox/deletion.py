@@ -15,7 +15,9 @@ from .storage import OutputGuard, StoragePaths, publish_snapshot
 
 
 _NO_OTHER_COPY = "같은 내용의 다른 파일이 남는지 확인하지 못해 그대로 두었습니다."
-_NEAR_ONLY = "‘화질만 다른 사진 포함’으로 묶인 사진은 내용이 완전히 같은 파일이 남을 때만 휴지통으로 보냅니다."
+_NEAR_ONLY = ("‘화질만 다른 사진 포함’으로 묶인 사진은 내용이 완전히 같은 파일이 남을 때만 사본으로 보냅니다. "
+              "‘비슷함’ 사진은 그 사진의 ‘비교’로 남길 사진과 나란히 본 뒤 한 장씩 보낼 수 있습니다.")
+_ALIKE_NOT_KEPT = "남길 사진이 그대로 있고 같은 사진인지 다시 확인하지 못해 그대로 두었습니다."
 
 
 def _same_content(first: Path, second: Path) -> bool:
@@ -58,6 +60,41 @@ def kept_copy(store: HistoryStore, path: str, signature, keepers) -> str:
     return ""
 
 
+def kept_alike(store: HistoryStore, path: str, signature, keeper, keeper_signature) -> str:
+    """The photo a person compared this one with, still there and still the same picture, or ''.
+
+    A photo the duplicate view shows only as alike ('비슷함': another size or
+    quality, other bytes) leaves only when a person chose it alone, looked at
+    it beside the photo its group keeps and confirmed. Its bytes prove
+    nothing, so what is checked is that the photo they saw beside it is the
+    very file still standing (``keeper_signature``, taken when the two were
+    shown), that it is another file and not this one under another record,
+    name or link, and that both looks of the near rule still find one picture.
+    """
+    try:
+        if not isinstance(keeper, str) or not keeper or not store.is_media_path(keeper):
+            return ""
+        expected = tuple(keeper_signature) if isinstance(keeper_signature, (list, tuple)) else ()
+        other = file_signature(keeper)              # an ordinary file, not a link
+        if other != expected:
+            return ""                               # not the file that was shown
+        if os.path.normcase(os.path.realpath(keeper)) == os.path.normcase(os.path.realpath(path)):
+            return ""
+        if other[1] and signature[1] and other[:2] == tuple(signature[:2]):
+            return ""                               # the same file number on the same volume
+        if file_signature(path) != tuple(signature):
+            return ""                               # the photo to move changed meanwhile
+        from .duplicates import nearly_identical, pixel_vector, same_in_detail
+
+        if not (nearly_identical(pixel_vector(path), pixel_vector(keeper)) and same_in_detail(path, keeper)):
+            return ""
+        if file_signature(keeper) != expected or file_signature(path) != tuple(signature):
+            return ""                               # one of them changed while they were read
+        return keeper
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
 def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: bool,
                  stop: threading.Event, emit) -> dict:
     """Recycle only the confirmed physical files, preserving their media history.
@@ -72,6 +109,11 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
     ``protected``. Each file is checked when its turn comes, so the last file
     of a group can never go. A photo grouped only as the same picture at
     another size or quality (``_copy_rule`` "near") therefore stays.
+
+    A row carrying ``_alike_keeper`` is such a photo that a person chose alone
+    and compared with the photo its group keeps (``kept_alike``). It moves
+    only as the whole batch, one file, and only while that photo still stands
+    beside it; never together with other rows.
     """
     unique = {}
     for row in rows:
@@ -87,6 +129,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
     warnings = []
     failures = []
     near_kept = False
+    alike_kept = 0
     batch = uuid.uuid4().hex
 
     def progress(message):
@@ -100,7 +143,10 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
         if result["cancelled"]:
             result["message"] += f" · 처리하지 않은 파일 {result['cancelled']:,}개"
         if result["protected"]:
-            result["message"] += "\n" + _NO_OTHER_COPY
+            if alike_kept:
+                result["message"] += "\n" + _ALIKE_NOT_KEPT
+            if result["protected"] > alike_kept:
+                result["message"] += "\n" + _NO_OTHER_COPY
             if near_kept:
                 result["message"] += "\n" + _NEAR_ONLY
         if failures:
@@ -180,7 +226,17 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 failures.append(f"{Path(path).name}: {error}")
                 progress(failures[-1])
                 continue
-            if "_copy_keepers" in row and not kept_copy(store, path, signature, row.get("_copy_keepers")):
+            if "_alike_keeper" in row:
+                # One compared photo is the whole batch: never part of a group, a selection or a bulk choice.
+                if (len(rows) != 1 or "_copy_keepers" in row
+                        or not kept_alike(store, path, signature, row.get("_alike_keeper"),
+                                          row.get("_alike_keeper_signature"))):
+                    result["protected"] += 1
+                    alike_kept += 1
+                    processed += 1
+                    progress(f"{Path(path).name}: {_ALIKE_NOT_KEPT}")
+                    continue
+            elif "_copy_keepers" in row and not kept_copy(store, path, signature, row.get("_copy_keepers")):
                 # Nothing is recorded: the file and its records stay as they are.
                 result["protected"] += 1
                 near_kept = near_kept or row.get("_copy_rule") == "near"
