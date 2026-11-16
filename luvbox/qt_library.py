@@ -2514,6 +2514,10 @@ class LibraryController(QObject):
             # A favorite is the photo its group keeps. The groups stay: their cards are redrawn in
             # place, and the photo opened and the photos picked are found again under the new keys.
             self._refresh(reload_authors=False, keep_place=True, keep_opened=True)
+        elif self._favorite_only and not new_state:
+            # The saved query no longer contains this photo. Leaving it in the
+            # model also makes its loaded-row count stop paging one photo early.
+            self._refresh(reload_authors=False)
         return new_state
 
     @Slot(str, result=str)
@@ -2547,10 +2551,8 @@ class LibraryController(QObject):
             if not had_tag:
                 self._upsert_cached_user_tag(clean, delta=1)
             self._user_tags_loaded = False
-            with self._condition:
-                self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
-                self._condition.notify_all()
-            self.changed.emit()
+            # A user tag with the same name replaces this photo's AI label.
+            self._settle(self._status, reload=bool(self._ai_category) and clean == self._ai_category)
         return ok
 
     @Slot(str, result=bool)
@@ -2566,10 +2568,7 @@ class LibraryController(QObject):
             self._selected["tags"] = tags
             self._upsert_cached_user_tag(clean, delta=-1)
             self._user_tags_loaded = False
-            with self._condition:
-                self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
-                self._condition.notify_all()
-            self.changed.emit()
+            self._settle(self._status, reload=clean in (self._user_tag, self._ai_category))
         return ok
 
     @Slot(bool)

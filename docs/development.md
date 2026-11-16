@@ -1,4 +1,4 @@
-# LuvBox 1.10.4 개발 안내
+# LuvBox 1.10.5 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -40,6 +40,8 @@ Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사�
 | `selftest.py`, `qt_smoke.py`, `tools/check_*startup.py`, `tools/package_release.py` | 격리 검사와 배포 파일(단일 EXE·체크섬·소스·라이선스 ZIP) 만들기 |
 
 Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트워크 작업은 작업 스레드나 별도 worker에서 처리하고, 신호·큐·JSON 메시지로 결과를 전달합니다. 이전 작업의 썸네일 결과는 generation으로 구분하며, 진행 이벤트는 제어 이벤트의 순서를 보존하면서 합칩니다. 종료 시 실행 중인 작업과 파일 핸들을 정리합니다.
+
+즐겨찾기만 보는 중 즐겨찾기를 해제하거나, 미리보기에서 현재 내 태그·AI 분류 조건을 바꾸는 태그 편집을 하면 목록을 다시 읽습니다. DB의 필터 결과와 모델의 불러온 행 수가 어긋나면 다음 페이지의 마지막 사진이 누락되기 때문입니다. 필터에 영향이 없는 태그 편집은 `_settle`로 열린 사진과 분류별 개수만 갱신합니다. `tests/test_gallery_filter_edits.py`는 7장을 3장씩 읽으며 네 편집 경로의 마지막 사진과 원본 파일 보존을 검사합니다.
 
 휴지통 이동이 끝나면 목록을 다시 읽지 않고 옮긴 행만 모델에서 뺍니다(`GalleryModel.removeKeys`, `LibraryController.removeDeleted`). 다음 페이지는 마지막으로 보인 행 뒤에서 이어지므로 저장소는 커서 앞의 행 수만 줄입니다(`LibraryRepository.forget`). 실패·미처리 파일이 있는 결과, 불러오는 중인 페이지, 중복 사진 보기, 32곳을 넘게 흩어진 선택은 이전처럼 전체를 다시 읽습니다. 폴더 전체 작업(자동분류·중복 검사·가르치기·AI 태그 초기화)이 끝날 때도 결과가 현재 필터를 바꾸는 경우에만 다시 읽고, 그 밖에는 열린 항목만 다시 조회합니다(`_settle`). 미리보기의 불러오는 표시는 열린 항목의 조회(`selectionBusy`)만 따르며 폴더 전체 작업의 `busy`와 구분합니다. 갤러리 썸네일 디코딩 작업 수는 논리 코어의 절반을 2~4개 범위로 씁니다.
 
@@ -177,7 +179,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.10.4.txt`, `release/LuvBox-1.10.4-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.10.5.txt`, `release/LuvBox-1.10.5-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 
