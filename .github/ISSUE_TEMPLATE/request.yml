@@ -1,0 +1,15 @@
+name: 제안·질문이 있어요
+description: 바라는 기능, 불편한 점, 궁금한 점
+title: "[제안·질문] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        이 글은 누구나 볼 수 있습니다. **로그인 토큰·쿠키·비밀번호는 절대 올리지 마세요.**
+  - type: textarea
+    id: what
+    attributes:
+      label: 하고 싶은 말
+      description: 바라는 기능이나 불편한 점, 궁금한 점을 편하게 적어 주세요.
+    validations:
+      required: true

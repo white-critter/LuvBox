@@ -1,0 +1,22 @@
+name: 문제가 있어요 (버그 신고)
+description: 앱이 이상하게 동작하거나 오류가 날 때
+title: "[버그] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        이 글은 누구나 볼 수 있습니다. **로그인 토큰·쿠키·비밀번호는 절대 올리지 마세요.**
+  - type: textarea
+    id: what
+    attributes:
+      label: 어떤 문제가 있나요?
+      description: 무엇을 했을 때 어떻게 됐는지 편하게 적어 주세요. 화면 캡처를 붙여 주시면 큰 도움이 됩니다.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: LuvBox 버전
+      description: 앱에 표시되는 버전입니다. 모르면 비워 두세요.
+      placeholder: 예) 1.10.7

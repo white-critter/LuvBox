@@ -8,7 +8,7 @@
 4. 수정에 맞는 회귀 검사와 격리된 Qt·다운로드 시작 검사를 수행합니다.
 5. 배포 시 `build.ps1`로 새 버전을 만들고 산출물의 버전·해시·실행 결과를 확인합니다.
 
-현재 변경사항은 [CHANGELOG](CHANGELOG.md), 완료된 검사와 생략 사유는 [검증 기록](docs/verification.md)에 기록합니다. 인증·파일 접근 경계는 [보안 검토](docs/security-review.md), 측정 방법은 [성능 안내](docs/performance.md)를 따릅니다. 과거 원문은 Git 태그·커밋 기록에 보존합니다.
+변경사항은 사용자가 읽는 짧은 요약을 [CHANGELOG](CHANGELOG.md)에, 기술적인 자세한 내용을 [자세한 변경 기록](docs/changelog-detail.md)에 적습니다(README·CHANGELOG·릴리스 설명을 쓰는 법은 [개발 안내](docs/development.md)의 ‘사용자가 읽는 글은 짧고 쉽게’). 완료된 검사와 생략 사유는 [검증 기록](docs/verification.md)에 기록합니다. 인증·파일 접근 경계는 [보안 검토](docs/security-review.md), 측정 방법은 [성능 안내](docs/performance.md)를 따릅니다. 과거 원문은 Git 태그·커밋 기록에 보존합니다.
 
 `%LOCALAPPDATA%\LuvBox`와 사용자 미디어·예약은 테스트 데이터가 아닙니다. 검사는 임시 앱 데이터·생성 미디어·합성 계정만 사용하고, 기존 설정·로그인·기록과 이전 이름의 호환 코드를 보존합니다. 데이터 충돌은 기존 안내와 명시적 선택 흐름을 유지합니다. 인증 값·사용자 DB·브라우저 프로필은 로그·Git·배포물에 포함하지 않습니다.
 

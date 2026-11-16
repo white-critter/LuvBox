@@ -183,6 +183,14 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 
+### 사용자가 읽는 글은 짧고 쉽게
+
+README, `CHANGELOG.md`, GitHub 릴리스 설명은 개발자가 아닌 사용자가 읽습니다(2026-11-16 저장소 관리자 요청). 다음을 지킵니다.
+
+- **README**: 무엇을 하는 앱인지, 받는 법, 쓰는 법, 업데이트, 자주 묻는 것, 문의만 둡니다. 화면별 세부 동작은 [사용 안내](사용안내.txt)에, 개발 내용은 이 문서에 적습니다.
+- **`CHANGELOG.md`**: 버전마다 쉬운 말로 한 줄씩, 많아도 네 줄입니다. 사용자가 느끼는 변화만 적고 함수·파일 이름, 측정값, 검사 수, “DB 구조는 같습니다” 같은 문장은 넣지 않습니다. 기술적인 자세한 기록은 [자세한 변경 기록](changelog-detail.md)의 맨 위에 같은 버전 제목으로 적습니다.
+- **릴리스 설명**: 한 줄 소개, `### 주요 변경 사항`(쉬운 말의 목록 네 줄 안팎, 앱의 업데이트 알림에 그대로 나옵니다), `### 받는 법` 순서로 씁니다. 검증 결과·확인하지 못한 것·체크섬은 맨 아래 `<details>`(접힌 ‘개발자용 정보’) 안에 넣습니다.
+
 `tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·실행기 소스·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 
 저장 못 한 미디어는 메인 창의 세 번째 화면(`UnsavedReview.qml`, `currentScreen === 2`)입니다. `window.openUnsaved(view)`가 열고, 갤러리의 `galleryUnsavedButton`·설정의 버튼·저장 화면의 안내가 이를 부릅니다. 목록은 `RecordsController`의 세 보기(`unsaved`·`excluded`·`missing`)이고 `UnsavedModel`(`records.unsavedModel`)로 그립니다. 스크롤이 끝에 가까워지면 `loadMoreUnsaved()`가 다음 묶음(`_UNSAVED_PAGE`개)을 아래에 붙이고, 위의 타일과 선택은 그대로입니다. 빼기·해제 뒤와 `refresh()`는 불러온 데까지 다시 읽으며(`"through"`) 화면은 보던 자리를 지킵니다. 다른 목록으로 바꾸거나 화면을 다시 열면 목록을 먼저 비워 맨 위에서 시작합니다. 타일 선택은 갤러리와 같습니다: 누르기(`toggleUnsavedSelected`), Shift+클릭(`selectUnsavedRangeTo`), 끌기(`beginUnsavedBand`·`unsavedBandSelect`·`endUnsavedBand`), Ctrl+A(`selectUnsavedPage`), 한 번에 `MAX_PICKED`개까지이고 버튼은 `retrySelected`·`settleSelected`를 부릅니다. 미리보기 그림은 행에 싣지 않습니다. 행에는 `image://unsavedpreview/<타일>` 주소만 있고, `UnsavedPreviewProvider`가 타일이 보일 때 이 PC의 미리보기 캐시에서 읽습니다(`PreviewShelf`가 타일과 미디어를 잇고, 목록이 이름 붙인 타일에만 답합니다). QML 엔진을 만드는 곳은 `engine.addImageProvider(PREVIEW_PROVIDER, records.preview_provider())`를 해야 그림이 나오며, 넘긴 공급자는 엔진이 소유합니다(따로 붙잡아 두지 않습니다). ‘없어진 파일’은 `HistoryStore._lost_items`(갤러리가 보여 주는 기록 가운데 어느 폴더 구성에도 파일이 없는 미디어, 지금 디스크에서 확인)이고, 저장 폴더가 없으면 빈 목록입니다. `exclude_lost`는 그 순간에도 없는 미디어만, 현재 저장 폴더 안의 경로만 바꾸며 기록을 지우지 않습니다. 제외·해제 뒤에는 `catalogChanged`로 갤러리를 다시 읽습니다. 직접 제외 항목의 미리보기는 저장 엔진이 그 미디어를 지나칠 때 `keep_unsaved_preview`로 받습니다(`unsaved_previews` 옵션이 켜진 저장에서만, 실행당 `MAX_PER_RUN`장).
