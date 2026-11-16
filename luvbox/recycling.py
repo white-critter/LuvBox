@@ -23,6 +23,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+# A file another program holds open. Windows itself reports 0x80070020; the Shell's
+# file operation, which does the move here, answers 0x80270027 after waiting about a second.
+_SHARING_VIOLATION = -2147024864
+_SHELL_IN_USE = -2144927705
+_IN_USE_HELP = "다른 프로그램이 이 파일을 사용하고 있어 휴지통으로 보내지 못했습니다. 그 프로그램을 닫은 뒤 다시 시도해 주세요."
+
+
 class RecyclingError(OSError):
     """A safe failure, or an explicitly uncertain outcome needing review."""
 
@@ -314,8 +321,14 @@ def recycle_file(path: Path | str, expected=None) -> str:
                 time.sleep(delay)
             outcome = _run_native(path, signature)
             missing = not path.exists()
-            if (missing or outcome.pre_error or outcome.destination or outcome.aborted or (
-                    outcome.post_result != -2147024864 and outcome.operation_result != -2147024864)):
+            results = (outcome.post_result, outcome.operation_result)
+            # What the Shell answers while another program holds the file open.
+            in_use = _SHELL_IN_USE in results
+            if (missing or outcome.pre_error or outcome.destination or outcome.aborted
+                    or not (in_use or _SHARING_VIOLATION in results)):
+                break
+            if in_use and delay:
+                # The Shell waited about a second itself before each answer: one more try is enough.
                 break
         if (missing and outcome.post_result is not None and outcome.post_result >= 0 and outcome.destination
                 and outcome.operation_result >= 0 and not outcome.aborted):
@@ -325,7 +338,9 @@ def recycle_file(path: Path | str, expected=None) -> str:
                     time.sleep(delay)
                 if verify_receipt(path, outcome.destination, signature):
                     return outcome.destination
-        message = outcome.pre_error or "휴지통 이동을 확인하지 못했습니다. 파일과 휴지통을 확인해 주세요."
+        message = outcome.pre_error or (
+            _IN_USE_HELP if in_use and not missing
+            else "휴지통 이동을 확인하지 못했습니다. 파일과 휴지통을 확인해 주세요.")
         raise RecyclingError(message, uncertain=missing, recycled_path=outcome.destination)
     except RecyclingError as exc:
         if not path.exists() and not exc.uncertain:

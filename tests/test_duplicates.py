@@ -86,6 +86,9 @@ class DuplicateTests(unittest.TestCase):
 
         # The same file hash and size is.
         self.store.save_image_hashes([("flat", "102", 1, "photo", p1.stat().st_size, "hash1", dh2)])
+        # The count is what the duplicate view lists: stored groups (1.10.8), made here from the hashes.
+        self.assertEqual(self.store.duplicate_counts(), 0)
+        self.assertEqual(self.store.regroup_exact_duplicates(), 2)
         self.assertEqual(self.store.duplicate_counts(), 2)
 
         # Filter duplicate_only
@@ -152,6 +155,7 @@ class DuplicateTests(unittest.TestCase):
             ("flat", "301", 1, "photo", 100, "samehash", "0123456789abcdef"),
             ("flat", "302", 1, "photo", 100, "samehash", "0123456789abcdef"),
         ])
+        self.assertEqual(self.store.regroup_exact_duplicates(), 2)
         self.assertEqual(self.store.duplicate_counts(), 2)
 
         # When one media row is marked deleted (path=''), neither remains a duplicate

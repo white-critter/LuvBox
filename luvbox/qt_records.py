@@ -362,7 +362,9 @@ class RecordsController(QObject):
     def refresh(self):
         if self._closing:
             return
-        self._enqueue("counts", None)
+        # One count is enough however often this is asked while one waits: counting the lost
+        # files looks at every saved file, and a finished save asks three times in a row.
+        self._enqueue("counts", None, replace=True)
         if "runs" in self._active:
             self.loadRuns(self._run_page)
         if "unsaved" in self._active:
@@ -935,7 +937,10 @@ class RecordsController(QObject):
         elif kind == "dismiss":
             self._unsaved_error = error
             self._unsaved_status = "" if error else "목록에서 지웠습니다. 저장된 파일에는 영향이 없습니다."
-            self.refresh()
+            if not error:
+                # Reading the list again clears the error line: after a failure nothing was
+                # removed, and the person has to see why.
+                self.refresh()
         elif kind == "release":
             self._unsaved_error = error
             if error:

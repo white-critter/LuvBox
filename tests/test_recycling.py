@@ -260,6 +260,40 @@ class RecyclingTests(unittest.TestCase):
         self.assertEqual(run_native.call_count, 2)
         sleep.assert_called_once_with(0.05)
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
+    def test_a_file_another_program_holds_is_tried_once_more_and_then_named_as_in_use(self):
+        """The Shell answers 0x80270027 for an open file, not 0x80070020: the 1.10.7 retry never ran."""
+        self.assertEqual(recycling._SHELL_IN_USE & 0xFFFFFFFF, 0x80270027)
+        self.assertEqual(recycling._SHARING_VIOLATION & 0xFFFFFFFF, 0x80070020)
+        busy = recycling._Outcome(operation_result=recycling._SHELL_IN_USE, post_result=recycling._SHELL_IN_USE)
+        with patch.object(recycling, "_run_native", return_value=busy) as run_native, \
+                patch.object(recycling.time, "sleep") as sleep:
+            with self.assertRaises(recycling.RecyclingError) as caught:
+                recycle_file(self.source)
+        # Each answer already took the Shell about a second: one more try, not four.
+        self.assertEqual(run_native.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+        self.assertIn("다른 프로그램이 이 파일을 사용하고 있어", str(caught.exception))
+        self.assertFalse(caught.exception.uncertain)
+        self.assertTrue(self.source.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
+    def test_a_file_released_in_the_meantime_goes_on_the_second_try(self):
+        attempts = []
+
+        def fake_native(*_):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return recycling._Outcome(operation_result=recycling._SHELL_IN_USE,
+                                          post_result=recycling._SHELL_IN_USE)
+            return self.recycled()
+
+        with patch.object(recycling, "_run_native", side_effect=fake_native), \
+                patch.object(recycling, "verify_receipt", return_value=True), \
+                patch.object(recycling.time, "sleep"):
+            self.assertEqual(recycle_file(self.source), str(self.destination))
+        self.assertEqual(len(attempts), 2)
+
     def test_permanent_delete_callback_is_aborted(self):
         outcome = recycling._Outcome()
         sink = recycling._Sink(self.source, self.signature, outcome, Mock())

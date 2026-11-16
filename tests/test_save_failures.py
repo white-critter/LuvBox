@@ -411,7 +411,10 @@ class SaveFailureTests(unittest.TestCase):
                 patch("gallery_dl.downloader.find", return_value=HttpDownloader), \
                 patch("requests.Session.send", side_effect=self.send):
             code = run_worker(replace(self.options, targets=("5000_1",)), events.append)
-        self.assertEqual((code, events[-1]["status"]), (1, "error"))
+        # Since 1.10.8 a refused retry gives up that file and ends normally (the files chosen with
+        # it are still tried; tests/test_retry_and_quick_rules.py). It stays listed and counts nothing.
+        self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "finished", 0))
+        self.assertEqual([identity[0] for identity in self.listed()], ["5000"])
         self.assertEqual(unsaved.refusals("myaccount", self.options.output_dir), {})
 
     def test_a_cut_off_or_timed_out_media_is_not_counted_as_refused(self):

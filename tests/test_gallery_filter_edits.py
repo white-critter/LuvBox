@@ -92,6 +92,46 @@ class GalleryFilterEditTests(unittest.TestCase):
         self.assertTrue(self.library.removeSelectedTag("인물"))
         self.assert_remaining(removed)
 
+    def test_an_edit_that_takes_a_photo_out_of_the_filter_keeps_the_place_in_the_list(self):
+        """1.10.5 read the list again: back to the top, the preview closed. Now only that tile goes."""
+        edits = (("favourite", lambda: self.library.setFavoriteOnly(True),
+                  lambda: self.library.toggleSelectedFavorite()),
+                 ("user tag", lambda: self.library.setUserTag("여행"),
+                  lambda: self.library.removeSelectedTag("여행")),
+                 ("ai label", lambda: self.library.setAiFilter("인물", ""),
+                  lambda: self.library.removeSelectedTag("인물")))
+        resets = []
+        self.library.model.modelReset.connect(lambda: resets.append(1))
+        for name, choose, edit in edits:
+            with self.subTest(filter=name):
+                choose()
+                self.wait(lambda: not self.library.model.busy and self.library.model.count == 3)
+                self.library.model.loadMore()                      # the person has scrolled on: six tiles
+                self.wait(lambda: not self.library.model.busy and self.library.model.count == 6)
+                rows = [row["key"] for row in self.library.model._rows]
+                self.library.selectItem(rows[4])                    # the fifth photo is open
+                self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == rows[4])
+                before = len(resets)
+                edit()
+                self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == rows[5])
+                self.assertEqual(len(resets), before)               # the list was not read again
+                self.assertEqual([row["key"] for row in self.library.model._rows],
+                                 rows[:4] + rows[5:])
+                self.assert_remaining(rows[4].split("_")[2])
+                # Put the mark back for the next filter.
+                with closing(HistoryStore.for_storage(self.paths)) as store:
+                    identity = ("flat", rows[4].split("_")[2], 1, "photo")
+                    if name == "favourite":
+                        store.toggle_favorite(*identity)
+                    elif name == "user tag":
+                        store.add_tag(*identity, "여행")
+                    else:
+                        store.add_tag(*identity, "인물", source="ai")
+                self.library.setFavoriteOnly(False)
+                self.library.setUserTag("")
+                self.library.setAiFilter("", "")
+                self.wait(lambda: not self.library.model.busy)
+
     def test_unrelated_tag_edit_preserves_open_photo_and_selection(self):
         self.library.setUserTag("여행")
         self.open_first()

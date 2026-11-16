@@ -15,7 +15,12 @@ FlatDialog {
         + (footer && footer.implicitHeight > 0 ? footer.implicitHeight + spacing : 0)
     height: Math.min(Math.max(200, summary.implicitHeight + keepDeleted.implicitHeight + Theme.gap + chromeHeight + 6),
                      420, parent ? Math.max(200, parent.height - 32) : 420)
-    onOpened: { keepDeleted.checked = false; cancelButton.forceActiveFocus() }
+    // From the duplicate view the switch starts on: a copy fetched again at the next full save
+    // would be the same duplicate again. From the gallery it starts off, as before.
+    onOpened: {
+        keepDeleted.checked = !!app && app.library.filterDuplicateOnly
+        cancelButton.forceActiveFocus()
+    }
     onRejected: if (app) app.management.cancelDelete()
     onAccepted: {
         let keep = keepDeleted.checked
@@ -45,6 +50,7 @@ FlatDialog {
         }
         FlatSwitch {
             id: keepDeleted
+            objectName: "deleteKeepSwitch"
             Layout.fillWidth: true
             trailing: true
             text: "다음 저장에서 다시 받지 않기"

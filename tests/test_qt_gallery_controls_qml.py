@@ -203,7 +203,7 @@ def scene():
             QTest.qWait(40)
             settle()
             labels = [row["label"] for row in author_combo.property("model")]
-            assert labels == ["전체 작성자", "@alice · 미디어 3개", "@alice2 · 미디어 1개", "@bob · 미디어 1개"], labels
+            assert labels == ["작성자 전체", "@alice · 미디어 3개", "@alice2 · 미디어 1개", "@bob · 미디어 1개"], labels
             def inside(name, bar):
                 node = find(name)
                 while node is not None:

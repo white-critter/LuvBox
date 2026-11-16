@@ -328,6 +328,34 @@ class ControllerTests(unittest.TestCase):
         self.wait(lambda: self.repository.scans == [True] and not self.library.busy)
         self.assertIn("AI 자동분류 완료", self.library.status)
 
+    def test_a_stop_asked_of_one_run_does_not_end_the_next_run_that_starts_by_itself(self):
+        """Until 1.10.7 only the button's own slot cleared the stop, so every later automatic run ended at once."""
+        cancel = Event()
+        self.repository._ai_cancel = cancel
+        run = self.repository.scan_ai_tags
+
+        def scan(generation, **arguments):
+            if cancel.is_set():                   # what the real scan's first check does
+                raise ScanCancelled("AI 자동분류를 중단했습니다.")
+            return run(generation, **arguments)
+
+        self.repository.scan_ai_tags = scan
+        self.open()
+        self.wait(lambda: self.repository.looks == 1 and not self.library._auto_ai_wanted)
+        self.repository.gate.clear()
+        self.assertTrue(self.library.scanAiTags())
+        self.wait(lambda: self.repository.scans == [True])
+        self.library.cancelAiScan()
+        self.assertTrue(cancel.is_set())
+        self.repository.gate.set()
+        self.wait(lambda: not self.library.aiScanning and not self.library.busy)
+        # A save ends later: the run that starts on its own has photos to classify.
+        self.repository.pending = True
+        self.library.classifyNewPhotos()
+        self.wait(lambda: self.repository.scans == [True, False] and not self.library.aiScanning,
+                  "the automatic run was stopped before it began")
+        self.assertFalse(cancel.is_set())
+
 
 class ScheduledTests(unittest.TestCase):
     """An unattended save classifies what it saved, and never fails because of it."""

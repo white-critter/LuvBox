@@ -1,4 +1,4 @@
-# LuvBox 1.10.7 개발 안내
+# LuvBox 1.10.8 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -43,7 +43,9 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 
 즐겨찾기만 보는 중 즐겨찾기를 해제하거나, 미리보기에서 현재 내 태그·AI 분류 조건을 바꾸는 태그 편집을 하면 목록을 다시 읽습니다. DB의 필터 결과와 모델의 불러온 행 수가 어긋나면 다음 페이지의 마지막 사진이 누락되기 때문입니다. 필터에 영향이 없는 태그 편집은 `_settle`로 열린 사진과 분류별 개수만 갱신합니다. `tests/test_gallery_filter_edits.py`는 7장을 3장씩 읽으며 네 편집 경로의 마지막 사진과 원본 파일 보존을 검사합니다.
 
-휴지통 이동이 끝나면 목록을 다시 읽지 않고 옮긴 행만 모델에서 뺍니다(`GalleryModel.removeKeys`, `LibraryController.removeDeleted`). 다음 페이지는 마지막으로 보인 행 뒤에서 이어지므로 저장소는 커서 앞의 행 수만 줄입니다(`LibraryRepository.forget`). 실패·미처리 파일이 있는 결과, 불러오는 중인 페이지, 중복 사진 보기, 32곳을 넘게 흩어진 선택은 이전처럼 전체를 다시 읽습니다. 폴더 전체 작업(자동분류·중복 검사·가르치기·AI 태그 초기화)이 끝날 때도 결과가 현재 필터를 바꾸는 경우에만 다시 읽고, 그 밖에는 열린 항목만 다시 조회합니다(`_settle`). 미리보기의 불러오는 표시는 열린 항목의 조회(`selectionBusy`)만 따르며 폴더 전체 작업의 `busy`와 구분합니다. 갤러리 썸네일 디코딩 작업 수는 논리 코어의 절반을 2~4개 범위로 씁니다.
+갤러리에서 보낸 휴지통 이동은 저장 폴더의 기록 사본과 이 PC의 기록 백업을 바로 쓰지 않습니다(`run_deletion(settle=False)`). `ManagementController`의 작업 스레드가 마지막 작업 뒤 `_SETTLE_AFTER`초(20초) 동안 조용하면 한 번, 그리고 앱을 닫을 때 `deletion.settle_records`로 씁니다(저장이 도는 중이면 저장이 끝에 쓰므로 건너뜁니다). 1.10.7까지는 삭제 한 번마다 기록 전체를 두 번 복사했습니다. 테스트나 자체 점검처럼 `run_deletion`을 직접 부르면 지금처럼 그 자리에서 씁니다.
+
+휴지통 이동이 끝나면 목록을 다시 읽지 않고 옮긴 행만 모델에서 뺍니다(`GalleryModel.removeKeys`, `LibraryController.removeDeleted`). 걸러 보던 표시(즐겨찾기, 내 태그, AI 분류)를 풀어 사진이 필터에서 빠질 때도 같은 방법으로 그 타일만 뺍니다(1.10.8; 뺄 수 없을 때만 목록을 다시 읽습니다). 다음 페이지는 마지막으로 보인 행 뒤에서 이어지므로 저장소는 커서 앞의 행 수만 줄입니다(`LibraryRepository.forget`). 실패·미처리 파일이 있는 결과, 불러오는 중인 페이지, 중복 사진 보기, 32곳을 넘게 흩어진 선택은 이전처럼 전체를 다시 읽습니다. 폴더 전체 작업(자동분류·중복 검사·가르치기·AI 태그 초기화)이 끝날 때도 결과가 현재 필터를 바꾸는 경우에만 다시 읽고, 그 밖에는 열린 항목만 다시 조회합니다(`_settle`). 미리보기의 불러오는 표시는 열린 항목의 조회(`selectionBusy`)만 따르며 폴더 전체 작업의 `busy`와 구분합니다. 갤러리 썸네일 디코딩 작업 수는 논리 코어의 절반을 2~4개 범위로 씁니다.
 
 ‘중복 아님’은 묶음 전체에도, 묶음 안의 사진 몇 장에도 할 수 있습니다. 묶음 전체는 `HistoryStore.set_duplicate_group_distinct`가 그 묶음의 파일 집합을 `catalog_meta`에 적고 `duplicates.split_distinct`로 묶음을 다시 나눕니다. 한 집합에 함께 든 두 파일은 서로의 사본이 아니고, 그렇게 끊긴 뒤에도 다른 파일로 이어진 것끼리만 묶음으로 남습니다(그래서 새 파일이 같은 묶음에 들어오면 모두 다시 보입니다). 빠진 파일은 묶음 번호를 음수로 지녀, 되돌리기·초기화가 다시 검사하지 않고 원래 묶음으로 돌려놓습니다. `save_clusters`가 검사 결과를 저장할 때마다 같은 규칙을 적용하므로, 묶음을 읽는 곳(`cluster_id>0`)은 바꿀 것이 없습니다.
 
@@ -82,6 +84,9 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 - 새 화면이나 대화상자 ↔ `Theme` 값만 쓰는지, `FlatDialog` 틀과 `DialogButtons`, 강조 버튼이 하나인지, 풍선말은 `tip`인지(`test_qt_theme`, `test_qt_look_qml`).
 - 창 상태를 바꾸는 코드(최대화·복원·최소화·전체 화면) ↔ 닫을 때 기억하는 보통 크기·위치(`normalPlace`, `lastMaximized`), 미리보기와 저장 전 확인창의 창 최대화 버튼.
 - QML로 넘기는 값의 자료형과 설정 키 ↔ 이전 버전이 읽어도 깨지지 않는지, 손상된 값의 기본값 복구.
+- 보였다 숨는 버튼(중복 보기의 줄과 카드, 진행 중에만 나오는 ‘중단’, 대화상자를 여는 제목 줄 버튼) ↔ `focusPolicy: Qt.TabFocus`. 마우스 클릭이 키 포커스를 가져가면 버튼이 숨은 뒤에도 Space가 그 버튼을 누릅니다(1.10.8). 숨는 보기의 키 처리(`Keys.enabled`, `keyNavigationEnabled`)도 함께 끕니다.
+- 격자의 강조(`currentIndex`)를 지우는 곳 ↔ 보관함의 열린 사진(`forgetOpened`). 한쪽만 지우면 다음 묶음을 불러올 때 강조와 스크롤 위치가 돌아옵니다.
+- 저장 폴더 위치를 다루는 변경 ↔ 옮긴 폴더를 새 위치로 고르는 경로(`storage.adopt_moved_folder`, `HistoryStore.adopt_moved_root`)와 예전 폴더가 남아 있는 경로(`migrate_records`), 한 파일의 두 기록이 같은 경로를 가리키는 모양(`tests/test_moved_folder.py`).
 
 저장 화면의 카드가 창을 키울 때는 창이 있는 화면의 작업 영역 높이에서 48을 뺀 높이까지(`screenHeightLimit`), 그리고 창의 위쪽에서 그 작업 영역의 아래끝까지만 키웁니다(`saveGrowLimit`; 창은 움직이지 않습니다). 카드가 사라질 때 돌려주는 높이에는 아래끝 제한을 걸지 않습니다. QML은 화면의 작업 영역을 모르므로 컨트롤러에 묻습니다(`screenFreeArea()` → `ApplicationController.screenArea`; 답이 없으면 그 화면 전체). 1.10.1까지는 이 값을 QML의 화면 정보에서 읽으려 했는데 그런 값이 없어, 모든 모니터를 합친 데스크톱 높이가 한도였습니다. 검사는 `tests/test_qt_window_memory_qml.py`의 카드 장면입니다. 앱 창의 크기·위치는 닫을 때 `ApplicationController.rememberWindow`가 설정 파일의 `window`에 적고, 다음 시작에 `window_geometry`가 읽어 `qt_app._place_window`가 연결된 화면에 맞춥니다. 넘기는 숫자는 언제나 보통 창의 크기·위치입니다. 최대화한 창은 화면 영역을, 최대화한 뒤 최소화한 창은 최대화 때의 영역을 알려 주므로, `MainWindow.qml`은 보통 창으로 250ms 머문 크기·위치를 `normalPlace`에 따로 둡니다. 사람이 최대화하면 Windows는 새 크기를 상태보다 먼저 보내므로, 바뀔 때마다 바로 적으면 최대화 영역이 보통 크기로 남습니다(Windows 11, Qt 6.10.3에서 확인). 최소화한 창의 최대화 여부는 최소화 직전 상태(`lastMaximized`)로 정합니다. 저장 화면의 카드 때문에 커진 높이 대신 그 전 높이(`ownHeight()`)를 적습니다. 최대화로 열리는 창은 기억된 자리가 연결된 화면에 있을 때, `_place_window`가 최대화하기 전에 그 보통 크기·위치를 `normalPlace`에 넣어 줍니다(연결되지 않은 모니터의 자리는 넘기지 않아, 최대화한 채 닫으면 그 자리가 남습니다). 최대화한 채 다른 모니터로 옮긴 창은 닫을 때 보통 자리의 가운데가 그 모니터에 있는지 보고, 아니면 그 크기를 처음 실행 때처럼 줄여 그 모니터의 작업 영역 가운데에 둡니다. QML은 화면의 작업 영역을 모르므로 이 계산은 컨트롤러가 합니다(`normalPlaceOnScreen`, `qt_app._onto_screen`). 그래도 쓸 숫자가 없으면 크기 0을 보내고, 시작 때 읽은 크기·위치가 그대로 남습니다. 검사는 `tests/test_window_memory.py`, `tests/test_qt_window_memory_qml.py`, `tests/test_window_placement.py`입니다.
 
@@ -179,7 +184,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.10.7.txt`, `release/LuvBox-1.10.7-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.10.8.txt`, `release/LuvBox-1.10.8-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 

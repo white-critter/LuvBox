@@ -95,8 +95,41 @@ def kept_alike(store: HistoryStore, path: str, signature, keeper, keeper_signatu
         return ""
 
 
+def settle_records(location: StoragePaths) -> bool:
+    """Write the records copy into the media folder and this PC's backup of the catalog.
+
+    A deletion does both itself unless it is told to leave them (``settle=False``),
+    which the gallery does so that photos put away one after another do not each
+    copy the whole catalog twice (and, in a synced folder, upload it again each
+    time). Returns False when it cannot be done now: a save holds the account or
+    the folder and writes both at its own end, or the folder is not connected.
+    """
+    if not isinstance(location, StoragePaths):
+        return False
+    account_guard, guard = None, None
+    try:
+        if not location.output_dir.is_dir():
+            # A moved or disconnected output must not be recreated for its record copy.
+            return False
+        account_guard = AccountGuard(location.account, sleep=lambda *_: None)
+        account_guard.acquire(respect_cooldown=False)
+        guard = OutputGuard(location.output_dir)
+        guard.acquire()
+        publish_snapshot(location)
+        return backup_catalog(location.record_dir, location.account) is not None
+    except Exception:
+        return False            # the next save writes both again
+    finally:
+        for held in (guard, account_guard):
+            if held is not None:
+                try:
+                    held.close()
+                except Exception:
+                    pass
+
+
 def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: bool,
-                 stop: threading.Event, emit) -> dict:
+                 stop: threading.Event, emit, *, settle: bool = True) -> dict:
     """Recycle only the confirmed physical files, preserving their media history.
 
     Intent is committed before every native operation. An uncertain receipt or
@@ -114,6 +147,10 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
     and compared with the photo its group keeps (``kept_alike``). It moves
     only as the whole batch, one file, and only while that photo still stands
     beside it; never together with other rows.
+
+    With ``settle=False`` the records copy in the media folder and the backup
+    of the catalog are left to the caller (``settle_records``); the result then
+    says so with ``unsettled``.
     """
     unique = {}
     for row in rows:
@@ -296,7 +333,10 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 closed = True
             except Exception:
                 warnings.append("기록 파일을 닫지 못했습니다. 앱을 다시 시작해 주세요.")
-            if closed and isinstance(location, StoragePaths):
+            if closed and isinstance(location, StoragePaths) and not settle:
+                # The caller writes the records copy and the backup once things are quiet.
+                result["unsettled"] = True
+            elif closed and isinstance(location, StoragePaths):
                 try:
                     # A moved or disconnected output must not be replaced by
                     # an empty folder just to publish its record copy.

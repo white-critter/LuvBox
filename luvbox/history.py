@@ -968,10 +968,13 @@ class HistoryStore:
         'settings-changed', 'records-changed' or 'incomplete'.
         """
         # Re-downloading chosen files does not walk the Like list, so it never
-        # serves as a complete scan.
+        # serves as a complete scan. A run that ended before it read a single
+        # Like (offline, X not answering, stopped at once) changed nothing
+        # either: the run before it still says how far the files are known.
         row = self._db.execute(
             "SELECT id,status,media_signature FROM runs WHERE folder_mode=? AND status!='running' "
-            "AND scan_mode!='retry' ORDER BY started_at DESC,id DESC LIMIT 1", (self._mode(folder_mode),)).fetchone()
+            "AND scan_mode!='retry' AND NOT (status IN ('error','stopped','limited') AND visited=0 AND saved=0) "
+            "ORDER BY started_at DESC,id DESC LIMIT 1", (self._mode(folder_mode),)).fetchone()
         if row is None or row["status"] != "finished":
             return "incomplete"
         merged = self._db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone()
@@ -1289,6 +1292,60 @@ class HistoryStore:
             return self._import_legacy(refresh)
         finally:
             self._folder_cache = None
+
+    @_safe
+    def adopt_moved_root(self, old_root: Path | str) -> int:
+        """Point file records at the files that moved along with their folder.
+
+        ``old_root`` is the media folder this account was saved to before the
+        person moved or renamed it outside the application; today's folder is
+        that folder at its new place. A record under the old folder is pointed
+        at the same relative place in today's folder when a file is there now,
+        so both records of one file go on sharing one path. A record whose file
+        is not there keeps naming the old place (it may be on a drive that
+        comes back). The place a removed file would return to moves as well.
+        Returns how many records now name a file in today's folder.
+        """
+        if not Path(old_root).is_absolute():
+            return 0
+        old, new = os.path.abspath(old_root), self.output_dir
+        if os.path.normcase(old) == os.path.normcase(str(new)):
+            return 0
+        prefix = os.path.normcase(old).rstrip("\\/") + os.sep
+        changes = []
+        kept_cache, self._folder_cache = self._folder_cache, {}
+        try:
+            for row in self._db.execute(
+                    "SELECT rowid,path,last_path FROM media WHERE path!='' OR last_path!=''").fetchall():
+                moved = {}
+                for column in ("path", "last_path"):
+                    value = os.path.abspath(row[column]) if row[column] else ""
+                    if os.path.normcase(value).startswith(prefix):
+                        moved[column] = str(new / value[len(prefix):])
+                if "path" in moved:
+                    try:
+                        found, size, _name = self._file(moved["path"])
+                    except (HistoryError, OSError, ValueError):
+                        found, size = "", None
+                    if not found or size is None:
+                        continue             # not at the new place: this record keeps the old one
+                    moved["path"] = found
+                elif row["path"]:
+                    continue                 # its file is elsewhere; where it last was stays with it
+                if moved:
+                    changes.append((moved.get("path"), moved.get("last_path"), row["rowid"]))
+        finally:
+            self._folder_cache = kept_cache
+
+        def apply(change):
+            path, last_path, rowid = change
+            if path is not None:
+                self._db.execute("UPDATE media SET path=? WHERE rowid=?", (path, rowid))
+            if last_path is not None:
+                self._db.execute("UPDATE media SET last_path=? WHERE rowid=?", (last_path, rowid))
+
+        self._write_batches(changes, apply)
+        return sum(1 for path, _last_path, _rowid in changes if path is not None)
 
     def _restore_known_paths(self) -> None:
         """Reconnect restored files, including exact locations in former roots.
@@ -2178,9 +2235,11 @@ class HistoryStore:
                 # no copy remains; a file still on disk keeps its key.
                 if not item["keep_deleted"]:
                     for identity in identities:
+                        # Naming the layouts lets SQLite use the primary key; without them
+                        # it read every record of the media type for each file sent.
                         present = self._db.execute(
-                            "SELECT 1 FROM media WHERE tweet_id=? AND num=? AND media_type=? "
-                            "AND path!='' LIMIT 1", identity).fetchone()
+                            f"SELECT 1 FROM media WHERE folder_mode IN {_MODE_LIST} AND tweet_id=? AND num=? "
+                            "AND media_type=? AND path!='' LIMIT 1", identity).fetchone()
                         if present is None:
                             drop_archive.append(identity)
             self._db.execute(
@@ -2617,9 +2676,11 @@ class HistoryStore:
                                 record,
                             ).fetchone() is not None
                         )
-                        if row["source"] == "ai" or (has_embedding and not has_ai_tag):
+                        if row["source"] == "ai" or (tag in _AI_CATEGORIES and has_embedding and not has_ai_tag):
                             # Keep an empty AI evaluation marker so incremental scans do not
-                            # re-apply a tag that the user explicitly removed.
+                            # re-apply a tag that the user explicitly removed. Only a tag named
+                            # like a category stood in for the AI label: removing any other tag
+                            # of a photo not classified yet must leave it to be classified.
                             self._db.execute(
                                 "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
                                 "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
@@ -3607,16 +3668,17 @@ class HistoryStore:
 
     @_safe
     def duplicate_counts(self) -> int:
-        """Total number of duplicate media items currently detected."""
-        if not self._has_table("image_hashes"):
+        """How many photos the duplicate view lists: the members of stored groups of two or more.
+
+        Hashes are saved while a scan runs and groups only at its end, so after
+        a scan that was stopped (or records merged from another copy) files can
+        share a hash without a group. Counting those made the chip say
+        "중복 사진 200" over a view that listed none.
+        """
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return 0
-        has_cluster = self._has_column("image_hashes", "cluster_id")
         row = self._db.execute(
-            "SELECT COUNT(*) FROM image_hashes h1 "
-            "JOIN media m1 ON m1.folder_mode=h1.folder_mode AND m1.tweet_id=h1.tweet_id "
-            "AND m1.num=h1.num AND m1.media_type=h1.media_type "
-            "WHERE " + _listed("m1") + " AND " + _duplicate_predicate("h1", "m1", has_cluster=has_cluster)
-        ).fetchone()
+            self._ranked_duplicates() + "SELECT COUNT(*) FROM ranked WHERE cluster_size>=2").fetchone()
         return row[0] if row else 0
 
     @_safe

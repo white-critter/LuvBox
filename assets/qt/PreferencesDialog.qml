@@ -405,6 +405,12 @@ FlatDialog {
                                     inputMethodHints: Qt.ImhDigitsOnly
                                     selectByMouse: true
                                     Accessible.name: "동영상 GIF 크기 제한 MB"
+                                    // Esc takes the typing back before the dialog closes. Otherwise the
+                                    // field lost the keys as the dialog closed and saved the half-typed number.
+                                    Keys.onEscapePressed: event => {
+                                        text = Qt.binding(function() { return String(dialog.pref("max_video_mb", 200)) })
+                                        event.accepted = false
+                                    }
                                     onEditingFinished: {
                                         if (acceptableInput && text.trim().length > 0)
                                             dialog.app.setPreference("max_video_mb", Number(text))

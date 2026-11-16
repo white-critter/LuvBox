@@ -323,7 +323,7 @@ class ControllerNameTests(unittest.TestCase):
              "library.setUserTags"),
             ("SaveReviewDialog.qml", "targetApp.respondReview(", "targetApp.respondReviw(",
              "targetApp.respondReviw"),
-            ("MainWindow.qml", "window.galleryModel.search(text)", "window.galleryModel.serch(text)",
+            ("MainWindow.qml", "window.galleryModel.search(displayText)", "window.galleryModel.serch(displayText)",
              "galleryModel.serch"),
             ("DuplicateReview.qml", "galleryModel.loadMore()", "galleryModel.loadMor()", "galleryModel.loadMor"),
             ("MainWindow.qml", "function onReviewCleared", "function onReviewClear", "no signal reviewClear"),

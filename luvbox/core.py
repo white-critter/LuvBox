@@ -87,6 +87,7 @@ _REFUSED_DETAIL = (f"사진 서버가 이 파일을 거부해 저장을 멈췄�
 _PASSED_BY_DETAIL = (f"사진 서버가 이 파일을 거부해 저장이 {REFUSED_LIMIT}번 멈췄습니다. 이제 저장할 때 건너뜁니다. "
                      "‘다시 저장’은 지금 다시 요청합니다.")
 _SERVER_ERROR_DETAIL = "사진 서버 오류로 저장을 멈췄습니다. 서버 오류는 대개 잠시 뒤 풀리므로 다음 저장에서 다시 요청합니다."
+_REFUSED_RETRY_DETAIL = "다시 요청했지만 사진 서버가 이 파일을 거부해 받지 못했습니다."
 
 
 def _not_served(status: int) -> bool:
@@ -533,6 +534,11 @@ class _GalleryLogHandler(logging.Handler):
         if raw == "media size exceeded":
             return
         text = raw.lower()
+        if record.name == "download" and text.startswith("failed to download "):
+            # What follows is the file's name, which begins with the author's id.
+            # An id such as "permission_art" or "ratelimit_fan" is no diagnosis:
+            # read as one, a single missing file ended the whole save as an error.
+            text = "failed to download"
         # gallery-dl uses AuthRequired for these two per-tweet visibility
         # results even with valid cookies. Keep every other authentication
         # error fatal, including either message accompanied by 401/403.
@@ -667,6 +673,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     # the one whose refusal stops this run.
     refused_runs = {}
     refused_now = None
+    # A chosen retry ("다시 저장"): the media the host refused again, and how many
+    # of them came one after another without a file in between.
+    retry_refused = set()
+    refused_streak = 0
     metadata_failed = 0
     metadata_available = False
     metadata_warned = False
@@ -1418,7 +1428,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             # gallery-dl's media downloader catches exceptions from request()
             # and returns False. Re-raise a protection failure before its parent
             # attempts other image sizes or the next photo.
-            nonlocal failed, failed_new, refused_now
+            nonlocal failed, failed_new, refused_now, refused_streak
             media_type = self.current_media.get("type")
             is_gif = media_type == "animated_gif"
             # gallery-dl's HTTP downloader writes every transfer to its .part
@@ -1466,7 +1476,18 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     note_unsaved(unsaved.FAILED, _REFUSED_DETAIL if counted else _SERVER_ERROR_DETAIL,
                                  media=self.current_media)
                     emit({"type": "failed", "path": "", **_media_details(self.current_media)})
+                elif targets and _not_served(guard.refused) and refused_streak + 1 < REFUSED_LIMIT:
+                    # A chosen retry met a file the host still refuses. That says
+                    # nothing about the other files chosen with it: give up this
+                    # one (no fallback size is requested) and go on to the next.
+                    # A host that refuses file after file still ends the run.
+                    refused_streak += 1
+                    retry_refused.add(self.identity)
+                    guard.failure, guard.refused = "", 0
+                    raise exception.StopDownload()
                 raise exception.AbortExtraction(guard.failure)
+            if result:
+                refused_streak = 0
             if self.size_exceeded:
                 raise SizeLimit()
             if not result:
@@ -1907,7 +1928,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         unavailable_tweets += 1
                         notice = "트윗을 볼 수 없어(삭제·비공개·제한) 다시 받지 못했습니다."
                     for key in left:
-                        note_unsaved(unsaved.FAILED, notice, identity=_key_identity(key))
+                        identity = _key_identity(key)
+                        note_unsaved(unsaved.FAILED, _REFUSED_RETRY_DETAIL if identity in retry_refused else notice,
+                                     identity=identity)
                     # The address lets the user check the tweet in a browser.
                     emit({"type": "log", "level": "info", "message": f"{notice} https://x.com/i/web/status/{tweet_id}"})
             else:

@@ -140,11 +140,14 @@ class LibraryControlsTests(unittest.TestCase):
         self.library.toggleSelection(keys[0])
         self.repository.duplicate_copy_keys = lambda generation: [*keys, "unloaded"]
         self.repository.selectable_keys = lambda candidates: (list(candidates), 0, 0)
+        self.library._duplicate_only = True        # the duplicate view is on
         with patch("luvbox.qt_library.MAX_SELECTION", 1):
             self.assertEqual(self.library.selectDuplicateCopies(), 0)
             self.assertEqual(self.library.selectedKeys, [keys[0]])
         self.assertEqual(self.library.selectDuplicateCopies(), 1)
         self.assertEqual(set(self.library.selectedKeys), set(keys))
+        # A copy further down the list is not picked, and the person is told how to get it.
+        self.assertIn("아직 불러오지 않은 사본 1장", self.library.status)
         self.assertEqual(self.library.selectDuplicateCopies(), 0)
 
     def test_empty_gallery_does_not_select_unloaded_duplicate_copies(self):
@@ -152,8 +155,76 @@ class LibraryControlsTests(unittest.TestCase):
         self.library.model._keys.clear()
         self.repository.duplicate_copy_keys = lambda generation: ["unloaded"]
         self.repository.selectable_keys = lambda candidates: (list(candidates), 0, 0)
+        self.library._duplicate_only = True
         self.assertEqual(self.library.selectDuplicateCopies(), 0)
         self.assertEqual(self.library.selectedCount, 0)
+
+    def test_counts_dropped_by_an_early_filter_change_are_asked_for_again(self):
+        """A filter changed right after opening made the first answers stale, and nothing asked again."""
+        from threading import Event
+
+        held, calls = Event(), []
+
+        def counts(generation=None):
+            calls.append(generation)
+            if len(calls) == 1:
+                held.wait(5)                  # the first answer is still on its way when the filter changes
+            return [{"category": "인물", "name": "인물", "count": 3}]
+
+        self.repository.ai_counts = counts
+        self.library.setLibrary("offline", str(Path(tempfile.gettempdir()) / "synthetic-controls-2"), False)
+        self.wait(lambda: len(calls) == 1)
+        self.library.search("x")              # a new listing: the answer above belongs to the old one
+        held.set()
+        self.wait(lambda: len(calls) >= 2 and self.library._counts_loaded)
+        self.assertEqual([item["count"] for item in self.library.aiCategoryCounts], [3])
+
+    def test_a_drag_adds_to_the_selection_only_while_selecting_was_switched_on(self):
+        """With "여러 개 선택" on, a click that moved a little must not throw away what was picked."""
+        first, second = (row["key"] for row in self.library.model._rows)
+
+        def drag_over_the_second_tile():
+            self.library.beginBandSelection(False)          # no Ctrl held
+            self.library.bandSelect(0, 0, 1, 1, 2)          # row 0, column 1 of two columns
+            self.library.endBandSelection()
+
+        self.library.setSelectionMode(True)
+        self.library.toggleSelection(first)
+        drag_over_the_second_tile()
+        self.assertEqual(set(self.library.selectedKeys), {first, second})
+        # A selection that began by picking a tile is replaced by a plain drag, as in a file manager.
+        self.library.setSelectionMode(False)
+        self.library.toggleSelection(first)
+        self.assertFalse(self.library._selection_explicit)
+        drag_over_the_second_tile()
+        self.assertEqual(self.library.selectedKeys, [second])
+
+    def test_copies_are_selected_only_while_the_duplicate_view_is_on(self):
+        """The button is hidden in the ordinary gallery, but a key could still reach it (it kept the focus)."""
+        keys = [row["key"] for row in self.library.model._rows]
+        self.repository.duplicate_copy_keys = lambda generation: list(keys)
+        self.repository.selectable_keys = lambda candidates: (list(candidates), 0, 0)
+        self.assertFalse(self.library._duplicate_only)
+        self.assertEqual(self.library.selectDuplicateCopies(), 0)
+        self.assertEqual((self.library.selectedKeys, self.library.selectionMode), ([], False))
+
+    def test_forgetting_the_opened_photo_leaves_nothing_opened_and_the_batch_as_it_was(self):
+        first, second = (row["key"] for row in self.library.model._rows)
+        self.library.selectItem(first)
+        self.wait(lambda: not self.library.busy)
+        self.library.toggleSelection(second)
+        self.assertEqual(self.library.selectedKey, first)
+        self.library.forgetOpened()
+        self.assertEqual((self.library.selectedKey, self.library._selection_key, self.library.busy), ("", "", False))
+        self.assertEqual(self.library.selectedKeys, [second])
+        # With nothing opened, the favourite key has no photo to act on.
+        self.assertFalse(self.library.toggleSelectedFavorite())
+        # Forgetting while a photo is still loading drops that request too.
+        self.library.selectItem(first)
+        self.library.forgetOpened()
+        self.wait(lambda: not self.library.busy)
+        self.app.processEvents()
+        self.assertEqual(self.library.selectedKey, "")
 
     def test_failed_favorite_write_preserves_displayed_state(self):
         key = self.library.model._rows[0]["key"]

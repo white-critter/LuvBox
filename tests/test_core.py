@@ -756,7 +756,8 @@ class CoreTests(unittest.TestCase):
             store.finish_run(retry, "finished")
             self.assertEqual(store.quick_scan_readiness("author", signature), "records-changed")
             failed = store.start_run("author", media_signature=signature)
-            store.finish_run(failed, "error")
+            # It read two Likes before it failed (a run that read none is passed over since 1.10.8).
+            store.finish_run(failed, "error", visited=2)
             self.assertEqual(store.quick_scan_readiness("author", signature), "incomplete")
             completed = store.start_run("author", media_signature=signature)
             store.finish_run(completed, "finished")

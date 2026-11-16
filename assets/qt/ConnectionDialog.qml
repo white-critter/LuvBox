@@ -14,7 +14,11 @@ FlatDialog {
     readonly property bool setupUnavailable: unavailable || !browserSetup || browserSetup.busy
         || (accounts.busy && !accounts.browserConnecting)
     title: "X 로그인 연결"
-    preferredWidth: 560
+    // In a wide window the opened help stands beside the connection instead of under it. In one
+    // column the dialog was taller than a window of the default size and had to be scrolled,
+    // and the help opens by itself the first time someone connects.
+    readonly property bool sideBySide: methodIndex === 0 && setupToggle.checked && !!parent && parent.width >= 1040
+    preferredWidth: sideBySide ? 980 : 560
     readonly property int windowLimit: parent ? Math.max(180, parent.height - 32) : 720
     readonly property int chromeHeight: topPadding + bottomPadding
         + (header && header.implicitHeight > 0 ? header.implicitHeight + spacing : 0)
@@ -66,6 +70,7 @@ FlatDialog {
 
     contentItem: FocusScrollView {
         id: scrollView
+        objectName: "connectionScroll"
         clip: true
         // The bar gets its own lane, so it never covers a control's right edge.
         rightPadding: ScrollBar.vertical.policy === ScrollBar.AlwaysOn ? 14 : 0
@@ -88,34 +93,28 @@ FlatDialog {
                 textFormat: Text.PlainText
             }
 
-            ColumnLayout {
+            GridLayout {
+                objectName: "connectionBrowserMethod"
                 Layout.fillWidth: true
                 visible: dialog.methodIndex === 0
-                spacing: 8
+                columns: dialog.sideBySide ? 2 : 1
+                uniformCellWidths: true
+                rowSpacing: 8
+                columnSpacing: Theme.gapLarge
 
-                Label { text: "연결할 브라우저"; color: Theme.textMuted; font.pixelSize: Theme.fontSmall }
-                FlatCombo {
-                    objectName: "connectionBrowser"
+                ColumnLayout {
                     Layout.fillWidth: true
-                    model: dialog.browserSetup ? dialog.browserSetup.browsers : []
-                    textRole: "label"
-                    valueRole: "id"
-                    currentIndex: {
-                        if (!dialog.browserSetup)
-                            return -1
-                        var choices = dialog.browserSetup.browsers
-                        for (var i = 0; i < choices.length; ++i)
-                            if (choices[i].id === dialog.browserSetup.selectedBrowser)
-                                return i
-                        return -1
-                    }
-                    enabled: !dialog.setupUnavailable && !dialog.accounts.busy
-                    displayText: currentIndex >= 0 ? currentText
-                        : !dialog.browserSetup || dialog.browserSetup.busy ? "브라우저를 확인하는 중…" : "지원하는 브라우저 없음"
-                    Accessible.name: "X 계정을 연결할 브라우저"
-                    onActivated: {
-                        dialog.browserSetup.setBrowser(currentValue)
-                        currentIndex = Qt.binding(function() {
+                    Layout.alignment: Qt.AlignTop
+                    spacing: 8
+
+                    Label { text: "연결할 브라우저"; color: Theme.textMuted; font.pixelSize: Theme.fontSmall }
+                    FlatCombo {
+                        objectName: "connectionBrowser"
+                        Layout.fillWidth: true
+                        model: dialog.browserSetup ? dialog.browserSetup.browsers : []
+                        textRole: "label"
+                        valueRole: "id"
+                        currentIndex: {
                             if (!dialog.browserSetup)
                                 return -1
                             var choices = dialog.browserSetup.browsers
@@ -123,140 +122,159 @@ FlatDialog {
                                 if (choices[i].id === dialog.browserSetup.selectedBrowser)
                                     return i
                             return -1
-                        })
-                    }
-                }
-                Label {
-                    objectName: "noBrowserMessage"
-                    Layout.fillWidth: true
-                    visible: dialog.browserSetup && !dialog.browserSetup.busy
-                        && !dialog.browserSetup.selectedBrowser.length
-                    text: dialog.browserSetup && dialog.browserSetup.error
-                        ? dialog.browserSetup.error
-                        : "지원하는 브라우저를 찾지 못했습니다. Chrome·Edge·Firefox를 설치한 뒤 앱을 다시 열어 주세요."
-                    color: Theme.error
-                    wrapMode: Text.Wrap
-                    textFormat: Text.PlainText
-                }
-                Label {
-                    Layout.fillWidth: true
-                    text: "X에 로그인하고 확장을 설치한 일반 프로필을 사용하세요. 여러 프로필을 쓴다면 열린 창의 프로필을 확인해 주세요."
-                    wrapMode: Text.Wrap
-                    textFormat: Text.PlainText
-                    color: Theme.textMuted
-                }
-                FlatButton {
-                    objectName: "connectBrowserButton"
-                    Layout.fillWidth: true
-                    text: dialog.accounts && dialog.accounts.cancelling ? "연결을 취소하는 중…"
-                          : dialog.accounts && dialog.accounts.busy ? "연결 진행 중…"
-                          : dialog.accounts && dialog.accounts.connected ? "다시 연결" : "X 계정 연결"
-                    tone: dialog.accounts && dialog.accounts.busy ? "quiet" : "primary"
-                    enabled: !dialog.setupUnavailable && !dialog.accounts.busy
-                        && dialog.browserSetup.selectedBrowser.length > 0
-                    onClicked: dialog.accounts.connectBrowser(dialog.browserSetup.selectedBrowser)
-                }
-                Frame {
-                    Layout.fillWidth: true
-                    visible: dialog.accounts && dialog.accounts.browserConnecting
-                    padding: Theme.gapLarge
-                    background: Card { glow: 0.14 }
-                    ColumnLayout {
-                        width: parent.width
-                        spacing: 8
-                        Label {
-                            Layout.fillWidth: true
-                            text: dialog.accounts && dialog.accounts.approvalPending ? "3 / 3 · 앱에서 최종 승인"
-                                : dialog.accounts && dialog.accounts.extensionReady ? "2 / 3 · 브라우저에서 계정 확인"
-                                : "1 / 3 · 연결 확장 확인"
-                            font.bold: true
-                            textFormat: Text.PlainText
-                            wrapMode: Text.Wrap
                         }
-                        Label {
-                            Layout.fillWidth: true
-                            text: dialog.accounts ? dialog.accounts.status : ""
-                            wrapMode: Text.Wrap
-                            textFormat: Text.PlainText
-                        }
-                        Label {
-                            visible: dialog.accounts && dialog.accounts.secondsRemaining > 0
-                            text: dialog.accounts ? "남은 시간 " + dialog.accounts.secondsRemaining + "초" : ""
-                            color: Theme.textMuted
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: dialog.accounts && dialog.accounts.pairingCode.length > 0
-                            text: "브라우저 확장의 코드와 비교하세요."
-                            wrapMode: Text.Wrap
-                        }
-                        Label {
-                            text: dialog.accounts ? dialog.accounts.pairingCode : ""
-                            font.pixelSize: Theme.fontDisplay
-                            font.bold: true
-                            font.letterSpacing: 3
-                            textFormat: Text.PlainText
-                            Accessible.name: "연결 코드 " + text
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: dialog.accounts && dialog.accounts.approvalPending
-                            text: dialog.accounts && dialog.accounts.pendingIdentity.handle
-                                ? "@" + dialog.accounts.pendingIdentity.handle : ""
-                            font.bold: true
-                            font.pixelSize: Theme.fontHeading
-                            textFormat: Text.PlainText
-                            wrapMode: Text.Wrap
-                        }
-                        Label {
-                            Layout.fillWidth: true
-                            visible: dialog.accounts && dialog.accounts.approvalPending
-                            text: dialog.accounts ? (dialog.accounts.pendingIdentity.display_name || "") : ""
-                            wrapMode: Text.Wrap
-                            textFormat: Text.PlainText
-                        }
-                        FlatButton {
-                            objectName: "approveConnectionButton"
-                            Layout.fillWidth: true
-                            visible: dialog.accounts && dialog.accounts.approvalPending
-                            enabled: !dialog.unavailable && !dialog.accounts.cancelling
-                            text: "이 계정 연결 승인"
-                            tone: "primary"
-                            onClicked: dialog.accounts.approveBrowser()
-                        }
-                        FlatButton {
-                            visible: dialog.accounts && dialog.accounts.connectionStage === "login_required"
-                            text: "선택한 브라우저에서 X 열기"
-                            enabled: !dialog.setupUnavailable
-                            onClicked: dialog.browserSetup.openX()
+                        enabled: !dialog.setupUnavailable && !dialog.accounts.busy
+                        displayText: currentIndex >= 0 ? currentText
+                            : !dialog.browserSetup || dialog.browserSetup.busy ? "브라우저를 확인하는 중…" : "지원하는 브라우저 없음"
+                        Accessible.name: "X 계정을 연결할 브라우저"
+                        onActivated: {
+                            dialog.browserSetup.setBrowser(currentValue)
+                            currentIndex = Qt.binding(function() {
+                                if (!dialog.browserSetup)
+                                    return -1
+                                var choices = dialog.browserSetup.browsers
+                                for (var i = 0; i < choices.length; ++i)
+                                    if (choices[i].id === dialog.browserSetup.selectedBrowser)
+                                        return i
+                                return -1
+                            })
                         }
                     }
-                }
-                ToolButton {
-                    id: setupToggle
-                    Layout.fillWidth: true
-                    implicitHeight: 36
-                    checkable: true
-                    text: checked ? "확장 설치·연결 도움말 ▾" : "처음 연결하거나 확장 응답이 없나요? ▸"
-                    HoverHandler {
-                        cursorShape: Qt.PointingHandCursor
+                    Label {
+                        objectName: "noBrowserMessage"
+                        Layout.fillWidth: true
+                        visible: dialog.browserSetup && !dialog.browserSetup.busy
+                            && !dialog.browserSetup.selectedBrowser.length
+                        text: dialog.browserSetup && dialog.browserSetup.error
+                            ? dialog.browserSetup.error
+                            : "지원하는 브라우저를 찾지 못했습니다. Chrome·Edge·Firefox를 설치한 뒤 앱을 다시 열어 주세요."
+                        color: Theme.error
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
                     }
-                    contentItem: Text {
-                        text: setupToggle.text
-                        font.pixelSize: Theme.fontBody
-                        color: Theme.text
-                        horizontalAlignment: Text.AlignHCenter
-                        verticalAlignment: Text.AlignVCenter
+                    Label {
+                        Layout.fillWidth: true
+                        text: "X에 로그인하고 확장을 설치한 일반 프로필을 사용하세요. 여러 프로필을 쓴다면 열린 창의 프로필을 확인해 주세요."
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
+                        color: Theme.textMuted
                     }
-                    background: Rectangle {
-                        radius: Theme.radiusControl
-                        border.width: setupToggle.visualFocus ? 2 : 0
-                        border.color: Theme.focus
-                        color: setupToggle.hovered || setupToggle.checked ? Theme.raised : Theme.field
+                    FlatButton {
+                        objectName: "connectBrowserButton"
+                        Layout.fillWidth: true
+                        text: dialog.accounts && dialog.accounts.cancelling ? "연결을 취소하는 중…"
+                              : dialog.accounts && dialog.accounts.busy ? "연결 진행 중…"
+                              : dialog.accounts && dialog.accounts.connected ? "다시 연결" : "X 계정 연결"
+                        tone: dialog.accounts && dialog.accounts.busy ? "quiet" : "primary"
+                        enabled: !dialog.setupUnavailable && !dialog.accounts.busy
+                            && dialog.browserSetup.selectedBrowser.length > 0
+                        onClicked: dialog.accounts.connectBrowser(dialog.browserSetup.selectedBrowser)
+                    }
+                    Frame {
+                        Layout.fillWidth: true
+                        visible: dialog.accounts && dialog.accounts.browserConnecting
+                        padding: Theme.gapLarge
+                        background: Card { glow: 0.14 }
+                        ColumnLayout {
+                            width: parent.width
+                            spacing: 8
+                            Label {
+                                Layout.fillWidth: true
+                                text: dialog.accounts && dialog.accounts.approvalPending ? "3 / 3 · 앱에서 최종 승인"
+                                    : dialog.accounts && dialog.accounts.extensionReady ? "2 / 3 · 브라우저에서 계정 확인"
+                                    : "1 / 3 · 연결 확장 확인"
+                                font.bold: true
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: dialog.accounts ? dialog.accounts.status : ""
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
+                            }
+                            Label {
+                                visible: dialog.accounts && dialog.accounts.secondsRemaining > 0
+                                text: dialog.accounts ? "남은 시간 " + dialog.accounts.secondsRemaining + "초" : ""
+                                color: Theme.textMuted
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                visible: dialog.accounts && dialog.accounts.pairingCode.length > 0
+                                text: "브라우저 확장의 코드와 비교하세요."
+                                wrapMode: Text.Wrap
+                            }
+                            Label {
+                                text: dialog.accounts ? dialog.accounts.pairingCode : ""
+                                font.pixelSize: Theme.fontDisplay
+                                font.bold: true
+                                font.letterSpacing: 3
+                                textFormat: Text.PlainText
+                                Accessible.name: "연결 코드 " + text
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                visible: dialog.accounts && dialog.accounts.approvalPending
+                                text: dialog.accounts && dialog.accounts.pendingIdentity.handle
+                                    ? "@" + dialog.accounts.pendingIdentity.handle : ""
+                                font.bold: true
+                                font.pixelSize: Theme.fontHeading
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                visible: dialog.accounts && dialog.accounts.approvalPending
+                                text: dialog.accounts ? (dialog.accounts.pendingIdentity.display_name || "") : ""
+                                wrapMode: Text.Wrap
+                                textFormat: Text.PlainText
+                            }
+                            FlatButton {
+                                objectName: "approveConnectionButton"
+                                Layout.fillWidth: true
+                                visible: dialog.accounts && dialog.accounts.approvalPending
+                                enabled: !dialog.unavailable && !dialog.accounts.cancelling
+                                text: "이 계정 연결 승인"
+                                tone: "primary"
+                                onClicked: dialog.accounts.approveBrowser()
+                            }
+                            FlatButton {
+                                visible: dialog.accounts && dialog.accounts.connectionStage === "login_required"
+                                text: "선택한 브라우저에서 X 열기"
+                                enabled: !dialog.setupUnavailable
+                                onClicked: dialog.browserSetup.openX()
+                            }
+                        }
+                    }
+                    ToolButton {
+                        id: setupToggle
+                        objectName: "connectionHelpToggle"
+                        Layout.fillWidth: true
+                        implicitHeight: 36
+                        checkable: true
+                        text: checked ? "확장 설치·연결 도움말 ▾" : "처음 연결하거나 확장 응답이 없나요? ▸"
+                        HoverHandler {
+                            cursorShape: Qt.PointingHandCursor
+                        }
+                        contentItem: Text {
+                            text: setupToggle.text
+                            font.pixelSize: Theme.fontBody
+                            color: Theme.text
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                        }
+                        background: Rectangle {
+                            radius: Theme.radiusControl
+                            border.width: setupToggle.visualFocus ? 2 : 0
+                            border.color: Theme.focus
+                            color: setupToggle.hovered || setupToggle.checked ? Theme.raised : Theme.field
+                        }
                     }
                 }
                 ColumnLayout {
+                    objectName: "connectionHelp"
                     Layout.fillWidth: true
+                    Layout.alignment: Qt.AlignTop
                     visible: setupToggle.checked
                     spacing: 8
                     Label {
@@ -333,7 +351,13 @@ FlatDialog {
                         wrapMode: Text.Wrap
                         color: Theme.textMuted
                     }
-                    Rectangle { Layout.fillWidth: true; Layout.topMargin: Theme.gapTiny; implicitHeight: 1; color: Theme.line }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.topMargin: Theme.gapTiny
+                        implicitHeight: 1
+                        color: Theme.line
+                        visible: !dialog.sideBySide
+                    }
                 }
             }
 

@@ -234,6 +234,47 @@ class RecordsControllerTests(unittest.TestCase):
         self.assertEqual(failure[2]['serial'], old_serial)
         self.assertEqual(self.records.unsavedError, '')
 
+    def test_a_dismissal_that_fails_says_so_and_keeps_the_row(self):
+        """The failure used to be wiped by the reload that followed it at once (found in 1.10.8)."""
+        self.add([self.item('100'), self.item('200')])
+        self.open_unsaved()
+        self.wait(lambda: self.records.unsavedTotal == 2 and self.records.unsavedRows)
+        with patch('luvbox.qt_records.unsaved.remove', side_effect=unsaved.UnsavedError('목록을 고치지 못했습니다.')):
+            self.records.dismiss(self.records.unsavedRows[0]['token'])
+            self.wait(lambda: self.records.unsavedError)
+        for _ in range(20):
+            self.app.processEvents()
+            time.sleep(.005)
+        self.assertIn('못했습니다', self.records.unsavedError)       # still shown after the events settled
+        self.assertEqual((self.records.unsavedStatus, len(self.records.unsavedRows)), ('', 2))
+
+    def test_counts_asked_again_while_one_waits_are_counted_once(self):
+        """A finished save asks three times in a row, and each count looks at every saved file."""
+        self.add([self.item('100')])
+        self.open_unsaved()
+        self.wait(lambda: self.records.unsavedCount == 1)
+        started, release, counted = Event(), Event(), []
+        count = self.records._missing_total
+
+        def slow(*arguments):
+            counted.append(1)
+            started.set()
+            release.wait(5)
+            return count(*arguments)
+
+        self.records.setActive('unsaved', False)
+        with patch.object(self.records, '_missing_total', side_effect=slow):
+            self.records.refresh()
+            self.assertTrue(started.wait(5))
+            for _ in range(3):                    # asked while the first one is still counting
+                self.records.refresh()
+            with self.records._condition:
+                waiting = [item[0] for item in self.records._pending]
+            self.assertEqual(waiting, ['counts'])
+            release.set()
+            self.wait(lambda: len(counted) == 2 and not self.records._pending)
+        self.assertEqual(len(counted), 2)
+
     def test_dismissing_forgets_the_row_without_touching_other_lists(self):
         self.add([self.item('100'), self.item('200'), self.item('300', unsaved.EXCLUDED)])
         self.exclude('300')

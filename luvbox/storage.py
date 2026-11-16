@@ -1031,6 +1031,78 @@ def initialize_storage(paths: StoragePaths) -> None:
         account_guard.close()
 
 
+def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
+    """The media folder was moved or renamed outside the application and chosen again at its new place.
+
+    The old place is gone, so ``migrate_records`` cannot run. Until 1.10.7 the
+    new place simply started from the records copy inside the folder. Its file
+    records still named the old place, so every photo showed as "파일 없음"
+    and no save reconnected them, and favourites, tags and "not duplicates"
+    marks made after the last save stayed behind in this PC's records of the
+    old place.
+
+    This PC's records of the old place are the newest there are. When the new
+    place has no records of its own yet they become its records, and the copy
+    inside the folder that this PC wrote itself is remembered as seen, so that
+    older copy is not merged back over them (a copy another PC wrote is still
+    merged, as always). Then every file record under the old folder whose file
+    is at the same relative place in the new folder is pointed there. The
+    records of the old place stay where they are. Returns how many file
+    records were pointed at the new folder.
+    """
+    from .history import HistoryStore
+    from .protection import AccountGuard, ProtectionError
+
+    source = resolve_storage(source.output_dir, source.account, source.separate_accounts)
+    destination = resolve_storage(destination.output_dir, destination.account, destination.separate_accounts)
+    if source.account != destination.account:
+        raise MigrationError("다른 계정의 기록은 합칠 수 없습니다.")
+    account_guard = AccountGuard(destination.account, sleep=time.sleep)
+    output_guard = OutputGuard(destination.output_dir)
+    stage = None
+    try:
+        account_guard.acquire(respect_cooldown=False)
+        output_guard.acquire()
+        _recover_relocation(destination, protected=True)
+        previous = source.record_dir / _HISTORY_DB
+        if (source.record_dir != destination.record_dir and not (destination.record_dir / _HISTORY_DB).is_file()
+                and previous.is_file() and not _linked(source.record_dir) and not _linked(previous)):
+            _record_files(source.record_dir)
+            destination.record_dir.parent.mkdir(parents=True, exist_ok=True)
+            stage = destination.record_dir.parent / (".relocate-" + destination.record_dir.name + "-" + uuid.uuid4().hex)
+            stage.mkdir()
+            for name in _DATABASES:
+                current = source.record_dir / name
+                if current.is_file():
+                    _backup_database(current, stage / name)    # a checked copy; the original stays
+            written = _snapshot_state(source)
+            seen = {}
+            for name, state in written.items():
+                shared = _snapshot_source(destination, name)
+                if shared is not None and _file_state(shared) == state:
+                    seen[name] = state
+            _publish_records(destination, stage)
+            stage = None
+            if seen:
+                _write_snapshot_state(destination, seen)
+        with closing(HistoryStore.for_storage(destination, protected=True)) as store:
+            moved = store.adopt_moved_root(source.output_dir)
+        try:
+            publish_snapshot(destination)
+        except (MigrationError, OSError, sqlite3.Error, ValueError):
+            pass   # the next save writes the snapshot
+        return moved
+    except (MigrationError, ProtectionError):
+        raise
+    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, OverflowError):
+        raise MigrationError(_MIGRATION_HELP) from None
+    finally:
+        if stage is not None:
+            shutil.rmtree(stage, ignore_errors=True)
+        output_guard.close()
+        account_guard.close()
+
+
 def migrate_records(source: StoragePaths, destination: StoragePaths) -> MigrationResult:
     """Copy/merge one account's records when its selected output changes.
 

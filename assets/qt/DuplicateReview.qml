@@ -114,6 +114,9 @@ Item {
                         objectName: "duplicateGroupPhotosDistinct"
                         compact: true
                         tone: "ghost"
+                        // A click leaves the keys where they were: left on a card's button, Space
+                        // pressed it again, also after the card had scrolled away or the view closed.
+                        focusPolicy: Qt.TabFocus
                         visible: card.chosenKeys.length > 0 && card.chosenKeys.length < card.size
                         text: "선택한 " + card.chosenKeys.length + "장만 중복 아님"
                         enabled: !!review.library && !review.library.copiesLocked && !review.settling
@@ -126,6 +129,7 @@ Item {
                         objectName: "duplicateGroupDistinct"
                         compact: true
                         tone: "ghost"
+                        focusPolicy: Qt.TabFocus
                         text: "중복 아님"
                         enabled: !!review.library && !review.library.copiesLocked && !review.settling && card.items.length > 0
                         tip: "이 묶음을 중복이 아닌 것으로 기억합니다. 다음 검사부터 묶지 않고, 위의 ‘되돌리기’나 ‘초기화’로 다시 볼 수 있습니다."
@@ -135,6 +139,7 @@ Item {
                     FlatButton {
                         objectName: "duplicateGroupSelect"
                         compact: true
+                        focusPolicy: Qt.TabFocus
                         text: card.copiesSelected ? "선택 해제" : "사본 " + card.copies.length + "장 선택"
                         enabled: card.copies.length > 0 && !!review.library && !review.library.copiesLocked && !review.settling
                         Accessible.name: "묶음 " + card.number + " " + text
@@ -151,10 +156,16 @@ Item {
                     Layout.fillWidth: true
                     spacing: 8
                     Repeater {
-                        model: card.items
+                        // One tile per place in the group. A list read again (after every "중복 아님",
+                        // favourite or move) then changes what a tile shows instead of making every
+                        // tile anew, which emptied all pictures for a moment.
+                        model: card.items.length
                         delegate: Rectangle {
                             id: tile
-                            required property var modelData
+                            required property int index
+                            readonly property var modelData: card.items[index]
+                                || ({ key: "", caption: "", detail: "", thumbUrl: "", keeper: false, copy: false,
+                                      favorite: false, missing: true })
                             objectName: "duplicateTile"
                             readonly property bool chosen: {
                                 const revision = review.library ? review.library.selectionRevision : -1
@@ -189,6 +200,8 @@ Item {
                                 sourceSize.height: Math.min(384, Math.max(1, Math.round((Math.round(review.tileWidth * 0.75) - 16) * Math.max(1, Screen.devicePixelRatio))))
                                 asynchronous: true
                                 cache: false
+                                // The picture stays until the one read again is ready.
+                                retainWhileLoading: true
                                 fillMode: Image.PreserveAspectFit
                             }
                             Label {

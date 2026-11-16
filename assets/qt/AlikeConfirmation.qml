@@ -20,7 +20,9 @@ FlatDialog {
     // Let go of both pictures before the move: Windows keeps a file that is being read.
     property bool released: false
     onAboutToShow: released = false
-    onOpened: { keepDeleted.checked = false; cancelButton.forceActiveFocus() }
+    // The switch starts on: fetched again at the next full save, this photo would be grouped
+    // with the one kept all over again.
+    onOpened: { keepDeleted.checked = true; cancelButton.forceActiveFocus() }
     onRejected: {
         released = true
         if (app) app.management.cancelDelete()

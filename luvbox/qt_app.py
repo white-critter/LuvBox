@@ -647,7 +647,8 @@ class ApplicationController(QObject):
 
     @staticmethod
     def _prepare_save(snapshot, consents):
-        from .storage import initialize_storage, migrate_records, resolve_storage, saved_media_missing
+        from .storage import (adopt_moved_folder, initialize_storage, migrate_records, resolve_storage,
+                              saved_media_missing)
 
         options = JobOptions(**{name: snapshot[name] for name in (
             "account", "output_dir", "folder_mode", "scan_mode", "include_videos", "include_gifs",
@@ -662,7 +663,12 @@ class ApplicationController(QObject):
                 if not source.output_dir.is_dir():
                     if "relocate" not in consents:
                         return {"choice": "relocate", "message": "이전 폴더가 연결되지 않았습니다. 새 위치에서 시작할까요? 기존 파일은 그대로 둡니다."}
-                    initialize_storage(destination)
+                    if destination.output_dir.is_dir():
+                        # The folder itself was moved or renamed: its records follow it, and the
+                        # files found at the same places in it are connected again.
+                        adopt_moved_folder(source, destination)
+                    else:
+                        initialize_storage(destination)
                 else:
                     migrate_records(source, destination)
         if saved_media_missing(destination):

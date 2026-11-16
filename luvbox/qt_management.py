@@ -8,6 +8,10 @@ from threading import Condition, Event, Thread
 from PySide6.QtCore import QObject, Property, Qt, QTimer, Signal, Slot
 
 
+# Seconds without a new job before the records copy and backup of a deletion are written.
+_SETTLE_AFTER = 20.0
+
+
 def _recycled_keys(rows, paths):
     """Displayed keys whose file is now in the Recycle Bin, by the path that moved."""
     if not isinstance(paths, (list, tuple)):
@@ -182,11 +186,26 @@ class ManagementController(QObject):
         self.changed.emit()
 
     def _work(self):
+        # Libraries whose records copy (in the media folder) and catalog backup wait to be written.
+        # A deletion used to write both itself: two copies of the whole catalog for every photo
+        # put away, and in a synced folder an upload of it each time. They are written once,
+        # after the last deletion has been quiet for a while, and before the application ends.
+        unsettled = {}
         while True:
             with self._condition:
-                self._condition.wait_for(lambda: self._closing or self._pending)
-                if self._closing: return
-                kind, generation, payload = self._pending.popleft()
+                self._condition.wait_for(lambda: self._closing or self._pending,
+                                         timeout=_SETTLE_AFTER if unsettled else None)
+                closing = self._closing
+                job = None if closing or not self._pending else self._pending.popleft()
+            if job is None:
+                if unsettled:
+                    from .deletion import settle_records
+                    for location in unsettled.values():
+                        settle_records(location)
+                    unsettled.clear()
+                if closing: return
+                continue
+            kind, generation, payload = job
             try:
                 if generation != self._generation:
                     self._delivered.emit((kind, generation, {}, "계정이나 목록이 바뀌었습니다."))
@@ -206,7 +225,11 @@ class ManagementController(QObject):
                     from .deletion import run_deletion
                     manifest, keep = payload
                     result = run_deletion(manifest["location"], manifest["rows"], keep, self._stop,
-                                          lambda event: self._delivered.emit(("progress", generation, event, "")))
+                                          lambda event: self._delivered.emit(("progress", generation, event, "")),
+                                          settle=False)
+                    if result.get("unsettled"):
+                        location = manifest["location"]
+                        unsettled[str(getattr(location, "record_dir", location))] = location
                     result = dict(result, keys=_recycled_keys(manifest["rows"], result.get("paths")),
                                   alike=bool(manifest.get("alike")))
                 self._delivered.emit((kind, generation, result, ""))

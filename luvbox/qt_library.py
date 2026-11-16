@@ -936,11 +936,16 @@ class LibraryRepository:
                     if not is_available():
                         try:
                             def on_dl(dl_bytes, tot_bytes):
+                                # "분류 중단" and closing the window end the download too,
+                                # not only the classification that follows it.
+                                check_cancel()
                                 if status_callback and tot_bytes:
                                     status_callback(
                                         f"AI 분류 모델 내려받는 중… ({dl_bytes / (1024 * 1024):.1f} / {tot_bytes / (1024 * 1024):.1f} MB)"
                                     )
                             ensure_model(progress_callback=on_dl)
+                        except ScanCancelled:
+                            raise
                         except Exception as exc:
                             raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 확인해 주세요.") from exc
 
@@ -1055,6 +1060,7 @@ class LibraryRepository:
         if request is None:
             return 0, 0
         from .clip_classifier import classify_detailed, ensure_model, get_session, is_available, release_session
+        from .duplicates import ScanCancelled
         if category not in CATEGORY_NAMES and category != "":
             return 0, 0
         try:
@@ -1085,8 +1091,14 @@ class LibraryRepository:
                     progress_callback(0, total)
                 if missing:
                     if not is_available():
+                        def stop_when_closing(_done, _total):
+                            # Closing the window sets the flag; the download must not hold the exit.
+                            if self._ai_cancel.is_set():
+                                raise ScanCancelled("분류 가르치기를 중단했습니다.")
                         try:
-                            ensure_model()
+                            ensure_model(progress_callback=stop_when_closing)
+                        except ScanCancelled:
+                            raise
                         except Exception as exc:
                             raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 확인해 주세요.") from exc
                     session = get_session()
@@ -1599,6 +1611,10 @@ class LibraryController(QObject):
         self._teach_request = None
         self._skipped_teach = 0
         self._ai_counts = []
+        # The counts beside the filters (duplicates, "not duplicates", AI categories) of this
+        # library have arrived. Until then every reload asks again: a filter changed right
+        # after opening dropped the first answers and nothing asked a second time.
+        self._counts_loaded = False
         self._duplicate_near = False
         self._duplicate_groups = []
         self._duplicate_model = DuplicateGroupModel(self)
@@ -1812,6 +1828,26 @@ class LibraryController(QObject):
             self._busy = False
             self.changed.emit()
 
+    @Slot()
+    def forgetOpened(self):
+        """Esc took the highlight off the grid: no photo is the opened one any more.
+
+        The grid's highlight is the grid's own. Left alone, the library went on
+        naming the photo, so the next page that loaded put the highlight and the
+        scroll position back on it, and F still starred a photo nothing marked.
+        Photos picked for a batch are another matter and stay picked.
+        """
+        if self._closed or not (self._selection_key or self._selected or self._navigation is not None):
+            return
+        self._navigation = None
+        self._selection_serial += 1
+        self._selection_key = ""
+        self._selected = {}
+        self._busy = False
+        with self._condition:
+            self._interactive = deque(item for item in self._interactive if item[0] != "select")
+        self.changed.emit()
+
     @Slot("QVariantList", result=int)
     def addToSelection(self, keys):
         """Select the given loaded tiles as well, for one duplicate group at a time."""
@@ -2016,6 +2052,7 @@ class LibraryController(QObject):
         self._account = account.strip().lstrip("@").lower()
         self._output_dir = output_dir
         self._separate_accounts = separate_accounts
+        self._counts_loaded = False
         self._authors = []
         self._authors_loaded = False
         self.authorsChanged.emit()
@@ -2099,7 +2136,8 @@ class LibraryController(QObject):
             self._user_tags_loaded = False
             self.userTagsChanged.emit()
         self._repository.configure(request)
-        if request is not None and (reload_authors or not self._authors_loaded or not self._hashtags_loaded or not self._user_tags_loaded):
+        if request is not None and (reload_authors or not self._authors_loaded or not self._hashtags_loaded
+                                    or not self._user_tags_loaded or not self._counts_loaded):
             with self._condition:
                 if reload_authors or not self._authors_loaded:
                     self._interactive.append(("authors", self._generation, self._selection_serial, ""))
@@ -2107,7 +2145,7 @@ class LibraryController(QObject):
                     self._interactive.append(("hashtags", self._generation, self._selection_serial, ""))
                 if reload_authors or not self._user_tags_loaded:
                     self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
-                if reload_authors:
+                if reload_authors or not self._counts_loaded:
                     self._interactive.append(("duplicate_counts", self._generation, self._selection_serial, ""))
                     self._interactive.append(("distinct_counts", self._generation, self._selection_serial, ""))
                     self._interactive.append(("ai_counts", self._generation, self._selection_serial, ""))
@@ -2334,6 +2372,13 @@ class LibraryController(QObject):
             self.changed.emit()
             return False
         self._exclusive = kind
+        if kind in ("ai", "teach"):
+            # A stop asked of an earlier scan must not end this one at once. Only the button's
+            # own slot used to clear it, so after one "분류 중단" every classification that
+            # started by itself (after a save, on opening) ended as "stopped" straight away.
+            cancel = getattr(self._repository, "_ai_cancel", None)
+            if cancel is not None:
+                cancel.clear()
         if kind == "ai":
             self._ai_scanning = True
             self._ai_current = 0
@@ -2463,7 +2508,8 @@ class LibraryController(QObject):
     def _duplicate_marks_changed(self, status):
         """Reload the duplicate list and its counts after a "not duplicates" mark changed."""
         self.duplicateDistinctChanged.emit()
-        self._refresh(reload_authors=False, status=status, keep_place=True)
+        # keep_opened: photos picked in other groups stay picked, as they do after a favorite.
+        self._refresh(reload_authors=False, status=status, keep_place=True, keep_opened=True)
         with self._condition:
             for action in ("duplicate_counts", "distinct_counts"):
                 self._interactive.append((action, self._generation, self._selection_serial, ""))
@@ -2552,7 +2598,9 @@ class LibraryController(QObject):
 
     @Slot(result=int)
     def selectDuplicateCopies(self):
-        if self._closed:
+        # Only in the duplicate view: there a file is checked again before it moves. The button
+        # is hidden elsewhere, but a key press could still reach it while it kept the focus.
+        if self._closed or not self._duplicate_only:
             return 0
         if self._exclusive == "duplicates":
             self._status = _HOLD_REASON["duplicates"]
@@ -2567,6 +2615,10 @@ class LibraryController(QObject):
             self._status = "선택할 중복 사본이 없습니다." + left
             self.changed.emit()
             return 0
+        # The list is read 200 rows at a time; copies further down are not on screen yet.
+        waiting = sum(1 for k in copy_keys if k not in self.model._keys)
+        if waiting:
+            left += f" 아직 불러오지 않은 사본 {waiting:,}장은 목록을 더 내린 뒤 다시 누르면 고릅니다."
         loaded_copies = [k for k in copy_keys if k in self.model._keys and k not in self._selection_keys]
         selectable, _, _ = self._repository.selectable_keys(loaded_copies)
         capacity = max(0, MAX_SELECTION - len(self._selection_keys))
@@ -2615,7 +2667,10 @@ class LibraryController(QObject):
         elif self._favorite_only and not new_state:
             # The saved query no longer contains this photo. Leaving it in the
             # model also makes its loaded-row count stop paging one photo early.
-            self._refresh(reload_authors=False)
+            # Its tile is taken out where it is: reading the list again (1.10.5) sent a
+            # person tidying deep in the list back to its top and closed the preview.
+            if not self.removeDeleted([key]):
+                self._refresh(reload_authors=False)
         return new_state
 
     @Slot(str, result=str)
@@ -2649,8 +2704,11 @@ class LibraryController(QObject):
             if not had_user_tag:
                 self._upsert_cached_user_tag(clean, delta=1)
             self._user_tags_loaded = False
-            # A user tag with the same name replaces this photo's AI label.
-            self._settle(self._status, reload=bool(self._ai_category) and clean == self._ai_category)
+            # A user tag with the same name replaces this photo's AI label, so under that
+            # category's filter the photo leaves the list: only its tile goes (see toggleFavorite).
+            leaves = bool(self._ai_category) and clean == self._ai_category
+            if not (leaves and self.removeDeleted([self.selectedKey])):
+                self._settle(self._status, reload=leaves)
         return ok
 
     @Slot(str, result=bool)
@@ -2671,7 +2729,9 @@ class LibraryController(QObject):
             if had_user_tag:
                 self._upsert_cached_user_tag(clean, delta=-1)
             self._user_tags_loaded = False
-            self._settle(self._status, reload=clean in (self._user_tag, self._ai_category))
+            leaves = clean in (self._user_tag, self._ai_category)
+            if not (leaves and self.removeDeleted([self.selectedKey])):
+                self._settle(self._status, reload=leaves)
         return ok
 
     @Slot(bool)
@@ -2754,9 +2814,15 @@ class LibraryController(QObject):
 
     @Slot(bool)
     def beginBandSelection(self, additive):
-        """Start a drag selection; with Ctrl held the earlier selection stays."""
+        """Start a drag selection; with Ctrl held the earlier selection stays.
+
+        It also stays while the person has switched "여러 개 선택" on: tiles cover the
+        whole grid there, so a click that moved a few pixels counted as a drag and
+        threw away everything picked so far.
+        """
         if self._closed:
             return
+        additive = bool(additive) or self._selection_explicit
         self._band_base = set(self._selection_keys) if additive else set()
         self._band_rect = None
 
@@ -3353,6 +3419,7 @@ class LibraryController(QObject):
             self.statisticsLoaded.emit(selection if isinstance(selection, dict) else {"error": _STATISTICS_ERROR})
             return
         if action == "ai_counts":
+            self._counts_loaded = True          # asked last of the three, so the others are in
             counts = [dict(item) for item in selection if isinstance(item, dict)] if isinstance(selection, list) else []
             if counts != self._ai_counts:
                 self._ai_counts = counts

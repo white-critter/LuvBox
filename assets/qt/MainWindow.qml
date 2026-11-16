@@ -42,7 +42,18 @@ ApplicationWindow {
     readonly property bool menuOpen: aiMenu.visible || teachMenu.visible
     // Duplicates are reviewed group by group, not in the flat grid.
     readonly property bool duplicateMode: !!app && app.library.filterDuplicateOnly
-    onDuplicateModeChanged: if (!duplicateMode) Qt.callLater(updateFocus)
+    onDuplicateModeChanged: {
+        if (duplicateMode)
+            return
+        Qt.callLater(updateFocus)
+        // The duplicate view's own controls are hidden now. Keys left on one of them (reached
+        // with Tab) would press a button nobody can see, so they go back to the photos.
+        Qt.callLater(function() {
+            const item = window.activeFocusItem
+            if (window.currentScreen === 1 && !window.modalOpen && (!item || !item.visible))
+                gallery.forceActiveFocus()
+        })
+    }
     property bool duplicateNear: false
     readonly property bool letterKeysFree: currentScreen === 1 && !modalOpen && !search.activeFocus
         && !listEngaged && !menuOpen && !!app
@@ -153,6 +164,9 @@ ApplicationWindow {
         else if (window.visibility === Window.Windowed)
             window.lastMaximized = false
         normalPlaceTimer.restart()
+        // A saved-file card that came or went while the window was maximized is fitted now.
+        if (window.visibility === Window.Windowed)
+            Qt.callLater(fitSaveWindow)
     }
     Timer {
         id: normalPlaceTimer
@@ -167,8 +181,10 @@ ApplicationWindow {
         normalPlaceTimer.restart()
         if (applyingSaveHeight || !saveFitReady || height === appliedSaveHeight)
             return
-        // The person resized the window. Keep that choice until the open detail changes.
-        saveHeightHeld = true
+        // The person resized the window while a saved-file card showed. Keep that choice until
+        // the card goes away (a size set before the card came is where the card grows from).
+        if (savedDetailVisible)
+            saveHeightHeld = true
     }
     Component.onCompleted: {
         // The thumbnail size chosen last time, before the first tiles are laid out.
@@ -231,24 +247,26 @@ ApplicationWindow {
             fittedDetailName = ""
             saveHeightHeld = false
             if (saveHeightExpanded && saveRestoreHeight >= minimumHeight) {
-                if (visibility === Window.Windowed) {
-                    appliedSaveHeight = Math.min(saveRestoreHeight, screenHeightLimit())
-                    applyingSaveHeight = true
-                    height = appliedSaveHeight
-                    applyingSaveHeight = false
-                }
+                // While maximized the grown height stays noted as grown: the window gets its own
+                // height back when it is a normal window again (see onVisibilityChanged). Clearing
+                // the note here left the restored window tall, and that height was remembered.
+                if (visibility !== Window.Windowed)
+                    return
+                appliedSaveHeight = Math.min(saveRestoreHeight, screenHeightLimit())
+                applyingSaveHeight = true
+                height = appliedSaveHeight
+                applyingSaveHeight = false
                 saveHeightExpanded = false
             }
             return
         }
         if (visibility !== Window.Windowed)
             return
-        if (saveHeightHeld && detailName === fittedDetailName)
+        // A height the person set stays until the card goes away, whatever file comes next.
+        if (saveHeightHeld)
             return
-        saveHeightHeld = false
         fittedDetailName = detailName
         const needed = saveNeededHeight()
-        const limit = screenHeightLimit()
         if (needed > height + 4 && needed > fittedSaveNeed + 4) {
             const next = Math.min(Math.max(needed, minimumHeight), saveGrowLimit())
             if (next > height + 4) {
@@ -261,20 +279,10 @@ ApplicationWindow {
                 applyingSaveHeight = false
             }
             fittedSaveNeed = needed
-            return
         }
-        if (saveHeightExpanded && needed + 4 < height && needed + 4 < fittedSaveNeed) {
-            const next = Math.max(saveRestoreHeight, Math.min(needed, limit))
-            if (next + 4 < height) {
-                appliedSaveHeight = next
-                applyingSaveHeight = true
-                height = next
-                applyingSaveHeight = false
-                if (height <= saveRestoreHeight + 4)
-                    saveHeightExpanded = false
-            }
-            fittedSaveNeed = needed
-        }
+        // The window only grows while the card shows and returns to its own height when the card
+        // goes. It used to follow every file, so during a save its lower edge went up and down
+        // every few seconds with the length of each post's text.
     }
     property int densityChoice: 1
     readonly property int tileWidth: [168, 240, 320][densityChoice]
@@ -403,7 +411,10 @@ ApplicationWindow {
             let placed = Math.abs(gallery.contentY - target) < 1
             if (placed || tries >= 8) {
                 let visibleEnd = rowStart + columns * Math.max(1, Math.ceil(gallery.height / gallery.cellHeight))
-                if (gallery.currentIndex < rowStart || gallery.currentIndex >= visibleEnd)
+                // A highlighted photo that would end up out of sight moves into view. With no
+                // photo highlighted there is still none: a new size must not pick the first tile.
+                if (gallery.currentIndex >= 0
+                        && (gallery.currentIndex < rowStart || gallery.currentIndex >= visibleEnd))
                     gallery.currentIndex = rowStart
                 gallery.highlightFollowsCurrentItem = true
                 stop()
@@ -629,6 +640,9 @@ ApplicationWindow {
                 objectName: "galleryStatisticsButton"
                 text: "통계"
                 tone: "ghost"
+                // Opened with the mouse and closed again, the keys stay with the photos: left on
+                // this button, Space opened the window again instead of the preview.
+                focusPolicy: Qt.TabFocus
                 visible: !!window.app && window.currentScreen === 1
                 enabled: window.app && !window.app.closing
                 tip: "저장한 사진과 작성자·태그 요약 (S)"
@@ -638,6 +652,7 @@ ApplicationWindow {
                 objectName: "shortcutHelpButton"
                 text: "단축키"
                 tone: "ghost"
+                focusPolicy: Qt.TabFocus
                 visible: !!window.app && window.currentScreen === 1
                 enabled: window.app && !window.app.closing
                 Accessible.name: "단축키 안내"
@@ -649,6 +664,7 @@ ApplicationWindow {
             FlatButton {
                 objectName: "settingsButton"
                 text: "설정"
+                focusPolicy: Qt.TabFocus
                 visible: !!window.app
                 enabled: window.app && !window.app.closing
                 onClicked: preferencesDialog.open()
@@ -1001,7 +1017,9 @@ ApplicationWindow {
                                 }
                                 FlatButton {
                                     objectName: "saveUnsavedButton"
-                                    text: "확인"
+                                    // Names what the button does: it opens that list.
+                                    text: "보기"
+                                    Accessible.name: "저장하지 못한 미디어 보기"
                                     onClicked: window.openUnsaved("unsaved")
                                 }
                             }
@@ -1040,13 +1058,18 @@ ApplicationWindow {
                             window.stopWheel()
                             searchDelay.restart()
                         }
+                        onPreeditTextChanged: {
+                            // A syllable being composed changes what is searched for as well.
+                            if (activeFocus)
+                                searchDelay.restart()
+                        }
                         onAccepted: {
                             window.stopWheel()
                             searchDelay.stop()
                             if (window.app)
-                                window.app.library.search(text)
+                                window.app.library.search(displayText)
                             else
-                                window.galleryModel.search(text)
+                                window.galleryModel.search(displayText)
                         }
                         Keys.onEscapePressed: event => {
                             if (text.length > 0) {
@@ -1252,7 +1275,7 @@ ApplicationWindow {
                             // "미디어 N개" is the author's number of saved photos, videos and GIFs
                             // in the library, whatever filters are active.
                             model: {
-                                const items = [{ label: "전체 작성자", value: "" }]
+                                const items = [{ label: "작성자 전체", value: "" }]
                                 let found = !authorFilter.applied.length
                                 for (let i = 0; i < authorRows.length; i++) {
                                     const row = authorRows[i]
@@ -1638,6 +1661,8 @@ ApplicationWindow {
                         objectName: "cancelDuplicateScanButton"
                         text: "검사 중단"
                         compact: true
+                        // A mouse click leaves the keys with the grid (the button goes away once the work stops).
+                        focusPolicy: Qt.TabFocus
                         visible: window.app && window.app.library.copiesLocked
                         Accessible.name: "중복 검사 중단"
                         onClicked: if (window.app) window.app.library.cancelDuplicateScan()
@@ -1646,6 +1671,7 @@ ApplicationWindow {
                         objectName: "cancelAiScanButton"
                         text: "분류 중단"
                         compact: true
+                        focusPolicy: Qt.TabFocus
                         visible: window.app && window.app.library.aiScanning
                         Accessible.name: "AI 분류 중단"
                         onClicked: if (window.app) window.app.library.cancelAiScan()
@@ -1675,6 +1701,9 @@ ApplicationWindow {
                         Label {
                             objectName: "duplicateGuide"
                             Layout.fillWidth: true
+                            // In a low window the guide left no room for a single group; the
+                            // buttons' tips say the same.
+                            visible: window.height >= 640
                             text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’(내용이 완전히 같은 파일)을 골라 휴지통으로 보내세요. "
                                 + "크기·화질만 다른 ‘비슷함’은 사본으로 고르지 않습니다. 필요 없으면 그 사진의 ‘비교’를 눌러 "
                                 + "남길 사진과 나란히 본 뒤 한 장씩 휴지통으로 보내세요. "
@@ -1686,13 +1715,20 @@ ApplicationWindow {
                             font.pixelSize: Theme.fontSmall
                             color: Theme.textMuted
                         }
-                        RowLayout {
-                            spacing: Theme.gapSmall
+                        GridLayout {
+                            // In a narrow window the two "중복 아님" buttons take a line of their own
+                            // instead of running past the card's edge.
+                            columns: window.width < 800 ? 3 : 5
+                            columnSpacing: Theme.gapSmall
+                            rowSpacing: Theme.gapSmall
                             Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                            // These buttons hide when the duplicate view closes. A click must not
+                            // leave the keys on them: Space then pressed a button nobody could see.
                             FlatButton {
                                 id: duplicateNearToggle
                                 objectName: "galleryDuplicateNear"
                                 tone: "chip"
+                                focusPolicy: Qt.TabFocus
                                 enabled: !!window.app && !window.app.library.busy
                                 checkable: true
                                 checked: window.duplicateNear
@@ -1709,6 +1745,7 @@ ApplicationWindow {
                             FlatButton {
                                 id: scanDuplicatesButton
                                 objectName: "galleryScanDuplicates"
+                                focusPolicy: Qt.TabFocus
                                 enabled: !!window.app && !window.app.library.busy
                                 text: "중복 검사"
                                 tip: window.duplicateNear
@@ -1722,6 +1759,7 @@ ApplicationWindow {
                             FlatButton {
                                 id: selectDuplicatesButton
                                 objectName: "gallerySelectDuplicates"
+                                focusPolicy: Qt.TabFocus
                                 enabled: !!window.app && !window.app.library.copiesLocked && window.galleryModel.count > 0
                                 tip: window.app && window.app.library.copiesLocked
                                     ? window.app.library.holdReason
@@ -1739,6 +1777,7 @@ ApplicationWindow {
                             // "중복 아님" marks: take the last one back, or forget them all.
                             FlatButton {
                                 objectName: "galleryUndoDistinct"
+                                focusPolicy: Qt.TabFocus
                                 visible: !!window.app && window.app.library.canUndoDistinct
                                 enabled: !!window.app && !window.app.library.copiesLocked
                                 text: "중복 아님 되돌리기"
@@ -1748,6 +1787,7 @@ ApplicationWindow {
                             }
                             FlatButton {
                                 objectName: "galleryClearDistinct"
+                                focusPolicy: Qt.TabFocus
                                 visible: !!window.app && window.app.library.distinctDuplicateCount > 0
                                 enabled: !!window.app && !window.app.library.copiesLocked
                                 text: "중복 아님 " + (window.app ? window.app.library.distinctDuplicateCount.toLocaleString() : "0") + "개 초기화"
@@ -1810,7 +1850,10 @@ ApplicationWindow {
                     // Dragging draws a selection rectangle, as in a file manager. The wheel,
                     // the scrollbar and the keys scroll.
                     interactive: false
-                    keyNavigationEnabled: true
+                    // The duplicate view hides this grid. Its keys must stop with it: arrows moved
+                    // a highlight nobody saw, and Enter or Delete then acted on that photo.
+                    keyNavigationEnabled: !window.duplicateMode
+                    Keys.enabled: !window.duplicateMode
                     keyNavigationWraps: false
                     highlightMoveDuration: 0
                     focus: window.currentScreen === 1
@@ -1993,6 +2036,10 @@ ApplicationWindow {
                         if (window.app && window.app.library.selectionMode)
                             window.app.library.setSelectionMode(false)
                         currentIndex = -1
+                        // The library forgets the photo too. Otherwise the next page that loads
+                        // puts the highlight and the scroll position back on it, and F stars it.
+                        if (window.app)
+                            window.app.library.forgetOpened()
                     }
 
                     delegate: Item {
@@ -2346,11 +2393,13 @@ ApplicationWindow {
     Timer {
         id: searchDelay
         interval: 180
+        // displayText includes the syllable a Korean input method is still composing; text gets it
+        // only once the next key commits it, so the last syllable typed was missing from the search.
         onTriggered: {
             if (window.app)
-                window.app.library.search(search.text)
+                window.app.library.search(search.displayText)
             else
-                window.galleryModel.search(search.text)
+                window.galleryModel.search(search.displayText)
         }
     }
     Timer {
@@ -2424,8 +2473,10 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Delete"
+        // Not while a date is being typed: Delete there removes a character of the date.
         enabled: window.currentScreen === 1 && !window.modalOpen && !window.listEngaged && !window.menuOpen
-            && !search.activeFocus && !!window.app && !window.app.closing
+            && !search.activeFocus && !dateFromFilter.activeFocus && !dateToFilter.activeFocus
+            && !!window.app && !window.app.closing
             && window.app.library.selectionMode && window.app.library.selectedCount > 0
         onActivated: {
             window.stopWheel()
@@ -2681,6 +2732,9 @@ ApplicationWindow {
         }
         contentItem: ColumnLayout {
             spacing: 12
+            // In the smallest window the rows under the picture can need more room than there is.
+            // What does not fit is cut off here instead of being drawn over the buttons below.
+            clip: true
             Flow {
                 Layout.fillWidth: true
                 spacing: 8

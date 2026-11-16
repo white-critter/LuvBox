@@ -140,6 +140,65 @@ class ManagementControllerTests(unittest.TestCase):
             self.assertEqual(row['status'], 'recycled')
             self.assertEqual(store.ignored_media(), {('100', 1, 'photo')})
 
+    def recycle_one(self):
+        """Send the present photo through the controller, with a stand-in for the Recycle Bin."""
+        self.management.prepareDelete([self.gallery_key()])
+        self.wait(lambda: self.management.deleteConfirmationPending)
+
+        def fake_recycle(path, expected):
+            target = self.kept / Path(path).name
+            Path(path).rename(target)
+            return str(target)
+
+        with patch('luvbox.deletion.recycle_file', side_effect=fake_recycle):
+            self.management.confirmDelete(False)
+            self.wait(lambda: not self.management.mutating)
+        self.assertFalse(self.present.exists())
+
+    def test_the_records_copy_and_backup_wait_for_a_quiet_moment(self):
+        """Each photo put away used to copy the whole catalog twice before the next could go (1.10.8)."""
+        with patch('luvbox.deletion.publish_snapshot') as publish, \
+                patch('luvbox.deletion.backup_catalog', return_value=self.root / 'backup') as backup, \
+                patch('luvbox.qt_management._SETTLE_AFTER', 0.2):
+            self.recycle_one()
+            # The result is back and the tile can go; nothing was copied for it yet.
+            self.assertEqual((publish.call_count, backup.call_count), (0, 0))
+            self.wait(lambda: publish.call_count == 1 and backup.call_count == 1)
+            time.sleep(.5)
+            self.app.processEvents()
+        self.assertEqual((publish.call_count, backup.call_count), (1, 1))
+        self.assertEqual(publish.call_args.args[0].record_dir, self.paths.record_dir)
+
+    def test_closing_writes_what_still_waited(self):
+        with patch('luvbox.deletion.publish_snapshot') as publish, \
+                patch('luvbox.deletion.backup_catalog', return_value=self.root / 'backup') as backup, \
+                patch('luvbox.qt_management._SETTLE_AFTER', 60):
+            self.recycle_one()
+            self.assertEqual((publish.call_count, backup.call_count), (0, 0))
+            self.management.shutdown()
+            self.wait(lambda: not self.management._worker.is_alive())
+        self.assertEqual((publish.call_count, backup.call_count), (1, 1))
+
+    def test_a_deletion_run_directly_still_writes_both_itself(self):
+        from luvbox.deletion import run_deletion
+
+        self.management.prepareDelete([self.gallery_key()])
+        self.wait(lambda: self.management.deleteConfirmationPending)
+        manifest = self.management._delete
+        self.management.cancelDelete()
+
+        def fake_recycle(path, expected):
+            target = self.kept / Path(path).name
+            Path(path).rename(target)
+            return str(target)
+
+        with patch('luvbox.deletion.publish_snapshot') as publish, \
+                patch('luvbox.deletion.backup_catalog', return_value=self.root / 'backup') as backup, \
+                patch('luvbox.deletion.recycle_file', side_effect=fake_recycle):
+            result = run_deletion(manifest['location'], manifest['rows'], False, threading.Event(), lambda _event: None)
+        self.assertEqual((result['recycled'], publish.call_count, backup.call_count), (1, 1, 1))
+        self.assertNotIn('unsettled', result)
+
 
 if __name__ == '__main__':
     unittest.main()

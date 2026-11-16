@@ -18,6 +18,9 @@ Item {
     readonly property int chosen: records ? records.unsavedSelectedCount : 0
     // Acting on a whole list asks once more; it lapses after a few seconds.
     property bool confirmAll: false
+    // The tile a click just picked or let go of, and how it was before (see the tile's double click).
+    property string clickedToken: ""
+    property bool clickedWasPicked: false
     readonly property string retryWord: view === "unsaved" ? "다시 저장" : "다시 받기"
     readonly property string settleWord: view === "excluded" ? "제외 해제"
         : view === "missing" ? "갤러리에서 빼기" : "목록에서 지우기"
@@ -149,6 +152,8 @@ Item {
                 Label {
                     objectName: "unsavedGuide"
                     Layout.fillWidth: true
+                    // In a low window the guide left less than one row of tiles to see.
+                    visible: review.height >= 560
                     text: review.view === "excluded"
                         ? "다시 받지 않도록 빼 둔 미디어입니다. ‘제외 해제’는 다음 저장에서 다시 받게 하고, ‘다시 받기’는 지금 받습니다. 저장된 파일은 바뀌지 않습니다. 빈 미리보기는 전체 목록 확인으로 저장하면 채워집니다."
                         : review.view === "missing"
@@ -183,6 +188,9 @@ Item {
                             ? "갤러리에서 감추고 다음 저장에서 다시 받지 않습니다. 기록은 지우지 않으며 ‘직접 제외’에서 되돌릴 수 있습니다."
                             : review.view === "excluded" ? "다음 저장에서 다시 받게 합니다"
                             : "이 목록에서만 지웁니다. 저장된 파일에는 영향이 없습니다."
+                        // A double click counts once. Without this its second click confirmed what
+                        // its first had only asked about, and every item of the list was settled.
+                        onDoubleClicked: {}
                         onClicked: {
                             if (review.chosen > 0) {
                                 review.records.settleSelected()
@@ -459,12 +467,23 @@ Item {
                             ToolTip.text: cell.detail + (cell.seen ? "\n마지막 확인 " + cell.seen : "")
                                 + "\n누르면 선택 · Shift+클릭은 범위 · 두 번 누르면 원문 보기"
                             onClicked: mouse => {
-                                if (mouse.modifiers & Qt.ShiftModifier)
+                                if (mouse.modifiers & Qt.ShiftModifier) {
+                                    review.clickedToken = ""
                                     review.records.selectUnsavedRangeTo(cell.token)
-                                else
+                                } else {
+                                    review.clickedToken = cell.token
+                                    review.clickedWasPicked = cell.picked
                                     review.records.toggleUnsavedSelected(cell.token)
+                                }
                             }
-                            onDoubleClicked: review.records.openSource(cell.token)
+                            onDoubleClicked: {
+                                // The first click of the two picked or let go of the tile; opening
+                                // the post leaves it as it was before.
+                                if (review.clickedToken === cell.token && cell.picked !== review.clickedWasPicked)
+                                    review.records.toggleUnsavedSelected(cell.token)
+                                review.clickedToken = ""
+                                review.records.openSource(cell.token)
+                            }
                         }
                     }
                 }
