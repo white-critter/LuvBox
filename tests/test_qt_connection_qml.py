@@ -287,6 +287,27 @@ ApplicationWindow {
             wait_for(lambda: controller.connectionStage == "extension_wait", "browser launch")
             if opened_browsers != [("firefox", "http://127.0.0.1:12345/connect#synthetic-test-only")]:
                 raise AssertionError("QML connection did not use the selected browser")
+            cancel_button = next((item for item in dialog.findChildren(QQuickItem)
+                                  if item.property("text") == "연결 취소"), None)
+            if cancel_button is None:
+                raise AssertionError("cancel-browser button is missing")
+            click(cancel_button)
+            wait_for(lambda: not controller.browserConnecting and not controller.cancelling and not controller.busy,
+                     "browser cancellation")
+            if not dialog.property("visible") or not connect.property("enabled"):
+                raise AssertionError("cancelling browser connection closed the dialog instead of keeping it open")
+            footer = dialog.property("footer")
+            footer.rejected.emit()
+            settle()
+            if dialog.property("visible"):
+                raise AssertionError("close button did not close connection dialog once idle")
+            invoke(window, "openConnection")
+            wait_for(lambda: dialog.property("visible") and connect.property("enabled"), "reopened connection dialog")
+            checks.append("cancel-keeps-dialog-open")
+            click(connect)
+            wait_for(lambda: controller.connectionStage == "extension_wait", "browser launch after cancel")
+            if opened_browsers[-1] != ("firefox", "http://127.0.0.1:12345/connect#synthetic-test-only"):
+                raise AssertionError("QML connection did not reuse the selected browser after cancel")
             # Advance the silence threshold without spending eight seconds;
             # the actual production QTimer opens the help section.
             controller._extension_wait_started = time.monotonic() - 9
@@ -408,7 +429,7 @@ class ConnectionQmlTests(unittest.TestCase):
                                 encoding="utf-8", errors="replace", timeout=35)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout)
-        self.assertEqual(len(report["checks"]), 9)
+        self.assertEqual(len(report["checks"]), 10)
         self.assertEqual(report["qml_errors"], [])
         self.assertEqual(report["browser"], "firefox")
         self.assertEqual(report["token_state"], "saved")

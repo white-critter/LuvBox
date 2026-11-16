@@ -188,12 +188,15 @@ async function dispatch(message, sender) {
       // Do not open an X tab for an app that has already stopped waiting.
       if (await reportProgress(pairing, "checking_account") === "gone") throw failure("app_gone");
       const result = await inspectAccount(pairing, tabId);
-      await reportProgress(pairing, "awaiting_approval");
+      if (await reportProgress(pairing, "awaiting_approval") === "gone") throw failure("app_gone");
       return result;
     } catch (error) {
-      const code = errorCode(error);
+      let code = errorCode(error);
       if (code === "app_gone") pairings.delete(tabId);
-      else await reportProgress(pairing, progressStage(code));
+      else if (await reportProgress(pairing, progressStage(code)) === "gone") {
+        pairings.delete(tabId);
+        code = "app_gone";
+      }
       throw failure(code);
     }
     finally { pairing.busy = false; }

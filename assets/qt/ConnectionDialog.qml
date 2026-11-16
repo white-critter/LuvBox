@@ -446,7 +446,12 @@ FlatDialog {
             text: dialog.accounts && dialog.accounts.cancelling ? "취소하는 중…"
                   : dialog.accounts && dialog.accounts.browserConnecting ? "연결 취소" : "닫기"
             enabled: !dialog.accounts || !dialog.accounts.cancelling
-            DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            DialogButtonBox.buttonRole: dialog.accounts && dialog.accounts.browserConnecting
+                ? DialogButtonBox.ActionRole : DialogButtonBox.RejectRole
+            onClicked: {
+                if (dialog.accounts && dialog.accounts.browserConnecting)
+                    dialog.accounts.cancelBrowser()
+            }
         }
         onRejected: {
             if (dialog.accounts && dialog.accounts.browserConnecting)

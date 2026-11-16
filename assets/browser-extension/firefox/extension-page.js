@@ -99,16 +99,16 @@
       const result = await send({type: "luvbox-inspect"});
       // The pairing may have ended while the check ran; keep that notice.
       if (confirmation.disabled) return;
-      if (!result?.ok) {
-        if (final.has(result?.code)) return end(failureText(result.code));
-        showAccount("", "", "계정을 확인하지 못했습니다.");
-        show("failed", failureText(result?.code));
-        return;
-      }
+      if (!result?.ok && final.has(result?.code)) return end(failureText(result.code));
       // The box was unticked during the check: stay on the code step.
       if (!confirmation.checked) {
         showAccount("", "", firstHint);
         return show("code", codeText);
+      }
+      if (!result?.ok) {
+        showAccount("", "", "계정을 확인하지 못했습니다.");
+        show("failed", failureText(result?.code));
+        return;
       }
       showAccount(result.display_name || "", "@" + result.username, "");
       connect.textContent = "@" + result.username + " 연결";

@@ -185,8 +185,8 @@ Item {
                                 anchors.margins: 8
                                 height: Math.round(review.tileWidth * 0.75) - 16
                                 source: tile.modelData.missing ? "" : tile.modelData.thumbUrl
-                                sourceSize.width: Math.min(384, Math.round(width * Math.max(1, Screen.devicePixelRatio)))
-                                sourceSize.height: Math.min(384, Math.round(height * Math.max(1, Screen.devicePixelRatio)))
+                                sourceSize.width: Math.min(384, Math.max(1, Math.round((review.tileWidth - 16) * Math.max(1, Screen.devicePixelRatio))))
+                                sourceSize.height: Math.min(384, Math.max(1, Math.round((Math.round(review.tileWidth * 0.75) - 16) * Math.max(1, Screen.devicePixelRatio))))
                                 asynchronous: true
                                 cache: false
                                 fillMode: Image.PreserveAspectFit

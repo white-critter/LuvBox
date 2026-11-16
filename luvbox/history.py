@@ -1306,7 +1306,7 @@ class HistoryStore:
         """
         restored = []
         for row in self._db.execute(
-                "SELECT folder_mode,tweet_id,num,media_type,last_path,updated_at FROM media "
+                "SELECT folder_mode,tweet_id,num,media_type,last_path,updated_at,missing_since FROM media "
                 "WHERE path='' AND last_path!=''").fetchall():
             if not Path(row["last_path"]).is_absolute():
                 continue
@@ -1335,15 +1335,22 @@ class HistoryStore:
             if stat.S_ISREG(info.st_mode):
                 restored.append((str(candidate), info.st_size, _now(), row["folder_mode"],
                                  row["tweet_id"], row["num"], row["media_type"],
-                                 row["last_path"], row["updated_at"]))
+                                 row["last_path"], row["updated_at"], row["missing_since"]))
 
         def reconnect(values):
+            reconnected, size, stamp, mode, tweet_id, num, media_type, last_path, updated_at, missing_since = values
             if self._db.execute(
                     "UPDATE media SET path=?,filesize=?,updated_at=?,missing_since='' "
                     "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-                    "AND path='' AND last_path=? AND updated_at=?", values).rowcount:
-                self._leave_moved_records({"folder_mode": values[3], "tweet_id": values[4], "num": values[5],
-                                           "media_type": values[6], "path": values[0]})
+                    "AND path='' AND last_path=? AND updated_at=?",
+                    (reconnected, size, stamp, mode, tweet_id, num, media_type, last_path, updated_at)).rowcount:
+                self._leave_moved_records({"folder_mode": mode, "tweet_id": tweet_id, "num": num,
+                                           "media_type": media_type, "path": reconnected})
+                if missing_since:
+                    self._db.execute(
+                        "UPDATE missing_choices SET ignored=0,updated_at=? "
+                        "WHERE tweet_id=? AND num=? AND media_type=? AND ignored=1 AND updated_at=?",
+                        (stamp, tweet_id, num, media_type, missing_since))
 
         self._write_batches(restored, reconnect)
 
@@ -1849,18 +1856,20 @@ class HistoryStore:
         return len(self._lost_items())
 
     @_safe
-    def lost_media(self, *, page=0, page_size=50) -> dict:
+    def lost_media(self, *, page=0, page_size=50, through=False) -> dict:
         """One page of media whose saved file is gone and that the person has not excluded."""
-        if type(page) is not int or page < 0 or type(page_size) is not int or not 1 <= page_size <= 200:
+        if (type(page) is not int or page < 0 or type(page_size) is not int
+                or not 1 <= page_size <= 200 or type(through) is not bool):
             raise ValueError("invalid lost page")
         items = self._lost_items()
         total = len(items)
         pages = (total + page_size - 1) // page_size if total else 0
         page = min(page, max(0, pages - 1))
+        start = 0 if through else page * page_size
         rows = [{"tweet_id": item["tweet_id"], "num": item["num"], "media_type": item["media_type"],
                  "author": item["author"], "posted_at": item["posted_at"] or "",
                  "saved_at": item["saved_at"] or "", "missing_since": item["missing_since"] or ""}
-                for item in items[page * page_size:(page + 1) * page_size]]
+                for item in items[start:(page + 1) * page_size]]
         return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
     @_safe
@@ -1869,6 +1878,48 @@ class HistoryStore:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2000:
             raise ValueError("invalid lost key limit")
         return tuple(item["archive_key"] for item in self._lost_items()[:limit])
+
+    def _lost_targets(self, chosen: list[tuple]) -> list[tuple]:
+        """Subset of ``chosen`` that currently match ``_lost_items`` without scanning every file."""
+        if not chosen:
+            return []
+        try:
+            if not self.media_dir.is_dir():
+                return []
+        except OSError:
+            return []
+        ignored = self._ignored()
+        where, params = self._filter_clause("all", "", include_deleted=False)
+        modes = sorted(_MODES)
+        marks = ",".join("?" for _ in modes)
+        listed_sql = ("SELECT 1 FROM media" + where + (" AND " if where else " WHERE ")
+                      + "media.folder_mode IN (" + marks + ") AND media.tweet_id=? AND media.num=? "
+                      "AND media.media_type=? LIMIT 1")
+        paths_sql = ("SELECT path FROM media WHERE folder_mode IN (" + marks + ") "
+                     "AND tweet_id=? AND num=? AND media_type=? AND path!=''")
+        targets = []
+        previous_cache = self._folder_cache
+        self._folder_cache = {}
+        try:
+            for identity in chosen:
+                if identity in ignored:
+                    continue
+                if self._db.execute(listed_sql, (*params, *modes, *identity)).fetchone() is None:
+                    continue
+                present = False
+                for row in self._db.execute(paths_sql, (*modes, *identity)):
+                    try:
+                        path, size, _ = self._file(row["path"])
+                    except (HistoryError, OSError):
+                        continue
+                    if path and size is not None:
+                        present = True
+                        break
+                if not present:
+                    targets.append(identity)
+        finally:
+            self._folder_cache = previous_cache
+        return targets
 
     @_safe
     def exclude_lost(self, items=None) -> int:
@@ -1880,8 +1931,8 @@ class HistoryStore:
         its last location, so a file that returns there is reconnected, and
         ``release_excluded`` takes the choice back. Returns how many were excluded.
         """
-        lost = {(item["tweet_id"], item["num"], item["media_type"]) for item in self._lost_items()}
         if items is None:
+            lost = {(item["tweet_id"], item["num"], item["media_type"]) for item in self._lost_items()}
             targets = sorted(lost)
         else:
             chosen = []
@@ -1892,7 +1943,7 @@ class HistoryStore:
                         or media_type not in _TYPES):
                     raise HistoryError(_HISTORY_HELP)
                 chosen.append((tweet_id, number, media_type))
-            targets = [identity for identity in dict.fromkeys(chosen) if identity in lost]
+            targets = self._lost_targets(list(dict.fromkeys(chosen)))
         if not targets:
             return 0
         stamp = _now()
@@ -2235,13 +2286,15 @@ class HistoryStore:
             else:
                 clauses.append("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark") + ")")
         if user_tag:
-            tag = user_tag.strip().lstrip("#")
+            tag = _normalize_tag(user_tag)
             if tag:
                 if not has_media_tags:
                     clauses.append("0")
                 else:
+                    # Keep the correlated primary-key lookup on media_tags instead of
+                    # scanning every row with this (source, tag) pair in the library.
                     clauses.append("EXISTS (SELECT 1 FROM media_tags AS mark WHERE " + _on_file("mark") +
-                                   " AND mark.source='user' AND mark.tag=?)")
+                                   " AND +mark.source='user' AND +mark.tag=?)")
                     params.append(tag)
         if ai_category:
             if not isinstance(ai_category, str) or ai_category not in _AI_CATEGORIES or not has_media_tags:
@@ -2534,14 +2587,44 @@ class HistoryStore:
                     (*record, tag)
                 )
                 removed = removed or cur.rowcount > 0
-                if cur.rowcount > 0 and row["source"] == "ai":
-                    # Keep an empty AI evaluation marker so incremental scans do not
-                    # re-apply a tag that the user explicitly removed.
-                    self._db.execute(
-                        "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
-                        (*record, "", "ai", _now()),
+                if cur.rowcount > 0:
+                    taught = (
+                        self._db.execute(
+                            "SELECT category FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                            record,
+                        ).fetchone()
+                        if self._has_table("ai_feedback")
+                        else None
                     )
+                    if taught is not None:
+                        if (taught["category"] or "") == tag:
+                            self._db.execute(
+                                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                                (*record, tag, "confirmed", _now()),
+                            )
+                    else:
+                        has_ai_tag = self._db.execute(
+                            "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                            "AND source='ai' LIMIT 1",
+                            record,
+                        ).fetchone() is not None
+                        has_embedding = (
+                            self._has_table("ai_embeddings")
+                            and self._db.execute(
+                                "SELECT 1 FROM ai_embeddings WHERE folder_mode=? AND tweet_id=? AND num=? "
+                                "AND media_type=? LIMIT 1",
+                                record,
+                            ).fetchone() is not None
+                        )
+                        if row["source"] == "ai" or (has_embedding and not has_ai_tag):
+                            # Keep an empty AI evaluation marker so incremental scans do not
+                            # re-apply a tag that the user explicitly removed.
+                            self._db.execute(
+                                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                                (*record, "", "ai", _now()),
+                            )
         return removed
 
     @_safe
@@ -2574,10 +2657,12 @@ class HistoryStore:
     def user_tags(self, limit: int = 200) -> list[dict]:
         if not self._has_table("media_tags"):
             return []
-        # Count files: a tag typed on either record of a file counts once.
+        # Count files: drive from user-tag index into media primary keys.
         rows = self._read_rows(
-            "SELECT tag, COUNT(*) AS count FROM (SELECT DISTINCT mark.tag AS tag, media.rowid AS file FROM media "
-            "JOIN media_tags AS mark ON " + _on_file("mark") + " "
+            "SELECT tag, COUNT(*) AS count FROM (SELECT DISTINCT mark.tag AS tag, media.rowid AS file "
+            "FROM media_tags AS mark "
+            f"CROSS JOIN media ON media.folder_mode IN {_MODE_LIST} AND media.tweet_id=mark.tweet_id "
+            "AND " + _on_file("mark") + " "
             "WHERE mark.tag != '' AND mark.source='user' AND " + _listed("media") + ") "
             "GROUP BY tag ORDER BY count DESC, tag ASC LIMIT ?",
             (limit,)

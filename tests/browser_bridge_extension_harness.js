@@ -11,7 +11,7 @@ const {webcrypto} = require("node:crypto");
   const extensionId = "abcdefghijklmnopabcdefghijklmnop";
   const extensionUrl = `chrome-extension://${extensionId}/connect.html`;
   const token = "synthetic-bridge-token";
-  let currentToken = token, signedIn = true, refused = false, checkTabClosed = false;
+  let currentToken = token, signedIn = true, refused = false, checkTabClosed = false, refuseAfterInspect = false;
   const updates = [];
   const tabs = new Map([[1, {id: 1, url: "http://127.0.0.1:49123/connect"}]]);
   const api = {
@@ -24,7 +24,8 @@ const {webcrypto} = require("node:crypto");
       create: async ({url, active}) => { created++; const tab = {id: 2, url, active};
         if (!checkTabClosed) tabs.set(2, tab); return tab; },
       remove: async id => { closed++; tabs.delete(id); },
-      sendMessage: async () => ({ready: true, username: "Offline_User", display_name: "Offline Name"}),
+      sendMessage: async () => { if (refuseAfterInspect) refused = true;
+        return {ready: true, username: "Offline_User", display_name: "Offline Name"}; },
       onRemoved: {addListener: () => {}}
     },
     cookies: {
@@ -133,6 +134,14 @@ const {webcrypto} = require("node:crypto");
   assert.equal((await send({type: "luvbox-status", tabId: 1}, owned)).code, "expired", "pairing ended");
   refused = false;
 
+  await pairAgain();
+  refuseAfterInspect = true;
+  const goneAfterInspect = await send({type: "luvbox-inspect", tabId: 1}, owned);
+  assert.equal(goneAfterInspect.code, "app_gone");
+  assert.equal((await send({type: "luvbox-status", tabId: 1}, owned)).code, "expired", "pairing deleted when gone after inspect");
+  refuseAfterInspect = false;
+  refused = false;
+
   // The person closed the check tab: stop at once instead of waiting 25 s.
   await pairAgain();
   checkTabClosed = true;
@@ -216,5 +225,26 @@ const {webcrypto} = require("node:crypto");
     assert.equal(ended.get("inspect").hidden, true, code);
     assert.equal(ended.get("connect").disabled, true, code);
   }
+
+  // Unchecking the code confirmation while an inspect call fails returns to the code step cleanly.
+  const unticked = new Map();
+  for (const id of elements.keys()) {
+    const hidden = ["inspect", "account-name", "account-handle", "close"].includes(id);
+    unticked.set(id, {checked: false, hidden, dataset: {}, addEventListener(type, callback) { this[type] = callback; }});
+  }
+  const untickedApi = {tabs: {getCurrent: async () => ({id: 1})}, runtime: {sendMessage: async message => {
+    if (message.type === "luvbox-status") return {ok: true, code: "AAAAAAAA"};
+    unticked.get("confirm-code").checked = false;
+    return {ok: false, code: "no_account"};
+  }}};
+  const untickedUi = {window, chrome: untickedApi, setInterval: () => 0, clearInterval: () => {},
+    document: {getElementById: id => unticked.get(id)}};
+  vm.createContext(untickedUi);
+  vm.runInContext(fs.readFileSync(path.join(process.argv[2], "extension-page.js"), "utf8"), untickedUi);
+  await new Promise(resolve => setImmediate(resolve));
+  unticked.get("confirm-code").checked = true;
+  await unticked.get("confirm-code").change({isTrusted: true});
+  assert.equal(unticked.get("card").dataset.state, "code");
+  assert.equal(unticked.get("inspect").hidden, true);
   process.stdout.write(JSON.stringify({session: envelope, progress}));
 })().catch(error => { process.stderr.write(error.stack + "\n"); process.exitCode = 1; });

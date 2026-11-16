@@ -696,13 +696,30 @@ class RecordsController(QObject):
                             return self._missing_page(account, output_dir, separate, number)
                         return unsaved.page(account, output_dir, _KINDS[view], number, _UNSAVED_PAGE)
 
-                    found = read(0 if mode == "through" else page)
-                    if mode == "through":
-                        # Everything that was on screen, read again after a change.
-                        for number in range(1, min(page, found.get("pages", 0) - 1) + 1):
-                            following = read(number)
-                            found["rows"] = list(found["rows"]) + list(following["rows"])
-                            found["page"] = following.get("page", number)
+                    if mode == "through" and view == "missing":
+                        found = self._missing_page(account, output_dir, separate, page, through=True)
+                    else:
+                        found = read(0 if mode == "through" else page)
+                        if mode == "append" and found.get("page", 0) < page:
+                            # Fewer pages remain than requested; reload through the clamped page
+                            # instead of appending duplicate trailing rows.
+                            target_page = max(0, int(found.get("page", 0)))
+                            mode = "through"
+                            if target_page > 0:
+                                if view == "missing":
+                                    found = self._missing_page(account, output_dir, separate, target_page, through=True)
+                                else:
+                                    found = read(0)
+                                    for number in range(1, target_page + 1):
+                                        following = read(number)
+                                        found["rows"] = list(found["rows"]) + list(following["rows"])
+                                        found["page"] = following.get("page", number)
+                        elif mode == "through":
+                            # Everything that was on screen, read again after a change.
+                            for number in range(1, min(page, found.get("pages", 0) - 1) + 1):
+                                following = read(number)
+                                found["rows"] = list(found["rows"]) + list(following["rows"])
+                                found["page"] = following.get("page", number)
                     result = dict(found, serial=serial, view=view, mode=mode)
                     if view == "unsaved" and result.get("pages", 0) > 1:
                         result.update(retryable_total=unsaved.retryable_count(account, output_dir, limit_mb),
@@ -796,12 +813,12 @@ class RecordsController(QObject):
         with closing(_ReadOnlyHistory(paths)) as store:
             return store.lost_count() if hasattr(store, "lost_count") else 0
 
-    def _missing_page(self, account, output_dir, separate, page):
+    def _missing_page(self, account, output_dir, separate, page, *, through=False):
         paths = self._catalog(account, output_dir, separate)
         if paths is None:
             return {"rows": [], "total": 0, "page": 0, "pages": 0, "page_size": _UNSAVED_PAGE}
         with closing(_ReadOnlyHistory(paths)) as store:
-            found = store.lost_media(page=page, page_size=_UNSAVED_PAGE)
+            found = store.lost_media(page=page, page_size=_UNSAVED_PAGE, through=through)
         found["rows"] = [dict(tweet_id=row["tweet_id"], num=row["num"], media_type=row["media_type"],
                               reason=MISSING, author=row["author"], posted_at=row["posted_at"],
                               width=0, height=0, duration=0, size_bytes=0, limit_mb=0, detail=_MISSING_DETAIL,

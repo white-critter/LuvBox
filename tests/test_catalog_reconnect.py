@@ -188,7 +188,8 @@ class SaveTests(unittest.TestCase):
         parked = self.base / "elsewhere.jpg"
         original.rename(parked)                          # gone in Explorer
         with self.store() as store:
-            self.assertEqual(store.exclude_lost([("102", 1, "photo")]), 1)
+            with patch.object(HistoryStore, "_lost_items", side_effect=AssertionError("unexpected full scan")):
+                self.assertEqual(store.exclude_lost([("102", 1, "photo")]), 1)
             self.assertEqual(self.gallery(store), ["101", "103"])
         parked.rename(original)                          # and back in its place
 
@@ -197,6 +198,8 @@ class SaveTests(unittest.TestCase):
         self.assertEqual(test_core.FakeHttpDownloader.downloaded, [])
         with self.store() as store:
             self.assertEqual(self.gallery(store), ["101", "102", "103"])
+            self.assertEqual(store.ignored_media(), set())
+            self.assertEqual(store.excluded_media()["total"], 0)
             self.assertEqual({row["path"] for row in self.rows(store, "102").values()}, {str(original)})
             self.assertEqual(store.lost_count(), 0)
 
@@ -269,6 +272,30 @@ class SaveTests(unittest.TestCase):
                 self.assertEqual(rows["flat"]["path"], new)
                 # The author record keeps where the file was, so a file moved back is connected again.
                 self.assertEqual((rows["author"]["path"], rows["author"]["last_path"]), ("", old))
+
+    def test_a_moved_file_is_found_at_destination_even_when_target_layout_has_a_fileless_row(self):
+        likes = [("201", 1, "photo", "alice")]
+        self.save(likes)
+        source = self.media / "alice" / "alice_201_1.jpg"
+        destination = self.media / "alice_201_1.jpg"
+        with self.store() as store:
+            store.record_declined("flat", details("201"), destination)
+            with store._db:
+                store._db.execute("DELETE FROM missing_choices WHERE tweet_id='201'")
+                store._db.execute(
+                    "UPDATE media SET last_path='', missing_since='' WHERE folder_mode='flat' AND tweet_id='201'"
+                )
+        source.rename(destination)
+
+        finished = self.save(likes, folder_mode="flat")
+
+        self.assertEqual((finished["saved"], finished["skipped"]), (0, 1))
+        self.assertEqual(test_core.FakeHttpDownloader.downloaded, [])
+        with self.store() as store:
+            rows = self.rows(store, "201")
+            self.assertEqual(rows["flat"]["path"], str(destination.resolve()))
+            self.assertEqual(rows["author"]["path"], "")
+            self.assertEqual(store.lost_count(), 0)
 
     def test_a_save_in_one_folder_keeps_a_recorded_place_that_is_there_or_not_known_to_be_gone(self):
         """Today's destination is looked at only for a recorded file verifiably gone from the media folder."""

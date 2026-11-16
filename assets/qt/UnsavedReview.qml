@@ -169,8 +169,9 @@ Item {
                         tone: "primary"
                         text: review.chosen > 0 ? "선택한 " + review.chosen.toLocaleString() + "개 " + review.retryWord
                                                 : "모두 " + review.retryWord
-                        enabled: !!review.app && review.app.canStart && !!review.records
-                            && (review.chosen > 0 || review.records.retryableCount > 0)
+                        enabled: !!review.app && review.app.canStart
+                            && review.app.accounts.authenticationState !== "reconnect_required"
+                            && !!review.records && (review.chosen > 0 || review.records.retryableCount > 0)
                         onClicked: review.chosen > 0 ? review.records.retrySelected() : review.records.retryAll()
                     }
                     FlatButton {
@@ -218,7 +219,7 @@ Item {
                 Label {
                     objectName: "unsavedRetryHint"
                     Layout.fillWidth: true
-                    visible: grid.count > 0 && !!review.app && !review.app.canStart
+                    visible: grid.count > 0 && !!review.app && (!review.app.canStart || review.app.accounts.authenticationState === "reconnect_required")
                     text: review.retryWord + "하려면 X 계정이 연결되어 있고 진행 중인 작업이 끝나야 합니다."
                     color: Theme.notice
                     wrapMode: Text.Wrap

@@ -16,7 +16,7 @@ from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, Property, Q
 
 # The names only: the classifier itself (numpy, onnxruntime) is loaded by the work that classifies.
 from .clip_model import CATEGORY_NAMES
-from .history import HistoryStore, page_cursor
+from .history import HistoryStore, _normalize_tag, page_cursor
 from .preview import Thumbnail, thumbnail
 from .qt_gallery import GalleryModel, SafeThumbnailProvider
 from .recycling import file_signature
@@ -228,6 +228,7 @@ class LibraryRepository:
         self._cursor = None
         self._cursor_offset = 0
         self._scan_note = ""
+        self._ai_wrote = False
         self._duplicate_cancel = Event()
         self._ai_cancel = Event()
         self.provider = None
@@ -811,6 +812,7 @@ class LibraryRepository:
         uses the model only when it is already on this PC.
         """
         self._scan_note = ""
+        self._ai_wrote = False
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
@@ -857,6 +859,8 @@ class LibraryRepository:
                     if chosen:
                         applied += 1
             _store_labels(store, label_rows)
+            if applied:
+                self._ai_wrote = True
             return applied
 
         try:
@@ -969,6 +973,7 @@ class LibraryRepository:
                                 ) from exc
                             embed_rows = []
                             label_rows = []
+                            batch_applied = 0
                             forget = []
                             remember = []
                             for record, path_item, (tag, confidence, vector) in zip(batch_records, batch_paths, predictions):
@@ -988,10 +993,13 @@ class LibraryRepository:
                                     continue
                                 label_rows.append((*ident, chosen))
                                 if chosen:
+                                    batch_applied += 1
                                     saved_count += 1
                             if embed_rows and hasattr(store, "save_embeddings"):
                                 store.save_embeddings(embed_rows)
                             _store_labels(store, label_rows)
+                            if batch_applied:
+                                self._ai_wrote = True
                             if forget and hasattr(store, "forget_unreadable"):
                                 store.forget_unreadable(forget)
                             if remember and hasattr(store, "remember_unreadable"):
@@ -1010,7 +1018,10 @@ class LibraryRepository:
                 if taught_encoded:
                     if status_callback and feedback:
                         status_callback("비슷한 사진에 분류를 맞추는 중…")
-                    saved_count += _propagate_neighbors(store)
+                    propagated = _propagate_neighbors(store)
+                    if propagated:
+                        self._ai_wrote = True
+                    saved_count += propagated
                 return saved_count
         except RuntimeError:
             raise
@@ -1288,8 +1299,10 @@ class LibraryRepository:
             if identity in spared:
                 continue
             keepers = [member["path"] for member in groups.get(member_of.get(identity), ())
-                       if member["identity"] != identity and (member["identity"] not in chosen
-                                                              or member["identity"] in spared)]
+                       if member["identity"] != identity and (
+                           member["identity"] not in chosen
+                           or member["identity"] in spared
+                           or (identity in copies and member["identity"] not in copies))]
             near = identity in member_of and identity not in first and identity not in copies
             marked.append(dict(row, _copy_keepers=keepers, _copy_rule=rule or "exact", _copy_near=near))
         return marked, len(spared)
@@ -2041,13 +2054,12 @@ class LibraryController(QObject):
         # Once the cards have been read again, the opened photo opens again and the picked photos
         # are picked again (see _return_to_duplicates); until then the preview waits for its photo.
         # A return still waiting carries over to the next reading of the same cards.
-        if not holding:
-            self._duplicate_return = None
-        elif keep_opened and self._duplicate_return is None:
+        return_state = self._duplicate_return if holding else None
+        if holding and keep_opened and return_state is None:
             prefix = f"g{self._generation}_"
             opened = self._selection_key or self.selectedKey
             picked = [key[len(prefix):] for key in self._selected_keys_order if key.startswith(prefix)]
-            self._duplicate_return = (opened[len(prefix):] if opened.startswith(prefix) else "", picked)
+            return_state = (opened[len(prefix):] if opened.startswith(prefix) else "", picked)
         self._generation += 1
         self._selection_serial += 1
         self._selected = {}
@@ -2055,8 +2067,9 @@ class LibraryController(QObject):
         self._navigation = None
         self._selection_anchor = ""
         self._band_base = None
-        self._busy = bool(self._duplicate_return and self._duplicate_return[0])
         self.clearSelection()
+        self._duplicate_return = return_state
+        self._busy = bool(self._duplicate_return and self._duplicate_return[0])
         # A folder-wide scan keeps running while the grid reloads. Clearing the
         # flag here let a second scan start and left the first one's button stuck.
         if self._exclusive:
@@ -2207,7 +2220,7 @@ class LibraryController(QObject):
 
     @Slot(str)
     def setUserTag(self, tag):
-        tag = tag.strip().lstrip("#") if isinstance(tag, str) else ""
+        tag = _normalize_tag(tag)
         if tag == self._user_tag:
             return
         self._user_tag = tag
@@ -2339,7 +2352,7 @@ class LibraryController(QObject):
     def addTagToSelection(self, tag):
         if self._refuse_tags() or self._closed or not tag:
             return 0
-        clean = tag.strip().lstrip("#")
+        clean = _normalize_tag(tag)
         if not clean:
             return 0
         count = self._repository.add_tag_batch(list(self._selection_keys), self._generation, clean)
@@ -2620,20 +2633,20 @@ class LibraryController(QObject):
     def addSelectedTag(self, tag):
         if self._refuse_tags() or self._closed or not self.selectedKey or not tag:
             return False
-        clean = tag.strip().lstrip("#")
+        clean = _normalize_tag(tag)
         if not clean:
             return False
-        had_tag = any(
-            (t.get("tag") if isinstance(t, dict) else str(t)) == clean
+        had_user_tag = any(
+            (t.get("tag") == clean and t.get("source") == "user") if isinstance(t, dict) else str(t) == clean
             for t in self._selected.get("tags", [])
         )
         ok = self._repository.add_tag(self.selectedKey, self._generation, clean)
         if ok:
-            tags = [t for t in self._selected.get("tags", []) if not (isinstance(t, dict) and t.get("tag") == clean)]
+            tags = [t for t in self._selected.get("tags", []) if (t.get("tag") if isinstance(t, dict) else str(t)) != clean]
             tags.append({"tag": clean, "source": "user"})
             tags.sort(key=lambda t: str(t.get("tag", "")) if isinstance(t, dict) else str(t))
             self._selected["tags"] = tags
-            if not had_tag:
+            if not had_user_tag:
                 self._upsert_cached_user_tag(clean, delta=1)
             self._user_tags_loaded = False
             # A user tag with the same name replaces this photo's AI label.
@@ -2644,14 +2657,19 @@ class LibraryController(QObject):
     def removeSelectedTag(self, tag):
         if self._refuse_tags() or self._closed or not self.selectedKey or not tag:
             return False
-        clean = tag.strip().lstrip("#")
+        clean = _normalize_tag(tag)
         if not clean:
             return False
+        had_user_tag = any(
+            (t.get("tag") == clean and t.get("source") == "user") if isinstance(t, dict) else str(t) == clean
+            for t in self._selected.get("tags", [])
+        )
         ok = self._repository.remove_tag(self.selectedKey, self._generation, clean)
         if ok:
-            tags = [t for t in self._selected.get("tags", []) if t.get("tag") != clean]
+            tags = [t for t in self._selected.get("tags", []) if (t.get("tag") if isinstance(t, dict) else str(t)) != clean]
             self._selected["tags"] = tags
-            self._upsert_cached_user_tag(clean, delta=-1)
+            if had_user_tag:
+                self._upsert_cached_user_tag(clean, delta=-1)
             self._user_tags_loaded = False
             self._settle(self._status, reload=clean in (self._user_tag, self._ai_category))
         return ok
@@ -2662,6 +2680,8 @@ class LibraryController(QObject):
             return
         self._selection_mode = self._selection_explicit = enabled
         if not enabled:
+            if self._duplicate_return is not None and self._duplicate_return[1]:
+                self._duplicate_return = (self._duplicate_return[0], [])
             self._selection_keys.clear()
             if self._status:
                 self._status = ""
@@ -2795,6 +2815,8 @@ class LibraryController(QObject):
 
     @Slot()
     def clearSelection(self):
+        if self._duplicate_return is not None and self._duplicate_return[1]:
+            self._duplicate_return = (self._duplicate_return[0], [])
         if self._selection_keys:
             self._selection_keys.clear()
             self._batch_selection_changed()
@@ -3058,6 +3080,8 @@ class LibraryController(QObject):
                     )
                 try:
                     # The run that starts on its own never downloads the model.
+                    if hasattr(self._repository, "_ai_wrote"):
+                        self._repository._ai_wrote = False
                     extra = {"download": False} if action == "auto_ai_tags" else {}
                     count = self._repository.scan_ai_tags(
                         generation,
@@ -3202,8 +3226,10 @@ class LibraryController(QObject):
         changed. Otherwise the scroll position and an open preview stay.
         """
         if reload:
-            self._refresh(reload_authors=False, status=message)
+            self._refresh(reload_authors=False, status=message, keep_place=self._duplicate_only)
             with self._condition:
+                if not self._user_tags_loaded:
+                    self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
                 self._interactive.append(("ai_counts", self._generation, self._selection_serial, ""))
                 self._condition.notify_all()
             return
@@ -3296,9 +3322,16 @@ class LibraryController(QObject):
             return                      # busy: asked again when the running job ends
         if action == "auto_ai_tags":
             self._release_exclusive()
+            wrote = bool(getattr(self._repository, "_ai_wrote", False))
+            if hasattr(self._repository, "_ai_wrote"):
+                self._repository._ai_wrote = False
             if selection is None:
-                self._status = message
-                self.changed.emit()
+                if wrote:
+                    self._user_tags_loaded = False
+                    self._settle(message, reload=bool(self._ai_category))
+                else:
+                    self._status = message
+                    self.changed.emit()
                 return
             if message:
                 self._user_tags_loaded = False
@@ -3346,9 +3379,16 @@ class LibraryController(QObject):
             return
         if action == "scan_ai_tags":
             self._release_exclusive()
+            wrote = bool(getattr(self._repository, "_ai_wrote", False))
+            if hasattr(self._repository, "_ai_wrote"):
+                self._repository._ai_wrote = False
             if selection is None:
-                self._status = message
-                self.changed.emit()
+                if wrote:
+                    self._user_tags_loaded = False
+                    self._settle(message, reload=bool(self._ai_category))
+                else:
+                    self._status = message
+                    self.changed.emit()
                 return
             self._user_tags_loaded = False
             self._settle(message, reload=bool(self._ai_category))

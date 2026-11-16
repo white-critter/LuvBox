@@ -103,6 +103,84 @@ class GalleryFilterEditTests(unittest.TestCase):
         self.assertEqual(self.library.selectedKeys, [key])
         self.assertEqual(self.library.model.total, 7)
 
+    def test_tag_filters_and_edits_normalize_leading_hash_and_control_chars(self):
+        self.open_first()
+        self.assertTrue(self.library.addSelectedTag("# \x07밤하늘 "))
+        self.library.setUserTag("# 밤하늘")
+        self.wait(lambda: not self.library.model.busy and self.library.model.count == 1)
+        self.assertEqual(self.library.filterUserTag, "밤하늘")
+        self.library.selectLoaded()
+        self.assertEqual(self.library.addTagToSelection("#\x08여름"), 1)
+        self.library.setUserTag("# 여름")
+        self.wait(lambda: not self.library.model.busy and self.library.model.count == 1)
+        key = self.library.model._rows[0]["key"]
+        self.library.selectItem(key)
+        self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == key)
+        self.assertTrue(self.library.removeSelectedTag("#\x07여름"))
+        self.wait(lambda: not self.library.model.busy and self.library.model.total == 0)
+
+    def test_removing_user_tag_preserves_taught_confirmed_category_and_ai_sentinel(self):
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            store.set_taught_categories([("flat", "101", 1, "photo")], "인물")
+            self.assertTrue(store.add_tag("flat", "101", 1, "photo", "인물", source="user"))
+            self.assertTrue(store.remove_tag("flat", "101", 1, "photo", "인물"))
+            taught = store.classification_of("flat", "101", 1, "photo")
+            self.assertEqual((taught["category"], taught["confirmed"]), ("인물", True))
+            self.assertIn({"tag": "인물", "source": "confirmed"}, store.item_tags("flat", "101", 1, "photo"))
+
+            store.save_embeddings([("flat", "102", 1, "photo", b"\x00" * (512 * 4), 0.9)])
+            self.assertTrue(store.add_tag("flat", "102", 1, "photo", "인물", source="user"))
+            self.assertTrue(store.remove_tag("flat", "102", 1, "photo", "인물"))
+            self.assertEqual(store.count_embeddings_without_labels(), 0)
+
+    def test_cancelled_partial_ai_scan_settles_active_ai_filter(self):
+        self.library.setAiFilter("풍경·배경", "")
+        self.wait(lambda: not self.library.model.busy and self.library.model.total == 0)
+
+        def partial_scan(generation, progress_callback=None, status_callback=None, epoch=None, download=True):
+            with closing(HistoryStore.for_storage(self.paths)) as store:
+                store.save_ai_tags([("flat", "101", 1, "photo", "풍경·배경")])
+            self.library._repository._ai_wrote = True
+            raise RuntimeError("AI 자동분류를 중단했습니다. 이미 분류된 1장은 유지됩니다.")
+
+        original = self.library._repository.scan_ai_tags
+        self.library._repository.scan_ai_tags = partial_scan
+        try:
+            self.assertTrue(self.library.scanAiTags())
+            self.wait(lambda: not self.library.aiScanning and "유지됩니다" in self.library.status)
+            self.wait(lambda: not self.library.model.busy and self.library.model.total == 1)
+        finally:
+            self.library._repository.scan_ai_tags = original
+
+    def test_near_duplicate_copies_only_allows_subcopy_deletion_with_near_keeper(self):
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            rows = store.records()
+            p0 = next(r for r in rows if r["tweet_id"] == "103")
+            p1 = next(r for r in rows if r["tweet_id"] == "102")
+            p2 = next(r for r in rows if r["tweet_id"] == "101")
+            for p, content in ((p0["path"], b"alpha" * 30), (p1["path"], b"beta" * 20), (p2["path"], b"beta" * 20)):
+                Path(p).write_bytes(content)
+            import hashlib
+            h_a = hashlib.sha256(b"alpha" * 30).hexdigest()
+            h_b = hashlib.sha256(b"beta" * 20).hexdigest()
+            store.save_image_hashes([
+                ("flat", "103", 1, "photo", 150, h_a, "0" * 16),
+                ("flat", "102", 1, "photo", 80, h_b, "0" * 16),
+                ("flat", "101", 1, "photo", 80, h_b, "0" * 16),
+            ])
+            store.set_duplicate_rule("near")
+            store.save_clusters([[("flat", "103", 1, "photo"), ("flat", "102", 1, "photo"), ("flat", "101", 1, "photo")]])
+        self.library.setDuplicateOnly(True)
+        self.wait(lambda: not self.library.model.busy and self.library.model.count == 3)
+        subcopy_key = next(r["key"] for r in self.library.model._rows if r["key"].endswith("_101_1_photo"))
+        near_key = next(r["key"] for r in self.library.model._rows if r["key"].endswith("_102_1_photo"))
+        manifest = self.library._repository.deletion_manifest([subcopy_key, near_key])
+        self.assertEqual(manifest["kept"], 0)
+        by_id = {m["tweet_id"]: m for m in manifest["rows"]}
+        self.assertEqual(by_id["101"]["_copy_near"], False)
+        self.assertIn(by_id["102"]["path"], by_id["101"]["_copy_keepers"])
+        self.assertEqual(by_id["102"]["_copy_near"], True)
+
 
 if __name__ == "__main__":
     unittest.main()

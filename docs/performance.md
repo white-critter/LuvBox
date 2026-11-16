@@ -86,6 +86,19 @@ Windows CPython 3.12.16·Pillow 13.0.0에서 생성한 4,000×3,000 RGB JPEG(EXI
 
 자동 테스트는 기존 정렬·필터·DB 이전, 캐시 상한·무효화·오래된 결과 배제, EXIF 회전·원본 보존, 미디어 파일 해제, 최신 진행 이벤트 유지와 불필요한 미리보기 재발행 방지를 확인합니다. 최신 전체 검사·빌드 결과는 [검증 기록](verification.md)을 따릅니다. 특정 합성 벤치마크의 개선을 전체 앱의 동일한 속도 향상으로 설명하지 않습니다. 장기 실행 메모리 증가와 사용자 라이브러리 규모의 체감 성능은 별도 관찰이 필요합니다.
 
+## 2026-11-16 내 태그 목록·필터 SQLite 실행 계획 및 불필요한 전체 조회 제거
+
+Windows, CPython 3.12.16, SQLite 3.53.1에서 임시 보관함(`media` 10,000행, `source='user'` 태그 2,000건·20종)으로 5회 중앙값을 측정했습니다. 두 질의 모두 이전·이후 반환 결과가 완전히 같음을 확인했습니다.
+
+| 처리 | 조건 | 변경 전 | 변경 후 |
+| --- | --- | ---: | ---: |
+| `HistoryStore.user_tags()` | 10,000행 · `user` 태그 2,000건 | 5,267.33ms (4,944.442–5,703.774ms) | 6.316ms (6.230–7.045ms) |
+| `HistoryStore.record_page(user_tag=...)` | 10,000행 · `tag_0` 100건 조회 | 455.273ms (451.818–511.906ms) | 51.043ms (48.713–55.718ms) |
+
+- `user_tags()`는 `media_tags AS mark CROSS JOIN media`로 조인 순서를 고정해 `media` 전체 스캔 대신 `media_tags_source_tag` 인덱스에서 `media` 기본 키(`sqlite_autoindex_media_1`)로 조회합니다.
+- `_record_filter(user_tag=...)`는 `+mark.source='user' AND +mark.tag=?`로 각 후보 행에서 `media_tags_source_tag` 전체를 훑지 않고 `media_tags` 기본 키(`sqlite_autoindex_media_tags_1`)를 사용합니다.
+- 함께 개선한 경로: `exclude_lost(items)`는 지정된 항목만 확인해 전체 라이브러리 `_lost_items()` 디스크 스캔을 생략하고, `RecordsController._work`의 `missing` `through` 다시 읽기는 `lost_media(..., through=True)` 단일 패스로 처리하며, `DuplicateReview.qml` 썸네일은 `tileWidth` 기준 `sourceSize`로 불필요한 재디코딩을 막습니다.
+
 ## 2026-11-10 비둘기집 원리 기반 유사 해시 클러스터링과 단일 패스 해시
 
 `cluster_duplicates`는 해밍 거리 `d <= 7`에서 64비트 dHash를 `d + 1`개의 서로소 비트 조각으로 나누어 같은 조각 값을 공유하는 후보끼리만 비교합니다(비둘기집 원리에 의해 해밍 거리 `d` 이하인 두 해시는 반드시 최소 1개 조각이 일치함). Windows, CPython 3.12.16에서 합성 고유 해시 20,000개와 근접 사본 50개(총 20,050개, 거리 4)를 클러스터링하는 시간은 약 67.8ms였으며, 전체 짝 비교 결과와 동일한 묶음을 만듭니다. 또한 `compute_image_hashes`는 한 번의 파일 열기와 스트림 되감기(`seek(0)`)로 SHA-256과 dHash를 함께 계산해 파일 열기 비용을 줄입니다.

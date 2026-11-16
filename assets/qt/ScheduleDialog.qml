@@ -13,6 +13,7 @@ FlatDialog {
         + (footer && footer.implicitHeight > 0 ? footer.implicitHeight + spacing : 0)
     height: Math.min(Math.max(240, panel.implicitHeight + chromeHeight + 6),
                      parent ? Math.max(200, parent.height - 32) : 560)
+    onClosed: panel.closeConfirmation()
     contentItem: FocusScrollView {
         id: scroll
         clip: true

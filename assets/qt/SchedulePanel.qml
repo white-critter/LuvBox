@@ -185,6 +185,8 @@ ColumnLayout {
         color: Theme.textMuted
     }
 
+    function closeConfirmation() { confirmation.close() }
+
     FlatDialog {
         id: confirmation
         objectName: "scheduleConfirmation"

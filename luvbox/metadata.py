@@ -608,8 +608,18 @@ def _run(arguments: list[str], deadline: float) -> subprocess.CompletedProcess:
         session.close()
 
 
+def _coerce_tag_value(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return [_coerce_tag_value(item) if isinstance(item, (bool, int, float)) else item for item in value]
+    return value
+
+
 def _read_tags(path: Path, deadline: float) -> dict:
-    result = _run(["-j", "-G1", "-XMP-dc:Source", "-XMP-dc:Description",
+    result = _run(["-j", "-G1", "-api", "StructFormat=JSONQ", "-XMP-dc:Source", "-XMP-dc:Description",
                    "-XMP-dc:Creator", "-XMP-dc:Relation", "-XMP-xmp:Identifier",
                    "-QuickTime:Comment", str(path)], deadline)
     if result.returncode != 0:
@@ -617,7 +627,7 @@ def _read_tags(path: Path, deadline: float) -> dict:
     rows = json.loads(result.stdout)
     if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
         raise ValueError("metadata read failed")
-    return rows[0]
+    return {key: _coerce_tag_value(value) for key, value in rows[0].items()}
 
 
 def _values(value) -> list[str]:

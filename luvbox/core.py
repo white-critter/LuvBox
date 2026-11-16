@@ -1279,7 +1279,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             raise exception.AbortExtraction("history store unavailable") from None
                         # An absent recorded place must not mask a file at
                         # today's destination (see skipped_file_places).
-                        known_path = previous.get("path") if previous is not None else media_path
+                        known_path = (previous.get("path") or previous.get("last_path") or media_path) if previous is not None else media_path
                         candidates = skipped_file_places(known_path, media_path)
                         media_path = ""
                         for known_path in candidates:

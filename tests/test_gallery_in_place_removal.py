@@ -122,8 +122,10 @@ class InPlaceRecycleTests(unittest.TestCase):
         self.library.model._batch_size = 3
         self.management = ManagementController(self.library)
         self.addCleanup(self.close)
-        self.shell = SimpleNamespace(_management=self.management, _library=self.library, _gallery_dirty=True,
-                                     changed=SimpleNamespace(emit=lambda: None))
+        self.record_refreshes = []
+        self.shell = SimpleNamespace(_management=self.management, _library=self.library,
+                                     _records=SimpleNamespace(refresh=lambda: self.record_refreshes.append(1)),
+                                     _gallery_dirty=True, changed=SimpleNamespace(emit=lambda: None))
         self.management.libraryChanged.connect(
             lambda: ApplicationController._managed_library_changed(self.shell))
         self.library.setLibrary("alice", str(self.output), False)
@@ -177,6 +179,7 @@ class InPlaceRecycleTests(unittest.TestCase):
         self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == before[5])
         self.assertEqual(self.library.model.total, 5)
         self.assertTrue(self.shell._gallery_dirty)
+        self.assertEqual(len(self.record_refreshes), 1)
         self.assertFalse(self.library.canSelect(before[1]))
         # The seventh file was never shown. It must arrive once, after the last shown row.
         self.library.model.loadMore()

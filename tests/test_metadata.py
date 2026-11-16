@@ -904,6 +904,58 @@ class ActualExifToolTests(unittest.TestCase):
                 worker.join(10)
             self.assertEqual(metadata.embed_source(path, "402", "writer")["author_status"], "embedded")
 
+    def test_numeric_and_boolean_descriptions_do_not_break_verification(self):
+        with metadata.persistent():
+            for suffix in (".jpg", ".png", ".webp", ".mp4"):
+                for index, text in enumerate(("2026", "0", "3.14", "true", "false")):
+                    with self.subTest(suffix=suffix, text=text):
+                        path = self.root / f"10{index}_scalar{suffix}"
+                        path.write_bytes(self.media_payload(suffix))
+                        if suffix == ".mp4":
+                            # QuickTime.mov carries a non-Bag legacy dc:creator and existing ItemList:Comment.
+                            self.assertEqual(
+                                metadata._run(["-overwrite_original", "-XMP-dc:Creator=", "-ItemList:Comment=", str(path)],
+                                              time.monotonic() + 20).returncode,
+                                0,
+                            )
+                        first = metadata.embed_source(path, "100", "writer", "12345", text=text)
+                        self.assertEqual((first["status"], first["author_status"]), ("embedded", "embedded"))
+                        tags = metadata._read_tags(path, time.monotonic() + 20)
+                        self.assertIsInstance(tags["XMP-dc:Description"], str)
+                        self.assertEqual(tags["XMP-dc:Description"], text)
+                        if suffix == ".mp4":
+                            self.assertEqual(tags.get("ItemList:Comment", ""), "")
+                        second = metadata.embed_source(path, "100", "current_name", "67890")
+                        self.assertEqual((second["status"], second["author_status"]), ("embedded", "embedded"))
+                        again = metadata._read_tags(path, time.monotonic() + 20)
+                        self.assertEqual(again["XMP-dc:Description"], text)
+
+                        external = self.root / f"10{index}_ext_{suffix}"
+                        external.write_bytes(self.media_payload(suffix))
+                        args = ["-overwrite_original", f"-XMP-dc:Description={text}"]
+                        if suffix == ".mp4":
+                            args.extend(["-XMP-dc:Creator=", f"-ItemList:Comment={text}"])
+                        self.assertEqual(metadata._run(args + [str(external)], time.monotonic() + 20).returncode, 0)
+                        kept = metadata.embed_source(external, "100", "writer", "12345", text="new post text")
+                        self.assertEqual((kept["status"], kept["text_status"]), ("embedded", "preserved"))
+                        external_tags = metadata._read_tags(external, time.monotonic() + 20)
+                        self.assertEqual(external_tags["XMP-dc:Description"], text)
+                        if suffix == ".mp4":
+                            self.assertEqual(external_tags["ItemList:Comment"], text)
+
+    def test_read_tags_coerces_scalar_json_numbers_and_booleans(self):
+        payload = json.dumps([{
+            "XMP-dc:Description": 2026,
+            "QuickTime:Comment": True,
+            "XMP-dc:Relation": [123, False],
+        }])
+        fake = subprocess.CompletedProcess(["exiftool"], 0, stdout=payload, stderr="")
+        with patch.object(metadata, "_run", return_value=fake):
+            tags = metadata._read_tags(self.root / "100_mock.jpg", time.monotonic() + 5)
+        self.assertEqual(tags["XMP-dc:Description"], "2026")
+        self.assertEqual(tags["QuickTime:Comment"], "true")
+        self.assertEqual(tags["XMP-dc:Relation"], ["123", "false"])
+
 
 class BundleExtractionTests(unittest.TestCase):
     def setUp(self):

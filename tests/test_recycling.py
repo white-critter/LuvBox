@@ -243,6 +243,23 @@ class RecyclingTests(unittest.TestCase):
         self.assertEqual(verify.call_count, 2)
         sleep.assert_called_once_with(0.05)
 
+    @unittest.skipUnless(os.name == "nt", "Windows recycle operation guard")
+    def test_sharing_violation_retries_briefly_before_succeeding(self):
+        attempts = []
+
+        def fake_native(*_):
+            attempts.append(1)
+            if len(attempts) == 1:
+                return recycling._Outcome(operation_result=-2147024864, post_result=-2147024864)
+            return self.recycled()
+
+        with patch.object(recycling, "_run_native", side_effect=fake_native) as run_native, \
+                patch.object(recycling, "verify_receipt", return_value=True), \
+                patch.object(recycling.time, "sleep") as sleep:
+            self.assertEqual(recycle_file(self.source), str(self.destination))
+        self.assertEqual(run_native.call_count, 2)
+        sleep.assert_called_once_with(0.05)
+
     def test_permanent_delete_callback_is_aborted(self):
         outcome = recycling._Outcome()
         sink = recycling._Sink(self.source, self.signature, outcome, Mock())

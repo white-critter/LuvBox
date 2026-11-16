@@ -309,8 +309,14 @@ def recycle_file(path: Path | str, expected=None) -> str:
         raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로 고침해 주세요.")
     outcome = None
     try:
-        outcome = _run_native(path, signature)
-        missing = not path.exists()
+        for delay in (0, 0.05, 0.1, 0.2):
+            if delay:
+                time.sleep(delay)
+            outcome = _run_native(path, signature)
+            missing = not path.exists()
+            if (missing or outcome.pre_error or outcome.destination or outcome.aborted or (
+                    outcome.post_result != -2147024864 and outcome.operation_result != -2147024864)):
+                break
         if (missing and outcome.post_result is not None and outcome.post_result >= 0 and outcome.destination
                 and outcome.operation_result >= 0 and not outcome.aborted):
             # Windows may release the $I handle shortly after PostDeleteItem.

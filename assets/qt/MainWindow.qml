@@ -42,6 +42,7 @@ ApplicationWindow {
     readonly property bool menuOpen: aiMenu.visible || teachMenu.visible
     // Duplicates are reviewed group by group, not in the flat grid.
     readonly property bool duplicateMode: !!app && app.library.filterDuplicateOnly
+    onDuplicateModeChanged: if (!duplicateMode) Qt.callLater(updateFocus)
     property bool duplicateNear: false
     readonly property bool letterKeysFree: currentScreen === 1 && !modalOpen && !search.activeFocus
         && !listEngaged && !menuOpen && !!app
@@ -230,14 +231,18 @@ ApplicationWindow {
             fittedDetailName = ""
             saveHeightHeld = false
             if (saveHeightExpanded && saveRestoreHeight >= minimumHeight) {
-                appliedSaveHeight = Math.min(saveRestoreHeight, screenHeightLimit())
-                applyingSaveHeight = true
-                height = appliedSaveHeight
-                applyingSaveHeight = false
+                if (visibility === Window.Windowed) {
+                    appliedSaveHeight = Math.min(saveRestoreHeight, screenHeightLimit())
+                    applyingSaveHeight = true
+                    height = appliedSaveHeight
+                    applyingSaveHeight = false
+                }
                 saveHeightExpanded = false
             }
             return
         }
+        if (visibility !== Window.Windowed)
+            return
         if (saveHeightHeld && detailName === fittedDetailName)
             return
         saveHeightHeld = false
@@ -407,7 +412,7 @@ ApplicationWindow {
     }
 
     function updateFocus() {
-        if (currentScreen !== 1 || gallery.width <= 0 || gallery.height <= 0 || gallery.cellWidth <= 0 || gallery.cellHeight <= 0 || gallery.contentHeight <= 0 || gallery.count === 0)
+        if (currentScreen !== 1 || duplicateMode || gallery.width <= 0 || gallery.height <= 0 || gallery.cellWidth <= 0 || gallery.cellHeight <= 0 || gallery.contentHeight <= 0 || gallery.count === 0)
             return
         let y = Math.max(0, gallery.contentY - gallery.originY)
         let direction = y >= focusContentY ? 1 : -1
@@ -1871,6 +1876,7 @@ ApplicationWindow {
                         }
                         onActiveChanged: {
                             if (active) {
+                                gallery.forceActiveFocus()
                                 window.stopWheel()
                                 const pressed = inView(centroid.scenePressPosition)
                                 startX = Math.max(0, Math.min(gallery.width, pressed.x))
@@ -2275,6 +2281,7 @@ ApplicationWindow {
                             }
                             FlatButton {
                                 objectName: "gallerySelectLoaded"
+                                focusPolicy: Qt.TabFocus
                                 tone: "ghost"
                                 text: "불러온 항목 선택"
                                 enabled: !!window.app
@@ -2283,6 +2290,7 @@ ApplicationWindow {
                             }
                             FlatButton {
                                 objectName: "gallerySelectionClear"
+                                focusPolicy: Qt.TabFocus
                                 tone: "ghost"
                                 text: "선택 해제"
                                 onClicked: window.app.library.clearSelection()
@@ -2293,6 +2301,7 @@ ApplicationWindow {
                             spacing: Theme.gapSmall
                             FlatButton {
                                 objectName: "galleryTeachSelected"
+                                focusPolicy: Qt.TabFocus
                                 text: "분류 가르치기"
                                 enabled: window.app && !window.app.library.tagsLocked && !window.app.library.filesLocked
                                     && window.app.library.selectedCount > 0
@@ -2303,6 +2312,7 @@ ApplicationWindow {
                             }
                             FlatButton {
                                 objectName: "galleryAddTagSelected"
+                                focusPolicy: Qt.TabFocus
                                 text: "태그 추가"
                                 enabled: window.app && !window.app.busy && !window.app.library.tagsLocked && window.app.library.selectedCount > 0
                                 tip: window.app && window.app.library.tagsLocked ? (window.app ? window.app.library.holdReason : "") : ""
@@ -2310,6 +2320,7 @@ ApplicationWindow {
                             }
                             FlatButton {
                                 objectName: "galleryRecycleSelected"
+                                focusPolicy: Qt.TabFocus
                                 tone: "danger"
                                 text: "휴지통으로"
                                 enabled: window.app && !window.app.busy && !window.app.library.filesLocked && window.app.library.selectedCount > 0
@@ -2401,9 +2412,29 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Escape"
-        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app && window.app.library.selectedCount > 0
+        enabled: window.currentScreen === 1 && !window.modalOpen && !window.listEngaged && !window.menuOpen
+            && !search.activeFocus && !!window.app
+            && (window.app.library.selectedCount > 0 || window.app.library.selectionMode)
         onActivated: {
-            window.app.library.clearSelection()
+            if (window.app.library.selectedCount > 0)
+                window.app.library.clearSelection()
+            else
+                window.app.library.setSelectionMode(false)
+        }
+    }
+    Shortcut {
+        sequence: "Delete"
+        enabled: window.currentScreen === 1 && !window.modalOpen && !window.listEngaged && !window.menuOpen
+            && !search.activeFocus && !!window.app && !window.app.closing
+            && window.app.library.selectionMode && window.app.library.selectedCount > 0
+        onActivated: {
+            window.stopWheel()
+            if (window.app.library.filesLocked)
+                window.flashNotice(window.app.library.holdReason)
+            else if (window.app.busy)
+                window.flashNotice("작업이 끝난 뒤 휴지통으로 이동할 수 있습니다.")
+            else
+                window.app.management.prepareDelete(window.app.library.selectedKeys)
         }
     }
     Shortcut {

@@ -280,7 +280,8 @@ FlatDialog {
                             Layout.fillWidth: true
                             text: dialog.updates
                                 ? "지금 버전 " + dialog.updates.currentVersion + " · " + dialog.updates.status : ""
-                            color: dialog.updates && dialog.updates.state === "failed" ? Theme.error : Theme.textMuted
+                            color: dialog.updates && (dialog.updates.state === "failed" || (dialog.updates.state === "available" && dialog.updates.error.length > 0))
+                                ? Theme.error : Theme.textMuted
                             textFormat: Text.PlainText
                             wrapMode: Text.Wrap
                         }
@@ -407,6 +408,7 @@ FlatDialog {
                                     onEditingFinished: {
                                         if (acceptableInput && text.trim().length > 0)
                                             dialog.app.setPreference("max_video_mb", Number(text))
+                                        text = Qt.binding(function() { return String(dialog.pref("max_video_mb", 200)) })
                                     }
                                     onActiveFocusChanged: {
                                         if (!activeFocus && (!acceptableInput || text.trim().length === 0))

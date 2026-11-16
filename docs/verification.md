@@ -10,6 +10,26 @@
 
 배포 검증은 `LuvBox.exe`의 체크섬과 꼬리표, 소스·라이선스 ZIP의 내용과 개인정보 제외를 확인합니다. 공개 뒤 올린 `LuvBox.exe`를 다시 받아 해시를 대조하고 한글·공백 경로에서, 격리한 `LOCALAPPDATA`로 실행합니다. 세부 로그와 화면은 `.test-output/`에 보관하며 배포 소스에 넣지 않습니다.
 
+## 2026-11-16 1.10.7 프로그램 검수, SQLite·목록 성능 개선, UI/UX·오류 수정
+
+- **계기**: 1.10.6(`9a29659`) 배포 완료 뒤 프로그램 전체 검수(꼭 필요한 성능 개선, 어색한 UI/UX, 중간 이상 오류·오작동 수정 후 재배포).
+- **성능 개선 및 재현**:
+  - Windows CPython 3.12.16·SQLite 3.53.1 임시 보관함(10,000행, `user` 태그 2,000건·20종) 5회 중앙값: `HistoryStore.user_tags()` **5,267.33ms → 6.316ms**, `HistoryStore.record_page(user_tag=...)` **455.273ms → 51.043ms**(동일 결과·`EXPLAIN QUERY PLAN` 인덱스 조회 확인).
+  - `HistoryStore.exclude_lost(items)`는 지정된 항목만 확인(`_lost_targets`)해 전체 라이브러리 `_lost_items()` 스캔을 피하고, `RecordsController._work`의 `missing` `through` 다시 읽기는 `lost_media(..., through=True)` 단일 패스로 읽습니다. `DuplicateReview.qml` 썸네일은 `tileWidth` 기반 `sourceSize`로 바꿨습니다.
+- **주요 수정 및 새 회귀 검사(+10개 테스트 및 기존 시나리오 보강)**:
+  - `tests/test_metadata.py`: `ActualExifToolTests` 2개 추가(`"2026"`·`"0"`·`"3.14"`·`"true"`·`"false"` 본문·기존 댓글 보존 및 `_read_tags` 스칼라 JSON 형 변환 검증; `-api StructFormat=JSONQ` 적용).
+  - `tests/test_catalog_reconnect.py`: 잃어버려 제외한 파일 복귀 시 `missing_choices.ignored=0` 해제 확인(`exclude_lost([item])` 전체 스캔 회피 포함) 및 다른 폴더 방식에 파일 없는 옛 기록이 있을 때도 이동한 파일을 제자리에서 찾는지 검증 1개 추가.
+  - `tests/test_gallery_filter_edits.py`: 4개 추가(`#`·제어문자 태그 정규화, 같은 이름 사용자 태그 제거 후 `ai_feedback` `confirmed` 태그 및 `ai_embeddings` 평가 마커 보존, 중단·일부 완료 AI 스캔 뒤 `aiCounts` 및 활성 AI 필터 갱신, `near` 중복 묶음에서 `'비슷함'`과 함께 고른 exact `'사본'`의 `_copies_only` 허용).
+  - `tests/test_qt_connection_qml.py`: 브라우저 연결 진행 중 푸터 **연결 취소**(`DialogButtonBox.ActionRole`) 시 `ConnectionDialog`가 닫히지 않고 유지되는지 검증 추가(총 10개 장면 확인, QML 경고 0).
+  - `tests/browser_bridge_extension_harness.js` (`tests/test_browser_bridge.py`·Chromium/Firefox 동일 파일): `inspectAccount` 뒤 `awaiting_approval`이 `"gone"`이면 `app_gone` 종료, 비최종 오류 중 체크 상자 해제 시 `code` 단계 복귀 검증 추가.
+  - `tests/test_recycling.py`·`tests/test_qt_records.py`·`tests/test_gallery_in_place_removal.py`: 공유 위반(`0x80070020`) 짧은 재시도, 클램프된 `unsaved` 페이지 추가 읽기 시 중복 행 대신 `through` 재조회, `missing` `through` 단일 `_lost_items()` 호출, `_managed_library_changed`의 `_records.refresh()` 호출 검증 추가.
+  - QML: `MainWindow.qml`(최대화 중 저장 상세 창 높이 변경 방지, `duplicateMode` 중 `updateFocus()` 차단 및 종료 시 복귀, 끌기 선택 시 `gallery` 포커스, 선택 막대 `Qt.TabFocus`, `Esc` 선택 해제→선택 끝내기 및 선택 중 `Delete` 단축키), `UnsavedReview.qml`(`reconnect_required` 시 다시 받기 비활성·안내), `PreferencesDialog.qml`(업데이트 오류 색·`videoLimit` 바인딩 복구), `SchedulePanel.qml`/`ScheduleDialog.qml`(닫힘 시 확인 팝업 정리).
+- **실행 검증**:
+  - 소스 `pip check`, `tools/check_build_inputs.py`, `tools/package_release.py --check-guides`, `tools/release_key.py --check` 통과.
+  - 격리 `LOCALAPPDATA`·`QML_DISK_CACHE_PATH`에서 `entry.py --self-test`·`--download-smoke` 통과(`qml_errors: []`).
+  - 전체 회귀 **1,730개 중 1,722개 통과·8개 생략, 실패·오류 0**(631.231초).
+- **확인 범위 밖**: 실제 X 로그인·실제 미디어 저장·실제 계정 예약 실행·Firefox 실제 브라우저 확장 실행·설치본에서의 앱 내 자동 업데이트.
+
 ## 2026-11-16 1.10.6 ‘비슷함’ 사진을 비교한 뒤 한 장씩 휴지통으로
 
 - **계기**: 1.10.4부터 중복 보기의 ‘비슷함’(크기·화질만 다르고 바이트가 다른) 사진은 휴지통으로 보내지 않았습니다. 사람이 직접 크게 보고 확인한 한 장은 보낼 수 있게 하되, 사본 선택·일괄 선택은 그대로 두라는 요청이었습니다. 기능이 바뀌는 일이라 설계안(남길 사진과 나란히 보는 확인 창, 보내기 직전 재확인, 한 장씩만)을 먼저 주인님께 보였고, 주인님은 두 안의 예시 화면을 본 뒤 미리보기에 더해 카드에도 ‘비교’ 단추를 두는 안을 골랐습니다.

@@ -306,6 +306,41 @@ class RecordsControllerTests(unittest.TestCase):
         self.assertTrue(self.records.unsavedError)
         self.assertEqual(self.records.unsavedRows, [])
 
+    def test_clamped_append_reloads_through_without_duplicating_rows(self):
+        self.add([self.item(str(1000 + i)) for i in range(110)])
+        self.open_unsaved()
+        self.wait(lambda: len(self.records.unsavedRows) == 50)
+        # Load page 1 (rows 50..99), then shrink the list below page 2 before page 2 loads.
+        self.records.loadMoreUnsaved()
+        self.wait(lambda: len(self.records.unsavedRows) == 100 and not self.records.unsavedBusy)
+        unsaved.remove(account='alice', output_dir=str(self.output),
+                       items=[(str(1000 + i), 1, 'photo') for i in range(40)])
+        self.records.loadMoreUnsaved()
+        self.wait(lambda: not self.records.unsavedBusy)
+        tokens = [row['token'] for row in self.records.unsavedRows]
+        self.assertEqual(len(tokens), self.records.unsavedTotal)
+        self.assertEqual(len(tokens), len(set(tokens)))
+
+    def test_missing_through_reads_lost_items_in_a_single_pass(self):
+        paths = resolve_storage(self.output, 'alice')
+        paths.media_dir.mkdir(parents=True, exist_ok=True)
+        with HistoryStore.for_storage(paths) as store:
+            for i in range(60):
+                p = paths.media_dir / f'alice_{2000 + i}_1.jpg'
+                p.write_bytes(b'x')
+                store.record_media('flat', {'tweet_id': str(2000 + i), 'num': 1, 'type': 'photo',
+                                            'author': {'name': 'alice'}}, p)
+                p.unlink()
+        self.open_unsaved('missing')
+        self.wait(lambda: len(self.records.unsavedRows) == 50)
+        self.records.loadMoreUnsaved()
+        self.wait(lambda: len(self.records.unsavedRows) == 60 and not self.records.unsavedBusy)
+        with patch.object(HistoryStore, '_lost_items', wraps=HistoryStore._lost_items, autospec=True) as lost_spy:
+            self.records.refresh()
+            self.wait(lambda: not self.records.unsavedBusy)
+        self.assertEqual(lost_spy.call_count, 2)  # counts() + single-pass missing through read
+        self.assertEqual(len(self.records.unsavedRows), 60)
+
 
 if __name__ == '__main__':
     unittest.main()

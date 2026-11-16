@@ -541,6 +541,9 @@ class ApplicationController(QObject):
         take = getattr(self._management, "takeRecycledKeys", None)
         keys = take() if callable(take) else None
         remove = getattr(self._library, "removeDeleted", None)
+        refresh_records = getattr(getattr(self, "_records", None), "refresh", None)
+        if callable(refresh_records):
+            refresh_records()
         if keys is not None and (not keys or (callable(remove) and remove(keys))):
             self.changed.emit()
             return
