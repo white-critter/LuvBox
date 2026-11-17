@@ -275,7 +275,7 @@ def scene():
             assert history.property("x") + history.property("width") <= overlay.width() + 1
             assert history.property("y") + history.property("height") <= overlay.height() + 1
             assert history.property("width") >= min(900, width - 56)
-            assert history.property("height") >= min(680, height - 56)
+            assert history.property("height") >= min(680, overlay.height() - 56)
             list_box = find("runHistoryList")
             content = history.property("contentItem")
             # syncContent is posted when the dialog opens, so the list can still
@@ -295,7 +295,8 @@ def scene():
                 assert find("runHistoryList").property("width") > 700
                 # The window gets smaller while the dialog still fits: it moves back inside.
                 window.setWidth(860)
-                window.setHeight(600)
+                # Leave 600px for dialogs below the 60px custom caption.
+                window.setHeight(660)
                 wait(lambda: overlay.width() <= 860 and overlay.height() <= 600, "window made smaller")
                 QTest.qWait(40)
                 assert history.property("width") == 780 and history.property("height") == 520

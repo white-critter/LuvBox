@@ -127,6 +127,19 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertIn("설정을 저장하지 못했습니다", self.controller.error)
         self.assertNotIn("private", self.controller.error)
 
+    def test_failed_video_limit_restores_retry_eligibility(self):
+        previous = self.controller.preferences["max_video_mb"]
+        self.settings.update.side_effect = self.blocked_update
+        self.controller.setPreference("max_video_mb", 1)
+        self.assertTrue(self.entered.wait(1))
+        row = {"reason": "size", "limit_mb": 1}
+        self.assertFalse(self.controller.records._can_retry(row))
+        self.release.set()
+        self.wait_for(lambda: not self.controller.busy)
+        self.assertEqual(self.controller.preferences["max_video_mb"], previous)
+        self.assertEqual(self.controller.records._limit_mb, previous)
+        self.assertTrue(self.controller.records._can_retry(row))
+
     def test_failed_save_preferences_never_start_the_download(self):
         options = JobOptions("example", self.controller.outputFolder)
         self.patch("luvbox.qt_app.ApplicationController._prepare_save",

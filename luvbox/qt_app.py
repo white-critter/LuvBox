@@ -52,6 +52,7 @@ class ApplicationController(QObject):
     reviewCleared = Signal()
     retryStarted = Signal()
     shutdownFinished = Signal()
+    shutdownStarted = Signal()
     _completed = Signal(str, bool, object)
 
     def __init__(self, parent=None):
@@ -389,6 +390,8 @@ class ApplicationController(QObject):
                     self._download.setDetailsEnabled(bool(value))
                 if name == "auto_classify":
                     self._library.setAutoClassify(value is not False)
+                if name == "max_video_mb":
+                    self._records.setVideoLimit(value)
             for field, (name, value) in fields.items():
                 if self._settings_versions.get(name) == revision:
                     if field == "_account" and self._accounts.identity:
@@ -901,6 +904,7 @@ class ApplicationController(QObject):
     def requestClose(self):
         if self._closing:
             return
+        self.shutdownStarted.emit()
         self._closing = True
         self._pending_start = None
         self._pending_download = None
@@ -1141,6 +1145,8 @@ def launch(*, startup_probe=None):
             QMessageBox.critical(None, "LuvBox", "화면을 열지 못했습니다. Qt 패키지와 앱 파일을 확인해 주세요.")
         return 1
     window = engine.rootObjects()[0]
+    from .qt_tray import TrayController
+    tray = TrayController(application, window, controller)
     first_frame = _FirstFrame(window)
     program = launcher.launcher_path() if startup_probe is None else None
     if program is not None:
@@ -1156,6 +1162,7 @@ def launch(*, startup_probe=None):
         # Source runs and the isolated startup checks never contact GitHub by themselves.
         controller.updates.startAutomaticCheck()
     result = application.exec()
+    tray.close()
     wheel_input.close()
     controller._library.provider = None
     restart = controller.updates.restart_pending and launcher.launcher_path()

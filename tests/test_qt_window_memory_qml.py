@@ -2,7 +2,7 @@
 
 tests/test_window_memory.py checks the controller's side with direct calls. This runs the
 real MainWindow.qml and controller against a private settings file, and ten times starts
-the window, uses it and closes it the way its close button does. Each time the window must
+the window, uses it and exits it the way the tray menu does. Each time the window must
 stay on screen until the controller has finished closing.
 
 1. A first start. The window is moved and resized, then grown for a saved-file card from the
@@ -171,14 +171,14 @@ def scene(layout="one"):
         window.setProperty("saveRestoreHeight", lowest)
         window.setProperty("saveHeightExpanded", True)
         before = geometry(window)
-        window.close()
+        window.property("appController").requestClose()
         return {"closed": before, "minimum": lowest}
 
     def second(window):
         window.showMaximized()
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
         before = geometry(window)
-        window.close()
+        window.property("appController").requestClose()
         return {"closed": before}
 
     def third(window):
@@ -192,7 +192,7 @@ def scene(layout="one"):
         window.setProperty("saveRestoreHeight", window.minimumHeight() - 1)
         window.setProperty("saveHeightExpanded", True)
         before = geometry(window)
-        window.close()
+        window.property("appController").requestClose()
         return {"made_normal": normal, "closed": before}
 
     def fourth(window):
@@ -203,18 +203,18 @@ def scene(layout="one"):
         # A card that grew the window earlier and gave the height back leaves its mark.
         window.setProperty("saveRestoreHeight", window.minimumHeight() + 50)
         window.setProperty("saveHeightExpanded", False)
-        window.close()
+        window.property("appController").requestClose()
         # Still closing: the close button pressed again after a resize changes nothing.
         window.setHeight(640)
-        window.close()
+        window.property("appController").requestClose()
 
     def fifth(window):
         window.showFullScreen()
         wait(lambda: window.visibility() == QWindow.Visibility.FullScreen, "the full-screen window")
-        window.close()
+        window.property("appController").requestClose()
 
     def sixth(window):
-        window.close()
+        window.property("appController").requestClose()
 
     def seventh(window):
         # Made normal, moved and resized; after a moment maximized, then minimized, and closed
@@ -242,7 +242,7 @@ def scene(layout="one"):
         window.showMinimized()
         wait(lambda: window.visibility() == QWindow.Visibility.Minimized, "the minimized window")
         before = geometry(window)
-        window.close()
+        window.property("appController").requestClose()
         return {"closed": before, "followed": followed}
 
     def eighth(window):
@@ -263,7 +263,7 @@ def scene(layout="one"):
         window.showMaximized()
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
         settled(window, "the maximized window to settle")
-        window.close()
+        window.property("appController").requestClose()
         return {"made_normal": normal}
 
     def ninth(window):
@@ -277,7 +277,7 @@ def scene(layout="one"):
         follows(window, [100, 80, 700, 520], "the normal place after the move")
         window.showMinimized()
         wait(lambda: window.visibility() == QWindow.Visibility.Minimized, "the minimized window")
-        window.close()
+        window.property("appController").requestClose()
 
     def tenth(window):
         # A saved-file card grew the normal window from the lowest height it allows; the window was
@@ -295,7 +295,7 @@ def scene(layout="one"):
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
         settled(window, "the maximized window to settle")
         window.setProperty("saveHeightExpanded", False)
-        window.close()
+        window.property("appController").requestClose()
         return {"minimum": lowest}
 
     def across(window):
@@ -317,7 +317,7 @@ def scene(layout="one"):
         settled(window, "the maximized window to settle")
         notes = {"screen": window.screen().name(), "tracked": tracked(window),
                  "area": [area.x(), area.y(), area.width(), area.height()]}
-        window.close()
+        window.property("appController").requestClose()
         return notes
 
     def stayed(window):
@@ -331,7 +331,7 @@ def scene(layout="one"):
         wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "the maximized window")
         settled(window, "the maximized window to settle")
         notes = {"screen": window.screen().name()}
-        window.close()
+        window.property("appController").requestClose()
         return notes
 
     def card(window):
@@ -412,7 +412,7 @@ def scene(layout="one"):
         notes["low"]["after_card"] = window.height()
         download._running = False
         taskbar.stop()
-        window.close()
+        window.property("appController").requestClose()
         return notes
 
     resources = ExitStack()
@@ -569,7 +569,7 @@ def launched(kind):
                 window.setY(60)
                 window.setWidth(720)
                 window.setHeight(520)
-                window.close()
+                window.property("appController").requestClose()
                 report["open_after_close"] = window.isVisible()
 
             QTimer.singleShot(400, move_and_close)

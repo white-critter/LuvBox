@@ -198,7 +198,7 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                 action_buttons(dialog, ("닫기", "파일 열기", "폴더", "원문 보기"))
                 if not baseline:
                     action_buttons(dialog, ("이전", "다음", "−", "+", "화면 맞춤", "원본 100%", "창 최대화"))
-                    if data["dialog"][0] < width - 26 or data["dialog"][1] < height - 26:
+                    if data["dialog"][0] < parent.width() - 26 or data["dialog"][1] < parent.height() - 26:
                         raise AssertionError("The preview retained its old fixed size cap")
                     body = find("previewBodyScroll")
                     if dialog.property("detailsVisible") or body.property("visible"):
@@ -364,7 +364,8 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                 window.resize(width, height)
                 settle(.1)
                 data = metrics(review, review_media)
-                if not baseline and (data["dialog"][0] < width - 26 or data["dialog"][1] < height - 26):
+                parent = review.property("parent")
+                if not baseline and (data["dialog"][0] < parent.width() - 26 or data["dialog"][1] < parent.height() - 26):
                     raise AssertionError("Save review retained its old fixed size cap")
                 action_buttons(review, ("저장 중단", "더보기", "건너뛰기", "저장"))
                 if width == 680:
@@ -584,10 +585,9 @@ class PreviewSizeTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(len(report["checks"]), 5)
         self.assertEqual(report["qml_errors"], [])
-        # Navigation and zoom controls occupy one row; the long description
-        # must still leave substantially more image space than the old326px.
-        # (The tag row under the picture is 6 pixels taller since 1.9.4: 418.)
-        self.assertGreater(report["gallery"]["1080x760"]["canvas"][1], 410)
+        # The custom caption now keeps its 60px above the viewer. Navigation,
+        # zoom and the collapsed description still leave a useful image area.
+        self.assertGreater(report["gallery"]["1080x760"]["canvas"][1], 350)
 
     @unittest.skipUnless(os.name == "nt", "Windows bundled FFmpeg execution")
     def test_saved_details_and_preview_controls_work_in_the_real_window(self):

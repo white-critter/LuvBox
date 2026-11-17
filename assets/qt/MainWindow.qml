@@ -27,6 +27,7 @@ ApplicationWindow {
     readonly property bool savedDetailVisible: !!(app && app.download && app.download.detailsEnabled
         && app.download.currentSavedItem && app.download.currentSavedItem.filename)
     visible: true
+    flags: Qt.Window | Qt.FramelessWindowHint | Qt.WindowMinMaxButtonsHint
     readonly property var app: appController
     readonly property bool modalOpen: previewDialog.visible || connectionDialog.visible ||
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
@@ -318,20 +319,34 @@ ApplicationWindow {
         return -1
     }
 
+    function rememberPlacement() {
+        if (!app)
+            return
+        const maximized = visibility === Window.Maximized || visibility === Window.FullScreen
+            || ((visibility === Window.Minimized || visibility === Window.Hidden) && lastMaximized)
+        const place = maximized ? maximizedNormalPlace() : Qt.rect(x, y, width, ownHeight())
+        // Tray restore must stay on the screen where the maximized window was hidden.
+        if (maximized && place.width > 0 && place.height > 0)
+            normalPlace = place
+        app.rememberWindow(place.x, place.y, place.width, place.height, maximized)
+    }
+
+    function toggleMaximized() {
+        if (visibility === Window.Maximized || visibility === Window.FullScreen)
+            showNormal()
+        else
+            showMaximized()
+    }
+
+    function openPreferences() { preferencesDialog.open() }
+
     onClosing: (close) => {
-        if (app && !app.shutdownReady) {
+        if (!app || !app.shutdownReady) {
             close.accepted = false
-            if (!app.closing) {
-                // Always the normal window's size and place. A window minimized from a normal one
-                // still reports those; a maximized one, or one minimized from it, does not.
-                const minimized = visibility === Window.Minimized
-                const maximized = visibility === Window.Maximized || visibility === Window.FullScreen
-                    || (minimized && lastMaximized)
-                // The height grown for a saved-file card is temporary; the person's own is kept.
-                const place = maximized ? maximizedNormalPlace() : Qt.rect(x, y, width, ownHeight())
-                app.rememberWindow(place.x, place.y, place.width, place.height, maximized)
+            if (!app || !app.closing) {
+                rememberPlacement()
+                hide()
             }
-            app.requestClose()
         }
     }
 
@@ -568,7 +583,15 @@ ApplicationWindow {
     }
 
     header: ToolBar {
+        id: titleBar
+        objectName: "titleBar"
         height: Theme.titleBarHeight
+        MouseArea {
+            objectName: "titleBarDrag"
+            anchors.fill: parent
+            onPressed: window.startSystemMove()
+            onDoubleClicked: window.toggleMaximized()
+        }
         // See-through, so the window's light passes behind it; only the line under it is drawn.
         background: Item {
             Rectangle {
@@ -582,7 +605,7 @@ ApplicationWindow {
         RowLayout {
             anchors.fill: parent
             anchors.leftMargin: Theme.pageMargin
-            anchors.rightMargin: Theme.pageMargin
+            anchors.rightMargin: 144
             spacing: Theme.gapSmall
             Image {
                 source: "../icons/luvbox.png"
@@ -602,6 +625,7 @@ ApplicationWindow {
             }
             Label {
                 text: "LuvBox"
+                visible: window.width > 760
                 font.pixelSize: Theme.fontHeading
                 font.bold: true
                 Layout.rightMargin: Theme.gapLarge
@@ -672,6 +696,44 @@ ApplicationWindow {
         }
     }
 
+    // Caption controls remain above modal popups, just as native Windows buttons do.
+    Row {
+        parent: Overlay.overlay
+        z: 1000002
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.topMargin: (Theme.titleBarHeight - Theme.controlHeight) / 2
+        anchors.rightMargin: 6
+        WindowButton {
+            objectName: "windowMinimizeButton"
+            windowAction: "minimize"
+            onClicked: window.showMinimized()
+        }
+        WindowButton {
+            objectName: "windowMaximizeButton"
+            windowAction: window.visibility === Window.Maximized || window.visibility === Window.FullScreen ? "restore" : "maximize"
+            onClicked: window.toggleMaximized()
+        }
+        WindowButton {
+            objectName: "windowCloseButton"
+            windowAction: "close"
+            onClicked: window.close()
+        }
+    }
+    WindowResize {
+        parent: Overlay.overlay
+        z: 1000003
+        anchors.fill: parent
+        targetWindow: window
+    }
+    Item {
+        id: popupHost
+        parent: Overlay.overlay
+        y: Theme.titleBarHeight
+        width: parent.width
+        height: Math.max(0, parent.height - y)
+    }
+
     ColumnLayout {
         anchors.fill: parent
         anchors.leftMargin: Theme.pageMargin
@@ -692,9 +754,8 @@ ApplicationWindow {
             id: updateNotice
             Layout.fillWidth: true
             app: window.app
-            // Closing the window remembers its size and ends every part; the
-            // launcher is started again only after that.
-            onRestartRequested: if (window.app && window.app.prepareRestart()) window.close()
+            // Explicit shutdown remembers placement and finishes all work before restarting.
+            onRestartRequested: if (window.app && window.app.prepareRestart()) window.app.requestClose()
         }
 
         StackLayout {
@@ -2520,7 +2581,7 @@ ApplicationWindow {
     Dialog {
         id: previewDialog
         objectName: "previewDialog"
-        parent: Overlay.overlay
+        parent: popupHost
         property bool detailsVisible: false
         readonly property bool textInputFocused: bodyText.activeFocus || inlineTagField.activeFocus
         // Why the last move started here did not happen (a refused comparison, say). The status line
@@ -2772,7 +2833,7 @@ ApplicationWindow {
                 objectName: "selectedMedia"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 80
+                Layout.minimumHeight: previewDialog.detailsVisible ? 24 : 60
                 sourceUrl: window.app ? window.app.library.selectedPreviewUrl : window.selectedThumb
                 mediaType: window.app ? window.app.library.selectedMediaType : "photo"
                 sourcePixelWidth: window.app ? window.app.library.selectedPixelWidth : 0
@@ -2783,7 +2844,7 @@ ApplicationWindow {
                 // Only the opened item's own load. A folder-wide scan used to keep the
                 // spinner on a missing file for as long as the scan ran.
                 externalBusy: window.app ? window.app.library.selectionBusy : false
-                playing: previewDialog.visible
+                playing: previewDialog.visible && window.visible && window.visibility !== Window.Minimized
             }
             RowLayout {
                 Layout.fillWidth: true
@@ -3071,7 +3132,7 @@ ApplicationWindow {
     Popup {
         id: datePickerPopup
         objectName: "galleryDatePickerPopup"
-        parent: Overlay.overlay
+        parent: popupHost
         width: 280
         margins: 8
         padding: 12
@@ -3335,12 +3396,12 @@ ApplicationWindow {
 
     DeleteConfirmation {
         id: deleteConfirmation
-        parent: Overlay.overlay
+        parent: popupHost
         app: window.app
     }
     AlikeConfirmation {
         id: alikeConfirmation
-        parent: Overlay.overlay
+        parent: popupHost
         app: window.app
     }
 
@@ -3388,14 +3449,14 @@ ApplicationWindow {
     ConnectionDialog {
         id: connectionDialog
         objectName: "connectionDialog"
-        parent: Overlay.overlay
+        parent: popupHost
         accounts: window.app ? window.app.accounts : null
         app: window.app
     }
 
     PreferencesDialog {
         id: preferencesDialog
-        parent: Overlay.overlay
+        parent: popupHost
         app: window.app
         onScheduleRequested: scheduleDialog.open()
         onRunHistoryRequested: runHistoryDialog.open()
@@ -3407,20 +3468,20 @@ ApplicationWindow {
 
     ScheduleDialog {
         id: scheduleDialog
-        parent: Overlay.overlay
+        parent: popupHost
         app: window.app
     }
 
     RunHistoryDialog {
         id: runHistoryDialog
-        parent: Overlay.overlay
+        parent: popupHost
         app: window.app
     }
 
     FlatDialog {
         id: aiClearConfirm
         objectName: "aiClearConfirm"
-        parent: Overlay.overlay
+        parent: popupHost
         title: "AI 태그를 초기화할까요?"
         preferredWidth: 460
         windowMargin: 48
@@ -3456,13 +3517,13 @@ ApplicationWindow {
 
     ShortcutHelp {
         id: shortcutHelp
-        parent: Overlay.overlay
+        parent: popupHost
     }
 
     StatisticsDialog {
         id: statisticsDialog
         objectName: "statisticsDialog"
-        parent: Overlay.overlay
+        parent: popupHost
         app: window.app
         onAuthorSelected: author => {
             window.currentScreen = 1
@@ -3492,7 +3553,7 @@ ApplicationWindow {
     Popup {
         id: teachPopup
         objectName: "teachPopup"
-        parent: Overlay.overlay
+        parent: popupHost
         modal: true
         focus: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -3622,7 +3683,7 @@ ApplicationWindow {
     Popup {
         id: tagBatchPopup
         objectName: "tagBatchPopup"
-        parent: Overlay.overlay
+        parent: popupHost
         modal: true
         focus: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -3686,14 +3747,14 @@ ApplicationWindow {
     SaveReviewDialog {
         id: saveReviewDialog
         objectName: "saveReviewDialog"
-        parent: Overlay.overlay
+        parent: popupHost
         app: window.app
     }
 
     FlatDialog {
         id: storageDialog
         objectName: "storageDialog"
-        parent: Overlay.overlay
+        parent: popupHost
         title: "저장 위치 확인"
         preferredWidth: 440
         windowMargin: 48
@@ -3724,7 +3785,7 @@ ApplicationWindow {
     FlatDialog {
         id: repairDialog
         objectName: "repairDialog"
-        parent: Overlay.overlay
+        parent: popupHost
         title: "기록 복구"
         preferredWidth: 460
         windowMargin: 48
@@ -3766,6 +3827,7 @@ ApplicationWindow {
 
     Connections {
         target: window.app
+        function onShutdownStarted() { window.rememberPlacement() }
         function onChanged() {
             if (window.app.closing) {
                 selectedMedia.release()

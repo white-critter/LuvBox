@@ -154,7 +154,8 @@ Dialog {
             sourcePixelHeight: dialog.item ? (dialog.item.pixel_height || 0) : 0
             sourceRawWidth: dialog.item ? (dialog.item.source_width || 0) : 0
             sourceRawHeight: dialog.item ? (dialog.item.source_height || 0) : 0
-            playing: dialog.visible && !dialog._responded
+            playing: dialog.visible && !dialog._responded && (!dialog.hostWindow
+                || (dialog.hostWindow.visible && dialog.hostWindow.visibility !== Window.Minimized))
         }
 
         Label {
