@@ -409,6 +409,22 @@ def replaced_name(launcher: Path, index: int = 0) -> Path:
     return launcher.with_name(launcher.name + ".old" + (f".{index}" if index else ""))
 
 
+_TRANSIENT_REPLACE_WINERRORS = {5, 32, 33}
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    """Retry brief Windows sharing or antivirus locks without masking real failures."""
+    delays = (0.05, 0.1, 0.2, 0.4)
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            if getattr(exc, "winerror", None) not in _TRANSIENT_REPLACE_WINERRORS or attempt >= len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
 def install(downloaded, launcher, expected: str) -> None:
     """Put a verified download where the launcher is; the old one is set aside.
 
@@ -444,14 +460,14 @@ def install(downloaded, launcher, expected: str) -> None:
         if aside is None:
             raise UpdateError("replace")
         try:
-            os.replace(launcher, aside)
+            _replace_with_retry(launcher, aside)
         except OSError:
             raise UpdateError("replace") from None
         try:
-            os.replace(staged, launcher)
+            _replace_with_retry(staged, launcher)
         except OSError:
             try:
-                os.replace(aside, launcher)
+                _replace_with_retry(aside, launcher)
             except OSError:
                 pass
             raise UpdateError("replace") from None

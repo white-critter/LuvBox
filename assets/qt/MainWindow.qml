@@ -1595,6 +1595,7 @@ ApplicationWindow {
                         id: activeFilters
                         objectName: "galleryActiveFilters"
                         Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         text: window.app ? window.app.library.filterSummary : ""
                         visible: text.length > 0
                         elide: Text.ElideRight
@@ -1605,9 +1606,11 @@ ApplicationWindow {
                         ToolTip.delay: 500
                         ToolTip.visible: activeFiltersHover.hovered && truncated
                     }
-                    Item { Layout.fillWidth: true; visible: !activeFilters.visible }
+                    Item { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !activeFilters.visible }
                     Label {
                         objectName: "galleryLoadError"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         Layout.maximumWidth: Math.max(160, statusLine.width - 220)
                         text: window.galleryModel.error
                         visible: statusLine.loadFailed
@@ -1617,6 +1620,8 @@ ApplicationWindow {
                     }
                     Label {
                         objectName: "galleryManagementMessage"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         Layout.maximumWidth: Math.max(160, statusLine.width * 0.62)
                         text: statusLine.managementText
                         visible: statusLine.showManagement
@@ -1630,6 +1635,8 @@ ApplicationWindow {
                     }
                     Label {
                         objectName: "galleryWorkStatus"
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
                         Layout.maximumWidth: Math.max(160, statusLine.width * 0.62)
                         text: statusLine.workText
                         visible: statusLine.showWork

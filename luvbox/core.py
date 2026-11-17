@@ -687,6 +687,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     exit_code = 1
     # The window offers its record repair only for this specific failure.
     catalog_damaged = False
+    catalog_error = ""
     auth_state = ""
     error_kind = ""
     auth_response_rejected = False
@@ -710,6 +711,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     # Files skipped in an earlier review: (tweet_id, num, type). A quick scan
     # continues until it reaches them; resolved ones are then forgotten.
     review_pending = set()
+    enabled_pending = set()
     review_reached = set()
     review_resolved = set()
     review_declined_ids = set()
@@ -781,7 +783,15 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         details = _media_details(media) if media is not None else {}
         tweet_id, number, media_type = identity or (details["tweet_id"], details["num"], details["media_type"])
         key = (tweet_id, number, media_type)
-        if key not in unsaved_items and len(unsaved_items) >= unsaved.MAX_ITEMS:
+        existing = unsaved_items.get(key)
+        if existing is None and len(unsaved_items) >= unsaved.MAX_ITEMS:
+            return
+        if media is None and existing is not None:
+            # Keep extracted Tweet/media facts recorded earlier in this run.
+            unsaved_items[key] = dict(
+                existing, reason=reason, detail=detail,
+                size_bytes=size or existing["size_bytes"],
+                limit_mb=normalized.max_video_mb if reason == unsaved.SIZE else existing["limit_mb"])
             return
         media = media or {}
         duration = media.get("duration")
@@ -839,6 +849,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     progress_fields = {}
     progress_written = 0.0
 
+    def _catalog_unavailable(error):
+        nonlocal catalog_damaged, catalog_error
+        if isinstance(error, CatalogDamaged):
+            catalog_damaged = True
+            catalog_error = str(error)
+        return exception.AbortExtraction("history store unavailable")
+
     def history_update(*, force=False, **fields):
         """Record run progress at most every two seconds.
 
@@ -856,8 +873,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         progress_written = now
         try:
             history.update_run(run_id, **progress_fields)
-        except HistoryError:
-            raise exception.AbortExtraction("history store unavailable") from None
+        except HistoryError as exc:
+            raise _catalog_unavailable(exc) from None
         progress_fields.clear()
 
     def record_source(kwdict, media_path, media_status, previous):
@@ -1212,8 +1229,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         # to the archive, listed with the hidden missing files.
                         history.record_declined(normalized.folder_mode, kwdict, declined.path)
                         self.archive.add(kwdict)
-                except (HistoryError, sqlite3.Error):
-                    raise exception.AbortExtraction("history store unavailable") from None
+                except (HistoryError, sqlite3.Error) as exc:
+                    raise _catalog_unavailable(exc) from None
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
                 note_unsaved(unsaved.EXCLUDED, _EXCLUDED_DETAIL, media=kwdict)
                 emit({"type": "review-never", "path": "", **_media_details(kwdict)})
@@ -1285,8 +1302,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         # location rather than today's generated destination.
                         try:
                             previous = history.media_record(normalized.folder_mode, kwdict)
-                        except HistoryError:
-                            raise exception.AbortExtraction("history store unavailable") from None
+                        except HistoryError as exc:
+                            raise _catalog_unavailable(exc) from None
                         # An absent recorded place must not mask a file at
                         # today's destination (see skipped_file_places).
                         known_path = (previous.get("path") or previous.get("last_path") or media_path) if previous is not None else media_path
@@ -1336,8 +1353,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             previews.add(preview_key, media_path, only_missing=True)
                         try:
                             history.record_media(normalized.folder_mode, kwdict, media_path, status=media_status)
-                        except HistoryError:
-                            raise exception.AbortExtraction("history store unavailable") from None
+                        except HistoryError as exc:
+                            raise _catalog_unavailable(exc) from None
                         if targets:
                             recovered[kwdict["_luvbox_archive_key"]] = media_status
                         if identity in unsaved_known:
@@ -1367,7 +1384,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         # Not asked for at all: its own host refuses it, so no picture either.
                         note_unsaved(unsaved.FAILED, _PASSED_BY_DETAIL, media=kwdict)
                     else:
-                        note_unsaved(unsaved.FAILED, _FAILED_DETAIL, media=kwdict)
+                        detail = _REFUSED_RETRY_DETAIL if identity in retry_refused else _FAILED_DETAIL
+                        note_unsaved(unsaved.FAILED, detail, media=kwdict)
                         keep_unsaved_preview(self, url, kwdict)
                     emit({"type": "failed", "path": "", **_media_details(kwdict)})
             finally:
@@ -1386,7 +1404,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 # so they neither extend nor break the already-saved streak.
                 existing_streak = 0 if self.last_output[0] == "saved" else existing_streak + 1
                 # A file skipped earlier is not known yet; look until it is reached.
-                if existing_streak >= QUICK_STOP_AFTER and review_pending <= review_reached:
+                if existing_streak >= QUICK_STOP_AFTER and enabled_pending <= review_reached:
                     stop_reason = "caught-up"
                     raise exception.StopExtraction()
 
@@ -1406,8 +1424,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         likes.visit(last_tweet_id)
                     if len(tweet_texts) >= 50:
                         flush_tweet_texts()
-                except HistoryError:
-                    raise exception.AbortExtraction("history store unavailable") from None
+                except HistoryError as exc:
+                    raise _catalog_unavailable(exc) from None
                 history_update(visited=len(visited_ids), last_tweet_id=last_tweet_id,
                                last_posted_at=last_posted_at)
 
@@ -1860,6 +1878,12 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             remembered = history.review_pending()
             review_unknown = remembered is None
             review_pending = remembered or set()
+            enabled_pending = {
+                item for item in review_pending
+                if item[2] == "photo"
+                or (item[2] == "video" and normalized.include_videos)
+                or (item[2] == "animated_gif" and normalized.include_gifs)
+            }
         scan_note = ""
         if targets:
             scan_note = (f"선택한 미디어 {len(targets):,}개(트윗 {len(_retry_groups(normalized.targets)):,}개)를 다시 받습니다. "
@@ -1874,9 +1898,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 "settings-changed": "동영상·GIF·용량 설정이 바뀌어 이번만 전체 목록을 확인합니다.",
                 "records-changed": "다른 계정의 저장 기록을 합쳐 이번만 전체 목록을 확인합니다.",
             }.get(readiness, "이전 확인이 끝까지 되지 않아(첫 실행·중단·오류·시험 저장) 이번만 전체 목록을 확인합니다.")
-            if quick_scan and review_pending:
+            if quick_scan and enabled_pending:
                 # Files skipped in a save review, and media released from '직접 제외'.
-                scan_note += f" 지난번에 건너뛰었거나 제외를 해제한 파일 {len(review_pending):,}개가 나올 때까지는 이어서 확인합니다."
+                scan_note += f" 지난번에 건너뛰었거나 제외를 해제한 파일 {len(enabled_pending):,}개가 나올 때까지는 이어서 확인합니다."
         run_id = history.start_run(normalized.folder_mode,
                                    scan_mode="retry" if targets else "quick" if quick_scan else "full",
                                    media_signature=normalized.media_signature)
@@ -1911,6 +1935,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         if session is not None:
                             session.cookies.clear()
                             session.close()
+                    if catalog_damaged:
+                        raise CatalogDamaged(catalog_error)
                     if guard.failure or handler.fatal or handler.rate_limited:
                         exit_code = 1
                         break
@@ -1936,6 +1962,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             else:
                 active_job = PhotoJob(f"https://x.com/{normalized.account}/likes")
                 exit_code = active_job.run()
+                if catalog_damaged:
+                    raise CatalogDamaged(catalog_error)
         if handler.rate_limited and not guard.failure:
             guard.record_limit()
         if guard.failure:
@@ -2061,17 +2089,22 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         # saved-file streak: remember it for the next quick run.
                         remaining = review_pending - review_resolved
                         if status == "finished" and stop_reason in {"", "caught-up"}:
-                            # The whole list was walked, or every remembered
-                            # file was reached; unreached ones are not Liked now.
-                            remaining &= review_reached
+                            # The whole list was walked, or every enabled remembered
+                            # file was reached; preserve disabled types until re-enabled.
+                            remaining = (remaining - enabled_pending) | (remaining & enabled_pending & review_reached)
                         remaining |= review_declined_ids
                         if review_unknown or remaining != review_pending:
                             history.set_review_pending(remaining)
                     history.finish_run(run_id, status, saved=saved, skipped=skipped, size_skipped=size_skipped,
                                        visited=len(visited_ids), last_tweet_id=last_tweet_id,
                                        last_posted_at=last_posted_at, message=message)
+            except CatalogDamaged as exc:
+                status, exit_code, message = "error", 1, str(exc)
+                catalog_damaged = True
+                error_kind = ""
             except HistoryError:
-                status, exit_code, message = "error", 1, _HISTORY_ERROR
+                if not catalog_damaged:
+                    status, exit_code, message = "error", 1, _HISTORY_ERROR
                 error_kind = ""
             finally:
                 if previews is not None:
@@ -2082,8 +2115,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                               "다운로드한 원본은 그대로이며 라이브러리에서 파일을 열면 자동으로 다시 시도합니다."})
                 try:
                     history.close()
+                except CatalogDamaged as exc:
+                    status, exit_code, message = "error", 1, str(exc)
+                    catalog_damaged = True
+                    error_kind = ""
                 except HistoryError:
-                    status, exit_code, message = "error", 1, _HISTORY_ERROR
+                    if not catalog_damaged:
+                        status, exit_code, message = "error", 1, _HISTORY_ERROR
                     error_kind = ""
             # A verified copy on this PC, so a damaged catalog can be restored.
             try:

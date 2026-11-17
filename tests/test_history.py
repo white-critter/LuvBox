@@ -166,12 +166,14 @@ class HistoryTests(unittest.TestCase):
                      "SELECT 1 FROM deletion_items WHERE deletion_items.tweet_id=media.tweet_id "
                      "AND deletion_items.num=media.num AND deletion_items.media_type=media.media_type "
                      "AND deletion_items.path=media.last_path" + collation +
-                     " AND deletion_items.status IN ('recycled','interrupted')))")
+                     " AND deletion_items.status IN ('recycled','interrupted')"
+                     " AND (media.missing_since='' OR COALESCE(deletion_items.finished_at,'')=''"
+                     " OR media.missing_since<=deletion_items.finished_at)))")
         # One record on its own: the clauses that fold several records of a
         # file into one entry must not change what a single record does.
-        fixture = ("WITH media(tweet_id,num,media_type,path,record_source,last_path,folder_mode,saved_at) AS "
-                   "(VALUES (?,?,?,?,?,?,'flat',NULL)),"
-                   "deletion_items(tweet_id,num,media_type,path,status) AS (VALUES (?,?,?,?,?)) "
+        fixture = ("WITH media(tweet_id,num,media_type,path,record_source,last_path,missing_since,folder_mode,saved_at) AS "
+                   "(VALUES (?,?,?,?,?,?,'','flat',NULL)),"
+                   "deletion_items(tweet_id,num,media_type,path,status,finished_at) AS (VALUES (?,?,?,?,?,'')) "
                    "SELECT EXISTS(SELECT 1 FROM media")
         for path, source, last_path, receipt in product(
                 ("", "present.jpg", None), ("saved", "declined", None),

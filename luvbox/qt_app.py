@@ -11,7 +11,7 @@ import uuid
 from PySide6.QtCore import QObject, Property, QPoint, QRectF, QTimer, Qt, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QGuiApplication, QIcon, QPalette
 
-from . import __version__
+from . import __version__, settings
 from .app_settings import SettingsRepository, default_settings
 from .core import JobOptions, _normal_account
 from .protection import ProtectionError
@@ -1019,6 +1019,48 @@ class _FirstFrame(QObject):
         launcher.signal_ready()
 
 
+def _start_controller(message_box, *, startup_probe=None):
+    from . import launcher
+
+    try:
+        return ApplicationController()
+    except settings.AppDataConflict as exc:
+        if startup_probe is not None:
+            raise
+        launcher.signal_ready()
+        prompt = (f"{exc}\n\n"
+                  "기존 LuvBox 데이터를 유지하고 이전 XlikeSaver 폴더를 옆으로 치운 뒤 계속할까요?\n"
+                  "(직접 두 폴더를 확인한 뒤 결정하려면 '아니오'를 누르세요.)")
+        if message_box.question(
+                None, "LuvBox", prompt,
+                message_box.StandardButton.Yes | message_box.StandardButton.No,
+                message_box.StandardButton.No) == message_box.StandardButton.Yes:
+            try:
+                settings.set_aside_previous()
+                return ApplicationController()
+            except settings.AppDataError as retry_error:
+                message_box.critical(None, "LuvBox", str(retry_error))
+                return None
+            except Exception:
+                message_box.critical(
+                    None, "LuvBox", "기존 앱 데이터를 열지 못했습니다. 다른 LuvBox 창을 닫고 다시 실행해 주세요.")
+                return None
+        return None
+    except settings.AppDataError as exc:
+        if startup_probe is not None:
+            raise
+        launcher.signal_ready()
+        message_box.critical(None, "LuvBox", str(exc))
+        return None
+    except Exception:
+        if startup_probe is not None:
+            raise
+        launcher.signal_ready()
+        message_box.critical(
+            None, "LuvBox", "기존 앱 데이터를 열지 못했습니다. 다른 LuvBox 창을 닫고 다시 실행해 주세요.")
+        return None
+
+
 def launch(*, startup_probe=None):
     import sys
     from PySide6.QtQml import QQmlApplicationEngine
@@ -1076,13 +1118,8 @@ def launch(*, startup_probe=None):
     ui_font.setWeight(QFont.Weight.Normal)
     ui_font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
     application.setFont(ui_font)
-    try:
-        controller = ApplicationController()
-    except Exception:
-        if startup_probe is not None:
-            raise
-        launcher.signal_ready()
-        QMessageBox.critical(None, "LuvBox", "기존 앱 데이터를 열지 못했습니다. 다른 LuvBox 창을 닫고 다시 실행해 주세요.")
+    controller = _start_controller(QMessageBox, startup_probe=startup_probe)
+    if controller is None:
         return 1
     wheel_input = WheelInputFilter()
     engine = QQmlApplicationEngine()

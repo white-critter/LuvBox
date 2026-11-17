@@ -292,14 +292,15 @@ class LibraryRepository:
                 # OFFSET would slide when a save inserts newer rows, and the
                 # next page would repeat keys until the gallery stopped.
                 grouped = request.duplicate_only and hasattr(store, "duplicate_page")
-                after = self._cursor if offset and offset == self._cursor_offset and not grouped else None
+                after = self._cursor if offset and offset == self._cursor_offset else None
                 if grouped:
                     # Each group together, the photo to keep first. The chosen sort order does not apply.
-                    page = store.duplicate_page(offset // limit, limit, request.media_type, request.query,
+                    page = store.duplicate_page(0 if after is not None else offset // limit, limit,
+                                                request.media_type, request.query,
                                                 period=period, author=request.author, hashtag=request.hashtag,
                                                 favorite_only=request.favorite_only, user_tag=request.user_tag,
                                                 ai_category=getattr(request, "ai_category", ""),
-                                                ai_origin=getattr(request, "ai_origin", ""))
+                                                ai_origin=getattr(request, "ai_origin", ""), after=after)
                 else:
                     page = store.record_page(0 if after is not None else offset // limit, limit,
                                              request.media_type, request.query,
@@ -366,8 +367,9 @@ class LibraryRepository:
                         return 0, []
                     for key, item in served.items():
                         self._served.setdefault(key, item)
-                    if last is not None and not grouped:
-                        self._cursor = page_cursor(last, request.order)
+                    if last is not None:
+                        self._cursor = ((int(last["cluster_id"]), int(last["cluster_rank"]))
+                                        if grouped else page_cursor(last, request.order))
                         self._cursor_offset = offset + len(rows)
                 return page["total"], rows
         except FileNotFoundError:
@@ -1092,8 +1094,8 @@ class LibraryRepository:
                 if missing:
                     if not is_available():
                         def stop_when_closing(_done, _total):
-                            # Closing the window sets the flag; the download must not hold the exit.
-                            if self._ai_cancel.is_set():
+                            # Closing the window or leaving the library stops a long model fetch.
+                            if self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None:
                                 raise ScanCancelled("분류 가르치기를 중단했습니다.")
                         try:
                             ensure_model(progress_callback=stop_when_closing)
@@ -1143,14 +1145,39 @@ class LibraryRepository:
         request = self.current(generation)
         if request is None:
             return []
+        period = ((request.date_field, request.date_from, request.date_to)
+                  if request.date_from or request.date_to else None)
+        filtered = (request.media_type != "all" or bool(request.query) or period is not None
+                    or bool(request.author) or bool(request.hashtag) or bool(request.favorite_only)
+                    or bool(request.user_tag) or bool(getattr(request, "ai_category", ""))
+                    or bool(getattr(request, "ai_origin", "")))
         try:
-            with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
-                stored = store.duplicate_copy_identities() if hasattr(store, "duplicate_copy_identities") else None
+            with closing(_ReadOnlyHistory(request.location())) as store:
+                if hasattr(store, "duplicate_copy_identities"):
+                    stored = (store.duplicate_copy_identities(
+                                  request.media_type, request.query, period=period, author=request.author,
+                                  hashtag=request.hashtag, favorite_only=request.favorite_only,
+                                  user_tag=request.user_tag, ai_category=getattr(request, "ai_category", ""),
+                                  ai_origin=getattr(request, "ai_origin", ""))
+                              if filtered else store.duplicate_copy_identities())
+                else:
+                    stored = None
                 if stored is not None:
                     return [f"g{generation}_{item[0]}_{item[1]}_{item[2]}_{item[3]}" for item in stored]
                 from .duplicates import cluster_duplicates
                 hashes = store.get_image_hashes()
                 favs = store.favorite_identities()
+                allowed = None
+                if filtered:
+                    allowed = {
+                        (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                        for row in store.records(
+                            limit=10000, media_type=request.media_type, query=request.query,
+                            order="saved", period=period, author=request.author, include_deleted=False,
+                            hashtag=request.hashtag, favorite_only=request.favorite_only,
+                            user_tag=request.user_tag, ai_category=getattr(request, "ai_category", ""),
+                            ai_origin=getattr(request, "ai_origin", ""))
+                    }
                 items = [
                     {"key": f"g{generation}_{k[0]}_{k[1]}_{k[2]}_{k[3]}",
                      "ident": k, "filesize": v[0], "file_hash": v[1], "dhash": v[2],
@@ -1164,10 +1191,12 @@ class LibraryRepository:
                     seen = set()
                     for member in group:
                         digest = member["file_hash"]
-                        if digest and digest in seen:
+                        if digest and digest in seen and (allowed is None or member["ident"] in allowed):
                             copy_keys.append(member["key"])
                         seen.add(digest)
                 return copy_keys
+        except FileNotFoundError:
+            return []
         except Exception:
             return []
 
@@ -1612,9 +1641,11 @@ class LibraryController(QObject):
         self._skipped_teach = 0
         self._ai_counts = []
         # The counts beside the filters (duplicates, "not duplicates", AI categories) of this
-        # library have arrived. Until then every reload asks again: a filter changed right
-        # after opening dropped the first answers and nothing asked a second time.
-        self._counts_loaded = False
+        # library have arrived. Track each separately so an interrupted reload only re-asks
+        # what did not finish.
+        self._duplicate_counts_loaded = False
+        self._distinct_counts_loaded = False
+        self._ai_counts_loaded = False
         self._duplicate_near = False
         self._duplicate_groups = []
         self._duplicate_model = DuplicateGroupModel(self)
@@ -2074,9 +2105,24 @@ class LibraryController(QObject):
             self._auto_ai_seen = library
             self.classifyNewPhotos()
 
+    @property
+    def _counts_loaded(self):
+        return self._duplicate_counts_loaded and self._distinct_counts_loaded and self._ai_counts_loaded
+
+    @_counts_loaded.setter
+    def _counts_loaded(self, value):
+        flag = bool(value)
+        self._duplicate_counts_loaded = flag
+        self._distinct_counts_loaded = flag
+        self._ai_counts_loaded = flag
+
     @Slot()
     def refresh(self):
         # The same listing read again (files were recycled, a save ended): duplicate cards keep their place.
+        self._authors_loaded = False
+        self._hashtags_loaded = False
+        self._user_tags_loaded = False
+        self._counts_loaded = False
         self._refresh(reload_authors=True, keep_place=True)
 
     def _refresh(self, *, reload_authors=True, status="", keep_place=False, keep_opened=False):
@@ -2140,14 +2186,22 @@ class LibraryController(QObject):
                                     or not self._user_tags_loaded or not self._counts_loaded):
             with self._condition:
                 if reload_authors or not self._authors_loaded:
+                    self._authors_loaded = False
                     self._interactive.append(("authors", self._generation, self._selection_serial, ""))
                 if reload_authors or not self._hashtags_loaded:
+                    self._hashtags_loaded = False
                     self._interactive.append(("hashtags", self._generation, self._selection_serial, ""))
                 if reload_authors or not self._user_tags_loaded:
+                    self._user_tags_loaded = False
                     self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
-                if reload_authors or not self._counts_loaded:
+                if reload_authors or not self._duplicate_counts_loaded:
+                    self._duplicate_counts_loaded = False
                     self._interactive.append(("duplicate_counts", self._generation, self._selection_serial, ""))
+                if reload_authors or not self._distinct_counts_loaded:
+                    self._distinct_counts_loaded = False
                     self._interactive.append(("distinct_counts", self._generation, self._selection_serial, ""))
+                if reload_authors or not self._ai_counts_loaded:
+                    self._ai_counts_loaded = False
                     self._interactive.append(("ai_counts", self._generation, self._selection_serial, ""))
                 self._condition.notify_all()
         if request is not None and self._statistics_wanted:
@@ -2508,12 +2562,10 @@ class LibraryController(QObject):
     def _duplicate_marks_changed(self, status):
         """Reload the duplicate list and its counts after a "not duplicates" mark changed."""
         self.duplicateDistinctChanged.emit()
+        self._duplicate_counts_loaded = False
+        self._distinct_counts_loaded = False
         # keep_opened: photos picked in other groups stay picked, as they do after a favorite.
         self._refresh(reload_authors=False, status=status, keep_place=True, keep_opened=True)
-        with self._condition:
-            for action in ("duplicate_counts", "distinct_counts"):
-                self._interactive.append((action, self._generation, self._selection_serial, ""))
-            self._condition.notify_all()
 
     @Slot(str, result=bool)
     def markGroupDistinct(self, key):
@@ -2963,6 +3015,11 @@ class LibraryController(QObject):
             if self.model._rows:
                 self.selectItem(self.model._rows[min(successor, len(self.model._rows) - 1)]["key"])
         # Counts beside the filters include the files that just left.
+        self._authors_loaded = False
+        self._hashtags_loaded = False
+        self._user_tags_loaded = False
+        self._duplicate_counts_loaded = False
+        self._ai_counts_loaded = False
         with self._condition:
             for action in ("authors", "hashtags", "user_tags", "duplicate_counts", "ai_counts"):
                 self._interactive.append((action, self._generation, self._selection_serial, ""))
@@ -3291,13 +3348,9 @@ class LibraryController(QObject):
         The list is reloaded only when its filter depends on what the job
         changed. Otherwise the scroll position and an open preview stay.
         """
+        self._ai_counts_loaded = False
         if reload:
             self._refresh(reload_authors=False, status=message, keep_place=self._duplicate_only)
-            with self._condition:
-                if not self._user_tags_loaded:
-                    self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
-                self._interactive.append(("ai_counts", self._generation, self._selection_serial, ""))
-                self._condition.notify_all()
             return
         self._status = message
         with self._condition:
@@ -3373,6 +3426,7 @@ class LibraryController(QObject):
             self.changed.emit()
             return
         if action == "duplicate_counts":
+            self._duplicate_counts_loaded = True
             count = int(selection) if isinstance(selection, int) else 0
             if count != self._duplicate_count:
                 self._duplicate_count = count
@@ -3409,6 +3463,7 @@ class LibraryController(QObject):
                 self.changed.emit()
             return
         if action == "distinct_counts":
+            self._distinct_counts_loaded = True
             count = int(selection) if isinstance(selection, int) else 0
             if count != self._distinct_count:
                 self._distinct_count = count
@@ -3419,7 +3474,7 @@ class LibraryController(QObject):
             self.statisticsLoaded.emit(selection if isinstance(selection, dict) else {"error": _STATISTICS_ERROR})
             return
         if action == "ai_counts":
-            self._counts_loaded = True          # asked last of the three, so the others are in
+            self._ai_counts_loaded = True
             counts = [dict(item) for item in selection if isinstance(item, dict)] if isinstance(selection, list) else []
             if counts != self._ai_counts:
                 self._ai_counts = counts
@@ -3517,6 +3572,10 @@ class LibraryController(QObject):
             self._interactive.clear()
             self._navigation = None
             self._condition.notify_all()
+        if hasattr(self._repository, "cancel_ai_scan"):
+            self._repository.cancel_ai_scan()
+        if hasattr(self._repository, "cancel_duplicate_scan"):
+            self._repository.cancel_duplicate_scan()
         self._repository.configure(None)
         self.provider.close()
         self.model.shutdown(timeout=0)

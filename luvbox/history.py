@@ -362,7 +362,9 @@ def _fileless_elsewhere(alias: str) -> str:
         "other.last_path!='' AND EXISTS (SELECT 1 FROM deletion_items WHERE deletion_items.tweet_id=other.tweet_id "
         "AND deletion_items.num=other.num AND deletion_items.media_type=other.media_type "
         f"AND deletion_items.path=other.last_path{_SAME_TEXT} "
-        "AND deletion_items.status IN ('recycled','interrupted'))"
+        "AND deletion_items.status IN ('recycled','interrupted') "
+        f"AND ({alias}.missing_since='' OR COALESCE(deletion_items.finished_at,'')='' OR {alias}.missing_since<=deletion_items.finished_at) "
+        "AND (other.missing_since='' OR COALESCE(deletion_items.finished_at,'')='' OR other.missing_since<=deletion_items.finished_at))"
     )
     return (
         f"(({alias}.path='')=1 AND EXISTS (SELECT 1 FROM media AS other WHERE other.folder_mode IN {_MODE_LIST} "
@@ -836,8 +838,13 @@ class HistoryStore:
             return candidate
         for root in self.media_roots[1:]:
             candidate = self._path_in_root(path, root)
-            if candidate is not None and self._db.execute(
-                    "SELECT 1 FROM media WHERE path=? LIMIT 1", (str(candidate),)).fetchone():
+            if candidate is None:
+                continue
+            text = str(candidate)
+            if self._db.execute("SELECT 1 FROM media WHERE path=? LIMIT 1", (text,)).fetchone():
+                return candidate
+            if os.name == "nt" and self._db.execute(
+                    "SELECT 1 FROM media WHERE path=? COLLATE NOCASE LIMIT 1", (text,)).fetchone():
                 return candidate
         return None
 
@@ -1198,8 +1205,11 @@ class HistoryStore:
             raise HistoryError(_HISTORY_HELP)
         if author_status is not None and author_status not in {"embedded", "unknown", "error", "pending"}:
             raise HistoryError(_HISTORY_HELP)
-        actual, size, _ = self._file(row.get("path") or "")
-        actual = self._preserve_missing_location(row.get("path") or "", actual)
+        raw_path = row.get("path") or ""
+        actual, size, _ = self._file(raw_path)
+        actual = self._preserve_missing_location(raw_path, actual)
+        if actual and size is None and self._drive_disconnected(raw_path):
+            size = row.get("filesize")
         with self._db:
             # A file removed during the job keeps its last location, so a
             # restore can reconnect it like any other missing file.
@@ -1311,17 +1321,26 @@ class HistoryStore:
         old, new = os.path.abspath(old_root), self.output_dir
         if os.path.normcase(old) == os.path.normcase(str(new)):
             return 0
-        prefix = os.path.normcase(old).rstrip("\\/") + os.sep
+        old_parts = Path(old).parts
+        old_folded = [os.path.normcase(part) for part in old_parts]
         changes = []
+        rebased_deletions = []
         kept_cache, self._folder_cache = self._folder_cache, {}
         try:
             for row in self._db.execute(
-                    "SELECT rowid,path,last_path FROM media WHERE path!='' OR last_path!=''").fetchall():
+                    "SELECT rowid,tweet_id,num,media_type,path,last_path FROM media WHERE path!='' OR last_path!=''").fetchall():
                 moved = {}
+                old_last = ""
                 for column in ("path", "last_path"):
-                    value = os.path.abspath(row[column]) if row[column] else ""
-                    if os.path.normcase(value).startswith(prefix):
-                        moved[column] = str(new / value[len(prefix):])
+                    if not row[column]:
+                        continue
+                    value = os.path.abspath(row[column])
+                    parts = Path(value).parts
+                    if (len(parts) > len(old_parts)
+                            and [os.path.normcase(part) for part in parts[:len(old_parts)]] == old_folded):
+                        moved[column] = str(new.joinpath(*parts[len(old_parts):]))
+                        if column == "last_path":
+                            old_last = row["last_path"]
                 if "path" in moved:
                     try:
                         found, size, _name = self._file(moved["path"])
@@ -1334,6 +1353,9 @@ class HistoryStore:
                     continue                 # its file is elsewhere; where it last was stays with it
                 if moved:
                     changes.append((moved.get("path"), moved.get("last_path"), row["rowid"]))
+                    if "last_path" in moved and old_last:
+                        rebased_deletions.append(
+                            (moved["last_path"], row["tweet_id"], row["num"], row["media_type"], old_last))
         finally:
             self._folder_cache = kept_cache
 
@@ -1344,7 +1366,16 @@ class HistoryStore:
             if last_path is not None:
                 self._db.execute("UPDATE media SET last_path=? WHERE rowid=?", (last_path, rowid))
 
+        def apply_deletion(entry):
+            new_path, tweet_id, num, media_type, old_last = entry
+            self._db.execute(
+                f"UPDATE deletion_items SET path=? WHERE tweet_id=? AND num=? AND media_type=? "
+                f"AND status IN ('recycled','interrupted') AND path=?{_SAME_TEXT}",
+                (new_path, tweet_id, num, media_type, old_last))
+
         self._write_batches(changes, apply)
+        if rebased_deletions:
+            self._write_batches(rebased_deletions, apply_deletion)
         return sum(1 for path, _last_path, _rowid in changes if path is not None)
 
     def _restore_known_paths(self) -> None:
@@ -1426,6 +1457,8 @@ class HistoryStore:
                         present[row["path"]] = found
                     actual, size, _ = found
                     actual = self._preserve_missing_location(row["path"], actual)
+                    if actual and size is None and self._drive_disconnected(row["path"]):
+                        size = row["filesize"]
                 except HistoryError:
                     # A copied/moved catalog may contain its old absolute
                     # paths. Do not inspect those files outside this folder;
@@ -1902,10 +1935,19 @@ class HistoryStore:
         except OSError:
             return []
         where, params = self._filter_clause("all", "", include_deleted=False)
-        listed = {(row[0], row[1], row[2]) for row in self._db.execute(
-            "SELECT media.tweet_id,media.num,media.media_type FROM media" + where, params)}
+        listed = set()
+        disconnected = set()
+        anchor_disconnected = {}
+        for row in self._db.execute(
+                "SELECT media.tweet_id,media.num,media.media_type,media.path FROM media" + where, params):
+            identity = (row[0], row[1], row[2])
+            listed.add(identity)
+            if self._drive_disconnected(row[3], anchor_disconnected):
+                disconnected.add(identity)
         return [item for item in self.missing_media(verify_files=True)
-                if not item["ignored"] and (item["tweet_id"], item["num"], item["media_type"]) in listed]
+                if not item["ignored"]
+                and (item["tweet_id"], item["num"], item["media_type"]) in listed
+                and (item["tweet_id"], item["num"], item["media_type"]) not in disconnected]
 
     @_safe
     def lost_count(self) -> int:
@@ -2150,16 +2192,27 @@ class HistoryStore:
         return ident
 
     @staticmethod
+    def _drive_disconnected(path: str, cache: dict[str, bool] | None = None) -> bool:
+        anchor = Path(path).anchor if path else ""
+        if not anchor:
+            return False
+        if cache is not None and anchor in cache:
+            return cache[anchor]
+        try:
+            disconnected = not Path(anchor).exists()
+        except OSError:
+            disconnected = True
+        if cache is not None:
+            cache[anchor] = disconnected
+        return disconnected
+
+    @staticmethod
     def _deletion_path_absent(path: str) -> bool:
         candidate = Path(path)
         # A disconnected drive is also FileNotFoundError (WinError 3). That is
         # not evidence the file was removed; the catalog path has to remain so
         # a later save does not fetch it again.
-        anchor = candidate.anchor
-        try:
-            if anchor and not Path(anchor).exists():
-                return False
-        except OSError:
+        if HistoryStore._drive_disconnected(path):
             return False
         try:
             candidate.lstat()
@@ -2307,7 +2360,9 @@ class HistoryStore:
                            "AND deletion_items.num=media.num AND deletion_items.media_type=media.media_type "
                            "AND deletion_items.path=media.last_path "
                            + ("COLLATE NOCASE " if os.name == "nt" else "") +
-                           "AND deletion_items.status IN ('recycled','interrupted')))" )
+                           "AND deletion_items.status IN ('recycled','interrupted') "
+                           "AND (media.missing_since='' OR COALESCE(deletion_items.finished_at,'')='' "
+                           "OR media.missing_since<=deletion_items.finished_at)))")
             # One entry per file, and one per media that has no file anywhere:
             # a second record of the same path, or an old layout's record of a
             # photo that is here, is not another photo.
@@ -3628,7 +3683,8 @@ class HistoryStore:
 
     @_safe
     def duplicate_page(self, page=0, page_size=100, media_type="all", query="", *, period=None, author="",
-                       hashtag="", favorite_only=False, user_tag="", ai_category="", ai_origin="") -> dict:
+                       hashtag="", favorite_only=False, user_tag="", ai_category="", ai_origin="",
+                       after=None) -> dict:
         """Duplicates in group order: each group together, the photo to keep first.
 
         Every row carries ``cluster_id``, ``cluster_rank`` (1 is the photo to
@@ -3640,6 +3696,11 @@ class HistoryStore:
         """
         if (isinstance(page, bool) or not isinstance(page, int) or page < 0 or
                 isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000):
+            raise HistoryError(_HISTORY_HELP)
+        if after is not None and (
+                page != 0 or not isinstance(after, tuple) or len(after) != 2 or
+                isinstance(after[0], bool) or not isinstance(after[0], int) or
+                isinstance(after[1], bool) or not isinstance(after[1], int)):
             raise HistoryError(_HISTORY_HELP)
         empty = {"rows": [], "total": 0, "page": 0, "pages": 0, "page_size": page_size}
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
@@ -3653,17 +3714,23 @@ class HistoryStore:
                   "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
                   "LEFT JOIN tweets ON tweets.tweet_id=media.tweet_id")
         condition = (where + " AND " if where else " WHERE ") + "ranked.cluster_size>=2"
+        row_condition = condition
+        row_params = list(params)
+        if after is not None:
+            # Keyset continuation keeps incremental duplicate paging independent of OFFSET.
+            row_condition += " AND (ranked.cluster_id>? OR (ranked.cluster_id=? AND ranked.cluster_rank>?))"
+            row_params.extend((after[0], after[0], after[1]))
         hashtags_col = "tweets.hashtags" if self._has_column("tweets", "hashtags") else "'' AS hashtags"
         with self._read_snapshot():
             total = self._db.execute(ranked + "SELECT COUNT(*) " + source + condition, params).fetchone()[0]
             pages = (total + page_size - 1) // page_size
-            page = min(page, max(0, pages - 1))
+            page = 0 if after is not None else min(page, max(0, pages - 1))
             rows = self._read_rows(
                 ranked + "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,"
                 + hashtags_col + ",ranked.cluster_id AS cluster_id,ranked.cluster_rank AS cluster_rank,"
-                "ranked.cluster_copy AS cluster_copy,ranked.cluster_size AS cluster_size " + source + condition +
+                "ranked.cluster_copy AS cluster_copy,ranked.cluster_size AS cluster_size " + source + row_condition +
                 " ORDER BY ranked.cluster_id, ranked.cluster_rank LIMIT ? OFFSET ?",
-                (*params, page_size, page * page_size))
+                (*row_params, page_size, 0 if after is not None else page * page_size))
         return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
     @_safe
@@ -3682,7 +3749,9 @@ class HistoryStore:
         return row[0] if row else 0
 
     @_safe
-    def duplicate_copy_identities(self) -> list[tuple] | None:
+    def duplicate_copy_identities(self, media_type="all", query="", *, period=None, author="",
+                                  hashtag="", favorite_only=False, user_tag="",
+                                  ai_category="", ai_origin="") -> list[tuple] | None:
         """Copies from the last scan: what the duplicate view calls '사본', group by group.
 
         The favorite or largest file of each group stays, and so does every
@@ -3693,9 +3762,23 @@ class HistoryStore:
         """
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return None
-        rows = self._read_rows(
-            self._ranked_duplicates() + "SELECT folder_mode, tweet_id, num, media_type FROM ranked "
-            "WHERE cluster_copy ORDER BY cluster_id, cluster_rank")
+        if (media_type == "all" and not query and period is None and not author and not hashtag
+                and not favorite_only and not user_tag and not ai_category and not ai_origin):
+            rows = self._read_rows(
+                self._ranked_duplicates() + "SELECT folder_mode, tweet_id, num, media_type FROM ranked "
+                "WHERE cluster_copy ORDER BY cluster_id, cluster_rank")
+        else:
+            where, params = self._filter_clause(media_type, query, period, author, False, hashtag=hashtag,
+                                                favorite_only=favorite_only, user_tag=user_tag,
+                                                ai_category=ai_category, ai_origin=ai_origin)
+            source = ("FROM ranked JOIN media ON media.folder_mode=ranked.folder_mode AND media.tweet_id=ranked.tweet_id "
+                      "AND media.num=ranked.num AND media.media_type=ranked.media_type "
+                      "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
+                      "LEFT JOIN tweets ON tweets.tweet_id=media.tweet_id")
+            condition = (where + " AND " if where else " WHERE ") + "ranked.cluster_size>=2 AND ranked.cluster_copy"
+            rows = self._read_rows(
+                self._ranked_duplicates() + "SELECT ranked.folder_mode, ranked.tweet_id, ranked.num, ranked.media_type "
+                + source + condition + " ORDER BY ranked.cluster_id, ranked.cluster_rank", params)
         return [(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows]
 
     @_safe

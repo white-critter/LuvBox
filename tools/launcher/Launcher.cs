@@ -907,6 +907,9 @@ namespace LuvBox
 
         [DllImport("kernel32.dll")]
         public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+        [DllImport("kernel32.dll")]
+        public static extern bool CloseHandle(IntPtr handle);
     }
 
     /// <summary>Layout and wording from splash.ini, shared with tools/draw_splash.py.</summary>
@@ -1364,20 +1367,30 @@ namespace LuvBox
         {
             using (Process child = Start(installation, arguments))
             {
+                IntPtr job = IntPtr.Zero;
                 try
                 {
-                    IntPtr job = Native.CreateJobObject(IntPtr.Zero, null);
+                    job = Native.CreateJobObject(IntPtr.Zero, null);
                     if (job != IntPtr.Zero)
                     {
                         Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = new Native.JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
-                        limits.BasicLimitInformation.LimitFlags = 0x2000;  // end with the last handle to the job
+                        // Kill the child if the launcher dies, while letting detached GUI launches break away.
+                        limits.BasicLimitInformation.LimitFlags = 0x2000 | 0x0800;
                         if (Native.SetInformationJobObject(job, 9, ref limits, Marshal.SizeOf(limits)))
                             Native.AssignProcessToJobObject(job, child.Handle);
                     }
                 }
                 catch (Exception) { }
-                child.WaitForExit();
-                return child.ExitCode;
+                try
+                {
+                    child.WaitForExit();
+                    return child.ExitCode;
+                }
+                finally
+                {
+                    if (job != IntPtr.Zero)
+                        Native.CloseHandle(job);
+                }
             }
         }
 

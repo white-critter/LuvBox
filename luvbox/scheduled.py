@@ -24,6 +24,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+from threading import Event
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -80,24 +82,56 @@ def normal_time(value: str) -> str:
     return f"{int(match[1]):02d}:{match[2]}"
 
 
-def _powershell(script: str, **values: str) -> str:
+def _powershell(script: str, cancel: Event | None = None, **values: str) -> str:
     """Run a fixed script; user values only travel as environment variables."""
     executable = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     environment = os.environ.copy()
     environment.update({"XLS_" + key.upper(): value for key, value in values.items()})
     script = ("$ErrorActionPreference = 'Stop'\n"
               "[Console]::OutputEncoding = [Text.Encoding]::UTF8\n" + script)
+    command = [str(executable), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+               "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode("ascii")]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if cancel is None:
+        try:
+            result = subprocess.run(
+                command, env=environment, stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
+                creationflags=flags)
+        except (OSError, subprocess.SubprocessError):
+            raise ScheduleError(_SCHEDULE_HELP) from None
+        if result.returncode:
+            raise ScheduleError(_SCHEDULE_HELP)
+        return result.stdout.decode("utf-8", errors="replace").strip()
     try:
-        result = subprocess.run(
-            [str(executable), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-             "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode("ascii")],
-            env=environment, stdin=subprocess.DEVNULL, capture_output=True, timeout=60,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.SubprocessError):
+        process = subprocess.Popen(
+            command, env=environment, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags)
+    except OSError:
         raise ScheduleError(_SCHEDULE_HELP) from None
-    if result.returncode:
+    deadline = time.monotonic() + 60
+    with process:
+        try:
+            while True:
+                if cancel.is_set():
+                    raise ScheduleError(_SCHEDULE_HELP)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ScheduleError(_SCHEDULE_HELP)
+                try:
+                    stdout, _ = process.communicate(timeout=min(0.05, remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+        except ScheduleError:
+            try:
+                process.kill()
+                process.communicate(timeout=1)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            raise
+    if process.returncode:
         raise ScheduleError(_SCHEDULE_HELP)
-    return result.stdout.decode("utf-8", errors="replace").strip()
+    return stdout.decode("utf-8", errors="replace").strip()
 
 
 _TASK_LOOKUP_SCRIPT = r"""
@@ -177,10 +211,10 @@ foreach ($name in $found) {
 """
 
 
-def task_status() -> dict:
+def task_status(cancel: Event | None = None) -> dict:
     """What is registered: program, daily time, and whether it is this app."""
     try:
-        data = json.loads(_powershell(_STATUS_SCRIPT, task=TASK_NAME, legacy="|".join(_LEGACY_TASKS)))
+        data = json.loads(_powershell(_STATUS_SCRIPT, cancel=cancel, task=TASK_NAME, legacy="|".join(_LEGACY_TASKS)))
     except ValueError:
         raise ScheduleError(_SCHEDULE_HELP) from None
     # Only an explicit false from the scheduler means that no task exists.

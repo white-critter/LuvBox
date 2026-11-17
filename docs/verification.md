@@ -10,6 +10,14 @@
 
 배포 검증은 `LuvBox.exe`의 체크섬과 꼬리표, 소스·라이선스 ZIP의 내용과 개인정보 제외를 확인합니다. 공개 뒤 올린 `LuvBox.exe`를 다시 받아 해시를 대조하고 한글·공백 경로에서, 격리한 `LOCALAPPDATA`로 실행합니다. 세부 로그와 화면은 `.test-output/`에 보관하며 배포 소스에 넣지 않습니다.
 
+## 2026-11-17 1.10.9 프로그램 전체 검수와 수정
+
+- **계기**: 1.10.8 배포 뒤 프로그램 검수(꼭 필요한 성능 개선, 어색한 UI/UX, 중위험 이상 문제·오작동 수정, 필수적인 경우만 리팩토링, 수정 시 재배포) 요청에 따라 5개 영역(다운로드, 저장소/DB, 라이브러리/AI, 앱/브리지/실행기, QML UI)을 재점검했습니다.
+- **새 검사 16개**: `tests/test_regression_1109.py`에 실행기 Job/breakaway, 예약 PowerShell 취소 종료, 업데이트 잠금 재시도/롤백, `AppDataConflict`/`AppDataError` 시작 분기, `CatalogDamaged` 보존, 빠른 스캔의 비활성 `review_pending` 처리, 재시도 `note_unsaved` 메타데이터 유지, 비ACL 볼륨 DACL 예외, `adopt_moved_root` 유니코드 경로·`deletion_items` 동기화, 삭제 뒤 복원·재삭제 기록 필터, 미연결 드라이브 크기·없음 제외, 빈 기록 이전 스키마 초기화, 백업 무진전 타임아웃, 라이브러리 부분 새로고침·`teach_labels` 중단·중복 키셋 페이징·필터 사본 선택, `RecordsController` 우선순위/중복 재시도/캐시, 실 `MainWindow.qml` 680×480 상태 줄·예약 창·연결 창·중복/미저장 키보드 포커스 검사를 추가했습니다.
+- **실행 결과**: 전체 unittest 1,782개 중 1,774개 통과·8개 생략·0개 실패(668.974초).
+- 소스 `pip check`, `tools/check_build_inputs.py`, `tools/package_release.py --check-guides`, `tools/release_key.py --check`, 격리된 `LOCALAPPDATA`·QML 캐시에서 `entry.py --self-test`·`--download-smoke` 통과.
+- **확인하지 못한 것**: 실제 X 로그인과 실제 다운로드, Windows 탐색기 실제 외장 드라이브 탈착·exFAT 물리 볼륨·Windows Task Scheduler 실제 COM 등록/실행·실제 한글 IME 및 트랙패드 제스처.
+
 ## 2026-11-17 1.10.8 프로그램 전체 검수와 수정
 
 - **계기**: 1.10.7 배포 뒤 주인님이 프로그램 검수, 필요한 성능 개선, 많이 어색한 화면 개선, 중간 이상 문제 수정 뒤 재배포를 요청했습니다.

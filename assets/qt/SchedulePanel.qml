@@ -24,6 +24,11 @@ ColumnLayout {
         }
     }
 
+    function resetDraft() {
+        timeEdited = false
+        timeField.text = (schedule && schedule.time) ? schedule.time : "09:00"
+    }
+
     onVisibleChanged: if (visible && schedule && !schedule.busy) schedule.refresh()
     onAppChanged: if (schedule && !schedule.busy) schedule.refresh()
     Connections {

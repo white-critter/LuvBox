@@ -407,11 +407,22 @@ def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
     day = datetime.now().strftime("%Y%m%d")
     target, temporary = folder / f"history-{day}.sqlite3", folder / f".history-{day}.partial"
     temporary.unlink(missing_ok=True)
-    deadline = time.monotonic() + 5
+    start = time.monotonic()
+    stall_deadline = start + 5
+    hard_deadline = start + 120
+    last_remaining = None
 
     def progress(status, remaining, total):
-        # Connection.timeout does not bound backup's own SQLITE_BUSY retries.
-        if time.monotonic() > deadline:
+        nonlocal stall_deadline, last_remaining
+        # Connection.timeout does not bound backup's own SQLITE_BUSY retries;
+        # keep copying while pages advance, abort after 5s stalled or 120s total.
+        now = time.monotonic()
+        progressed = (last_remaining is None and remaining < total) or (
+            last_remaining is not None and remaining < last_remaining)
+        last_remaining = remaining if last_remaining is None else min(last_remaining, remaining)
+        if progressed:
+            stall_deadline = now + 5
+        if now > stall_deadline or now > hard_deadline:
             raise sqlite3.OperationalError("기록 백업 제한 시간을 초과했습니다. 다음 저장 때 다시 시도합니다.")
 
     try:

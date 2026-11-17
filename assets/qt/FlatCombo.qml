@@ -277,11 +277,14 @@ ComboBox {
                 blocking: true
                 onWheel: function(event) {
                     const step = event.pixelDelta.y
-                    if (!step)
+                        || (event.angleDelta.y ? Math.round(event.angleDelta.y / 120 * 108) : 0)
+                    if (!step) {
+                        event.accepted = false
                         return
+                    }
                     const minimum = popupList.originY
                     const maximum = minimum + Math.max(0, popupList.contentHeight - popupList.height)
-                    popupList.contentY = Math.max(minimum, Math.min(maximum, popupList.contentY + step))
+                    popupList.contentY = Math.max(minimum, Math.min(maximum, popupList.contentY - step))
                 }
             }
         }

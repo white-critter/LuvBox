@@ -2,6 +2,38 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.10.9 — 2026-11-17
+
+프로그램 전체 검수(다운로드, 기록/저장소, 라이브러리/AI, 앱/브리지/실행기, QML UI 5개 영역)에서 확인한 중위험 이상 오류·성능 병목·UI/UX 불편을 수정한 릴리스입니다.
+
+- **실행기·예약·업데이트·데이터 충돌 처리**:
+  - `Launcher.cs`의 Job Object 플래그에 `JOB_OBJECT_LIMIT_BREAKAWAY_OK`(`0x0800`)를 추가하고 종료 시 핸들을 닫도록 했으며, `luvbox/launcher.py` `spawn_detached`가 `CREATE_BREAKAWAY_FROM_JOB`(`0x01000000`)을 사용(허용되지 않은 상위 Job에서는 `PermissionError` 후 기본 플래그로 재시도)해 예약 실패 알림의 ‘앱 열기’나 업데이트 재시작이 부모 작업 종료와 함께 죽지 않도록 했습니다.
+  - `luvbox/scheduled.py`와 `luvbox/qt_schedule.py`에서 읽기 전용 `task_status` 조회가 취소 `Event`를 받아 창 닫기 시 지연 중인 PowerShell 프로세스를 즉시 종료할 수 있게 했습니다.
+  - `luvbox/updater.py` `install`이 Windows 공유·백신 잠금(`winerror` 5·32·33)에 대해 짧은 백오프로 재시도하도록 했습니다.
+  - `luvbox/qt_app.py` `_start_controller`가 `settings.AppDataConflict` 발생 시 `set_aside_previous()` 진행 여부를 묻고 `AppDataError` 메시지를 그대로 안내하도록 보완했습니다.
+- **다운로드 엔진·메타데이터**:
+  - `luvbox/core.py` `run_worker`가 `PhotoJob` 안팎의 `CatalogDamaged`를 별도로 보존해 `finally:`의 `HistoryError`나 `error_kind` 초기화에 덮이지 않도록 수정했습니다.
+  - 비활성 미디어 형식(`include_videos`/`include_gifs` 끔)이 `review_pending`에 있을 때 빠른 스캔 종료와 보존이 `enabled_pending` 기준으로 동작하도록 수정했습니다.
+  - 재시도 실패 후속 기록(`note_unsaved`의 `identity=` 호출)이 앞서 추출한 작성자·크기·게시일 정보를 지우지 않고 `retry_refused` 세부 사유를 유지하게 했습니다.
+  - `luvbox/metadata.py` `_preserve_permissions`가 ACL 미지원 파일시스템(exFAT/FAT32 등, `winerror` 1·50·1350) 오류를 무시하고, 실제 권한 오류는 `reason="permission"`으로 보고하게 했습니다.
+- **저장소·기록 DB·복구**:
+  - `HistoryStore.adopt_moved_root`를 경로 구성 요소 비교(`Path.parts`)로 바꿔 `os.path.normcase` 길이 변화 문자(예: `İ`)에서 경로가 잘리지 않게 하고 `deletion_items.path`도 함께 갱신합니다.
+  - `_record_filter`와 `_fileless_elsewhere`에 `missing_since <= finished_at` 조건을 추가해 삭제 뒤 복원·재저장 후 다시 지워진 파일이 옛 삭제 이력 때문에 가려지지 않게 했습니다.
+  - 연결 해제된 이전 저장소 루트의 파일 크기 보존(`_drive_disconnected` 확인), Windows 대소문자 무시 `_media_path` 보조 조회, `_lost_items()`의 미연결 드라이브 제외를 보완했습니다.
+  - `storage.migrate_records`에서 양쪽에 `.luvbox-history.sqlite3`가 없을 때 `HistoryStore` 전체 스키마를 초기화하고 `PRAGMA journal_mode=DELETE`로 sidecar가 남지 않게 했습니다.
+  - `storage._backup_database`와 `recovery.backup_catalog`의 백업 제한 시간을 총 5초가 아니라 진행 멈춤(무진전) 5초(전체 상한 120초)로 바꿨습니다.
+- **갤러리·AI·중복·실행 기록**:
+  - `LibraryController.shutdown()`에서 AI/중복 스캔 취소 플래그를 세우고, `teach_labels` 모델 내려받기 콜백에서도 `_catalog_request` 무효화를 함께 확인합니다.
+  - `_duplicate_counts_loaded`·`_distinct_counts_loaded`·`_ai_counts_loaded`를 분리 추적해 새로고침·삭제·중복 아님 표시가 중간에 취소돼도 누락된 카운트를 다시 조회합니다.
+  - `HistoryStore.duplicate_page`에 `(cluster_id, cluster_rank)` 키셋 `after` 커서를 추가해 중복 보기 증분 페이징의 `OFFSET` 밀림을 없앴고, `duplicate_copy_identities` / `duplicate_copy_keys`가 활성 필터와 읽기 전용 연결을 반영하게 했습니다.
+  - `UnsavedReview.qml` 다시 저장 버튼 더블클릭 방어와 `RecordsController.retryAll` 중복 큐 방지, `"counts"`보다 대화형·실행 기록·추가 로드 우선 스케줄링, `"missing"` `append` 스냅샷 캐시를 적용했습니다.
+- **QML UI/UX**:
+  - `MainWindow.qml` `statusLine`에 `Layout.fillWidth`/`Layout.minimumWidth: 0`을 보완해 최소 폭(680px)에서 상태·진행 막대·중단 버튼이 화면 밖으로 밀리지 않게 했습니다.
+  - `FlatCombo.qml` 터치패드 `WheelHandler` 스크롤 방향(`- step`)과 `angleDelta.y` 폴백을 수정했습니다.
+  - `ConnectionDialog.qml` 스크롤에 `contentWidth: availableWidth`를 지정했습니다.
+  - `SchedulePanel.qml`·`ScheduleDialog.qml` 닫기/열기 시 `resetDraft()`로 취소된 잘못된 입력을 초기화합니다.
+  - `DuplicateReview.qml`·`UnsavedReview.qml` 타일 및 비교 배지에 `activeFocusOnTab`, `Theme.focus` 테두리, Space/Enter/Return 키보드 조작을 추가했습니다(마우스 클릭 포커스 비침해 유지).
+
 ## 1.10.8 — 2026-11-17
 
 프로그램 전체 검수(영역 일곱 곳과 화면 캡처)에서 재현된 문제를 고친 릴리스입니다. 기록 DB의 표 구조, 설정 파일, 브라우저 확장(1.2.0), 릴리스 첨부 이름·체크섬·서명 형식은 1.10.7과 같습니다.

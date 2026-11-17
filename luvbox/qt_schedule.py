@@ -1,7 +1,8 @@
 """Qt controls for one visible, editable daily Windows save task."""
 
 from collections import deque
-from threading import Condition, Thread
+import inspect
+from threading import Condition, Event, Thread
 
 from PySide6.QtCore import QObject, Property, Qt, QTimer, Signal, Slot
 
@@ -43,6 +44,7 @@ class ScheduleController(QObject):
         self._closing = False
         self._shutdown_complete = False
         self._condition = Condition()
+        self._read_cancel = Event()
         self._pending = deque()
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.setInterval(50)
@@ -198,8 +200,21 @@ class ScheduleController(QObject):
         return self._queue("migrate")
 
     @staticmethod
-    def _read_state():
-        data = task_status()
+    def _accepts_cancel(reader):
+        target = getattr(reader, "side_effect", None)
+        if not callable(target):
+            target = reader
+        try:
+            parameters = inspect.signature(target).parameters.values()
+        except (TypeError, ValueError):
+            return False
+        return any(p.name == "cancel" or p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters)
+
+    @staticmethod
+    def _read_state(cancel=None):
+        data = (task_status(cancel=cancel)
+                if cancel is not None and ScheduleController._accepts_cancel(task_status)
+                else task_status())
         if not isinstance(data, dict) or not isinstance(data.get("registered"), bool):
             raise ValueError("invalid task status")
         state = ScheduleController._empty_state()
@@ -223,7 +238,7 @@ class ScheduleController(QObject):
 
     def _perform(self, operation, value="", expected=None):
         if operation == "refresh":
-            return self._read_state(), ""
+            return self._read_state(cancel=self._read_cancel), ""
         # The named process lock covers the last check as well as replacement.
         # Another app window cannot slip a different schedule between them.
         with file_mutex(app_directory() / "schedule-task"):
@@ -303,6 +318,7 @@ class ScheduleController(QObject):
                 return self._shutdown_complete
             self._closing = True
             self._locked = True
+            self._read_cancel.set()
             self._pending.clear()
             self._condition.notify_all()
         if self._busy:

@@ -593,10 +593,20 @@ def _integrity(db: sqlite3.Connection) -> None:
 
 
 def _backup_database(source: Path, destination: Path) -> None:
-    deadline = time.monotonic() + 5
+    start = time.monotonic()
+    stall_deadline = start + 5
+    hard_deadline = start + 120
+    last_remaining = None
 
     def progress(status, remaining, total):
-        if time.monotonic() > deadline:
+        nonlocal stall_deadline, last_remaining
+        now = time.monotonic()
+        progressed = (last_remaining is None and remaining < total) or (
+            last_remaining is not None and remaining < last_remaining)
+        last_remaining = remaining if last_remaining is None else min(last_remaining, remaining)
+        if progressed:
+            stall_deadline = now + 5
+        if now > stall_deadline or now > hard_deadline:
             raise MigrationError("기록 파일이 사용 중이어서 옮기지 못했습니다. 다른 작업을 종료한 뒤 다시 시도해 주세요.")
 
     with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=1)) as old:
@@ -1173,7 +1183,14 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
                 finally:
                     incoming.unlink(missing_ok=True)
         history_path = stage / _HISTORY_DB
+        if not history_path.is_file():
+            from .history import HistoryStore
+            with closing(HistoryStore(stage, media_dir=destination.output_dir,
+                                      output_dir=destination.output_dir,
+                                      legacy_dir=destination.legacy_dir)):
+                pass
         with closing(sqlite3.connect(history_path, timeout=1)) as db:
+            db.execute("PRAGMA journal_mode=DELETE")
             with db:
                 db.execute("CREATE TABLE IF NOT EXISTS catalog_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
                 db.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('allowed_media_roots',?)",

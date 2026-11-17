@@ -231,6 +231,8 @@ class RecordsController(QObject):
         self._retryable_total = None
         self._retryable_limit = None
         self._unsaved_busy, self._unsaved_error, self._unsaved_status = False, "", ""
+        self._retry_busy = False
+        self._missing_snapshot = None
         self._counts = {reason: 0 for reason in unsaved.REASONS}
         self._missing_count = 0
         self._unsaved_selected = set()
@@ -330,6 +332,7 @@ class RecordsController(QObject):
         self._unsaved_status = self._unsaved_error = self._run_error = self._run_note = ""
         self._retryable_total = None
         self._retryable_limit = None
+        self._retry_busy = False
         self.refresh()
 
     def setVideoLimit(self, megabytes):
@@ -624,7 +627,10 @@ class RecordsController(QObject):
     @Slot()
     def retryAll(self):
         """Every row that could now succeed, including the ones on other pages."""
-        self._enqueue("retry_keys", self._unsaved_view)
+        if self._closing or self._retry_busy:
+            return
+        self._retry_busy = True
+        self._enqueue("retry_keys", self._unsaved_view, replace=True)
 
     def _can_retry(self, row):
         # A size-limited file only fits after the limit was raised since it was skipped.
@@ -664,7 +670,16 @@ class RecordsController(QObject):
         with self._condition:
             if replace:
                 self._pending = deque(item for item in self._pending if item[0] != kind)
-            self._pending.append((kind, self._generation, payload))
+            item = (kind, self._generation, payload)
+            prioritized = kind in {"runs", "dismiss", "release", "exclude", "retry_keys"} or (
+                kind == "unsaved" and payload[4] == "append")
+            if prioritized:
+                # Run history, user actions, and cached appends run before background full-library counts.
+                front = [entry for entry in self._pending if entry[0] != "counts"]
+                back = [entry for entry in self._pending if entry[0] == "counts"]
+                self._pending = deque([*front, item, *back])
+            else:
+                self._pending.append(item)
             self._condition.notify()
 
     def _work(self):
@@ -690,16 +705,20 @@ class RecordsController(QObject):
                     result = dict(run_page(paths, page), serial=serial)
                 elif kind == "unsaved":
                     view, page, serial, limit_mb, mode = payload
+                    if view != "missing" or mode != "append":
+                        self._missing_snapshot = None
 
-                    def read(number):
+                    def read(number, read_mode=mode):
                         if view == "excluded":
                             return self._excluded_page(account, output_dir, separate, number)
                         if view == "missing":
-                            return self._missing_page(account, output_dir, separate, number)
+                            return self._missing_page(account, output_dir, separate, number,
+                                                      mode=read_mode, generation=generation)
                         return unsaved.page(account, output_dir, _KINDS[view], number, _UNSAVED_PAGE)
 
                     if mode == "through" and view == "missing":
-                        found = self._missing_page(account, output_dir, separate, page, through=True)
+                        found = self._missing_page(account, output_dir, separate, page,
+                                                   through=True, mode="through", generation=generation)
                     else:
                         found = read(0 if mode == "through" else page)
                         if mode == "append" and found.get("page", 0) < page:
@@ -709,11 +728,12 @@ class RecordsController(QObject):
                             mode = "through"
                             if target_page > 0:
                                 if view == "missing":
-                                    found = self._missing_page(account, output_dir, separate, target_page, through=True)
+                                    found = self._missing_page(account, output_dir, separate, target_page,
+                                                               through=True, mode="through", generation=generation)
                                 else:
-                                    found = read(0)
+                                    found = read(0, "through")
                                     for number in range(1, target_page + 1):
-                                        following = read(number)
+                                        following = read(number, "through")
                                         found["rows"] = list(found["rows"]) + list(following["rows"])
                                         found["page"] = following.get("page", number)
                         elif mode == "through":
@@ -728,16 +748,20 @@ class RecordsController(QObject):
                                       retryable_limit=limit_mb)
                     self._attach_previews(account, result)
                 elif kind == "counts":
+                    self._missing_snapshot = None
                     result = unsaved.counts(account, output_dir) if account else {}
                     result[unsaved.EXCLUDED] = self._excluded_total(account, output_dir, separate)
                     result[MISSING] = self._missing_total(account, output_dir, separate)
                 elif kind == "dismiss":
+                    self._missing_snapshot = None
                     items, kinds = payload
                     unsaved.remove(account, output_dir, items, kinds)
                     result = {}
                 elif kind == "release":
+                    self._missing_snapshot = None
                     result = {"released": self._release_excluded(account, output_dir, separate, payload)}
                 elif kind == "exclude":
+                    self._missing_snapshot = None
                     result = {"excluded": self._exclude_missing(account, output_dir, separate, payload)}
                 else:
                     keys = self._retry_keys(account, output_dir, separate, payload)
@@ -815,16 +839,35 @@ class RecordsController(QObject):
         with closing(_ReadOnlyHistory(paths)) as store:
             return store.lost_count() if hasattr(store, "lost_count") else 0
 
-    def _missing_page(self, account, output_dir, separate, page, *, through=False):
+    def _missing_page(self, account, output_dir, separate, page, *, through=False, mode="replace", generation=None):
         paths = self._catalog(account, output_dir, separate)
         if paths is None:
             return {"rows": [], "total": 0, "page": 0, "pages": 0, "page_size": _UNSAVED_PAGE}
-        with closing(_ReadOnlyHistory(paths)) as store:
-            found = store.lost_media(page=page, page_size=_UNSAVED_PAGE, through=through)
+        cache_key = (generation, account, output_dir, separate)
+        cached = self._missing_snapshot if mode == "append" and generation is not None else None
+        items = None
+        if cached is not None and cached[0] == cache_key:
+            items = cached[1]
+        else:
+            with closing(_ReadOnlyHistory(paths)) as store:
+                if hasattr(store, "_lost_items") and type(store).lost_media is HistoryStore.lost_media:
+                    items = store._lost_items()
+                    if not through and generation is not None:
+                        self._missing_snapshot = (cache_key, items)
+                else:
+                    found = store.lost_media(page=page, page_size=_UNSAVED_PAGE, through=through)
+        if items is not None:
+            total = len(items)
+            pages = (total + _UNSAVED_PAGE - 1) // _UNSAVED_PAGE if total else 0
+            page = min(page, max(0, pages - 1))
+            start = 0 if through else page * _UNSAVED_PAGE
+            end = (page + 1) * _UNSAVED_PAGE
+            found = {"rows": items[start:end], "total": total, "page": page, "pages": pages,
+                     "page_size": _UNSAVED_PAGE}
         found["rows"] = [dict(tweet_id=row["tweet_id"], num=row["num"], media_type=row["media_type"],
                               reason=MISSING, author=row["author"], posted_at=row["posted_at"],
                               width=0, height=0, duration=0, size_bytes=0, limit_mb=0, detail=_MISSING_DETAIL,
-                              attempts=1, first_seen=row["saved_at"], last_seen=row["saved_at"])
+                              attempts=1, first_seen=row["saved_at"] or "", last_seen=row["saved_at"] or "")
                          for row in found["rows"]]
         return found
 
@@ -888,7 +931,11 @@ class RecordsController(QObject):
     @Slot(object)
     def _accept(self, event):
         kind, generation, result, error = event
-        if self._closing or generation != self._generation:
+        if self._closing:
+            return
+        if generation != self._generation:
+            if kind == "retry_keys":
+                self._retry_busy = False
             return
         if kind == "runs":
             if result.get("serial", self._run_serial) != self._run_serial:
@@ -968,6 +1015,7 @@ class RecordsController(QObject):
                 if count:
                     self.catalogChanged.emit()
         elif kind == "retry_keys":
+            self._retry_busy = False
             self._unsaved_error = error
             if not error:
                 if result["keys"]:

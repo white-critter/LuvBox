@@ -135,10 +135,20 @@ def spawn_detached(command) -> None:
             kernel32.SetDllDirectoryW(None)
         except (OSError, AttributeError):
             kernel32 = None
+    base_flags = getattr(subprocess, "DETACHED_PROCESS", 0)
+    flags = base_flags | (0x01000000 if sys.platform == "win32" else 0)
     try:
-        subprocess.Popen(command, env=environment, close_fds=True, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+        try:
+            subprocess.Popen(command, env=environment, close_fds=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=flags)
+        except PermissionError:
+            if flags == base_flags:
+                raise
+            # Outer jobs without breakaway permission reject CREATE_BREAKAWAY_FROM_JOB.
+            subprocess.Popen(command, env=environment, close_fds=True, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=base_flags)
     finally:
         bundle = getattr(sys, "_MEIPASS", None)
         if kernel32 is not None and bundle:

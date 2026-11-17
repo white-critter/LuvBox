@@ -177,6 +177,7 @@ Item {
                         enabled: !!review.app && review.app.canStart
                             && review.app.accounts.authenticationState !== "reconnect_required"
                             && !!review.records && (review.chosen > 0 || review.records.retryableCount > 0)
+                        onDoubleClicked: {}
                         onClicked: review.chosen > 0 ? review.records.retrySelected() : review.records.retryAll()
                     }
                     FlatButton {
@@ -316,9 +317,10 @@ Item {
                         anchors.fill: parent
                         anchors.margins: 4
                         radius: Theme.radiusCard
+                        activeFocusOnTab: true
                         color: cell.picked ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.raised : Theme.well)
-                        border.width: cell.picked ? 1 : 0
-                        border.color: Theme.accent
+                        border.width: tile.activeFocus ? 2 : (cell.picked ? 1 : 0)
+                        border.color: tile.activeFocus ? Theme.focus : Theme.accent
                         Accessible.role: Accessible.CheckBox
                         Accessible.name: cell.reasonLabel + " " + cell.author
                         Accessible.checkable: true
@@ -326,6 +328,21 @@ Item {
                         // Picked without a mouse too: a screen reader toggles or presses the tile.
                         Accessible.onToggleAction: review.records.toggleUnsavedSelected(cell.token)
                         Accessible.onPressAction: review.records.toggleUnsavedSelected(cell.token)
+                        Keys.onSpacePressed: event => {
+                            if (review.records)
+                                review.records.toggleUnsavedSelected(cell.token)
+                            event.accepted = true
+                        }
+                        Keys.onReturnPressed: event => {
+                            if (review.records)
+                                review.records.openSource(cell.token)
+                            event.accepted = true
+                        }
+                        Keys.onEnterPressed: event => {
+                            if (review.records)
+                                review.records.openSource(cell.token)
+                            event.accepted = true
+                        }
 
                         Item {
                             id: frame

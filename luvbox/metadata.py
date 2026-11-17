@@ -181,6 +181,9 @@ def _preserve_creation_time(temporary: Path, original) -> None:
         close(handle)
 
 
+_NO_ACL_WINERRORS = {1, 50, 1350}
+
+
 def _preserve_permissions(source: Path, temporary: Path) -> None:
     """Retain the original Windows DACL rather than inheriting the folder's."""
     if os.name != "nt":
@@ -208,6 +211,8 @@ def _preserve_permissions(source: Path, temporary: Path) -> None:
     descriptor, dacl = pointer(), pointer()
     result = get(str(source), 1, 4, None, None, ctypes.byref(dacl), None, ctypes.byref(descriptor))
     if result:
+        if result in _NO_ACL_WINERRORS:
+            return
         raise ctypes.WinError(result)
     try:
         flags, revision = wintypes.WORD(), wintypes.DWORD()
@@ -216,7 +221,7 @@ def _preserve_permissions(source: Path, temporary: Path) -> None:
         # Preserve whether the file inherits permissions from its folder.
         protection = 0x80000000 if flags.value & 0x1000 else 0x20000000
         result = set_security(str(temporary), 1, 4 | protection, None, None, dacl, None)
-        if result:
+        if result and result not in _NO_ACL_WINERRORS:
             raise ctypes.WinError(result)
     finally:
         free(descriptor)
@@ -916,6 +921,7 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
         _original_unchanged(target, original)
         os.utime(temporary, ns=(original.st_atime_ns, original.st_mtime_ns))
         _preserve_creation_time(temporary, original)
+        reason = "permission"
         _preserve_permissions(target, temporary)
         reason = "replace"
         _replace_verified(temporary, target, original, deadline)

@@ -174,10 +174,11 @@ Item {
                             width: review.tileWidth
                             height: review.tileHeight
                             radius: Theme.radiusCard
+                            activeFocusOnTab: true
                             color: chosen ? Theme.accentSoft
                                 : (tileMouse.containsMouse || roleHover.hovered ? Theme.raised : Theme.well)
-                            border.width: chosen ? 1 : 0
-                            border.color: Theme.accent
+                            border.width: tile.activeFocus ? 2 : (chosen ? 1 : 0)
+                            border.color: tile.activeFocus ? Theme.focus : Theme.accent
                             Accessible.role: Accessible.CheckBox
                             Accessible.name: (tile.modelData.keeper ? "남길 사진 " : tile.modelData.copy ? "사본 " : "비슷한 사진 ")
                                 + tile.modelData.caption
@@ -187,6 +188,20 @@ Item {
                             // Picked without a mouse too: a screen reader toggles or presses the tile.
                             Accessible.onToggleAction: tileMouse.pick()
                             Accessible.onPressAction: tileMouse.pick()
+                            Keys.onSpacePressed: event => {
+                                tileMouse.pick()
+                                event.accepted = true
+                            }
+                            Keys.onReturnPressed: event => {
+                                if (review.library && !review.settling)
+                                    review.previewRequested(tile.modelData.key)
+                                event.accepted = true
+                            }
+                            Keys.onEnterPressed: event => {
+                                if (review.library && !review.settling)
+                                    review.previewRequested(tile.modelData.key)
+                                event.accepted = true
+                            }
 
                             Image {
                                 id: picture
@@ -342,14 +357,27 @@ Item {
                                 width: compareLabel.implicitWidth + 16
                                 height: 22
                                 radius: height / 2
+                                activeFocusOnTab: compare.visible
                                 color: compareMouse.containsMouse && available ? Theme.accent : Theme.scrim
-                                border.width: 1
-                                border.color: Theme.accentLine
+                                border.width: compare.activeFocus ? 2 : 1
+                                border.color: compare.activeFocus ? Theme.focus : Theme.accentLine
                                 opacity: available ? 1 : 0.5
                                 Accessible.role: Accessible.Button
                                 Accessible.name: "묶음 " + card.number + " 비슷한 사진 " + tile.modelData.caption
                                     + " 남길 사진과 비교 후 휴지통으로"
                                 Accessible.onPressAction: compareMouse.open()
+                                Keys.onSpacePressed: event => {
+                                    compareMouse.open()
+                                    event.accepted = true
+                                }
+                                Keys.onReturnPressed: event => {
+                                    compareMouse.open()
+                                    event.accepted = true
+                                }
+                                Keys.onEnterPressed: event => {
+                                    compareMouse.open()
+                                    event.accepted = true
+                                }
                                 Label {
                                     id: compareLabel
                                     anchors.centerIn: parent
