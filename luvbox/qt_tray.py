@@ -55,6 +55,8 @@ class TrayController(QObject):
             self._window.show()
         self._window.raise_()
         self._window.requestActivate()
+        # A scheduled save may have ended while the window was away: show its photos now.
+        self._controller.checkScheduledRun()
 
     @Slot()
     def openSettings(self):

@@ -92,6 +92,9 @@ class ManagementController(QObject):
         if kept:
             # A whole group was chosen in the duplicate view: its first photo stays.
             summary += f"묶음을 통째로 고른 곳에서는 한 장씩 남깁니다(남기는 사진 {kept:,}장).\n"
+        if self.deleteCount > len(names):
+            # Only the first names are listed; say that the count above is not this list.
+            names.append(f"외 {self.deleteCount - len(names):,}개")
         return summary + "\n".join(names)
 
     def takeRecycledKeys(self):

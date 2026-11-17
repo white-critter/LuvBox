@@ -41,6 +41,19 @@ _VIEW_PREFERENCES = {"confirm_each", "detailed_progress", "gallery_density", "au
 _SETTINGS_ERROR = "설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요."
 _REPAIR_ERROR = ("기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
                  "저장 폴더 권한을 확인하고 다시 시도해 주세요.")
+# How often the running program looks whether a scheduled save has ended (one stat).
+_SCHEDULED_POLL_MS = 60 * 1000
+
+
+def _file_stamp(path):
+    """Size and change time of a file, or None while it is missing or unreadable."""
+    if path is None:
+        return None
+    try:
+        details = path.stat()
+    except OSError:
+        return None
+    return details.st_mtime_ns, details.st_size
 
 
 class ApplicationController(QObject):
@@ -144,6 +157,19 @@ class ApplicationController(QObject):
         self._close_timer = QTimer(self)
         self._close_timer.setInterval(50)
         self._close_timer.timeout.connect(self._finish_close)
+        # Since 1.11.0 the program usually stays in the tray, so a scheduled save (a process of its
+        # own) often ends while it runs. What it saved is noticed as an own save would be.
+        try:
+            from .scheduled import last_run_path
+
+            self._scheduled_file = last_run_path()
+        except (OSError, settings.AppDataError):
+            self._scheduled_file = None
+        self._scheduled_stamp = _file_stamp(self._scheduled_file)
+        self._scheduled_timer = QTimer(self)
+        self._scheduled_timer.setInterval(_SCHEDULED_POLL_MS)
+        self._scheduled_timer.timeout.connect(self.checkScheduledRun)
+        self._scheduled_timer.start()
         identity = self._accounts.identity
         if identity:
             self._account = identity["handle"]
@@ -528,6 +554,30 @@ class ApplicationController(QObject):
         self._records.refresh()
         self.changed.emit()
 
+    @Slot()
+    def checkScheduledRun(self):
+        """A scheduled save ended since the last look: list what it saved, as after a save made here."""
+        if self._closing or self._scheduled_file is None:
+            return
+        stamp = _file_stamp(self._scheduled_file)
+        if stamp == self._scheduled_stamp:
+            return
+        self._scheduled_stamp = stamp
+        from .scheduled import last_run
+
+        outcome = last_run() or {}
+        self._records.refresh()                     # run history, lost and unsaved counts
+        saved = outcome.get("saved")
+        if type(saved) is not int or saved <= 0:
+            return
+        self._library.classifyNewPhotos()           # what the run left, when the model is here
+        if self._gallery_visible:
+            # Not reloaded under the person's eyes: the refresh button offers the new photos.
+            self._gallery_dirty = True
+            self.changed.emit()
+        else:
+            self.refreshGallery()
+
     def _records_changed_gallery(self):
         # Media was excluded, or an exclusion released: the gallery lists something else now.
         if self._closing:
@@ -906,6 +956,7 @@ class ApplicationController(QObject):
             return
         self.shutdownStarted.emit()
         self._closing = True
+        self._scheduled_timer.stop()
         self._pending_start = None
         self._pending_download = None
         self._save_after_settings = False
@@ -1077,6 +1128,14 @@ def launch(*, startup_probe=None):
     launcher.set_process_identity()
     QQuickStyle.setStyle("Basic")
     application = QApplication(sys.argv)
+    instance = None
+    if startup_probe is None:
+        from .single_instance import InstanceGuard
+
+        # Closing the window keeps LuvBox in the tray: starting it again shows that window.
+        instance = InstanceGuard()
+        if not instance.claim():
+            return 0
     palette = QPalette()
     for role, color in {
         QPalette.ColorRole.Window: "#101010",
@@ -1124,6 +1183,8 @@ def launch(*, startup_probe=None):
     application.setFont(ui_font)
     controller = _start_controller(QMessageBox, startup_probe=startup_probe)
     if controller is None:
+        if instance is not None:
+            instance.release()
         return 1
     wheel_input = WheelInputFilter()
     engine = QQmlApplicationEngine()
@@ -1143,12 +1204,24 @@ def launch(*, startup_probe=None):
         if startup_probe is None:
             launcher.signal_ready()
             QMessageBox.critical(None, "LuvBox", "화면을 열지 못했습니다. Qt 패키지와 앱 파일을 확인해 주세요.")
+        if instance is not None:
+            instance.release()
         return 1
     window = engine.rootObjects()[0]
     from .window_frame import WindowFrame
     frame = WindowFrame(window)  # noqa: F841  (kept for the window's lifetime: it follows activation and maximizing)
     from .qt_tray import TrayController
     tray = TrayController(application, window, controller)
+    if instance is not None:
+        def show_again():
+            if controller.closing:
+                return False
+            tray.show()
+            return True
+
+        instance.attach(show_again)
+        # From here a new start waits for this program to end, then opens its own window.
+        controller.shutdownStarted.connect(instance.stopListening)
     first_frame = _FirstFrame(window)
     program = launcher.launcher_path() if startup_probe is None else None
     if program is not None:
@@ -1170,6 +1243,9 @@ def launch(*, startup_probe=None):
     restart = controller.updates.restart_pending and launcher.launcher_path()
     del first_frame
     delete(engine)
+    if instance is not None:
+        # Before the restart: the version it starts must become the program, not wait for this one.
+        instance.release()
     if restart:
         try:
             launcher.spawn_detached([str(restart)])
