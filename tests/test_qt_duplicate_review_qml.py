@@ -193,6 +193,27 @@ def scene(shots=None):
         wait(lambda: library.filterDuplicateOnly and not model.busy, "duplicate view")
         assert not find("galleryGrid").property("visible") and find("duplicateReview").property("visible")
         assert find("duplicateEmptyState").property("visible") and find("duplicateGuide").property("visible")
+        # One short line; the explanation is behind the "?": a click keeps it open, a second click closes it.
+        guide_text = find("duplicateGuide").property("text")
+        assert chr(10) not in guide_text and len(guide_text) < 60, guide_text
+        help_button = find("duplicateHelp")
+        assert not help_button.property("showing")
+        click("duplicateHelp")
+        wait(lambda: help_button.property("showing") and help_button.property("pinned"), "help card shown")
+        click("duplicateHelp")
+        wait(lambda: not help_button.property("showing"), "help card closed")
+        # Resting the pointer on the "?" shows it too, and it leaves with the pointer.
+        def move_to(item):
+            point = item.mapToScene(QPointF(item.width() / 2, item.height() / 2))
+            QCoreApplication.postEvent(window, QMouseEvent(
+                QEvent.Type.MouseMove, point, QPointF(window.mapToGlobal(point.toPoint())),
+                Qt.MouseButton.NoButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier))
+            settle(30)
+        move_to(find("galleryGrid").parentItem())
+        move_to(help_button)
+        wait(lambda: help_button.property("showing") and not help_button.property("pinned"), "help card on hover")
+        move_to(find("galleryDuplicateFilter"))  # away from both the "?" and its card
+        wait(lambda: not help_button.property("showing"), "help card left with the pointer")
 
         # Default scan: identical files only.
         click("galleryScanDuplicates")

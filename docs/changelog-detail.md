@@ -2,6 +2,13 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.11.1 — 2026-11-17
+
+- **시작할 때 업데이트 확인**: `UpdateController.startAutomaticCheck`가 하루 간격(`updater.check_due`) 대신 자동 확인이 켜져 있으면 시작할 때마다 확인합니다. 1.11.0부터 창을 닫으면 트레이에 남으므로, 실행 중에는 `_recheck_timer`(10분 간격)가 `_recheck_if_due`를 불러 마지막 확인에서 `updater.CHECK_INTERVAL`(24시간에서 6시간으로 변경)이 지났을 때 조용히 다시 확인합니다. 실패는 이전처럼 조용히 넘어가고, 받는 중·준비 완료 상태에서는 확인하지 않으며, 종료할 때 타이머를 멈춥니다. 설정 문구는 ‘시작할 때 새 버전 확인’입니다.
+- **창 테두리**: 새 `luvbox/window_frame.py`의 `WindowFrame`이 프레임 없는 주 창에 DWM 속성을 줍니다. `DWMWA_WINDOW_CORNER_PREFERENCE`는 보통 창일 때 `ROUND`, 최대화·전체 화면일 때 `DONOTROUND`입니다. `DWMWA_BORDER_COLOR`는 보통 창일 때 시스템 기본값이고, 활성 창이며 `HKCU\Software\Microsoft\Windows\DWM`의 `ColorPrevalence`가 1이면 `AccentColor`를 씁니다. 최대화하면 `COLOR_NONE`입니다. 창의 `activeChanged`·`visibilityChanged`에 맞춰 다시 적용합니다. 모서리 속성을 받지 않는 Windows 10이나 offscreen 같은 다른 플랫폼에서는 `nativeFrame`이 false가 되고, `MainWindow.qml`이 보통 창일 때 1px `Theme.lineStrong` 테두리를 직접 그립니다. Qt 6.10의 `ExpandedClientAreaHint`도 시험했지만, 위쪽 31px이 `WM_NCHITTEST`에서 `HTTOP`을 돌려줘 제목 줄 버튼을 누를 수 없어서 쓰지 않았습니다.
+- **중복 보기 도움말**: 세 줄짜리 `duplicateGuide`를 한 줄로 줄이고, 새 `HelpButton.qml`(둥근 ?: 마우스를 올리면 350ms 뒤 열리고 카드 위에서는 유지, 누르면 고정, Esc·바깥 누르기로 닫힘)과 `DuplicateHelpRow.qml`(사진의 배지 모양 + 설명)로 남김·사본·비슷함·중복 아님을 정리했습니다. 안내와 버튼은 둘 다 들어갈 때 한 줄에 놓입니다(`implicitWidth` 비교). ‘화질만 다른 사진 포함’과 ‘사본 일괄 선택’의 툴팁도 한 문장으로 줄였습니다.
+- 검사: `tests/test_window_frame.py` 4개, 업데이트 시작 확인·실행 중 재확인 2개를 추가했고, 중복 보기 장면에 도움말 클릭 고정·마우스 올리기·떠나기를 추가했습니다.
+
 ## 1.11.0 — 2026-11-17
 
 - `MainWindow.qml`을 프레임 없는 창으로 바꾸고 앱 제목 줄에 접근성 이름·툴팁을 갖춘 최소화·최대화/복원·트레이 숨기기 버튼을 배치했습니다. 가장자리 크기 조절과 제목 줄 이동은 Windows 시스템 동작을 사용합니다. 팝업이 창 버튼을 덮지 않도록 제목 줄 아래에 배치하고 좁은 미리보기의 최소 높이를 조정했습니다.

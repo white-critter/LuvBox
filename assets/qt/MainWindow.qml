@@ -138,6 +138,9 @@ ApplicationWindow {
     property rect normalPlace: Qt.rect(0, 0, 0, 0)
     // Whether the window was maximized (or full screen) before it was minimized.
     property bool lastMaximized: false
+    // True when Windows draws this frameless window's rounded corners and thin border
+    // (luvbox/window_frame.py); otherwise the window draws a hairline of its own.
+    property bool nativeFrame: false
     // The person's own height: a saved-file card may have grown the window for a while.
     function ownHeight() {
         return saveHeightExpanded && saveRestoreHeight >= minimumHeight ? saveRestoreHeight : height
@@ -719,6 +722,16 @@ ApplicationWindow {
             windowAction: "close"
             onClicked: window.close()
         }
+    }
+    Rectangle {
+        objectName: "windowHairline"
+        parent: Overlay.overlay
+        z: 1000001
+        anchors.fill: parent
+        visible: !window.nativeFrame && window.visibility === Window.Windowed
+        color: "transparent"
+        border.width: 1
+        border.color: Theme.lineStrong
     }
     WindowResize {
         parent: Overlay.overlay
@@ -1759,31 +1772,63 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.leftMargin: Theme.gapLarge
                         anchors.rightMargin: Theme.gap
-                        // The buttons for "중복 아님" marks appear only while there are marks; with them
-                        // the guide needs a wider window to stay beside the buttons.
-                        readonly property bool marks: !!window.app && (window.app.library.canUndoDistinct
-                                                                      || window.app.library.distinctDuplicateCount > 0)
-                        columns: parent.width >= (marks ? 1240 : 900) ? 2 : 1
+                        // The short guide stays beside the buttons while both fit (the buttons for
+                        // "중복 아님" marks appear only while there are marks).
+                        columns: width >= duplicateGuideRow.implicitWidth + duplicateStripButtons.implicitWidth
+                                 + columnSpacing ? 2 : 1
                         columnSpacing: Theme.gapLarge
                         rowSpacing: Theme.gapSmall
-                        Label {
-                            objectName: "duplicateGuide"
+                        // One short line; the full explanation waits behind the "?" beside it.
+                        RowLayout {
+                            id: duplicateGuideRow
                             Layout.fillWidth: true
-                            // In a low window the guide left no room for a single group; the
-                            // buttons' tips say the same.
-                            visible: window.height >= 640
-                            text: "같은 사진끼리 묶었습니다. 묶음마다 ‘남김’ 한 장을 두고 ‘사본’(내용이 완전히 같은 파일)을 골라 휴지통으로 보내세요. "
-                                + "크기·화질만 다른 ‘비슷함’은 사본으로 고르지 않습니다. 필요 없으면 그 사진의 ‘비교’를 눌러 "
-                                + "남길 사진과 나란히 본 뒤 한 장씩 휴지통으로 보내세요. "
-                                + "남길 사진은 즐겨찾기한 것, 그다음 용량이 큰 것으로 정합니다. "
-                                + "같은 사진이 아니거나 모두 남기려면 묶음의 ‘중복 아님’을, "
-                                + "몇 장만 다른 사진이면 그 사진을 고른 뒤 ‘선택한 N장만 중복 아님’을 누르세요."
-                            wrapMode: Text.WordWrap
-                            textFormat: Text.PlainText
-                            font.pixelSize: Theme.fontSmall
-                            color: Theme.textMuted
+                            spacing: Theme.gapSmall
+                            Label {
+                                objectName: "duplicateGuide"
+                                Layout.fillWidth: true
+                                Layout.maximumWidth: implicitWidth
+                                text: "묶음마다 ‘남김’ 한 장을 두고 ‘사본’을 휴지통으로 보내세요"
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                font.pixelSize: Theme.fontSmall
+                                color: Theme.textMuted
+                            }
+                            HelpButton {
+                                objectName: "duplicateHelp"
+                                title: "중복 사진 정리"
+                                cardWidth: 440
+                                content: [
+                                    DuplicateHelpRow {
+                                        badge: "남김"; badgeColor: Theme.keepFill
+                                        text: "묶음에서 남길 사진이에요. 즐겨찾기한 사진, 그다음 용량이 큰 사진으로 정해요."
+                                    },
+                                    DuplicateHelpRow {
+                                        badge: "사본"; badgeColor: Theme.accentLine
+                                        text: "내용이 완전히 같은 파일이에요. ‘사본 N장 선택’이나 ‘사본 일괄 선택’으로 골라 휴지통으로 보내면 돼요."
+                                    },
+                                    DuplicateHelpRow {
+                                        badge: "비슷함"; badgeColor: Theme.lineStrong
+                                        text: "크기·화질만 다른 같은 사진이에요. 사본으로 고르지 않으니 ‘비교’로 남길 사진과 나란히 본 뒤 한 장씩 보내세요."
+                                    },
+                                    DuplicateHelpRow {
+                                        badge: "중복 아님"; badgeColor: Theme.raised
+                                        text: "같은 사진이 아니거나 모두 남기려면 묶음의 ‘중복 아님’을, 몇 장만 다르면 그 사진을 고른 뒤 ‘선택한 N장만 중복 아님’을 누르세요."
+                                    },
+                                    Label {
+                                        Layout.fillWidth: true
+                                        Layout.topMargin: Theme.gapTiny
+                                        text: "사진을 한 번 누르면 선택, 두 번 누르면 크게 봐요. ‘화질만 다른 사진 포함’을 켜고 검사하면 ‘비슷함’도 찾아요."
+                                        textFormat: Text.PlainText
+                                        wrapMode: Text.Wrap
+                                        font.pixelSize: Theme.fontCaption
+                                        color: Theme.textFaint
+                                    }
+                                ]
+                            }
+                            Item { Layout.fillWidth: true }
                         }
                         GridLayout {
+                            id: duplicateStripButtons
                             // In a narrow window the two "중복 아님" buttons take a line of their own
                             // instead of running past the card's edge.
                             columns: window.width < 800 ? 3 : 5
@@ -1802,9 +1847,7 @@ ApplicationWindow {
                                 checked: window.duplicateNear
                                 text: checked ? "✓ 화질만 다른 사진 포함" : "화질만 다른 사진 포함"
                                 Accessible.name: "크기나 화질만 다른 같은 사진도 찾기"
-                                tip: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 묶어 ‘비슷함’으로 보여 줍니다. "
-                                    + "두 사진을 작게 줄여 비교한 뒤 작은 쪽 사진의 크기에서 한 번 더 비교해, 같을 때만 묶습니다. "
-                                    + "사본으로는 내용이 완전히 같은 파일만 휴지통으로 보내고, ‘비슷함’은 남길 사진과 비교한 뒤 한 장씩 보냅니다."
+                                tip: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 ‘비슷함’으로 묶어요"
                                 onClicked: {
                                     window.duplicateNear = !window.duplicateNear
                                     checked = Qt.binding(function() { return window.duplicateNear })
@@ -1831,8 +1874,7 @@ ApplicationWindow {
                                 enabled: !!window.app && !window.app.library.copiesLocked && window.galleryModel.count > 0
                                 tip: window.app && window.app.library.copiesLocked
                                     ? window.app.library.holdReason
-                                    : "묶음마다 즐겨찾기하거나 용량이 가장 큰 사진을 남기고, 내용이 완전히 같은 ‘사본’만 선택합니다. "
-                                      + "크기·화질만 다른 ‘비슷함’은 고르지 않습니다"
+                                    : "묶음마다 ‘남김’ 한 장을 두고 내용이 완전히 같은 ‘사본’만 모두 선택해요"
                                 text: "사본 일괄 선택"
                                 onClicked: {
                                     // The status says how many copies were picked and how many similar photos were left.

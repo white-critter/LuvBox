@@ -65,24 +65,47 @@ class UpdateControllerTests(unittest.TestCase):
     def paths(self):
         return [path for path, _headers in self.server.requests]
 
-    def test_nothing_is_requested_until_asked_and_never_when_the_daily_check_is_off_or_recent(self):
+    def test_nothing_is_requested_until_asked_and_never_when_the_check_is_off(self):
         self.server.publish("1.9.0")
-        recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-        for preferences in ({"update_check": False}, {"update_checked_at": recent}):
-            with self.subTest(preferences=preferences):
-                controller = self.controller(**preferences)
-                controller.startAutomaticCheck()
-                for _ in range(40):
-                    self.application.processEvents()
-                    time.sleep(0.005)
-                self.assertEqual(self.paths(), [])
-                self.assertEqual(controller.state, "idle")
-                self.assertFalse(controller.noticeVisible)
+        controller = self.controller(update_check=False)
+        controller.startAutomaticCheck()
+        controller._recheck_if_due()
+        for _ in range(40):
+            self.application.processEvents()
+            time.sleep(0.005)
+        self.assertEqual(self.paths(), [])
+        self.assertEqual(controller.state, "idle")
+        self.assertFalse(controller.noticeVisible)
         # Making the controller, reading its properties and closing it sends nothing either.
         self.assertEqual(self.controller().status, "아직 확인하지 않았어요")
         self.assertEqual(self.paths(), [])
 
-    def test_the_daily_check_finds_a_release_shows_it_and_remembers_it(self):
+    def test_every_start_checks_even_right_after_an_earlier_check(self):
+        self.server.publish("1.9.0")
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        controller = self.controller(update_checked_at=recent)
+        controller.startAutomaticCheck()
+        self.wait(lambda: controller.state == "available")
+        self.assertEqual(self.paths(), ["/latest"])
+        self.assertTrue(controller._recheck_timer.isActive())
+
+    def test_while_running_it_looks_again_only_when_due(self):
+        self.server.publish("1.9.0")
+        controller = self.controller()
+        controller._checked_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        controller._recheck_if_due()
+        for _ in range(40):
+            self.application.processEvents()
+            time.sleep(0.005)
+        self.assertEqual(self.paths(), [])
+        controller._checked_at = (datetime.now(timezone.utc) - updater.CHECK_INTERVAL).isoformat()
+        controller._recheck_if_due()
+        self.wait(lambda: controller.state == "available")
+        self.assertEqual(self.paths(), ["/latest"])
+        controller.shutdown()
+        self.assertFalse(controller._recheck_timer.isActive())
+
+    def test_the_check_at_start_finds_a_release_shows_it_and_remembers_it(self):
         program = self.server.publish("1.9.0")
         old = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
         controller = self.controller(update_checked_at=old)
@@ -103,10 +126,10 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertFalse(controller.noticeVisible)
         self.assertEqual(controller.status, "새 버전이 나왔어요 · 1.9.0")
 
-    def test_a_release_found_earlier_is_shown_at_start_without_asking_again(self):
+    def test_a_release_found_earlier_is_shown_at_start_before_the_new_check_answers(self):
         recent = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         remembered = {"version": "1.9.0", "notes": "· 기억한 변경", "installable": True, "size": 2_000_000}
-        controller = self.controller(update_checked_at=recent, update_found=remembered)
+        controller = self.controller(update_checked_at=recent, update_found=remembered, update_check=False)
         self.assertFalse(controller.noticeVisible)  # only once the window is up
         controller.startAutomaticCheck()
         self.assertTrue(controller.noticeVisible)
@@ -114,12 +137,13 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertEqual(self.paths(), [])
         # Already running that version or a later one: the stale note is ignored.
         for current in ("1.9.0", "1.10.0"):
-            other = self.controller(current=current, update_checked_at=recent, update_found=remembered)
+            other = self.controller(current=current, update_checked_at=recent, update_found=remembered,
+                                    update_check=False)
             other.startAutomaticCheck()
             self.assertFalse(other.noticeVisible)
             self.assertEqual(other.version, "")
         for damaged in ("1.9.0", ["1.9.0"], {"version": "v1.9.0"}, {"version": None}, {"notes": "x"}, None):
-            other = self.controller(update_checked_at=recent, update_found=damaged)
+            other = self.controller(update_checked_at=recent, update_found=damaged, update_check=False)
             other.startAutomaticCheck()
             self.assertFalse(other.noticeVisible, damaged)
 

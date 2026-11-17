@@ -85,11 +85,11 @@ class _ControllerCase(unittest.TestCase):
         return made
 
     def remembered(self, version="1.9.0"):
-        """A start under a day after a check that found `version`: shown without asking again."""
+        """A start after a check that found `version` (automatic checks off): shown from memory."""
         recent = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
         found = {"version": version, "notes": "· 기억한 변경", "installable": True,
                  "size": len(make_program(version))}
-        controller = self.controller(update_checked_at=recent, update_found=found)
+        controller = self.controller(update_checked_at=recent, update_found=found, update_check=False)
         controller.startAutomaticCheck()
         self.assertEqual((controller.state, controller.version), ("available", version))
         self.assertTrue(controller.noticeVisible and controller.canInstall)

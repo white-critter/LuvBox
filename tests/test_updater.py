@@ -41,10 +41,10 @@ class VersionAndTextTests(unittest.TestCase):
         for nothing in (None, "", 7, ["- item"], "### 주요 변경 사항\n"):
             self.assertEqual(updater.summarize(nothing), "")
 
-    def test_the_daily_check_is_due_once_a_day_and_never_when_switched_off(self):
+    def test_the_check_while_running_is_due_after_the_interval_and_never_when_switched_off(self):
         now = datetime(2026, 11, 12, 12, 0, tzinfo=timezone.utc)
-        recent = (now - timedelta(hours=23, minutes=59)).isoformat()
-        old = (now - timedelta(hours=24)).isoformat()
+        recent = (now - updater.CHECK_INTERVAL + timedelta(minutes=1)).isoformat()
+        old = (now - updater.CHECK_INTERVAL).isoformat()
         self.assertTrue(updater.check_due(True, "", now))
         self.assertTrue(updater.check_due(True, None, now))
         self.assertTrue(updater.check_due(True, "not a date", now))

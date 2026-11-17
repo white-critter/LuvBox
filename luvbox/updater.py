@@ -38,7 +38,8 @@ EXE_ASSET = "LuvBox.exe"
 RELEASES_PAGE = f"https://github.com/{REPOSITORY}/releases/latest"
 # A fixed, generic name: no version, no machine or account detail.
 CLIENT_NAME = "LuvBox-Updater"
-CHECK_INTERVAL = timedelta(hours=24)
+# While the program keeps running (in the tray), how often it looks again.
+CHECK_INTERVAL = timedelta(hours=6)
 _VERSION = re.compile(r"v?([0-9]{1,5})\.([0-9]{1,5})\.([0-9]{1,5})\Z")
 _CHECKSUM_LINE = re.compile(r"([0-9a-f]{64})  ([^\s/\\][^/\\\r\n]{0,199})\Z")
 _DESCRIPTION_LIMIT = 1024 * 1024
@@ -280,7 +281,7 @@ def check(current: str, source: Source = GITHUB, *, timeout: float = 15) -> dict
 
 
 def check_due(enabled, checked_at, now: datetime | None = None) -> bool:
-    """Whether the once-a-day check at start should run now."""
+    """Whether the check while running is due again (each start always checks)."""
     if enabled is not True:
         return False
     now = now or datetime.now(timezone.utc)

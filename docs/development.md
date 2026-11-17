@@ -1,4 +1,4 @@
-# LuvBox 1.11.0 개발 안내
+# LuvBox 1.11.1 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -117,7 +117,7 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 
 `luvbox/updater.py`가 GitHub의 최신 릴리스 설명을 읽어 버전을 숫자로 비교하고, 사람이 **업데이트**를 누를 때만 `LuvBox.exe`와 `SHA256-<버전>.txt`를 받습니다. 1.10.4부터 누를 때 최신 릴리스 설명을 한 번 더 읽어(`UpdateController._check`) 그 사이 나온 새 버전을 받고, 받으려던 릴리스의 체크섬 파일이 404·410이면 `UpdateError("gone")`(“받으려던 버전이 릴리스에서 내려졌어요…”)로 기억해 둔 버전을 지우고 다시 확인합니다. 다시 읽기가 실패하면(오프라인·요청 제한) 기억해 둔 버전을 받습니다. **나중에** 뒤에도 설정의 **지금 확인**이 새 버전을 찾으면 알림이 다시 나옵니다. 체크섬 파일의 서명을 먼저 확인하고(아래 ‘릴리스 서명’), 받은 파일의 SHA-256이 체크섬 파일의 `LuvBox.exe` 줄과 같고 파일 꼬리표의 버전이 그 릴리스와 같을 때만 실행기 자리에 둡니다. 교체는 실행기와 같은 폴더에 복사 → 기존 파일을 `LuvBox.exe.old`로 이름 변경 → 새 파일을 제자리로 이름 변경이며, 마지막 단계가 실패하면 되돌립니다. 남은 `.old`는 다음 시작 때 실행기가 지웁니다. 실행 중인 앱은 자기 버전 폴더에서 돌고 있어 영향을 받지 않고, 다시 시작하면 새 실행기가 새 버전을 풀어 실행합니다.
 
-- 자동 확인은 패키지된 앱에서만, 시작할 때 하루에 한 번입니다. 소스 실행과 시작 검사, 테스트는 스스로 GitHub에 접속하지 않습니다.
+- 자동 확인은 패키지된 앱에서만, 시작할 때마다 한 번, 그리고 켜져 있는 동안(트레이 포함) 마지막 확인에서 6시간(`updater.CHECK_INTERVAL`)이 지나면 다시 합니다(`UpdateController._recheck_if_due`, 10분마다 확인 시점을 봅니다). 소스 실행과 시작 검사, 테스트는 스스로 GitHub에 접속하지 않습니다.
 - 요청에는 고정 User-Agent(`LuvBox-Updater`)와 Accept만 넣습니다. 받는 주소는 버전에서 직접 만들고, 리다이렉트는 HTTPS의 `github.com`·`*.githubusercontent.com`만 따릅니다.
 - 릴리스에 `LuvBox.exe`나 체크섬 파일이 없으면 받기 대신 릴리스 페이지를 열게 안내합니다. 실행기 없이 실행한 경우도 같습니다.
 - 알림의 변경 사항은 릴리스 설명에서 가져옵니다. 제목에 ‘변경’이 들어간 항목(‘주요 변경 사항’) 아래의 맨 위 목록을 최대 8줄까지 보여 주므로 릴리스 설명은 이 형식을 유지합니다.
@@ -186,7 +186,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.11.0.txt`, `release/LuvBox-1.11.0-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.11.1.txt`, `release/LuvBox-1.11.1-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 

@@ -265,7 +265,7 @@ FlatDialog {
                         objectName: "updateAutoCheckSwitch"
                         Layout.fillWidth: true
                         trailing: true
-                        text: "시작할 때 새 버전 확인 (하루 한 번)"
+                        text: "시작할 때 새 버전 확인"
                         checked: !!dialog.updates && dialog.updates.autoCheck
                         onToggled: {
                             dialog.updates.setAutoCheck(checked)

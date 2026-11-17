@@ -15,6 +15,8 @@ from .launcher import launcher_path
 # A download cut off by closing the application stays on disk (up to the size
 # of a release). The next start removes what has not been touched this long.
 _LEFTOVER_AGE = 10 * 60
+# How often the running program asks whether a check is due again.
+_RECHECK_POLL_MS = 10 * 60 * 1000
 
 
 class UpdateController(QObject):
@@ -58,6 +60,11 @@ class UpdateController(QObject):
         self._shutdown_timer = QTimer(self)
         self._shutdown_timer.setInterval(50)
         self._shutdown_timer.timeout.connect(self._poll_shutdown)
+        # Closing the window leaves the program in the tray, possibly for days:
+        # look again now and then, not only when it starts.
+        self._recheck_timer = QTimer(self)
+        self._recheck_timer.setInterval(_RECHECK_POLL_MS)
+        self._recheck_timer.timeout.connect(self._recheck_if_due)
 
     def _remembered(self, value):
         """A newer release found by an earlier check, if it is still newer than this program."""
@@ -156,8 +163,9 @@ class UpdateController(QObject):
 
     @Slot()
     def startAutomaticCheck(self):
-        """At application start: show what an earlier check found, and look again once a day."""
-        if self._closing or self.busy:
+        """At application start: show what an earlier check found, look again right away,
+        and keep looking now and then while the program runs."""
+        if self._closing:
             return
         if not self._swept:
             # Once per run, off the UI thread, and without any request.
@@ -165,12 +173,23 @@ class UpdateController(QObject):
         if self._found and self._state == "idle":
             self._state = "available"
             self.changed.emit()
+        if self._auto:
+            self._quiet_check()
+        self._recheck_timer.start()
+
+    @Slot()
+    def _recheck_if_due(self):
         if updater.check_due(self._auto, self._checked_at):
-            self._manual = False
-            if self._queue("check"):
-                if self._state == "idle":
-                    self._state = "checking"
-                self.changed.emit()
+            self._quiet_check()
+
+    def _quiet_check(self):
+        if self._closing or self.busy or self._state == "ready":
+            return
+        self._manual = False
+        if self._queue("check"):
+            if self._state == "idle":
+                self._state = "checking"
+            self.changed.emit()
 
     @Slot()
     def checkNow(self):
@@ -404,6 +423,7 @@ class UpdateController(QObject):
         if self._closing:
             return self._shutdown_complete
         self._closing = True
+        self._recheck_timer.stop()
         self._cancel.set()
         self._jobs.put(("quit", {}))
         self.changed.emit()

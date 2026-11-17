@@ -1145,6 +1145,8 @@ def launch(*, startup_probe=None):
             QMessageBox.critical(None, "LuvBox", "화면을 열지 못했습니다. Qt 패키지와 앱 파일을 확인해 주세요.")
         return 1
     window = engine.rootObjects()[0]
+    from .window_frame import WindowFrame
+    frame = WindowFrame(window)  # noqa: F841  (kept for the window's lifetime: it follows activation and maximizing)
     from .qt_tray import TrayController
     tray = TrayController(application, window, controller)
     first_frame = _FirstFrame(window)
