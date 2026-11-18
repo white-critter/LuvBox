@@ -87,8 +87,8 @@ FlatDialog {
             Label {
                 Layout.fillWidth: true
                 text: dialog.methodIndex === 0
-                    ? "사용 중인 브라우저의 X 계정을 연결합니다. 이미 연결했다면 다시 설치할 필요가 없습니다."
-                    : "브라우저에서 확인한 토큰을 직접 입력해 이 PC에 보관합니다."
+                    ? "브라우저에서 쓰는 X 계정을 연결합니다."
+                    : "X의 로그인 토큰을 입력하세요."
                 color: Theme.textMuted
                 wrapMode: Text.Wrap
                 textFormat: Text.PlainText
@@ -148,14 +148,14 @@ FlatDialog {
                             && !dialog.browserSetup.selectedBrowser.length
                         text: dialog.browserSetup && dialog.browserSetup.error
                             ? dialog.browserSetup.error
-                            : "지원하는 브라우저를 찾지 못했습니다. Chrome·Edge·Firefox를 설치한 뒤 앱을 다시 열어 주세요."
+                            : "Chrome·Edge·Firefox 중 하나를 설치하고 앱을 다시 여세요."
                         color: Theme.error
                         wrapMode: Text.Wrap
                         textFormat: Text.PlainText
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: "X에 로그인하고 확장을 설치한 일반 프로필을 사용하세요. 여러 프로필을 쓴다면 열린 창의 프로필을 확인해 주세요."
+                        text: "X에 로그인하고 확장을 설치한 일반 프로필을 사용하세요."
                         wrapMode: Text.Wrap
                         textFormat: Text.PlainText
                         color: Theme.textMuted
@@ -253,7 +253,7 @@ FlatDialog {
                         Layout.fillWidth: true
                         implicitHeight: 36
                         checkable: true
-                        text: checked ? "확장 설치·연결 도움말 ▾" : "처음 연결하거나 확장 응답이 없나요? ▸"
+                        text: checked ? "확장 설치·연결 도움말 ▾" : "확장 설치·연결 도움말 ▸"
                         HoverHandler {
                             cursorShape: Qt.PointingHandCursor
                         }
@@ -280,14 +280,14 @@ FlatDialog {
                     spacing: 8
                     Label {
                         Layout.fillWidth: true
-                        text: "선택한 브라우저의 같은 프로필에 확장을 한 번 설치합니다. 설치 후에는 이 안내를 건너뛰어도 됩니다."
+                        text: "X에 로그인한 프로필에 확장을 설치하세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                     }
                     Label {
                         Layout.fillWidth: true
                         text: dialog.browserSetup && dialog.browserSetup.extensionKind === "firefox"
-                            ? "1. 부가 기능 디버깅 화면에서 ‘임시 부가 기능 로드’를 누르세요. Firefox를 다시 시작하면 확장을 다시 불러와야 합니다."
+                            ? "1. ‘임시 부가 기능 로드’를 누르세요. Firefox 재시작 후 다시 로드하세요."
                             : "1. 확장 관리 화면에서 개발자 모드를 켜세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
@@ -307,8 +307,8 @@ FlatDialog {
                     Label {
                         Layout.fillWidth: true
                         text: dialog.browserSetup && dialog.browserSetup.extensionKind === "firefox"
-                            ? "2. 아래 폴더의 manifest.json 파일을 선택하세요."
-                            : "2. ‘압축해제된 확장 프로그램 로드’를 누르세요. 폴더 창 주소창에 아래 경로를 붙여 넣고 Enter를 누르세요. ‘문서’ 폴더가 아니라 manifest.json이 있는 폴더를 선택합니다."
+                            ? "2. 아래 폴더에서 manifest.json을 선택하세요."
+                            : "2. ‘압축해제된 확장 프로그램 로드’에서 아래 폴더를 선택하세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                     }
@@ -336,7 +336,7 @@ FlatDialog {
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: "3. 같은 프로필에서 X에 로그인한 뒤, 위의 연결 버튼을 누르세요. 연결 중이라면 열린 연결 탭을 새로고침하지 말고 취소 후 다시 연결하세요."
+                        text: "3. 같은 프로필에서 X에 로그인하고 ‘X 계정 연결’을 누르세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                     }
@@ -347,7 +347,7 @@ FlatDialog {
                     }
                     Label {
                         Layout.fillWidth: true
-                        text: "앱을 업데이트한 뒤 확장이 응답하지 않으면 확장 관리에서 ‘새로고침’을 누르고 다시 연결하세요."
+                        text: "응답이 없으면 확장 관리에서 새로고침한 뒤 다시 연결하세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
                         color: Theme.textMuted
@@ -393,7 +393,7 @@ FlatDialog {
 
                 Label {
                     Layout.fillWidth: true
-                    text: "X에 로그인한 Chrome에서 F12 → Application → Cookies → https://x.com을 엽니다. auth_token의 Value만 복사하세요."
+                    text: "Chrome에서 F12 › Application › Cookies › https://x.com의 auth_token 값을 복사하세요."
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                 }
@@ -411,7 +411,7 @@ FlatDialog {
                 }
                 Label {
                     Layout.fillWidth: true
-                    text: "이 Windows 계정에 암호화해 보관합니다. 저장만으로 실제 X 인증이 확인되지는 않습니다. 값은 다른 사람에게 보내지 마세요."
+                    text: "토큰은 다른 사람에게 보내지 마세요."
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     color: Theme.textMuted

@@ -274,7 +274,7 @@ def scene(shots=None):
         assert overlay("alikeKeeperSize")[0].property("text").startswith("1200×900 · ")
         assert overlay("alikeTargetSize")[0].property("text").startswith("900×675 · ")
         summary = overlay("alikeSummaryText")[0].property("text")
-        assert "‘비슷함’ 사진 한 장만" in summary and "다시 확인" in summary, summary
+        assert "‘비슷함’ 사진 한 장만" in summary, summary
         # Two pictures side by side, the photo kept on the left.
         left = keeper_picture.mapToScene(QPointF(0, 0)).x()
         right = target_picture.mapToScene(QPointF(0, 0)).x()

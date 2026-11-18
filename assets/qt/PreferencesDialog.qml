@@ -44,8 +44,8 @@ FlatDialog {
         Label {
             objectName: "preferencesBusyNote"
             width: parent.width
-            visible: dialog.app && dialog.app.busy
-            text: "작업이 끝난 뒤 설정을 바꿀 수 있습니다. 기록은 지금도 볼 수 있습니다."
+            visible: dialog.app && dialog.app.operationBusy
+            text: "작업이 끝난 뒤 설정을 바꿀 수 있습니다."
             topPadding: 2
             color: Theme.notice
             font.pixelSize: Theme.fontSmall
@@ -117,7 +117,7 @@ FlatDialog {
                 Layout.fillWidth: true
                 Layout.preferredWidth: 1
                 Layout.alignment: Qt.AlignTop
-                enabled: dialog.app && !dialog.app.busy
+                enabled: dialog.app && !dialog.app.operationBusy
                 spacing: Theme.gapTiny
 
                 SectionTitle { text: "저장"; Layout.topMargin: 0 }
@@ -161,15 +161,6 @@ FlatDialog {
                         dialog.app.setPreference("auto_classify", checked)
                         checked = Qt.binding(function() { return dialog.pref("auto_classify", true) === true })
                     }
-                }
-                Label {
-                    objectName: "autoClassifyHint"
-                    Layout.fillWidth: true
-                    text: "‘AI 분류’를 한 번 실행한 뒤부터, 저장이 끝나면 새 사진을 알아서 분류해요. 자동 저장도 같아요."
-                    textFormat: Text.PlainText
-                    wrapMode: Text.Wrap
-                    font.pixelSize: Theme.fontCaption
-                    color: Theme.textFaint
                 }
                 SettingRow {
                     label: "폴더 구성"
@@ -268,7 +259,7 @@ FlatDialog {
                         text: "시작할 때 새 버전 확인"
                         checked: !!dialog.updates && dialog.updates.autoCheck
                         onToggled: {
-                            dialog.updates.setAutoCheck(checked)
+                            dialog.app.setPreference("update_check", checked)
                             checked = Qt.binding(function() { return !!dialog.updates && dialog.updates.autoCheck })
                         }
                     }
@@ -287,20 +278,11 @@ FlatDialog {
                         }
                         FlatButton {
                             objectName: "updateCheckButton"
-                            text: dialog.updates && dialog.updates.state === "checking" ? "확인하는 중" : "지금 확인"
+                            text: "지금 확인"
                             enabled: !!dialog.updates && !dialog.updates.busy && dialog.updates.state !== "ready"
                             Accessible.name: "새 버전 지금 확인"
                             onClicked: dialog.updates.checkNow()
                         }
-                    }
-                    Label {
-                        Layout.fillWidth: true
-                        Layout.topMargin: 2
-                        text: "공개 릴리스 정보만 읽고, 이 PC나 계정에 관한 것은 보내지 않아요. 받기는 알림에서 직접 누를 때만 시작해요."
-                        textFormat: Text.PlainText
-                        wrapMode: Text.Wrap
-                        font.pixelSize: Theme.fontCaption
-                        color: Theme.textFaint
                     }
                 }
                 // Stacked, it follows the block above; side by side, only when updates sit above it.
@@ -372,12 +354,10 @@ FlatDialog {
 
                         ColumnLayout {
                             Layout.fillWidth: true
-                            enabled: dialog.app && !dialog.app.busy
+                            enabled: dialog.app && !dialog.app.operationBusy
                             spacing: Theme.gapSmall
                             SettingRow {
                                 label: "목록 확인 범위"
-                                note: dialog.pref("scan_mode", "quick") === "full"
-                                    ? "오래된 Like까지 확인하므로 시간이 더 걸립니다." : ""
                                 FlatCombo {
                                     Layout.preferredWidth: dialog.controlWidth
                                     model: dialog.scanModes
@@ -395,7 +375,7 @@ FlatDialog {
                             }
                             SettingRow {
                                 label: "동영상·GIF 크기 제한 (MB)"
-                                note: "0은 제한 없음. 넘는 파일은 ‘저장 못 한 미디어’에 남깁니다."
+                                note: "0 = 제한 없음"
                                 FlatField {
                                     id: videoLimit
                                     objectName: "videoLimitField"

@@ -74,24 +74,21 @@ class ManagementController(QObject):
         if not self._delete: return ""
         if self._delete.get("alike"):
             # One '비슷함' photo compared with the photo its group keeps: never more than this one.
-            return ("오른쪽 ‘비슷함’ 사진 한 장만 Windows 휴지통으로 이동합니다. 왼쪽 ‘남김’ 사진은 그대로 둡니다.\n"
-                    "보내기 직전에 남길 사진이 그대로 있는지, 같은 사진인지 다시 확인하고, 아니면 그대로 둡니다.")
+            return "오른쪽 ‘비슷함’ 사진 한 장만 Windows 휴지통으로 이동합니다."
         names = [row.get("filename") or Path(row["path"]).name for row in self._delete["rows"][:5]]
         summary = f"선택한 파일 {self.deleteCount:,}개를 Windows 휴지통으로 이동합니다.\n"
         if any("_copy_keepers" in row for row in self._delete["rows"]):
             # From the duplicate view: say what protects the last file of a group.
-            summary += "보내기 직전에 같은 내용의 다른 파일이 남는지 하나씩 확인하고, 확인되지 않으면 그대로 둡니다.\n"
+            summary += "같은 파일이 남는 경우에만 이동합니다.\n"
             # Photos shown as only alike ('비슷함'): no file before them has their bytes, so they
             # usually stay. Said before the move, not only in the result.
             similar = sum(1 for row in self._delete["rows"] if row.get("_copy_near"))
             if similar:
-                summary += (f"그중 {similar:,}장은 크기·화질만 다른 ‘비슷함’ 사진이라, "
-                            "내용이 완전히 같은 파일이 남지 않으면 휴지통으로 보내지 않습니다. "
-                            "필요 없으면 그 사진의 ‘비교’로 한 장씩 보내세요.\n")
+                summary += f"‘비슷함’ {similar:,}장은 ‘비교’에서 한 장씩 이동할 수 있습니다.\n"
         kept = self._delete.get("kept") or 0
         if kept:
             # A whole group was chosen in the duplicate view: its first photo stays.
-            summary += f"묶음을 통째로 고른 곳에서는 한 장씩 남깁니다(남기는 사진 {kept:,}장).\n"
+            summary += f"묶음마다 한 장씩 남깁니다 · 총 {kept:,}장\n"
         if self.deleteCount > len(names):
             # Only the first names are listed; say that the count above is not this list.
             names.append(f"외 {self.deleteCount - len(names):,}개")
@@ -263,7 +260,7 @@ class ManagementController(QObject):
                 self._status = "" if kind == "prepare_alike" and error else "이동할 파일이 없습니다"
             else:
                 self._delete = value
-                self._status = ("남길 사진과 비교한 뒤 휴지통으로 보낼지 정해 주세요" if kind == "prepare_alike"
+                self._status = ("남길 사진과 비교해 주세요" if kind == "prepare_alike"
                                 else "휴지통으로 이동할지 확인해 주세요")
                 self.deleteConfirmationRequested.emit()
         else:

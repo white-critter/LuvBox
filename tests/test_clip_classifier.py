@@ -417,7 +417,7 @@ class TestHistoryStoreAiTags(unittest.TestCase):
              patch("luvbox.clip_classifier.release_session") as release:
             with self.assertRaises(RuntimeError) as ctx:
                 repo.scan_ai_tags(1)
-            self.assertIn("이어서 분류", str(ctx.exception))
+            self.assertIn("다시 실행해 주세요", str(ctx.exception))
             release.assert_called()
         with closing(HistoryStore.for_storage(paths)) as store:
             self.assertEqual(len(store.unclassified_photo_records()), 1)

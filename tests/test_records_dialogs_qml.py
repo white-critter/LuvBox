@@ -23,6 +23,7 @@ def scene():
     from contextlib import ExitStack, closing
     from datetime import datetime, timedelta, timezone
     import tempfile
+    from threading import Event
     import time
     from unittest.mock import patch
 
@@ -235,6 +236,35 @@ def scene():
             click_text("설정")
             preferences = find("preferencesDialog")
             wait(lambda: preferences.property("visible"), "settings open")
+            automatic = find("autoClassifySwitch")
+            reveal(automatic)
+            automatic.forceActiveFocus()
+            QTest.qWait(100)
+            old_value = automatic.property("checked")
+            scroll = find("preferencesScroll").property("contentItem")
+            geometry = (preferences.property("height"), automatic.mapToScene(QPointF()), scroll.property("contentY"))
+            update = controller._settings.update
+            release = Event()
+
+            def slow_update(changes):
+                if not release.wait(5):
+                    raise TimeoutError("settings check did not release the write")
+                return update(changes)
+
+            with (patch.object(controller._settings, "update", side_effect=slow_update),
+                  patch.object(controller._accounts, "_identity", {"handle": "offline", "user_id": "100"})):
+                try:
+                    click(automatic)
+                    QTest.qWait(160)
+                    assert controller.busy and not controller.operationBusy
+                    assert automatic.property("checked") != old_value and automatic.property("enabled")
+                    assert not find("preferencesBusyNote").property("visible")
+                    assert not find("saveReadinessHint").property("visible")
+                    assert geometry == (preferences.property("height"), automatic.mapToScene(QPointF()),
+                                        scroll.property("contentY"))
+                finally:
+                    release.set()
+                wait(lambda: not controller.busy, "switch setting written")
             toggle = find("advancedSettingsToggle")
             if not toggle.property("checked"):
                 reveal(toggle)

@@ -41,7 +41,7 @@ ColumnLayout {
 
     Label {
         Layout.fillWidth: true
-        text: "매일 정한 시각에 현재 저장된 계정과 옵션으로 새 Like를 저장합니다."
+        text: "매일 새 Like를 저장합니다."
         color: Theme.textMuted
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
@@ -64,7 +64,7 @@ ColumnLayout {
     }
     Label {
         Layout.fillWidth: true
-        text: "예약은 하나입니다. 저장할 계정이나 폴더를 바꾸면 다음 자동 저장의 대상도 바뀝니다."
+        text: "예약은 현재 계정과 저장 폴더를 사용합니다."
         color: Theme.textMuted
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
@@ -79,7 +79,7 @@ ColumnLayout {
     }
     Label {
         Layout.topMargin: Theme.gapTiny
-        text: "매일 실행 시각 (이 PC 시간)"
+        text: "매일 실행 시각"
         color: Theme.textMuted
         font.pixelSize: Theme.fontSmall
         textFormat: Text.PlainText
@@ -143,7 +143,7 @@ ColumnLayout {
     }
     Label {
         Layout.fillWidth: true
-        text: "24시간 형식으로 입력하세요. 오늘 시각이 지났다면 내일부터 실행합니다."
+        text: "24시간 형식 · 예: 09:00"
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: Theme.textMuted
@@ -152,7 +152,7 @@ ColumnLayout {
         objectName: "scheduleTimeHelp"
         Layout.fillWidth: true
         visible: panel.timeEdited && !panel.validTime
-        text: "실행 시각은 09:00처럼 24시간 형식으로 입력해 주세요."
+        text: "09:00처럼 입력하세요."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: Theme.error
@@ -174,7 +174,7 @@ ColumnLayout {
     Label {
         Layout.fillWidth: true
         visible: !!(panel.schedule && panel.schedule.locked)
-        text: "진행 중인 작업이 끝난 뒤 예약을 바꿀 수 있습니다. 예약 조회와 실행 기록 확인은 계속할 수 있습니다."
+        text: "작업이 끝난 뒤 예약을 바꿀 수 있습니다."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: Theme.textMuted
@@ -182,9 +182,7 @@ ColumnLayout {
     Label {
         Layout.fillWidth: true
         visible: !!(panel.schedule && panel.schedule.registered)
-        text: (panel.schedule && panel.schedule.catchUp ? "놓친 예약은 PC를 다시 사용할 때 실행합니다. " : "")
-            + (panel.schedule && panel.schedule.onBattery ? "배터리 전원에서도 실행합니다. " : "")
-            + "예약 저장은 확인창 없이 진행합니다. 결과는 설정 › 고급 › 실행 기록에서 확인하세요."
+        text: "저장 결과는 설정 › 고급 › 실행 기록에서 확인하세요."
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
         color: Theme.textMuted
@@ -203,10 +201,10 @@ ColumnLayout {
         contentItem: Label {
             color: Theme.textMuted
             text: panel.action === "remove"
-                ? "다음 자동 저장부터 실행하지 않습니다. 이미 시작한 저장과 받은 파일은 유지합니다."
+                ? "다음 예약부터 중지합니다."
                 : panel.action === "migrate"
-                ? "기존 실행 시각을 유지하고 현재 버전으로 연결합니다."
-                : "매일 " + panel.requestedTime + "에 현재 저장된 계정과 옵션으로 실행합니다. 예약 저장은 현재 버전에 연결하며 사용 중으로 설정합니다."
+                ? "같은 시각에 현재 버전으로 실행합니다."
+                : "매일 " + panel.requestedTime + "에 자동으로 저장합니다."
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
         }

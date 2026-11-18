@@ -34,10 +34,10 @@ _CHOICES = {
     "gif_size": {"original", "720", "480"},
 }
 _BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_each", "detailed_progress",
-             "auto_classify"}
+             "auto_classify", "update_check"}
 _PUBLIC_PREFERENCES = {*_CHOICES, *_BOOLEANS, "max_video_mb", "gallery_density"}
 # Screen-only choices: they change nothing a save reads, so a running save does not lock them.
-_VIEW_PREFERENCES = {"confirm_each", "detailed_progress", "gallery_density", "auto_classify"}
+_VIEW_PREFERENCES = {"confirm_each", "detailed_progress", "gallery_density", "auto_classify", "update_check"}
 _SETTINGS_ERROR = "설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요."
 _REPAIR_ERROR = ("기록을 복구하지 못했습니다. 손상된 원본은 그대로 두었습니다. "
                  "저장 폴더 권한을 확인하고 다시 시도해 주세요.")
@@ -102,6 +102,7 @@ class ApplicationController(QObject):
         self._repairing = False
         self._repair_target = None
         self._settings_revision = 0
+        self._settings_failure_revision = 0
         self._pending_settings = {}
         self._settings_versions = {}
         self._pending_download = None
@@ -311,10 +312,15 @@ class ApplicationController(QObject):
         return QUrl.fromLocalFile(self._output)
 
     @Property(bool, notify=changed)
-    def busy(self):
+    def operationBusy(self):
         return bool(self._closing or self._preparing or self._repairing or self._pending_start is not None
-                    or self._pending_settings or self._accounts.busy or self._download.running
+                    or self._pending_download is not None or self._save_after_settings
+                    or self._accounts.busy or self._download.running
                     or self._schedule.mutating or self._management.mutating)
+
+    @Property(bool, notify=changed)
+    def busy(self):
+        return self.operationBusy or bool(self._pending_settings)
 
     @Property(bool, notify=changed)
     def closing(self):
@@ -334,12 +340,10 @@ class ApplicationController(QObject):
     def status(self):
         if self._closing:
             return "작업을 정리하고 닫습니다"
-        if self._preparing:
+        if self._preparing or self._save_after_settings or self._pending_download is not None:
             return "저장 폴더를 준비합니다"
         if self._repairing:
             return "기록 DB를 복구하는 중입니다"
-        if self._pending_settings:
-            return "설정을 저장합니다"
         if self._accounts.busy:
             return self._accounts.status
         if self._schedule.mutating:
@@ -394,13 +398,16 @@ class ApplicationController(QObject):
         changes, fields = pending
         if success:
             self._committed_preferences.update(changes)
-            if self._error == _SETTINGS_ERROR:
+            if self._error == _SETTINGS_ERROR and revision > self._settings_failure_revision:
                 self._error = ""
         else:
-            self._save_after_settings = False
-            for name in changes:
-                if self._settings_versions.get(name) != revision:
-                    continue
+            rejected = {name for name in changes if self._settings_versions.get(name) == revision}
+            if rejected:
+                self._save_after_settings = False
+                self._error = _SETTINGS_ERROR
+                # Writes queued before this failure cannot clear its feedback.
+                self._settings_failure_revision = self._settings_revision
+            for name in rejected:
                 value = self._committed_preferences.get(name)
                 if name == "account" and self._accounts.identity:
                     # A stored login changed successfully. Preferences cannot
@@ -416,17 +423,21 @@ class ApplicationController(QObject):
                     self._download.setDetailsEnabled(bool(value))
                 if name == "auto_classify":
                     self._library.setAutoClassify(value is not False)
+                if name == "update_check":
+                    self._updates.set_auto_check(value)
                 if name == "max_video_mb":
                     self._records.setVideoLimit(value)
             for field, (name, value) in fields.items():
-                if self._settings_versions.get(name) == revision:
+                if name in rejected:
                     if field == "_account" and self._accounts.identity:
                         value = self._accounts.identity["handle"]
                     setattr(self, field, value)
-            if "account" in changes and self._accounts.identity:
+            if "account" in rejected and self._accounts.identity:
                 self._message = "연결한 계정은 유지했습니다. 저장 위치를 확인하고 다시 시도해 주세요."
-            self._load_library()
-        self.preferencesChanged.emit()
+            if rejected & {"account", "output_dir", "separate_accounts"}:
+                self._load_library()
+            if rejected & _PUBLIC_PREFERENCES:
+                self.preferencesChanged.emit()
         pending_download = self._pending_download
         if pending_download is not None and pending_download[0] == revision:
             self._pending_download = None
@@ -474,7 +485,7 @@ class ApplicationController(QObject):
 
     @Slot(str, "QVariant")
     def setPreference(self, name, value):
-        if self._closing or (self.busy and name not in _VIEW_PREFERENCES):
+        if self._closing or (self.operationBusy and name not in _VIEW_PREFERENCES):
             return
         if name in _CHOICES:
             if not isinstance(value, str) or value not in _CHOICES[name]:
@@ -490,9 +501,9 @@ class ApplicationController(QObject):
             if type(value) not in (int, float) or value not in (0, 1, 2):
                 return
             value = int(value)
-            if value == self._preferences.get("gallery_density"):
-                return
         else:
+            return
+        if value == self._preferences.get(name):
             return
         self._persist({name: value})
         if name == "confirm_each":
@@ -501,6 +512,8 @@ class ApplicationController(QObject):
             self._download.setDetailsEnabled(value)
         if name == "auto_classify":
             self._library.setAutoClassify(value)
+        if name == "update_check":
+            self._updates.set_auto_check(value)
         if name == "separate_accounts":
             self._load_library()
         if name == "max_video_mb":
@@ -614,10 +627,9 @@ class ApplicationController(QObject):
         if self.busy:
             # The Save button commits a typed account immediately before this
             # call. Continue that click after the queued settings commit.
-            if self._pending_settings and not (self._closing or self._preparing
-                    or self._pending_start is not None or self._accounts.busy
-                    or self._download.running or self._schedule.mutating or self._management.mutating):
+            if self._pending_settings and not self.operationBusy:
                 self._save_after_settings = True
+                self.changed.emit()
             return
         if not self._accounts.connected or self._accounts.authenticationState == "reconnect_required":
             self.loginRequested.emit()
@@ -820,7 +832,6 @@ class ApplicationController(QObject):
         if not success:
             if kind == "settings":
                 self._settings_finished(value["revision"], False)
-                self._error = value["message"]
             else:
                 self._error = str(value)
             if kind == "prepare":

@@ -120,7 +120,7 @@ Item {
                         visible: card.chosenKeys.length > 0 && card.chosenKeys.length < card.size
                         text: "선택한 " + card.chosenKeys.length + "장만 중복 아님"
                         enabled: !!review.library && !review.library.copiesLocked && !review.settling
-                        tip: "고른 사진만 이 묶음에서 뺍니다. 나머지는 묶음으로 남고, 뺀 사진은 다음 검사부터 이 묶음과 묶지 않습니다. 위의 ‘되돌리기’나 ‘초기화’로 다시 볼 수 있습니다."
+                        tip: "선택한 사진만 묶음에서 빼기"
                         Accessible.name: "묶음 " + card.number + " " + text
                         onClicked: review.library.markPhotosDistinct(card.chosenKeys)
                     }
@@ -132,7 +132,7 @@ Item {
                         focusPolicy: Qt.TabFocus
                         text: "중복 아님"
                         enabled: !!review.library && !review.library.copiesLocked && !review.settling && card.items.length > 0
-                        tip: "이 묶음을 중복이 아닌 것으로 기억합니다. 다음 검사부터 묶지 않고, 위의 ‘되돌리기’나 ‘초기화’로 다시 볼 수 있습니다."
+                        tip: "묶음 전체를 중복에서 빼기"
                         Accessible.name: "묶음 " + card.number + " 중복 아님"
                         onClicked: review.library.markGroupDistinct(card.items[0].key)
                     }
@@ -232,8 +232,7 @@ Item {
                                 objectName: "duplicateRole"
                                 // Only a photo that is neither kept nor a copy says more: why it is not offered.
                                 readonly property string tip: tile.modelData.keeper || tile.modelData.copy ? ""
-                                    : "크기나 화질만 다른 비슷한 사진입니다. 남길 사진과 내용이 완전히 같지 않아 사본으로 고르지 않습니다. "
-                                      + "필요 없으면 ‘비교’를 눌러 남길 사진과 나란히 본 뒤 이 사진만 휴지통으로 보낼 수 있습니다."
+                                    : "크기·화질만 다른 같은 사진입니다. ‘비교’에서 한 장씩 정리하세요."
                                 anchors.left: parent.left
                                 anchors.top: parent.top
                                 anchors.margins: 12
@@ -311,7 +310,7 @@ Item {
                                 cursorShape: Qt.PointingHandCursor
                                 ToolTip.visible: containsMouse
                                 ToolTip.delay: 600
-                                ToolTip.text: "누르면 선택 (휴지통으로 보내거나, 위의 ‘선택한 것만 중복 아님’) · 두 번 누르면 크게 보기"
+                                ToolTip.text: "클릭 선택 · 더블 클릭 미리보기"
                                 function pick() {
                                     if (review.library && !review.settling)
                                         review.library.toggleSelection(tile.modelData.key)
@@ -394,7 +393,7 @@ Item {
                                     ToolTip.visible: containsMouse
                                     ToolTip.delay: 500
                                     ToolTip.text: compare.available
-                                        ? "남길 사진과 나란히 비교한 뒤 이 사진만 휴지통으로 보낼 수 있습니다"
+                                        ? "남길 사진과 비교"
                                         : "작업이 끝난 뒤 비교할 수 있습니다"
                                     function open() {
                                         if (compare.available && compare.visible)
@@ -418,11 +417,11 @@ Item {
         width: Math.max(0, parent.width - 32)
         visible: list.count === 0 && !review.settling && (!review.galleryModel || !review.galleryModel.busy)
         text: review.library && review.library.copiesLocked
-            ? "같은 사진을 찾고 있습니다. 끝나면 묶음으로 보여 드립니다."
-            : "찾은 중복 사진이 없습니다. 위의 ‘중복 검사’를 눌러 확인해 보세요."
+            ? "중복 사진을 찾는 중…"
+            : "중복 사진이 없습니다. ‘중복 검사’를 실행해 보세요."
               + (review.library && review.library.distinctDuplicateCount > 0
                  ? "\n‘중복 아님’ 표시 " + review.library.distinctDuplicateCount.toLocaleString()
-                   + "개는 위의 ‘초기화’로 다시 볼 수 있습니다." : "")
+                   + "개 · ‘초기화’로 다시 보기" : "")
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap
         color: Theme.textMuted

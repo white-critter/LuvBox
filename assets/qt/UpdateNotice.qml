@@ -57,7 +57,7 @@ Card {
                         if (notice.phase === "downloading")
                             return notice.updates.version + " 받는 중 · " + Math.round(notice.updates.progress * 100) + "%"
                         if (notice.phase === "ready")
-                            return notice.updates.version + " 준비 완료 · 다시 시작하면 바뀌어요"
+                            return notice.updates.version + " 준비 완료"
                         if (notice.phase === "failed")
                             return notice.updates.error
                         return "새 버전이 나왔어요 · " + notice.updates.version
@@ -75,14 +75,11 @@ Card {
                         if (!notice.updates)
                             return ""
                         if (notice.phase === "ready")
-                            return notice.saving ? "저장이 끝나면 다시 시작할 수 있어요. 그냥 닫아도 다음에는 새 버전으로 열려요."
-                                                 : "지금 닫기만 해도 다음에는 새 버전으로 열려요."
-                        if (notice.phase === "downloading")
-                            return "하던 일은 그대로 계속해도 돼요."
+                            return notice.saving ? "저장이 끝나면 다시 시작하세요." : "다시 시작하면 적용됩니다."
                         if (notice.phase === "available" && !notice.updates.canInstall)
-                            return "이 버전은 릴리스 페이지에서 LuvBox.exe를 직접 받아 주세요."
+                            return "릴리스 페이지에서 LuvBox.exe를 받으세요."
                         if (notice.phase === "available")
-                            return "지금 버전 " + notice.updates.currentVersion + " · 설정과 사진, 기록은 그대로예요."
+                            return "지금 버전 " + notice.updates.currentVersion
                         return ""
                     }
                     color: Theme.textMuted

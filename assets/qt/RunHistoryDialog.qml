@@ -8,7 +8,6 @@ FlatDialog {
     property var app: null
     readonly property var records: app ? app.records : null
     title: "실행 기록"
-    subtitle: "수동·자동 저장 결과를 최근 1,000건까지 보관합니다."
     // A desk-sized list, kept inside the window. The corner grip changes chosenWidth/Height
     // and the list fills whatever remains.
     readonly property int frameMargin: 24
@@ -179,7 +178,7 @@ FlatDialog {
                 objectName: "runHistoryEmpty"
                 anchors.centerIn: parent
                 visible: list.count === 0 && dialog.records && !dialog.records.runBusy && !dialog.records.runError.length
-                text: "아직 실행 기록이 없어요 · 저장하면 여기에 남아요"
+                text: "실행 기록이 없습니다."
                 color: Theme.textMuted
             }
             Column {

@@ -556,7 +556,7 @@ ApplicationWindow {
         const started = selection ? app.library.teachSelection(category) : app.library.teachSelected(category)
         if (started) {
             const name = category.length ? category : "어느 쪽도 아님"
-            flashNotice(name + " 분류를 저장하는 중입니다. 매우 닮은 사진도 함께 바뀝니다.")
+            flashNotice(name + " 분류 저장 중…")
         }
     }
 
@@ -683,7 +683,7 @@ ApplicationWindow {
                 visible: !!window.app && window.currentScreen === 1
                 enabled: window.app && !window.app.closing
                 Accessible.name: "단축키 안내"
-                tip: "갤러리와 미리보기에서 쓰는 단축키 (F1)"
+                tip: "단축키 보기 (F1)"
                 onClicked: shortcutHelp.open()
             }
             // Settings stay reachable during a save: its records are read-only, and the
@@ -940,8 +940,8 @@ ApplicationWindow {
                                 Layout.fillWidth: true
                                 implicitHeight: 4
                                 clip: true
-                                visible: window.app && window.app.busy && !window.app.management.deleteConfirmationPending && (sliding || amount > 0)
-                                readonly property bool sliding: !!(window.app && window.app.busy &&
+                                visible: window.app && window.app.operationBusy && !window.app.management.deleteConfirmationPending && (sliding || amount > 0)
+                                readonly property bool sliding: !!(window.app && window.app.operationBusy &&
                                     (!window.app.download.running || window.app.download.progress < 0))
                                 readonly property real amount: window.app
                                     ? Math.max(0, Math.min(1, window.app.download.progress)) : 0
@@ -1008,15 +1008,16 @@ ApplicationWindow {
                                 objectName: "saveReadinessHint"
                                 Layout.fillWidth: true
                                 text: {
-                                    if (!window.app || window.app.busy)
+                                    if (!window.app || window.app.operationBusy)
                                         return ""
                                     if (!window.app.accounts.connected)
                                         return "저장하려면 먼저 X 계정을 연결해 주세요."
                                     if (!window.app.outputFolder.length)
                                         return "저장할 폴더를 선택해 주세요."
-                                    if (!window.app.accounts.identity.handle && !accountInput.acceptableInput)
+                                    const handle = window.app.accounts.identity.handle
+                                    if (!handle && !accountInput.acceptableInput)
                                         return "저장할 X 아이디를 입력해 주세요."
-                                    if (window.app.accounts.identity.handle && !window.app.canStart)
+                                    if (handle && window.app.account.toLowerCase() !== handle.toLowerCase())
                                         return "연결된 X 계정을 선택해 주세요."
                                     return ""
                                 }
@@ -1304,7 +1305,7 @@ ApplicationWindow {
                             visible: !!window.app && (attention > 0 || window.app.records.excludedCount > 0)
                             text: attention > 0 ? "저장 못 한 미디어 " + attention.toLocaleString() : "저장 못 한 미디어"
                             Accessible.name: "저장 못 한 미디어 보기"
-                            tip: "저장하지 못한 것, 파일이 없어진 것, 직접 제외한 것을 갤러리처럼 모아 봅니다"
+                            tip: "저장 실패 · 없어진 파일 · 직접 제외"
                             onClicked: window.openUnsaved("")
                         }
                         FlatButton {
@@ -1319,7 +1320,7 @@ ApplicationWindow {
                             text: window.app && window.app.library.aiScanning ? "AI 분류 중…"
                                 : (applied.length ? "AI 분류: " + applied : "AI 분류")
                             Accessible.name: applied.length ? "AI 분류 " + applied + " 보는 중" : "AI 분류"
-                            tip: !aiMenu.visible ? "사진을 다섯 분류로 나눠 보고, 자동분류를 실행합니다" : ""
+                            tip: !aiMenu.visible ? "AI 분류 보기 · 실행" : ""
                             onClicked: aiMenu.popup(aiMenuButton, 0, aiMenuButton.height + 4)
                         }
                         FlatCombo {
@@ -1787,7 +1788,7 @@ ApplicationWindow {
                                 objectName: "duplicateGuide"
                                 Layout.fillWidth: true
                                 Layout.maximumWidth: implicitWidth
-                                text: "묶음마다 ‘남김’ 한 장을 두고 ‘사본’을 휴지통으로 보내세요"
+                                text: "‘남김’은 보관, ‘사본’은 휴지통으로"
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 font.pixelSize: Theme.fontSmall
@@ -1800,24 +1801,24 @@ ApplicationWindow {
                                 content: [
                                     DuplicateHelpRow {
                                         badge: "남김"; badgeColor: Theme.keepFill
-                                        text: "묶음에서 남길 사진이에요. 즐겨찾기한 사진, 그다음 용량이 큰 사진으로 정해요."
+                                        text: "묶음에서 보관할 사진입니다."
                                     },
                                     DuplicateHelpRow {
                                         badge: "사본"; badgeColor: Theme.accentLine
-                                        text: "내용이 완전히 같은 파일이에요. ‘사본 N장 선택’이나 ‘사본 일괄 선택’으로 골라 휴지통으로 보내면 돼요."
+                                        text: "같은 파일입니다. ‘사본 일괄 선택’으로 고를 수 있습니다."
                                     },
                                     DuplicateHelpRow {
                                         badge: "비슷함"; badgeColor: Theme.lineStrong
-                                        text: "크기·화질만 다른 같은 사진이에요. 사본으로 고르지 않으니 ‘비교’로 남길 사진과 나란히 본 뒤 한 장씩 보내세요."
+                                        text: "크기·화질만 다른 같은 사진입니다. ‘비교’에서 한 장씩 정리하세요."
                                     },
                                     DuplicateHelpRow {
                                         badge: "중복 아님"; badgeColor: Theme.raised
-                                        text: "같은 사진이 아니거나 모두 남기려면 묶음의 ‘중복 아님’을, 몇 장만 다르면 그 사진을 고른 뒤 ‘선택한 N장만 중복 아님’을 누르세요."
+                                        text: "묶음 전체나 선택한 사진을 중복에서 뺍니다."
                                     },
                                     Label {
                                         Layout.fillWidth: true
                                         Layout.topMargin: Theme.gapTiny
-                                        text: "사진을 한 번 누르면 선택, 두 번 누르면 크게 봐요. ‘화질만 다른 사진 포함’을 켜고 검사하면 ‘비슷함’도 찾아요."
+                                        text: "클릭 선택 · 더블 클릭 미리보기"
                                         textFormat: Text.PlainText
                                         wrapMode: Text.Wrap
                                         font.pixelSize: Theme.fontCaption
@@ -1845,9 +1846,9 @@ ApplicationWindow {
                                 enabled: !!window.app && !window.app.library.busy
                                 checkable: true
                                 checked: window.duplicateNear
-                                text: checked ? "✓ 화질만 다른 사진 포함" : "화질만 다른 사진 포함"
+                                text: "화질만 다른 사진 포함"
                                 Accessible.name: "크기나 화질만 다른 같은 사진도 찾기"
-                                tip: "켜고 검사하면 크기·화질만 다르게 저장된 같은 사진도 ‘비슷함’으로 묶어요"
+                                tip: "크기·화질이 다른 같은 사진도 찾기"
                                 onClicked: {
                                     window.duplicateNear = !window.duplicateNear
                                     checked = Qt.binding(function() { return window.duplicateNear })
@@ -1860,11 +1861,11 @@ ApplicationWindow {
                                 enabled: !!window.app && !window.app.library.busy
                                 text: "중복 검사"
                                 tip: window.duplicateNear
-                                    ? "완전히 같은 파일과, 크기·화질만 다르게 다시 저장된 같은 사진을 찾습니다"
-                                    : "내용이 완전히 같은 파일만 찾습니다"
+                                    ? "같은 사진과 비슷한 사진 찾기"
+                                    : "완전히 같은 파일 찾기"
                                 onClicked: {
                                     if (window.app.library.scanDuplicates(window.duplicateNear))
-                                        window.flashNotice("중복 검사를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
+                                        window.flashNotice("중복 검사 중…")
                                 }
                             }
                             FlatButton {
@@ -1874,14 +1875,12 @@ ApplicationWindow {
                                 enabled: !!window.app && !window.app.library.copiesLocked && window.galleryModel.count > 0
                                 tip: window.app && window.app.library.copiesLocked
                                     ? window.app.library.holdReason
-                                    : "묶음마다 ‘남김’ 한 장을 두고 내용이 완전히 같은 ‘사본’만 모두 선택해요"
+                                    : "불러온 사본 선택"
                                 text: "사본 일괄 선택"
                                 onClicked: {
                                     // The status says how many copies were picked and how many similar photos were left.
-                                    const count = window.app.library.selectDuplicateCopies()
-                                    window.flashNotice(count > 0
-                                        ? window.app.library.status + " ‘휴지통으로’를 누르면 정리됩니다."
-                                        : window.app.library.status)
+                                    window.app.library.selectDuplicateCopies()
+                                    window.flashNotice(window.app.library.status)
                                 }
                             }
                             // "중복 아님" marks: take the last one back, or forget them all.
@@ -1891,7 +1890,7 @@ ApplicationWindow {
                                 visible: !!window.app && window.app.library.canUndoDistinct
                                 enabled: !!window.app && !window.app.library.copiesLocked
                                 text: "중복 아님 되돌리기"
-                                tip: "방금 한 ‘중복 아님’ 표시를 되돌립니다. 표시한 묶음이나 뺀 사진이 다시 보입니다."
+                                tip: "마지막 ‘중복 아님’ 표시 취소"
                                 Accessible.name: "중복 아님 표시 되돌리기"
                                 onClicked: window.app.library.undoDistinct()
                             }
@@ -1901,7 +1900,7 @@ ApplicationWindow {
                                 visible: !!window.app && window.app.library.distinctDuplicateCount > 0
                                 enabled: !!window.app && !window.app.library.copiesLocked
                                 text: "중복 아님 " + (window.app ? window.app.library.distinctDuplicateCount.toLocaleString() : "0") + "개 초기화"
-                                tip: "‘중복 아님’으로 표시한 묶음과 묶음에서 뺀 사진을 모두 다시 보이게 합니다. 사진은 지우지 않습니다."
+                                tip: "모든 ‘중복 아님’ 표시 취소"
                                 Accessible.name: "중복 아님 표시 모두 초기화"
                                 onClicked: window.app.library.clearDistinct()
                             }
@@ -2389,7 +2388,7 @@ ApplicationWindow {
                         visible: gallery.count === 0 && !window.galleryModel.busy && !window.galleryModel.error.length
                         text: {
                             if (window.app && window.app.library.filterDuplicateOnly && window.app.library.copiesLocked)
-                                return "중복 사진을 찾는 중 · 끝나면 여기에 모아 둘게요"
+                                return "중복 사진을 찾는 중…"
                             if (window.app && window.app.library.filterDuplicateOnly)
                                 return "중복 사진이 없어요 · 위의 ‘중복 검사’로 다시 찾아볼 수 있어요"
                             // Only when nothing else narrows the list: otherwise there may well be
@@ -2437,7 +2436,7 @@ ApplicationWindow {
                                 objectName: "gallerySelectionCount"
                                 Layout.fillWidth: true
                                 text: window.app ? window.app.library.selectedCount.toLocaleString() + "개 선택"
-                                    + (window.app.busy && window.app.library.selectedCount > 0
+                                    + (window.app.operationBusy && window.app.library.selectedCount > 0
                                        ? " · 작업이 끝나면 휴지통으로 이동할 수 있습니다" : "") : ""
                                 font.bold: true
                                 elide: Text.ElideRight
@@ -2470,7 +2469,7 @@ ApplicationWindow {
                                     && window.app.library.selectedCount > 0
                                 tip: window.app && window.app.library.holdReason
                                     ? window.app.library.holdReason
-                                    : "선택한 사진을 하나의 AI 분류로 가르칩니다. 매우 닮은 사진도 함께 바뀝니다."
+                                    : "AI 분류 지정 · 닮은 사진에도 적용"
                                 onClicked: teachPopup.open()
                             }
                             FlatButton {
@@ -2998,8 +2997,8 @@ ApplicationWindow {
                                 font.pixelSize: Theme.fontSmall
                                 color: isAi ? Theme.aiTagText : Theme.userTagText
                                 ToolTip.visible: userTagMouse.containsMouse
-                                ToolTip.text: isConfirmed ? "내가 가르친 AI 분류 (누르면 이 분류만 보기)"
-                                    : (isAi ? "AI 자동분류 (누르면 이 분류만 보기)" : "내 태그 (누르면 이 태그만 보기)")
+                                ToolTip.text: isConfirmed ? "지정한 AI 분류 보기"
+                                    : (isAi ? "AI 자동분류 보기" : "이 태그만 보기")
                                 MouseArea {
                                     id: userTagMouse
                                     anchors.fill: parent
@@ -3114,7 +3113,7 @@ ApplicationWindow {
                         compact: true
                         visible: !!window.app && window.app.library.selectedMediaType === "photo"
                         enabled: !!window.app && !window.app.library.tagsLocked
-                        tip: "다섯 분류 중 하나로 가르치거나, 어느 쪽도 아니라고 지정합니다"
+                        tip: "AI 분류 지정 · 닮은 사진에도 적용"
                         onClicked: {
                             if (!window.app)
                                 return
@@ -3688,7 +3687,7 @@ ApplicationWindow {
                 if (window.app.library.aiScanning)
                     window.app.library.cancelAiScan()
                 else if (window.app.library.scanAiTags())
-                    window.flashNotice("AI 자동분류를 시작합니다. 그동안 갤러리를 보고 즐겨찾기를 바꿀 수 있습니다.")
+                    window.flashNotice("AI 자동분류 중…")
             }
         }
         FlatMenuItem {
@@ -3855,9 +3854,7 @@ ApplicationWindow {
         onAccepted: if (window.app) window.app.repairRecords()
         Label {
             width: parent.width
-            text: "손상된 기록 DB를 고칩니다.\n\n· 손상된 파일은 먼저 이 PC에 백업해 둡니다.\n" +
-                  "· 읽을 수 있는 기록과 최근 백업으로 기록 DB를 다시 만듭니다.\n" +
-                  "· 사진·영상과 중복 방지 기록은 건드리지 않습니다."
+            text: "손상된 기록을 백업한 뒤 복구합니다. 사진·영상은 유지됩니다."
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
         }

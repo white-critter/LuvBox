@@ -23,7 +23,7 @@ from luvbox.core import JobOptions
 from luvbox.history import HistoryStore
 from luvbox.qt_app import ApplicationController
 from luvbox.qt_library import LibraryRepository, _Request
-from luvbox.storage import resolve_storage
+from luvbox.storage import migrate_records, resolve_storage
 
 ROWS = [(str(1000 + index), 1, "photo", "alice", f"2026-09-{1 + index:02d}T12:00:00") for index in range(12)]
 
@@ -121,23 +121,65 @@ class MovedFolderTests(unittest.TestCase):
         self.assertEqual(self.gallery(moved), (12, 12, 0, 2))
         self.assertEqual(len(list(moved.glob("*.jpg"))), 12)
 
-    def test_opening_the_new_place_before_the_save_still_brings_later_marks(self):
-        """Choosing the folder opens its gallery, which used to keep only the older snapshot."""
+    def test_importing_the_snapshot_before_the_save_still_brings_later_marks(self):
         self.library()
+        older = self.base / "earlier-location"
+        older.mkdir()
+        picture = older / "alice_99_1.jpg"
+        picture.write_bytes(b"earlier photo")
+        with self.store(older) as store:
+            store.record_media("flat", {"tweet_id": "99", "num": 1, "type": "photo"}, picture)
+            picture.unlink()
+            store.import_legacy(refresh=True)
+        migrate_records(resolve_storage(older, "myaccount"), resolve_storage(self.output, "myaccount"))
         with self.store(self.output) as store:
             store.add_tag("flat", "1002", 1, "photo", "keep")
             store.toggle_favorite("flat", "1003", 1, "photo")
             store.toggle_favorite("flat", "1001", 1, "photo")
         moved = self.move()
-        self.gallery(moved)
+        with self.store(moved) as store:
+            earlier = store.media_record("flat", {"tweet_id": "99", "num": 1})
+            self.assertEqual((earlier["path"], Path(earlier["last_path"])), ("", picture.resolve()))
         prepared = self.chosen(moved, {"relocate"})
         self.assertIn("options", prepared)
-        self.assertEqual(self.gallery(moved), (12, 12, 0, 2))
+        self.assertEqual(self.gallery(moved), (13, 12, 1, 2))
         with self.store(moved) as store:
             self.assertEqual([(row["tag"], row["count"]) for row in store.user_tags()], [("keep", 1)])
             favourites = {row["tweet_id"] for row in store.records() if store.is_favorite(
                 row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])}
             self.assertEqual(favourites, {"1000", "1003"})
+
+    def test_marks_added_and_removed_in_both_locations_survive(self):
+        options = self.library()
+        with self.store(self.output) as store:
+            self.assertTrue(store.add_tag("flat", "1005", 1, "photo", "remove-old"))
+            self.assertTrue(store.add_tag("flat", "1006", 1, "photo", "remove-new"))
+        self.save(replace(options, scan_mode="quick"))
+        with self.store(self.output) as store:
+            self.assertFalse(store.toggle_favorite("flat", "1001", 1, "photo"))
+            self.assertTrue(store.toggle_favorite("flat", "1003", 1, "photo"))
+            self.assertTrue(store.remove_tag("flat", "1005", 1, "photo", "remove-old"))
+            self.assertTrue(store.add_tag("flat", "1002", 1, "photo", "old-side"))
+
+        moved = self.move()
+        with self.store(moved) as store:
+            self.assertEqual(len(store.records()), 17)
+        repository = LibraryRepository()
+        repository.provider = _Provider()
+        repository.configure(_Request(generation=1, account="myaccount", output_dir=str(moved),
+                                      separate_accounts=False))
+        self.assertFalse(repository.toggle_favorite("g1_flat_1000_1_photo", 1))
+        self.assertTrue(repository.toggle_favorite("g1_flat_1004_1_photo", 1))
+        self.assertTrue(repository.remove_tag("g1_flat_1006_1_photo", 1, "remove-new"))
+        self.assertTrue(repository.add_tag("g1_flat_1004_1_photo", 1, "new-side"))
+
+        self.assertIn("options", self.chosen(moved, {"relocate"}))
+        self.assertEqual(self.gallery(moved), (12, 12, 0, 2))
+        with self.store(moved) as store:
+            self.assertEqual({row["tag"] for row in store.user_tags()}, {"old-side", "new-side"})
+            favourites = {row["tweet_id"] for row in store.records() if store.is_favorite(
+                row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])}
+            self.assertEqual(favourites, {"1003", "1004"})
 
     def test_a_file_that_is_not_at_the_new_place_keeps_its_old_record(self):
         self.library()

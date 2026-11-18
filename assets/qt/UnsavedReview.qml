@@ -155,10 +155,10 @@ Item {
                     // In a low window the guide left less than one row of tiles to see.
                     visible: review.height >= 560
                     text: review.view === "excluded"
-                        ? "다시 받지 않도록 빼 둔 미디어입니다. ‘제외 해제’는 다음 저장에서 다시 받게 하고, ‘다시 받기’는 지금 받습니다. 저장된 파일은 바뀌지 않습니다. 빈 미리보기는 전체 목록 확인으로 저장하면 채워집니다."
+                        ? "‘제외 해제’하면 다음 저장에 포함됩니다."
                         : review.view === "missing"
-                        ? "저장했지만 폴더에 파일이 없는 미디어입니다. 갤러리에는 ‘파일 없음’ 칸으로 보입니다. ‘다시 받기’는 지금 다시 받고, ‘갤러리에서 빼기’는 갤러리에서 감추고 다시 받지 않게 합니다. 뺀 것은 ‘직접 제외’에서 되돌릴 수 있습니다."
-                        : "저장하지 못한 미디어입니다. ‘다시 저장’은 지금 다시 받습니다. 목록에서 지워도 저장된 파일은 그대로이고, 직접 제외한 항목은 빠지지 않습니다."
+                        ? "갤러리에서 뺀 항목은 ‘직접 제외’에서 되돌릴 수 있습니다."
+                        : "저장에 실패했거나 용량 제한을 넘은 미디어입니다."
                     wrapMode: Text.WordWrap
                     textFormat: Text.PlainText
                     font.pixelSize: Theme.fontSmall
@@ -186,9 +186,9 @@ Item {
                             : review.confirmAll ? "한 번 더 누르면 모두 " + review.settleWord
                             : "모두 " + review.settleWord
                         tip: review.view === "missing"
-                            ? "갤러리에서 감추고 다음 저장에서 다시 받지 않습니다. 기록은 지우지 않으며 ‘직접 제외’에서 되돌릴 수 있습니다."
-                            : review.view === "excluded" ? "다음 저장에서 다시 받게 합니다"
-                            : "이 목록에서만 지웁니다. 저장된 파일에는 영향이 없습니다."
+                            ? "갤러리와 다음 저장에서 제외"
+                            : review.view === "excluded" ? "다음 저장에 포함"
+                            : "실패 기록만 삭제"
                         // A double click counts once. Without this its second click confirmed what
                         // its first had only asked about, and every item of the list was settled.
                         onDoubleClicked: {}
@@ -214,7 +214,7 @@ Item {
                         objectName: "unsavedSelectPage"
                         tone: "ghost"
                         text: review.chosen > 0 ? "선택 해제" : "불러온 것 모두 선택"
-                        tip: review.chosen > 0 ? "선택 해제 (Esc)" : "불러온 타일을 모두 고릅니다 (Ctrl+A). Shift+클릭은 범위를, 끌기는 사각형 안을 고릅니다."
+                        tip: review.chosen > 0 ? "선택 해제 (Esc)" : "모두 선택 (Ctrl+A) · 범위 선택 (Shift+클릭) · 사각형 선택 (끌기)"
                         onClicked: review.chosen > 0 ? review.records.clearUnsavedSelection() : review.selectAll()
                     }
                     FlatButton {
@@ -229,7 +229,7 @@ Item {
                     objectName: "unsavedRetryHint"
                     Layout.fillWidth: true
                     visible: grid.count > 0 && !!review.app && (!review.app.canStart || review.app.accounts.authenticationState === "reconnect_required")
-                    text: review.retryWord + "하려면 X 계정이 연결되어 있고 진행 중인 작업이 끝나야 합니다."
+                    text: "X 계정을 연결하고 작업이 끝난 뒤 다시 시도하세요."
                     color: Theme.notice
                     wrapMode: Text.Wrap
                     font.pixelSize: Theme.fontSmall
@@ -482,7 +482,7 @@ Item {
                             ToolTip.visible: containsMouse && !bandDrag.active
                             ToolTip.delay: 600
                             ToolTip.text: cell.detail + (cell.seen ? "\n마지막 확인 " + cell.seen : "")
-                                + "\n누르면 선택 · Shift+클릭은 범위 · 두 번 누르면 원문 보기"
+                                + "\n클릭 선택 · Shift+클릭 범위 선택 · 더블 클릭 원문 보기"
                             onClicked: mouse => {
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     review.clickedToken = ""
@@ -607,8 +607,8 @@ Item {
                 visible: grid.count === 0 && !!review.records && !review.records.unsavedBusy
                     && !review.records.unsavedError.length
                 text: review.view === "excluded" ? "직접 제외한 미디어가 없어요"
-                    : review.view === "missing" ? "없어진 파일이 없어요 · 저장한 파일이 모두 제자리에 있어요"
-                    : "저장하지 못한 미디어가 없어요 · 모두 잘 담겼어요"
+                    : review.view === "missing" ? "없어진 파일이 없어요"
+                    : "저장하지 못한 미디어가 없어요"
                 horizontalAlignment: Text.AlignHCenter
                 wrapMode: Text.WordWrap
                 color: Theme.textMuted

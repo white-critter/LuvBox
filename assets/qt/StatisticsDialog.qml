@@ -12,7 +12,6 @@ FlatDialog {
     signal userTagSelected(string tag)
     signal duplicateSelected()
     title: "라이브러리 통계 요약"
-    subtitle: "저장한 파일의 용량, 종류, 작성자와 월별 현황입니다."
 
     readonly property bool loaded: stats.files !== undefined
     readonly property string problem: stats.error ? String(stats.error) : ""
@@ -191,7 +190,7 @@ FlatDialog {
                         spacing: 8
 
                         Label {
-                            text: "상위 작성자 TOP 10"
+                            text: "상위 작성자 10명"
                             font.pixelSize: Theme.fontBody
                             font.bold: true
                             color: Theme.text

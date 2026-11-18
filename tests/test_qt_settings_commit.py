@@ -243,6 +243,29 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertFalse(self.controller.preferences["confirm_each"])
         self.assertFalse(self.controller.download._service._review_enabled)
 
+    def test_saving_one_preference_keeps_the_form_editable_and_reports_a_rollback(self):
+        self.settings.update.side_effect = self.blocked_update
+        previous = self.controller.status
+        self.controller.setPreference("include_videos", False)
+        self.assertTrue(self.entered.wait(1))
+        self.assertTrue(self.controller.busy)
+        self.assertFalse(self.controller.operationBusy)
+        self.assertEqual(self.controller.status, previous)
+        self.controller.setPreference("include_gifs", False)
+        self.controller.setPreference("include_gifs", False)
+        self.assertFalse(self.controller.preferences["include_gifs"])
+        self.settings.update.side_effect = None
+        self.release.set()
+        self.wait_for(lambda: not self.controller.busy)
+        self.assertEqual(self.settings.update.call_count, 2)
+        self.assertTrue(self.controller.preferences["include_videos"])
+        self.assertFalse(self.controller.preferences["include_gifs"])
+        self.assertIn("설정을 저장하지 못했습니다", self.controller.error)
+        self.controller.setPreference("include_videos", False)
+        self.wait_for(lambda: not self.controller.busy)
+        self.assertFalse(self.controller.preferences["include_videos"])
+        self.assertEqual(self.controller.error, "")
+
     def test_automatic_classification_follows_its_switch_and_a_failed_save_restores_it(self):
         library = self.controller.library
         self.assertTrue(library._auto_classify)                 # on unless switched off

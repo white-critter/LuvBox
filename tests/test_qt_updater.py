@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from threading import Event
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -202,7 +203,7 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertEqual(list((self.folder / "updates").iterdir()), [])
         self.assertEqual(controller.progress, 1.0)
         self.assertTrue(controller.noticeVisible)
-        self.assertEqual(controller.status, "1.9.0 준비 완료 · 다시 시작하면 바뀌어요")
+        self.assertEqual(controller.status, "1.9.0 준비 완료")
         # The click reads the latest release once more before it downloads (1.10.4).
         self.assertEqual(self.paths(), ["/latest", "/latest", "/download/v1.9.0/SHA256-1.9.0.txt",
                                         "/download/v1.9.0/LuvBox.exe"])
@@ -266,13 +267,11 @@ class UpdateControllerTests(unittest.TestCase):
             controller.openReleasePage()
         self.assertEqual(opened.call_args.args[0].toString(), "https://github.com/white-critter/LuvBox/releases/latest")
 
-    def test_the_switch_is_remembered(self):
+    def test_the_switch_controls_automatic_checks(self):
         controller = self.controller()
         self.assertTrue(controller.autoCheck)
-        controller.setAutoCheck(False)
+        controller.set_auto_check(False)
         self.assertFalse(controller.autoCheck)
-        self.wait(lambda: self.settings.update.called)
-        self.assertEqual(self.settings.update.call_args.args[0], {"update_check": False})
         controller.startAutomaticCheck()
         self.assertEqual(self.paths(), [])
         # A damaged saved value falls back to checking, the default.
@@ -325,6 +324,41 @@ class ApplicationUpdateTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.application = QCoreApplication.instance() or QCoreApplication([])
+
+    def test_exiting_during_a_check_keeps_the_new_automatic_update_setting(self):
+        from luvbox.app_settings import SettingsRepository
+        from luvbox.qt_app import ApplicationController
+
+        checking, finish_check, check_done = Event(), Event(), Event()
+
+        def slow_check(*args, **kwargs):
+            checking.set()
+            finish_check.wait(10)
+            check_done.set()
+            raise updater.UpdateError("network")
+
+        with (tempfile.TemporaryDirectory(prefix="luvbox-qt-update-app-") as folder,
+              patch.dict(os.environ, {"LOCALAPPDATA": folder}),
+              patch("luvbox.qt_schedule.task_status", return_value={"registered": False}),
+              patch.object(updater, "check", side_effect=slow_check)):
+            controller = ApplicationController()
+            try:
+                controller.updates.startAutomaticCheck()
+                self.assertTrue(checking.wait(2))
+                controller.setPreference("update_check", False)
+                self.assertFalse(controller.updates.autoCheck)
+                controller.requestClose()
+                deadline = time.monotonic() + 5
+                while not controller.shutdownReady and time.monotonic() < deadline:
+                    self.application.processEvents()
+                    time.sleep(0.005)
+                self.assertTrue(controller.shutdownReady)
+                self.assertFalse(check_done.is_set())
+                self.assertFalse(SettingsRepository().load()["update_check"])
+            finally:
+                finish_check.set()
+                controller.requestClose()
+                controller.updates._worker.join(timeout=2)
 
     def test_the_application_owns_an_update_part_that_stays_offline_and_closes_with_it(self):
         from luvbox.qt_app import ApplicationController

@@ -246,7 +246,7 @@ def scene(shots=None):
         similar = every("duplicateTile", near_card)[2]
         assert attached(similar, "Accessible.name").startswith("비슷한 사진 "), attached(similar, "Accessible.name")
         tip = every("duplicateRole", near_card)[2].property("tip")
-        assert "완전히 같지 않아" in tip and "사본으로 고르지 않" in tip and "‘비교’" in tip, tip
+        assert "크기·화질" in tip and "‘비교’" in tip, tip
         shot("1-near-and-exact-groups")
 
         # The badge of the similar photo says why when the pointer rests on it, instead of the tile's line.
@@ -297,8 +297,8 @@ def scene(shots=None):
         confirmation = find("deleteConfirmation")
         wait(lambda: confirmation.property("visible"), "delete confirmation")
         summary = find("deleteSummaryText").property("text")
-        assert "같은 내용의 다른 파일이 남는지" in summary, summary
-        assert "1장은 크기·화질만 다른 ‘비슷함’ 사진이라" in summary, summary
+        assert "같은 파일이 남는 경우에만" in summary, summary
+        assert "‘비슷함’ 1장은 ‘비교’에서" in summary, summary
         shot("4-confirmation")
         click("confirmRecycle")
         wait(lambda: not controller.management.mutating and not model.busy and not library.duplicatesSettling

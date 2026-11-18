@@ -19,30 +19,30 @@ FlatDialog {
     // items and key handlers in MainWindow.qml.
     readonly property var sections: [
         { title: "갤러리", rows: [
-            { keys: "Ctrl+F", text: "사진 검색으로 이동" },
-            { keys: "Enter · Space", text: "미리보기 열기 (여러 개 선택 중에는 선택·해제)" },
-            { keys: "방향키", text: "사진 사이 이동" },
+            { keys: "Ctrl+F", text: "사진 검색" },
+            { keys: "Enter · Space", text: "미리보기 · 여러 개 선택 중에는 선택·해제" },
+            { keys: "방향키", text: "사진 이동" },
             { keys: "F", text: "즐겨찾기 추가·해제" },
-            { keys: "B", text: "즐겨찾기만 보기 켜기·끄기" },
-            { keys: "D", text: "중복 사진만 보기 켜기·끄기" },
-            { keys: "S", text: "통계 요약 열기" },
+            { keys: "B", text: "즐겨찾기만 보기" },
+            { keys: "D", text: "중복 사진만 보기" },
+            { keys: "S", text: "통계 보기" },
             { keys: "Ctrl+A", text: "불러온 항목 모두 선택" },
-            { keys: "Ctrl+클릭", text: "여러 개 선택에 추가·제외" },
-            { keys: "Shift+클릭", text: "마지막으로 누른 사진부터 여기까지 선택" },
-            { keys: "끌기", text: "사각형을 그려 닿은 사진 선택 (Ctrl을 누르거나 ‘여러 개 선택’ 중이면 추가)" },
-            { keys: "마우스 휠", text: "스크롤 · 계속 굴리면 빨라짐" },
-            { keys: "Delete", text: "선택한 사진을 휴지통으로 (확인 후 이동)" },
+            { keys: "Ctrl+클릭", text: "선택 추가·해제" },
+            { keys: "Shift+클릭", text: "범위 선택" },
+            { keys: "끌기", text: "사각형 선택 · Ctrl로 추가" },
+            { keys: "마우스 휠", text: "스크롤" },
+            { keys: "Delete", text: "선택한 사진을 휴지통으로" },
             { keys: "Esc", text: "선택 해제 · 검색어 지우기" },
             { keys: "F5", text: "새로고침 · 새 사진 보기" },
-            { keys: "F1", text: "이 안내 열기" }
+            { keys: "F1", text: "단축키 보기" }
         ] },
         { title: "미리보기", rows: [
             { keys: "← · →", text: "이전 · 다음 사진" },
             { keys: "F", text: "즐겨찾기 추가·해제" },
-            { keys: "+ · −", text: "확대 · 축소 (마우스 휠도 가능)" },
+            { keys: "+ · − · 휠", text: "확대 · 축소" },
             { keys: "0 · 1", text: "화면 맞춤 · 원본 100%" },
             { keys: "M", text: "영상 소리 켜기·끄기" },
-            { keys: "Delete", text: "휴지통으로 (이동 후 다음 사진으로 돌아옴)" },
+            { keys: "Delete", text: "휴지통으로" },
             { keys: "Esc", text: "미리보기 닫기" }
         ] }
     ]

@@ -29,7 +29,7 @@ _ORDERS = {"saved", "posted", "posted_oldest", "liked"}
 _KINDS = {"all", "photo", "video", "animated_gif"}
 _MEDIA_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".mp4"}
 _DRIVE_MISSING = "파일을 열 수 없습니다. 저장 드라이브를 연결해 주세요."
-_FILE_MISSING = "이 파일을 찾지 못했습니다. 저장 폴더 밖에서 지우거나 옮긴 파일일 수 있습니다."
+_FILE_MISSING = "파일이 없습니다. 저장 위치를 확인해 주세요."
 _CLOUD_ONLY = "이 파일은 클라우드에만 있습니다. 탐색기에서 받은 뒤 다시 열 수 있습니다."
 _POSTED = re.compile(r"(\d{4}-\d\d-\d\d)T(\d\d:\d\d)")
 MAX_SELECTION = 2000
@@ -45,18 +45,18 @@ _EXCLUSIVE_BUSY = {
     "teach": "분류를 반영한 뒤 다시 실행할 수 있습니다.",
 }
 _HOLD_REASON = {
-    "ai": "AI 자동분류 중에는 태그 수정과 휴지통 이동을 잠시 멈춥니다. 갤러리 보기, 즐겨찾기, 저장은 계속할 수 있습니다.",
-    "clear": "AI 태그 초기화 중에는 태그 수정과 휴지통 이동을 잠시 멈춥니다. 끝나면 다시 할 수 있습니다.",
-    "duplicates": "중복 검사 중에는 휴지통 이동과 사본 선택을 잠시 멈춥니다. 갤러리 보기와 즐겨찾기는 계속할 수 있습니다.",
-    "teach": "분류를 반영하는 중에는 태그 수정과 휴지통 이동을 잠시 멈춥니다.",
+    "ai": "AI 자동분류가 끝난 뒤 태그 수정과 휴지통 이동을 할 수 있습니다.",
+    "clear": "AI 태그 초기화가 끝난 뒤 태그 수정과 휴지통 이동을 할 수 있습니다.",
+    "duplicates": "중복 검사가 끝난 뒤 사본 선택과 휴지통 이동을 할 수 있습니다.",
+    "teach": "분류가 반영된 뒤 태그 수정과 휴지통 이동을 할 수 있습니다.",
 }
 _CATALOG_MOVED = "저장 폴더가 바뀌어 작업을 멈췄습니다. 이미 처리한 내용은 유지됩니다."
-_TAG_LOCKED = "AI 작업이 끝난 뒤 태그를 바꿀 수 있습니다. 분류나 초기화가 끝나면 다시 시도해 주세요."
+_TAG_LOCKED = "AI 작업이 끝난 뒤 태그를 바꿀 수 있습니다."
 _FAVORITE_ERROR = "즐겨찾기를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
 _DISTINCT_ERROR = "중복 아님 표시를 저장하지 못했습니다. 목록을 새로 고친 뒤 다시 시도해 주세요."
 # How the status lines of a running classification begin (see _perform).
 _AI_PROGRESS = ("AI 자동분류 중", "분류할 사진을 확인하는 중", "비슷한 사진에 분류를 맞추는 중")
-_STATISTICS_ERROR = "통계를 불러오지 못했습니다. 저장 폴더가 연결되어 있는지 확인한 뒤 다시 시도해 주세요."
+_STATISTICS_ERROR = "통계를 불러오지 못했습니다. 저장 폴더를 확인해 주세요."
 
 
 def _thumbnail_workers():
@@ -672,7 +672,7 @@ class LibraryRepository:
 
         def check_cancel():
             if self._duplicate_cancel.is_set():
-                raise ScanCancelled("중복 검사를 중단했습니다. 다시 검사하면 확인한 파일의 해시를 재사용합니다.")
+                raise ScanCancelled("중복 검사를 중단했습니다.")
             if self._catalog_request(generation, epoch) is None:
                 raise ScanCancelled(_CATALOG_MOVED)
 
@@ -907,7 +907,7 @@ class LibraryRepository:
                 def remember_note(count):
                     if count:
                         self._scan_note = (
-                            f" 읽을 수 없는 사진 {count:,}장은 파일이 바뀌기 전까지 다시 열지 않습니다."
+                            f" 읽을 수 없는 사진 {count:,}장은 제외했습니다."
                         )
 
                 remember_note(skipped_unreadable)
@@ -972,11 +972,9 @@ class LibraryRepository:
                             try:
                                 predictions = classify_detailed(batch_paths, batch_size=batch_size, session=sess)
                             except Exception as exc:
-                                kept = f"이미 분류된 {saved_count:,}장은 유지되며, " if saved_count else ""
+                                kept = f" {saved_count:,}장은 분류했습니다." if saved_count else ""
                                 raise RuntimeError(
-                                    "AI 분류 중 일부 사진을 처리하지 못했습니다. "
-                                    + kept
-                                    + "다시 실행하면 남은 사진부터 이어서 분류합니다."
+                                    "일부 사진을 분류하지 못했습니다." + kept + " 다시 실행해 주세요."
                                 ) from exc
                             embed_rows = []
                             label_rows = []
@@ -1398,9 +1396,8 @@ class LibraryRepository:
             if not (nearly_identical(pixel_vector(path), pixel_vector(keeper)) and same_in_detail(path, keeper)):
                 # In a group joined through a third photo, this one can be the same picture as that
                 # photo and still not pass beside the photo kept: say what can be done either way.
-                raise ValueError("남길 사진과 같은 사진으로 다시 확인되지 않아 여기서는 보낼 수 없습니다. "
-                                 "다른 사진이면 그 사진을 눌러 고른 뒤 ‘선택한 1장만 중복 아님’을, "
-                                 "필요 없는 사진이면 중복 보기를 끈 갤러리의 ‘휴지통으로’를 쓰세요.")
+                raise ValueError("남길 사진과 같은 사진으로 다시 확인되지 않아 보낼 수 없습니다. "
+                                 "‘중복 아님’으로 표시하거나 갤러리에서 휴지통으로 보내세요.")
             if file_signature(path) != signature or file_signature(keeper) != keeper_signature:
                 raise ValueError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
             favorites = store.favorite_identities_among([identity, members[0]["identity"]])
@@ -2507,7 +2504,7 @@ class LibraryController(QObject):
     def cancelDuplicateScan(self):
         if self._exclusive == "duplicates" and hasattr(self._repository, "_duplicate_cancel"):
             self._repository._duplicate_cancel.set()
-            self._status = "중복 검사를 중단하는 중… 현재 파일 확인이 끝나면 멈춥니다."
+            self._status = "중복 검사 중단 중…"
             self.changed.emit()
 
     def setAutoClassify(self, enabled):
@@ -2552,7 +2549,7 @@ class LibraryController(QObject):
     def cancelAiScan(self):
         if self._exclusive == "ai" and hasattr(self._repository, "_ai_cancel"):
             self._repository._ai_cancel.set()
-            self._status = "AI 자동분류를 중단하는 중… 현재 묶음 처리가 끝나면 멈춥니다."
+            self._status = "AI 자동분류 중단 중…"
             self.changed.emit()
 
     @Slot(result=bool)
@@ -2584,7 +2581,7 @@ class LibraryController(QObject):
         self._distinct_undo = ("group", members)
         self._distinct_count += 1
         self._duplicate_marks_changed(
-            f"사진 {len(members):,}장을 중복 아님으로 표시했습니다. 다음 검사부터 묶지 않습니다.")
+            f"사진 {len(members):,}장을 중복 아님으로 표시했습니다.")
         return True
 
     @Slot("QVariantList", result=bool)
@@ -2604,7 +2601,7 @@ class LibraryController(QObject):
         self._distinct_undo = ("photos", mark)
         self._distinct_count += 1
         self._duplicate_marks_changed(
-            f"사진 {len(mark['photos']):,}장을 묶음에서 뺐습니다. 다음 검사부터 이 묶음의 사진과 묶지 않습니다.")
+            f"사진 {len(mark['photos']):,}장을 묶음에서 뺐습니다.")
         return True
 
     @Slot(result=bool)
@@ -2662,7 +2659,7 @@ class LibraryController(QObject):
         # Photos of a group that are only alike (another size or quality) are never copies.
         similar = sum(1 for row in self.model._rows
                       if row.get("group") and not row.get("keeper") and not row.get("copy"))
-        left = f" 크기·화질만 다른 ‘비슷함’ {similar:,}장은 사본이 아니어서 고르지 않았습니다." if similar else ""
+        left = f" ‘비슷함’ {similar:,}장 제외." if similar else ""
         if not copy_keys:
             self._status = "선택할 중복 사본이 없습니다." + left
             self.changed.emit()
@@ -2670,7 +2667,7 @@ class LibraryController(QObject):
         # The list is read 200 rows at a time; copies further down are not on screen yet.
         waiting = sum(1 for k in copy_keys if k not in self.model._keys)
         if waiting:
-            left += f" 아직 불러오지 않은 사본 {waiting:,}장은 목록을 더 내린 뒤 다시 누르면 고릅니다."
+            left += f" 아래로 스크롤하면 사본 {waiting:,}장을 더 볼 수 있습니다."
         loaded_copies = [k for k in copy_keys if k in self.model._keys and k not in self._selection_keys]
         selectable, _, _ = self._repository.selectable_keys(loaded_copies)
         capacity = max(0, MAX_SELECTION - len(self._selection_keys))

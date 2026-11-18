@@ -13,7 +13,6 @@ FlatDialog {
     objectName: "alikeConfirmation"
     parent: Overlay.overlay
     title: "이 사진을 휴지통으로 보낼까요?"
-    subtitle: "오른쪽 ‘비슷함’ 사진을 그 묶음에 남길 사진과 나란히 보여 드립니다."
     preferredWidth: 1000
     height: parent ? Math.max(320, Math.min(760, parent.height - windowMargin)) : 640
     readonly property var shown: app ? app.management.deleteAlike : ({})

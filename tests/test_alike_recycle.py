@@ -272,7 +272,7 @@ class ComparedPhotoTests(AlikeCatalog):
         shown = type("Shown", (), {"_delete": manifest, "deleteCount": 1})()
         summary = ManagementController.deleteSummary.fget(shown)
         self.assertIn("‘비슷함’ 사진 한 장만", summary)
-        self.assertIn("남길 사진이 그대로 있는지, 같은 사진인지 다시 확인", summary)
+        self.assertIn("오른쪽 ‘비슷함’ 사진 한 장만", summary)
         self.assertEqual(ManagementController.deleteAlike.fget(shown), manifest["alike"])
 
 

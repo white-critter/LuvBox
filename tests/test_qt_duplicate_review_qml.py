@@ -269,12 +269,14 @@ def scene(shots=None):
         click("galleryRecycleSelected")
         confirmation = find("deleteConfirmation")
         wait(lambda: confirmation.property("visible"), "delete confirmation")
-        # The question says what protects the last file of a group, and the long
-        # sentence wraps inside the dialog (it used to run out of it, cut off).
+        # The last-copy rule remains legible even if the dialog is made narrow.
         summary = find("deleteSummaryText")
-        assert "같은 내용의 다른 파일이 남는지" in summary.property("text"), summary.property("text")
+        assert "같은 파일이 남는 경우에만" in summary.property("text"), summary.property("text")
+        preferred_width = confirmation.property("preferredWidth")
+        confirmation.setProperty("preferredWidth", 230)
         wait(lambda: 0 < summary.property("width") <= confirmation.property("width")
              and summary.property("lineCount") > summary.property("text").count("\n") + 1, "the summary wraps")
+        confirmation.setProperty("preferredWidth", preferred_width)
         click("confirmRecycle")
         wait(lambda: not controller.management.mutating and not model.busy and model.count == 2
              and library.duplicateCount == 2, "copies recycled, the kept photo leaves the list")
@@ -357,7 +359,7 @@ def scene(shots=None):
         wait(lambda: not model.busy and model.count == 0 and library.duplicateCount == 0
              and library.distinctDuplicateCount == 2, "second group marked")
         empty = find("duplicateEmptyState")
-        assert empty.property("visible") and "‘중복 아님’ 표시 2개는 위의 ‘초기화’로" in empty.property("text"), empty.property("text")
+        assert empty.property("visible") and "‘중복 아님’ 표시 2개 · ‘초기화’" in empty.property("text"), empty.property("text")
         shot("5-all-marked")
         click("galleryClearDistinct")
         wait(lambda: not model.busy and model.count == 4 and library.duplicateCount == 4

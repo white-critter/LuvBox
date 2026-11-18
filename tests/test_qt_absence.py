@@ -11,7 +11,7 @@ class AbsenceNoteTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows drive-letter paths")
     def test_missing_drive_is_distinct_from_a_deleted_file(self):
         present = Path("C:/LuvBox")
-        self.assertIn("지우거나 옮긴", absence_note(present))
+        self.assertIn("파일이 없습니다", absence_note(present))
         missing = Path("Q:/LuvBox") if not Path("Q:/").exists() else None
         if missing is not None:
             self.assertIn("드라이브", absence_note(missing))

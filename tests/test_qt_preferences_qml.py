@@ -52,7 +52,7 @@ def check_scene():
         @Property("QVariantMap", notify=preferencesChanged)
         def preferences(self): return self._values
         @Property(bool, constant=True)
-        def busy(self): return False
+        def operationBusy(self): return False
         @Property(str, notify=changed)
         def error(self): return self._error
         @Slot(str, "QVariant")
@@ -125,10 +125,8 @@ ApplicationWindow {
     # Newly saved photos are classified on their own unless this is switched off.
     from PySide6.QtCore import QMetaObject
     automatic = dialog.findChild(QQuickItem, 'autoClassifySwitch')
-    hint = dialog.findChild(QQuickItem, 'autoClassifyHint')
-    assert automatic is not None and hint is not None
+    assert automatic is not None
     assert automatic.property('checked') is True, "on until the owner switches it off"
-    assert '알아서 분류' in hint.property('text')
     automatic.setProperty('checked', False)
     QMetaObject.invokeMethod(automatic, 'toggled')
     QTest.qWait(50)

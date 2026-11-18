@@ -193,7 +193,7 @@ def scene(screenshot_dir=None):
         QTest.qWait(80)
         assert launcher.read_bytes() == program
         assert sorted(path.name for path in launcher.parent.iterdir()) == ["LuvBox.exe"]
-        assert title.property("text") == "1.9.1 준비 완료 · 다시 시작하면 바뀌어요"
+        assert title.property("text") == "1.9.1 준비 완료"
         restart = find("updateRestartButton")
         assert restart.property("visible") and restart.property("enabled")
         assert not find("updateCancelButton").property("visible")

@@ -132,7 +132,7 @@ class UpdateController(QObject):
         if self._state == "downloading":
             return f"{self.version} 받는 중 · {round(self._progress * 100)}%"
         if self._state == "ready":
-            return f"{self.version} 준비 완료 · 다시 시작하면 바뀌어요"
+            return f"{self.version} 준비 완료"
         if self._found:
             return f"새 버전이 나왔어요 · {self.version}"
         if self._state == "current":
@@ -230,13 +230,10 @@ class UpdateController(QObject):
             self._dismissed = True
             self.changed.emit()
 
-    @Slot(bool)
-    def setAutoCheck(self, enabled):
-        enabled = bool(enabled)
+    def set_auto_check(self, enabled):
         if enabled == self._auto or self._closing:
             return
         self._auto = enabled
-        self._queue("remember", changes={"update_check": enabled})
         self.changed.emit()
 
     @Slot()
@@ -270,9 +267,6 @@ class UpdateController(QObject):
             kind, details = self._jobs.get()
             if kind == "quit":
                 return
-            if kind == "remember":
-                self._remember(details["changes"])
-                continue
             if kind == "sweep":
                 try:
                     updater.clear_downloads(self._folder_path(), older_than=_LEFTOVER_AGE)

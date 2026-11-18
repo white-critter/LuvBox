@@ -1041,38 +1041,98 @@ def initialize_storage(paths: StoragePaths) -> None:
         account_guard.close()
 
 
-def _catalog_only_names(database: Path, root: Path) -> bool:
-    """True when this catalog has not been adopted onto its own folder.
+_MEDIA_MARK_ID = ("folder_mode", "tweet_id", "num", "media_type")
+_MOVED_MARK_KEYS = {
+    "favorites": _MEDIA_MARK_ID,
+    "media_tags": (*_MEDIA_MARK_ID, "tag"),
+}
+_MOVED_MARK_COLUMNS = {
+    "favorites": (*_MOVED_MARK_KEYS["favorites"], "created_at"),
+    "media_tags": (*_MOVED_MARK_KEYS["media_tags"], "source", "created_at"),
+}
 
-    Opening the new place before the save copies the traveling snapshot, or
-    creates an empty catalog. Every file path in that copy still names the old
-    folder, so the live catalog of the old folder is the one to keep. A place
-    that already has its own photos names those photos and is left alone.
-    """
-    if not database.is_file() or _linked(database):
-        return False
-    try:
-        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
-            db.execute("PRAGMA query_only=ON")
-            try:
-                rows = db.execute("SELECT path FROM media").fetchall()
-            except sqlite3.OperationalError:
-                return False
-    except (OSError, sqlite3.Error):
-        return False
-    root_text = os.path.normcase(os.path.abspath(root))
-    prefix = root_text if root_text.endswith(os.sep) else root_text + os.sep
-    saw_old = False
-    for (path,) in rows:
-        if not isinstance(path, str) or not path:
+
+def _moved_snapshot_edits(database: Path, snapshot: Path | None) -> dict | None:
+    """Return destination mark changes, or None for independently edited records."""
+    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+        db.execute("PRAGMA trusted_schema=OFF")
+        db.execute("PRAGMA query_only=ON")
+        tables = _tables(db) - {"sqlite_sequence"}
+        if snapshot is not None:
+            db.execute("ATTACH DATABASE ? AS baseline", (snapshot.as_uri() + "?mode=ro",))
+            baseline_tables = {name for name, in db.execute("SELECT name FROM baseline.sqlite_schema WHERE type='table'")}
+            if baseline_tables - {"sqlite_sequence"} - tables:
+                return None
+        else:
+            baseline_tables = set()
+        edits = {}
+        for table in tables:
+            # Catalog and archive schema names use plain identifiers.
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", table):
+                return None
+            current = f'SELECT * FROM main."{table}"'
+            if table not in baseline_tables:
+                if db.execute(current + " LIMIT 1").fetchone() is not None:
+                    return None
+                continue
+            columns = _columns(db, table)
+            if columns != [row[1] for row in db.execute(f'PRAGMA baseline.table_info("{table}")')]:
+                return None
+            before = f'SELECT * FROM baseline."{table}"'
+            if table == "catalog_meta":
+                # Opening a traveling copy strips former-root approvals.
+                before += " WHERE key != 'allowed_media_roots'"
+            removed, added = before + " EXCEPT " + current, current + " EXCEPT " + before
+            if table in _MOVED_MARK_COLUMNS:
+                if tuple(columns) != _MOVED_MARK_COLUMNS[table]:
+                    return None
+                key_count = len(_MOVED_MARK_KEYS[table])
+                deletes = [row[:key_count] for row in db.execute(removed)]
+                inserts = db.execute(added).fetchall()
+                if deletes or inserts:
+                    edits[table] = (deletes, inserts)
+            elif any(db.execute(difference + " LIMIT 1").fetchone() is not None for difference in (removed, added)):
+                return None
+        return edits
+
+
+def _moved_destination_edits(source: StoragePaths, destination: StoragePaths) -> dict | None:
+    """Identify a locally opened copy of the old folder that can be replaced."""
+    _record_files(destination.record_dir)
+    if not destination.record_dir.is_dir():
+        return {}
+    if any((destination.record_dir / name).exists() for name in (*_OLD_DATABASES.values(), _LEGACY_SYNC)):
+        return None
+    written = _snapshot_state(source)
+    imported = _snapshot_state(destination)
+    changes = {}
+    for name in _DATABASES:
+        local = destination.record_dir / name
+        if not local.is_file():
             continue
-        named = os.path.normcase(os.path.abspath(path))
-        if named != root_text and not named.startswith(prefix):
-            return False
-        saw_old = True
-    # No rows: the gallery created an empty catalog by opening the new place.
-    # Rows that only remember removed files are a catalog of their own.
-    return saw_old or not rows
+        snapshot = _snapshot_source(destination, name)
+        if snapshot is not None and (imported.get(name) != written.get(name) or imported.get(name) != _file_state(snapshot)):
+            return None
+        try:
+            edits = _moved_snapshot_edits(local, snapshot)
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            return None
+        if edits is None:
+            return None
+        changes.update(edits)
+    return changes
+
+
+def _apply_moved_mark_edits(database: Path, edits: dict) -> None:
+    """Apply destination choices while carrying forward the original catalog's edits."""
+    with closing(sqlite3.connect(database, timeout=1)) as db, db:
+        for table, (deletes, inserts) in edits.items():
+            predicate = " AND ".join(key + "=?" for key in _MOVED_MARK_KEYS[table])
+            db.executemany(f"DELETE FROM {table} WHERE {predicate}", deletes)
+            columns = _MOVED_MARK_COLUMNS[table]
+            names = ",".join(columns)
+            parameters = ",".join("?" for _ in columns)
+            db.executemany(f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({parameters})", inserts)
 
 
 def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
@@ -1085,12 +1145,12 @@ def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
     marks made after the last save stayed behind in this PC's records of the
     old place.
 
-    This PC's records of the old place are the newest there are. When the new
-    place has no records of its own yet, or only the snapshot copied by opening
-    it before this save, they become its records, and the copy
-    inside the folder that this PC wrote itself is remembered as seen, so that
-    older copy is not merged back over them (a copy another PC wrote is still
-    merged, as always). Then every file record under the old folder whose file
+    An empty destination or a copy of the original folder's snapshot starts
+    with the original local records and keeps favorite and tag edits made at
+    the new location. Independent records at the new location stay there.
+    The copy inside the folder that this PC wrote itself is remembered as seen,
+    so that older copy is not merged back over them (another PC's copy is
+    merged as usual). Then every file record under the old folder whose file
     is at the same relative place in the new folder is pointed there. The
     records of the old place stay where they are. Returns how many file
     records were pointed at the new folder.
@@ -1110,13 +1170,11 @@ def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
         output_guard.acquire()
         _recover_relocation(destination, protected=True)
         previous = source.record_dir / _HISTORY_DB
-        destination_db = destination.record_dir / _HISTORY_DB
-        # The gallery opens the new place as soon as it is chosen, which copies
-        # the older snapshot (or an empty catalog) before this save can. That
-        # copy still names the old folder; it is not a catalog of its own.
-        only_old = destination_db.is_file() and _catalog_only_names(destination_db, source.output_dir)
-        if (source.record_dir != destination.record_dir and (not destination_db.is_file() or only_old)
-                and previous.is_file() and not _linked(source.record_dir) and not _linked(previous)):
+        edits = None
+        if (source.record_dir != destination.record_dir and previous.is_file()
+                and not _linked(source.record_dir) and not _linked(previous)):
+            edits = _moved_destination_edits(source, destination)
+        if edits is not None:
             _record_files(source.record_dir)
             destination.record_dir.parent.mkdir(parents=True, exist_ok=True)
             stage = destination.record_dir.parent / (".relocate-" + destination.record_dir.name + "-" + uuid.uuid4().hex)
@@ -1125,6 +1183,8 @@ def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
                 current = source.record_dir / name
                 if current.is_file():
                     _backup_database(current, stage / name)    # a checked copy; the original stays
+            if edits:
+                _apply_moved_mark_edits(stage / _HISTORY_DB, edits)
             written = _snapshot_state(source)
             seen = {}
             for name, state in written.items():

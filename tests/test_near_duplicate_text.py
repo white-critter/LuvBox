@@ -395,7 +395,7 @@ class LibraryTests(unittest.TestCase):
         rows = self.copies(["200", "201"])
         self.assertEqual({row["tweet_id"]: bool(row.get("_copy_near")) for row in rows}, {"200": False, "201": True})
         summary = _summary(rows)
-        self.assertIn("1장은 크기·화질만 다른 ‘비슷함’ 사진이라", summary)
+        self.assertIn("‘비슷함’ 1장은 ‘비교’에서", summary)
         result = self.delete(rows)
         self.assertEqual((result["recycled"], result["protected"]), (1, 1))
         self.assertFalse(self.files["200"].exists())
@@ -427,7 +427,7 @@ class LibraryTests(unittest.TestCase):
         rows = self.copies(["202", "200"])
         self.assertFalse(any(row.get("_copy_near") for row in rows))
         summary = _summary(rows)
-        self.assertIn("같은 내용의 다른 파일이 남는지", summary)
+        self.assertIn("같은 파일이 남는 경우에만", summary)
         self.assertNotIn("‘비슷함’", summary)
 
     def test_without_stored_groups_only_files_with_the_same_bytes_are_offered(self):

@@ -147,7 +147,7 @@ class LibraryControlsTests(unittest.TestCase):
         self.assertEqual(self.library.selectDuplicateCopies(), 1)
         self.assertEqual(set(self.library.selectedKeys), set(keys))
         # A copy further down the list is not picked, and the person is told how to get it.
-        self.assertIn("아직 불러오지 않은 사본 1장", self.library.status)
+        self.assertIn("아래로 스크롤하면 사본 1장", self.library.status)
         self.assertEqual(self.library.selectDuplicateCopies(), 0)
 
     def test_empty_gallery_does_not_select_unloaded_duplicate_copies(self):
