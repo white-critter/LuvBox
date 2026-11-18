@@ -112,7 +112,7 @@ class WindowRepairTests(unittest.TestCase):
         self.controller.startSave()
         self.wait_for(lambda: self.controller.download.start.called and not self.controller.busy)
         self.controller.download._handle({"type": "finished", "status": "error", "catalog_damaged": True,
-                                          "message": "저장 기록 DB가 손상되어 기록 복구가 필요합니다."})
+                                          "message": "저장 기록이 손상되어 복구가 필요합니다."})
         self.assertTrue(self.controller.download.repairNeeded)
 
     def test_repair_is_offered_only_after_the_damage_report(self):

@@ -43,6 +43,6 @@ Row {
         text: "원본 100%"
         enabled: controls.preview.canActualSize
         onClicked: controls.preview.actualSize()
-        tip: "원본 배율은 1,600만 화소 이하의 확인된 사진에서 사용할 수 있습니다. (1)"
+        tip: "원본 100%는 1,600만 화소 이하 사진에서 쓸 수 있습니다. (1)"
     }
 }

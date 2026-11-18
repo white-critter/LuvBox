@@ -162,6 +162,16 @@ FlatDialog {
                         checked = Qt.binding(function() { return dialog.pref("auto_classify", true) === true })
                     }
                 }
+                Label {
+                    objectName: "autoClassifyHint"
+                    Layout.fillWidth: true
+                    Layout.topMargin: -Theme.gapTiny
+                    text: "처음 한 번은 갤러리의 ‘AI 분류’에서 직접 실행해 주세요."
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    font.pixelSize: Theme.fontCaption
+                    color: Theme.textFaint
+                }
                 SettingRow {
                     label: "폴더 구성"
                     Layout.topMargin: 2

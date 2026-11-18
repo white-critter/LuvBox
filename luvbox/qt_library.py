@@ -2661,7 +2661,7 @@ class LibraryController(QObject):
         # Photos of a group that are only alike (another size or quality) are never copies.
         similar = sum(1 for row in self.model._rows
                       if row.get("group") and not row.get("keeper") and not row.get("copy"))
-        left = f" ‘비슷함’ {similar:,}장 제외." if similar else ""
+        left = f" ‘비슷함’ {similar:,}장은 고르지 않았습니다." if similar else ""
         if not copy_keys:
             self._status = "선택할 중복 사본이 없습니다." + left
             self.changed.emit()
@@ -2669,7 +2669,7 @@ class LibraryController(QObject):
         # The list is read 200 rows at a time; copies further down are not on screen yet.
         waiting = sum(1 for k in copy_keys if k not in self.model._keys)
         if waiting:
-            left += f" 아래로 스크롤하면 사본 {waiting:,}장을 더 볼 수 있습니다."
+            left += f" 아직 불러오지 않은 사본 {waiting:,}장은 아래로 내린 뒤 한 번 더 누르면 고릅니다."
         loaded_copies = [k for k in copy_keys if k in self.model._keys and k not in self._selection_keys]
         selectable, _, _ = self._repository.selectable_keys(loaded_copies)
         capacity = max(0, MAX_SELECTION - len(self._selection_keys))
@@ -3264,13 +3264,13 @@ class LibraryController(QObject):
                             skipped = getattr(self, "_skipped_teach", 0)
                             missed = max(0, len(idents) - taught)
                             if taught == 0:
-                                message = "사진의 특징을 만들지 못해 분류를 저장하지 못했습니다."
+                                message = "사진을 읽지 못해 분류를 저장하지 못했습니다."
                             elif propagated:
                                 message = f"{taught:,}장의 분류를 저장했습니다. 비슷한 사진 {propagated:,}장도 함께 바꿨습니다."
                             else:
                                 message = f"{taught:,}장의 분류를 저장했습니다."
                             if missed and taught:
-                                message += f" 특징을 읽지 못한 {missed:,}장은 빠졌습니다."
+                                message += f" 읽지 못한 사진 {missed:,}장은 빠졌습니다."
                             if skipped:
                                 message += f" 영상·GIF {skipped:,}개는 제외했습니다."
                 except RuntimeError as exc:

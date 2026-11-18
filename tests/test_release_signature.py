@@ -144,7 +144,7 @@ class UpdateTests(unittest.TestCase):
     def test_a_release_without_a_signature_is_not_fetched(self):
         self.server.publish("1.9.2", signed=False)
         self.refused("signature")
-        self.assertIn("서명", str(updater.UpdateError("signature")))
+        self.assertIn("정식 LuvBox 파일인지", str(updater.UpdateError("signature")))
 
     def test_a_release_whose_program_was_swapped_with_a_matching_checksum_is_not_fetched(self):
         # Someone who can change the release replaces the program and writes a new, matching

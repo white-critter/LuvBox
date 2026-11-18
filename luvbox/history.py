@@ -81,7 +81,7 @@ class CatalogDamaged(HistoryError):
     """The records database file itself is damaged; it can be rebuilt."""
 
 
-_DAMAGED_HELP = ("저장 기록 DB가 손상되어 기록 복구가 필요합니다. 저장 화면의 ‘기록 복구’로 고칠 수 있습니다. "
+_DAMAGED_HELP = ("저장 기록이 손상되어 복구가 필요합니다. 저장 화면의 ‘기록 복구’로 고칠 수 있습니다. "
                  "사진·영상과 중복 방지 기록은 그대로 있습니다.")
 # SQLITE_CORRUPT and SQLITE_NOTADB, including their extended codes.
 _DAMAGED_CODES = {11, 26}

@@ -68,8 +68,8 @@ REFUSED_LIMIT = 3
 _KOREA = timezone(timedelta(hours=9))
 _RECORD_ERROR = ("저장 기록을 읽거나 갱신하지 못했습니다. "
                  "저장 폴더의 권한과 다른 실행 중인 프로그램을 확인해 주세요.")
-_COMPATIBILITY_ERROR = ("내장 gallery-dl이 예상과 달라 요청 전에 멈췄습니다. "
-                        "실행 파일을 다시 받거나 setup.ps1로 다시 설치해 주세요.")
+_COMPATIBILITY_ERROR = ("프로그램 파일이 손상되어 저장을 시작하기 전에 멈췄습니다. "
+                        "LuvBox.exe를 다시 받아 실행해 주세요.")
 _HISTORY_ERROR = "저장 이력을 기록하지 못했습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
 _METADATA_ERROR = "출처 또는 작성자를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다."
 _SNAPSHOT_ERROR = "저장 폴더에 기록 사본을 쓰지 못했습니다. 기록은 이 PC에 있고 다음 저장 때 다시 씁니다."
@@ -2115,7 +2115,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     if previews.failed:
                         emit({"type": "log", "level": "warning", "message":
                               f"작은 미리보기 {previews.failed:,}개를 이 PC에 보관하지 못했습니다. "
-                              "다운로드한 원본은 그대로이며 라이브러리에서 파일을 열면 자동으로 다시 시도합니다."})
+                              "받은 원본은 그대로이며 갤러리에서 파일을 열면 자동으로 다시 시도합니다."})
                 try:
                     history.close()
                 except CatalogDamaged as exc:

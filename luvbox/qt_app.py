@@ -343,7 +343,7 @@ class ApplicationController(QObject):
         if self._preparing or self._save_after_settings or self._pending_download is not None:
             return "저장 폴더를 준비합니다"
         if self._repairing:
-            return "기록 DB를 복구하는 중입니다"
+            return "저장 기록을 복구하는 중입니다"
         if self._accounts.busy:
             return self._accounts.status
         if self._schedule.mutating:
@@ -1233,7 +1233,7 @@ def launch(*, startup_probe=None):
         delete(engine)
         if startup_probe is None:
             launcher.signal_ready()
-            QMessageBox.critical(None, "LuvBox", "화면을 열지 못했습니다. Qt 패키지와 앱 파일을 확인해 주세요.")
+            QMessageBox.critical(None, "LuvBox", "화면을 열지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
         if instance is not None:
             instance.release()
         return 1

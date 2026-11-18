@@ -863,7 +863,7 @@ class CoreTests(unittest.TestCase):
             code = run_worker(self.options, events.append)
         find.assert_not_called()
         self.assertEqual(code, 1)
-        self.assertIn("gallery-dl이 예상과 달라", events[-1]["message"])
+        self.assertIn("프로그램 파일이 손상되어", events[-1]["message"])
         self.assertFalse(self.record_dir.exists())
 
     def test_no_results_is_actionable_error(self):

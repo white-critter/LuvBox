@@ -11,7 +11,7 @@ FlatDialog {
     signal aiCategorySelected(string category)
     signal userTagSelected(string tag)
     signal duplicateSelected()
-    title: "라이브러리 통계 요약"
+    title: "통계 요약"
 
     readonly property bool loaded: stats.files !== undefined
     readonly property string problem: stats.error ? String(stats.error) : ""
@@ -145,7 +145,7 @@ FlatDialog {
                 }
                 StatCard {
                     objectName: "statsPostsCard"
-                    caption: "저장된 트윗"
+                    caption: "저장한 게시물"
                     value: dialog.loaded ? dialog.amount(dialog.stats.posts) + "건" : "…"
                 }
                 StatCard {

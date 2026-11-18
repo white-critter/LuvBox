@@ -125,7 +125,10 @@ ApplicationWindow {
     # Newly saved photos are classified on their own unless this is switched off.
     from PySide6.QtCore import QMetaObject
     automatic = dialog.findChild(QQuickItem, 'autoClassifySwitch')
-    assert automatic is not None
+    hint = dialog.findChild(QQuickItem, 'autoClassifyHint')
+    assert automatic is not None and hint is not None
+    # It starts on its own only once the model is on this PC, after a run from the gallery.
+    assert '처음 한 번' in hint.property('text') and hint.property('visible')
     assert automatic.property('checked') is True, "on until the owner switches it off"
     automatic.setProperty('checked', False)
     QMetaObject.invokeMethod(automatic, 'toggled')
