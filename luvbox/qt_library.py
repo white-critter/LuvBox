@@ -2849,8 +2849,14 @@ class LibraryController(QObject):
         if self._closed or key not in self.model._keys:
             return 0
         positions = self.model._positions
-        anchor = self._selection_anchor if self._selection_anchor in positions else (
-            self.selectedKey if self.selectedKey in positions else key)
+        # A highlighted tile (arrow keys) has no click anchor yet. The highlight
+        # is the start of the range; the click that follows must not have moved
+        # it already.
+        if self._selection_anchor not in positions:
+            seed = self._selection_key if self._selection_key in positions else (
+                self.selectedKey if self.selectedKey in positions else key)
+            self._selection_anchor = seed
+        anchor = self._selection_anchor
         first, last = sorted((positions[anchor], positions[key]))
         keys = [self.model._rows[index]["key"] for index in range(first, last + 1)]
         added, unavailable, overflow = self._extend_selection(keys, self._selection_keys)

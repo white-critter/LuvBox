@@ -116,6 +116,16 @@ class ScheduledRunNoticeTests(unittest.TestCase):
         self.controller.checkScheduledRun()
         self.controller._library.refresh.assert_not_called()
 
+    def test_a_run_that_cannot_be_read_at_the_first_look_is_taken_on_the_next(self):
+        self.controller.galleryVisible(False)
+        self.write(4, later=4)
+        with patch("luvbox.scheduled.last_run", side_effect=[None, {"status": "finished", "saved": 4}]):
+            self.controller.checkScheduledRun()
+            self.controller._library.refresh.assert_not_called()
+            self.controller.checkScheduledRun()
+        self.controller._library.refresh.assert_called_once_with()
+        self.controller._library.classifyNewPhotos.assert_called_once_with()
+
     def test_opening_the_window_from_the_tray_looks_at_once(self):
         from luvbox.qt_tray import TrayController
 

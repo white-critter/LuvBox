@@ -562,10 +562,15 @@ class ApplicationController(QObject):
         stamp = _file_stamp(self._scheduled_file)
         if stamp == self._scheduled_stamp:
             return
-        self._scheduled_stamp = stamp
         from .scheduled import last_run
 
-        outcome = last_run() or {}
+        outcome = last_run()
+        # A sharing lock or a half-written file reads as nothing. Remembering the
+        # new stamp then would skip this run until something else rewrote the file.
+        if outcome is None and stamp is not None:
+            return
+        self._scheduled_stamp = stamp
+        outcome = outcome or {}
         self._records.refresh()                     # run history, lost and unsaved counts
         saved = outcome.get("saved")
         if type(saved) is not int or saved <= 0:
@@ -950,10 +955,24 @@ class ApplicationController(QObject):
             self._error = "원문을 열지 못했습니다. 브라우저 설정을 확인해 주세요."
             self.changed.emit()
 
+    def _commit_focused_edit(self):
+        """Write the field that still has the caret before quit ignores late edits.
+
+        A limit or an account id is stored when its field loses focus. Quit
+        closes the settings window only after it has marked itself closed, and
+        that late write used to be dropped.
+        """
+        from PySide6.QtQuick import QQuickItem
+
+        focus = QGuiApplication.focusObject()
+        if isinstance(focus, QQuickItem):
+            focus.setFocus(False)
+
     @Slot()
     def requestClose(self):
         if self._closing:
             return
+        self._commit_focused_edit()
         self.shutdownStarted.emit()
         self._closing = True
         self._scheduled_timer.stop()

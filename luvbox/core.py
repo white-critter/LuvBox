@@ -785,7 +785,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         key = (tweet_id, number, media_type)
         existing = unsaved_items.get(key)
         if existing is None and len(unsaved_items) >= unsaved.MAX_ITEMS:
-            return
+            # The ledger keeps the newest failures. Dropping a later one used to
+            # forget the media that stopped the run, so its refusal never counted
+            # and every following save stopped there again.
+            unsaved_items.pop(next(iter(unsaved_items)))
         if media is None and existing is not None:
             # Keep extracted Tweet/media facts recorded earlier in this run.
             unsaved_items[key] = dict(

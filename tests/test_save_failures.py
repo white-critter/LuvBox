@@ -401,6 +401,20 @@ class SaveFailureTests(unittest.TestCase):
                                  counted)
                 self.assertEqual("같은 파일에서" in self.detail(tweet), bool(counted))
 
+    def test_the_media_that_stops_a_full_unsaved_list_is_still_remembered(self):
+        """The newest failure has to stay: it is the one whose refusal must count."""
+        from gallery_dl.downloader.http import HttpDownloader
+
+        body = b"\xff\xd8\xff" + b"offline-photo" * 8
+        self.answer = lambda request: (_response(request.url, 403) if _tweet(request.url) == "9000"
+                                       else _response(request.url, 404))
+        rows = [("100", 1, "photo", "alice"), ("9000", 1, "photo", "carol")]
+        with patch("luvbox.unsaved.MAX_ITEMS", 1):
+            code, finished, events = self.save(rows, downloader=HttpDownloader)
+        self.assertEqual((code, finished["status"]), (1, "error"))
+        self.assertIn(("9000", 1, "photo"), self.listed())
+        self.assertEqual(unsaved.refusals("myaccount", self.options.output_dir), {("9000", 1, "photo"): 1})
+
     def test_a_retry_that_is_refused_again_counts_nothing(self):
         from gallery_dl.downloader.http import HttpDownloader
 

@@ -2138,7 +2138,9 @@ ApplicationWindow {
                         }
                         if (window.app.library.selectionMode && window.app.library.selectedCount > 0)
                             window.app.management.prepareDelete(window.app.library.selectedKeys)
-                        else if (!window.app.library.selectionMode && currentItem && !window.app.library.selectedMissing)
+                        else if (!window.app.library.selectionMode && currentItem
+                                && (window.app.library.selectedKey !== currentItem.key
+                                    || !window.app.library.selectedMissing))
                             window.app.management.prepareDelete([currentItem.key])
                     }
                     Keys.onEscapePressed: {
@@ -2280,21 +2282,25 @@ ApplicationWindow {
                                 onPressed: window.stopWheel()
                                 acceptedButtons: Qt.LeftButton | Qt.RightButton
                                 onClicked: mouse => {
-                                    gallery.currentIndex = tile.index
                                     gallery.forceActiveFocus()
                                     if (mouse.button === Qt.RightButton) {
+                                        gallery.currentIndex = tile.index
                                         teachMenu.targetKey = tile.key
                                         teachMenu.popup()
                                         return
                                     }
-                                    if (!window.app)
-                                        return
-                                    if (mouse.modifiers & Qt.ShiftModifier)
-                                        window.app.library.selectRangeTo(tile.key)
-                                    else if (window.app.library.selectionMode || (mouse.modifiers & Qt.ControlModifier))
-                                        window.app.library.toggleSelection(tile.key)
-                                    else
-                                        window.app.library.setSelectionAnchor(tile.key)
+                                    // The range is measured from the highlight. Setting
+                                    // currentIndex first moves that highlight onto the
+                                    // clicked tile, and Shift+click then selects only it.
+                                    if (window.app) {
+                                        if (mouse.modifiers & Qt.ShiftModifier)
+                                            window.app.library.selectRangeTo(tile.key)
+                                        else if (window.app.library.selectionMode || (mouse.modifiers & Qt.ControlModifier))
+                                            window.app.library.toggleSelection(tile.key)
+                                        else
+                                            window.app.library.setSelectionAnchor(tile.key)
+                                    }
+                                    gallery.currentIndex = tile.index
                                 }
                                 onDoubleClicked: if (!window.app || !window.app.library.selectionMode) previewDialog.open()
                             }
@@ -2543,7 +2549,9 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+A"
-        enabled: window.currentScreen === 1 && !window.modalOpen && !search.activeFocus && !!window.app
+        enabled: window.currentScreen === 1 && !window.modalOpen && !window.listEngaged && !window.menuOpen
+            && !search.activeFocus && !dateFromFilter.activeFocus && !dateToFilter.activeFocus
+            && !!window.app
         onActivated: {
             window.app.library.selectLoaded()
         }

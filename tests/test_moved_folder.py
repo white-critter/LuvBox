@@ -121,6 +121,24 @@ class MovedFolderTests(unittest.TestCase):
         self.assertEqual(self.gallery(moved), (12, 12, 0, 2))
         self.assertEqual(len(list(moved.glob("*.jpg"))), 12)
 
+    def test_opening_the_new_place_before_the_save_still_brings_later_marks(self):
+        """Choosing the folder opens its gallery, which used to keep only the older snapshot."""
+        self.library()
+        with self.store(self.output) as store:
+            store.add_tag("flat", "1002", 1, "photo", "keep")
+            store.toggle_favorite("flat", "1003", 1, "photo")
+            store.toggle_favorite("flat", "1001", 1, "photo")
+        moved = self.move()
+        self.gallery(moved)
+        prepared = self.chosen(moved, {"relocate"})
+        self.assertIn("options", prepared)
+        self.assertEqual(self.gallery(moved), (12, 12, 0, 2))
+        with self.store(moved) as store:
+            self.assertEqual([(row["tag"], row["count"]) for row in store.user_tags()], [("keep", 1)])
+            favourites = {row["tweet_id"] for row in store.records() if store.is_favorite(
+                row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])}
+            self.assertEqual(favourites, {"1000", "1003"})
+
     def test_a_file_that_is_not_at_the_new_place_keeps_its_old_record(self):
         self.library()
         moved = self.move()

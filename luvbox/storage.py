@@ -1041,6 +1041,40 @@ def initialize_storage(paths: StoragePaths) -> None:
         account_guard.close()
 
 
+def _catalog_only_names(database: Path, root: Path) -> bool:
+    """True when this catalog has not been adopted onto its own folder.
+
+    Opening the new place before the save copies the traveling snapshot, or
+    creates an empty catalog. Every file path in that copy still names the old
+    folder, so the live catalog of the old folder is the one to keep. A place
+    that already has its own photos names those photos and is left alone.
+    """
+    if not database.is_file() or _linked(database):
+        return False
+    try:
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
+            db.execute("PRAGMA query_only=ON")
+            try:
+                rows = db.execute("SELECT path FROM media").fetchall()
+            except sqlite3.OperationalError:
+                return False
+    except (OSError, sqlite3.Error):
+        return False
+    root_text = os.path.normcase(os.path.abspath(root))
+    prefix = root_text if root_text.endswith(os.sep) else root_text + os.sep
+    saw_old = False
+    for (path,) in rows:
+        if not isinstance(path, str) or not path:
+            continue
+        named = os.path.normcase(os.path.abspath(path))
+        if named != root_text and not named.startswith(prefix):
+            return False
+        saw_old = True
+    # No rows: the gallery created an empty catalog by opening the new place.
+    # Rows that only remember removed files are a catalog of their own.
+    return saw_old or not rows
+
+
 def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
     """The media folder was moved or renamed outside the application and chosen again at its new place.
 
@@ -1052,7 +1086,8 @@ def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
     old place.
 
     This PC's records of the old place are the newest there are. When the new
-    place has no records of its own yet they become its records, and the copy
+    place has no records of its own yet, or only the snapshot copied by opening
+    it before this save, they become its records, and the copy
     inside the folder that this PC wrote itself is remembered as seen, so that
     older copy is not merged back over them (a copy another PC wrote is still
     merged, as always). Then every file record under the old folder whose file
@@ -1075,7 +1110,12 @@ def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
         output_guard.acquire()
         _recover_relocation(destination, protected=True)
         previous = source.record_dir / _HISTORY_DB
-        if (source.record_dir != destination.record_dir and not (destination.record_dir / _HISTORY_DB).is_file()
+        destination_db = destination.record_dir / _HISTORY_DB
+        # The gallery opens the new place as soon as it is chosen, which copies
+        # the older snapshot (or an empty catalog) before this save can. That
+        # copy still names the old folder; it is not a catalog of its own.
+        only_old = destination_db.is_file() and _catalog_only_names(destination_db, source.output_dir)
+        if (source.record_dir != destination.record_dir and (not destination_db.is_file() or only_old)
                 and previous.is_file() and not _linked(source.record_dir) and not _linked(previous)):
             _record_files(source.record_dir)
             destination.record_dir.parent.mkdir(parents=True, exist_ok=True)

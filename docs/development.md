@@ -1,4 +1,4 @@
-# LuvBox 1.11.2 개발 안내
+# LuvBox 1.11.3 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -46,7 +46,7 @@ Qt 객체와 QML 상태는 UI 스레드에서 다룹니다. 파일·DB·네트�
 
 1.11.2부터 한 사람(데이터 폴더와 Windows 세션)에 LuvBox 하나만 돕니다(`single_instance.InstanceGuard`, `qt_app.launch`에서 시작 검사 밖일 때만). 처음 뜬 앱은 세션 이름공간의 뮤텍스 `Local\LuvBox-instance-<해시>`를 실행 내내 소유하고, 같은 이름의 로컬 소켓(`QLocalServer`, 같은 Windows 사용자만 접근)에서 `show` 요청 한 가지만 받습니다. 해시는 `세션 번호 + NUL + normcase(데이터 폴더)`의 SHA-256 앞 32자리이며, 이후 버전이 이전 버전을 찾아야 하므로 바꾸지 않습니다(`tests/test_single_instance.py`가 고정). 다음 실행은 뮤텍스가 이미 소유돼 있으면 소켓으로 `show`를 보내고, 받는 쪽 프로세스에 `AllowSetForegroundWindow`로 앞으로 나올 권리를 넘긴 뒤 `ok`를 받으면 컨트롤러를 만들지 않고 0으로 끝납니다(실행기의 시작 화면도 그때 닫힙니다). 받는 앱은 `TrayController.show`로 창을 엽니다. 닫는 중인 앱은 `shutdownStarted`에서 듣기를 멈추고, `launch`의 끝(업데이트 재시작을 띄우기 전)에 뮤텍스를 놓습니다. 그 사이의 실행은 뮤텍스를 기다렸다가 스스로 첫 앱이 되며, 30초 안에 답도 끝남도 없으면 예전처럼 창을 따로 열고, 앞의 앱이 끝나면 이름을 넘겨받습니다. 비정상 종료로 버려진 뮤텍스는 바로 넘겨받습니다.
 
-트레이에 켜 둔 동안 예약 저장(다른 프로세스)이 끝나는 일이 흔해져, `ApplicationController.checkScheduledRun`이 60초마다, 그리고 트레이에서 창을 열 때 `last-scheduled.json`의 크기·수정 시각만 봅니다. 바뀌었으면 실행 기록과 개수를 다시 읽고, 그 실행이 저장한 것이 있으면 앱에서 한 저장이 끝났을 때와 같게 남은 사진을 분류하고 갤러리를 다시 읽거나(다른 화면일 때) ‘새 사진 보기’ 버튼을 켭니다(갤러리를 보는 중일 때).
+트레이에 켜 둔 동안 예약 저장(다른 프로세스)이 끝나는 일이 흔해져, `ApplicationController.checkScheduledRun`이 60초마다, 그리고 트레이에서 창을 열 때 `last-scheduled.json`의 크기·수정 시각만 봅니다. 그 순간 파일을 읽지 못하면 시각을 기억하지 않고 다음에 다시 읽습니다. 읽히면 실행 기록과 개수를 다시 읽고, 그 실행이 저장한 것이 있으면 앱에서 한 저장이 끝났을 때와 같게 남은 사진을 분류하고 갤러리를 다시 읽거나(다른 화면일 때) ‘새 사진 보기’ 버튼을 켭니다(갤러리를 보는 중일 때).
 
 즐겨찾기만 보는 중 즐겨찾기를 해제하거나, 미리보기에서 현재 내 태그·AI 분류 조건을 바꾸는 태그 편집을 하면 목록을 다시 읽습니다. DB의 필터 결과와 모델의 불러온 행 수가 어긋나면 다음 페이지의 마지막 사진이 누락되기 때문입니다. 필터에 영향이 없는 태그 편집은 `_settle`로 열린 사진과 분류별 개수만 갱신합니다. `tests/test_gallery_filter_edits.py`는 7장을 3장씩 읽으며 네 편집 경로의 마지막 사진과 원본 파일 보존을 검사합니다.
 
@@ -191,7 +191,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.11.2.txt`, `release/LuvBox-1.11.2-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.11.3.txt`, `release/LuvBox-1.11.3-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 

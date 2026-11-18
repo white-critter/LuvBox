@@ -208,6 +208,19 @@ class LibraryControlsTests(unittest.TestCase):
         self.assertEqual(self.library.selectDuplicateCopies(), 0)
         self.assertEqual((self.library.selectedKeys, self.library.selectionMode), ([], False))
 
+    def test_a_shift_range_starts_at_the_highlight_before_its_details_arrive(self):
+        first, second = (row["key"] for row in self.library.model._rows)
+        self.repository.block_selection = first
+        try:
+            self.library.selectItem(first)
+            self.wait(lambda: self.repository.selection_entered.is_set())
+            self.assertEqual(self.library._selection_anchor, "")
+            self.assertEqual(self.library.selectedKey, "")
+            self.assertEqual(self.library.selectRangeTo(second), 2)
+            self.assertEqual(self.library.selectedKeys, [first, second])
+        finally:
+            self.repository.selection_release.set()
+
     def test_forgetting_the_opened_photo_leaves_nothing_opened_and_the_batch_as_it_was(self):
         first, second = (row["key"] for row in self.library.model._rows)
         self.library.selectItem(first)
