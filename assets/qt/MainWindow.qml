@@ -1218,6 +1218,7 @@ ApplicationWindow {
                         visible: !!window.app
                         label: "종류"
                         model: ["전체", "사진", "영상", "GIF"]
+                        enabled: !window.duplicateMode
                         implicitWidth: 116
                         focusPolicy: Qt.TabFocus
                         escapeFocus: gallery

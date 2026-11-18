@@ -347,6 +347,28 @@ def scene(part, shots=None):
             click(find("galleryDuplicateFilter"))
             reloaded(generation, number)
             assert not library.filterDuplicateOnly
+            kind = find("galleryMediaFilter")
+            order = find("galleryOrderChoice")
+            assert kind.property("enabled") and order.property("enabled")
+            # Leaving "영상" selected must not blank duplicate photos or leave the media type control active.
+            kind.setProperty("currentIndex", 2)
+            generation = library._generation
+            library.setFilters("video", "saved", "")
+            reloaded(generation, 0)
+            generation = library._generation
+            click(find("galleryDuplicateFilter"))
+            reloaded(generation, 8)
+            assert library.filterDuplicateOnly
+            assert not kind.property("enabled") and not order.property("enabled")
+            generation = library._generation
+            click(find("galleryDuplicateFilter"))
+            reloaded(generation, 0)
+            assert not library.filterDuplicateOnly
+            assert kind.property("enabled") and kind.property("currentIndex") == 2 and library._media_type == "video"
+            kind.setProperty("currentIndex", 0)
+            generation = library._generation
+            library.setFilters("all", "saved", "")
+            reloaded(generation, number)
             # A photo of the flat grid is highlighted, then the duplicate view is opened. Its grid
             # is hidden; the old row number must not open one of the duplicates by itself.
             highlight(3)

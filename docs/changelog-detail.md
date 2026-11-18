@@ -2,6 +2,13 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.11.5 — 2026-11-18
+
+프로그램 검수에서 확인한 중복 보기와 미디어 종류 필터 상호작용 오류를 수정했습니다. 성능·구조 변경은 불필요하여 적용하지 않았습니다.
+
+- **‘영상’·‘GIF’ 필터 상태에서 중복 사진이 비어 보이던 오류**: `LibraryRepository.read`와 `duplicate_copy_keys`가 `duplicate_only=True`일 때도 선택된 `request.media_type`을 그대로 전달해, 사진 해시만 보유한 `duplicate_page`·`duplicate_copy_identities`·레거시 대체 경로가 0건을 반환했습니다. `duplicate_only=True`일 때는 `media_type="all"`을 적용하고, `assets/qt/MainWindow.qml`의 `mediaFilter`(`종류`)에도 `orderChoice`(`정렬`)와 동일하게 `enabled: !window.duplicateMode`를 적용해 중복 보기 중에는 비활성화하며 나가면 기존 종류 선택을 유지하도록 했습니다.
+- 검사: `tests/test_duplicates.py`에 `video`·`animated_gif` 조건의 `LibraryRepository.read`·`duplicate_copy_keys`·레거시 대체 경로 회귀 테스트를 추가했고, `tests/test_qt_gallery_reload_qml.py`의 중복 보기 QML 장면에 ‘영상’ 필터 전환·비활성화·복원 확인을 추가했습니다.
+
 ## 1.11.4 — 2026-11-18
 
 - 단축키와 설정·갤러리·확인창 설명을 줄였습니다. 확인창에는 대상과 실행 결과를 담았습니다.

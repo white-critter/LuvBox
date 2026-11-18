@@ -292,18 +292,19 @@ class LibraryRepository:
                 # OFFSET would slide when a save inserts newer rows, and the
                 # next page would repeat keys until the gallery stopped.
                 grouped = request.duplicate_only and hasattr(store, "duplicate_page")
+                media_type = "all" if request.duplicate_only else request.media_type
                 after = self._cursor if offset and offset == self._cursor_offset else None
                 if grouped:
-                    # Each group together, the photo to keep first. The chosen sort order does not apply.
+                    # Each group together, the photo to keep first. The chosen sort order and media type do not apply.
                     page = store.duplicate_page(0 if after is not None else offset // limit, limit,
-                                                request.media_type, request.query,
+                                                media_type, request.query,
                                                 period=period, author=request.author, hashtag=request.hashtag,
                                                 favorite_only=request.favorite_only, user_tag=request.user_tag,
                                                 ai_category=getattr(request, "ai_category", ""),
                                                 ai_origin=getattr(request, "ai_origin", ""), after=after)
                 else:
                     page = store.record_page(0 if after is not None else offset // limit, limit,
-                                             request.media_type, request.query,
+                                             media_type, request.query,
                                              order=request.order, author=request.author, include_deleted=False,
                                              period=period, after=after, hashtag=request.hashtag,
                                              favorite_only=request.favorite_only, user_tag=request.user_tag,
@@ -1145,7 +1146,8 @@ class LibraryRepository:
             return []
         period = ((request.date_field, request.date_from, request.date_to)
                   if request.date_from or request.date_to else None)
-        filtered = (request.media_type != "all" or bool(request.query) or period is not None
+        media_type = "all" if request.duplicate_only else request.media_type
+        filtered = (media_type != "all" or bool(request.query) or period is not None
                     or bool(request.author) or bool(request.hashtag) or bool(request.favorite_only)
                     or bool(request.user_tag) or bool(getattr(request, "ai_category", ""))
                     or bool(getattr(request, "ai_origin", "")))
@@ -1153,7 +1155,7 @@ class LibraryRepository:
             with closing(_ReadOnlyHistory(request.location())) as store:
                 if hasattr(store, "duplicate_copy_identities"):
                     stored = (store.duplicate_copy_identities(
-                                  request.media_type, request.query, period=period, author=request.author,
+                                  media_type, request.query, period=period, author=request.author,
                                   hashtag=request.hashtag, favorite_only=request.favorite_only,
                                   user_tag=request.user_tag, ai_category=getattr(request, "ai_category", ""),
                                   ai_origin=getattr(request, "ai_origin", ""))
@@ -1170,7 +1172,7 @@ class LibraryRepository:
                     allowed = {
                         (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
                         for row in store.records(
-                            limit=10000, media_type=request.media_type, query=request.query,
+                            limit=10000, media_type=media_type, query=request.query,
                             order="saved", period=period, author=request.author, include_deleted=False,
                             hashtag=request.hashtag, favorite_only=request.favorite_only,
                             user_tag=request.user_tag, ai_category=getattr(request, "ai_category", ""),

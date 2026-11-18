@@ -428,6 +428,47 @@ class DuplicateTests(unittest.TestCase):
             ov = repo.overview(1)
             self.assertEqual(ov.get("duplicates"), 2)
 
+    def test_duplicate_view_ignores_non_photo_media_type_filter(self):
+        paths = resolve_storage(self.root / "LikesMediaType", "offline")
+        with closing(HistoryStore.for_storage(paths)) as store:
+            p1 = paths.output_dir / "user_501_1.jpg"
+            p2 = paths.output_dir / "user_502_1.jpg"
+            Image.new("RGB", (60, 60), color="blue").save(p1)
+            Image.new("RGB", (60, 60), color="blue").save(p2)
+            store.record_media("flat", {"tweet_id": "501", "num": 1, "type": "photo", "author": "user"}, p1)
+            store.record_media("flat", {"tweet_id": "502", "num": 1, "type": "photo", "author": "user"}, p2)
+
+        repo = LibraryRepository()
+        repo.provider = self
+        repo.configure(_Request(1, "offline", str(paths.output_dir), False))
+        self.assertEqual(repo.scan_duplicates(1), 2)
+
+        class _LegacyHistory:
+            def __init__(self, location):
+                self._inner = HistoryStore.for_storage(location, create_media=False)
+
+            def __getattr__(self, name):
+                if name == "duplicate_page":
+                    raise AttributeError(name)
+                return getattr(self._inner, name)
+
+            def close(self):
+                self._inner.close()
+
+        for generation, media_type in enumerate(("video", "animated_gif"), start=2):
+            req = _Request(generation, "offline", str(paths.output_dir), False,
+                           media_type=media_type, duplicate_only=True)
+            repo.configure(req)
+            total, rows = repo.read(str(generation), 0, 50)
+            self.assertEqual(total, 2, media_type)
+            self.assertEqual(len(rows), 2, media_type)
+            self.assertEqual(len(repo.duplicate_copy_keys(generation)), 1, media_type)
+            with patch("luvbox.qt_library._ReadOnlyHistory", _LegacyHistory):
+                total_legacy, rows_legacy = repo.read(str(generation), 0, 50)
+                self.assertEqual((total_legacy, len(rows_legacy)), (2, 2))
+            with patch.object(HistoryStore, "duplicate_copy_identities", return_value=None):
+                self.assertEqual(len(repo.duplicate_copy_keys(generation)), 1, media_type)
+
 
 if __name__ == "__main__":
     unittest.main()
