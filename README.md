@@ -2,6 +2,10 @@
 
 **X(트위터)에서 좋아요한 사진·영상·GIF를 내 PC에 저장하고, 갤러리로 모아 보는 Windows 앱입니다.**
 
+마음에 드는 게시물에 좋아요만 눌러 두세요. 사진·영상은 LuvBox가 내 폴더에 모아 두고, 갤러리에서 다시 찾아보기 쉽게 정리해 줍니다.
+
+![LuvBox 갤러리 화면](docs/images/gallery.png)
+
 ## 받기
 
 **[최신 버전 받기](https://github.com/white-critter/LuvBox/releases/latest)** — 열린 페이지 아래쪽 **Assets**에서 `LuvBox.exe` 하나만 받으면 됩니다.
@@ -24,6 +28,11 @@
 - 즐겨찾기, 내 태그, 작성자·해시태그·날짜로 걸러 보기
 - 중복 사진 찾아 정리하기 (Windows 휴지통으로 보내므로 되살릴 수 있습니다)
 - AI 자동 분류 (일러스트·인물·동물·짤·풍경, 이 PC 안에서만 동작)
+
+<p>
+  <img src="docs/images/duplicates.png" alt="중복 사진 정리 화면" width="49%">
+  <img src="docs/images/preview.png" alt="미리보기 화면" width="49%">
+</p>
 
 더 자세한 설명은 [사용 안내](docs/사용안내.txt)에 있습니다.
 
