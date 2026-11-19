@@ -332,7 +332,7 @@ class CoreAndPlatformRegressionTests(unittest.TestCase):
             events = []
             code = run_worker(quick_opts, events.append)
         self.assertEqual(code, 0)
-        self.assertIn("이미 저장한 파일이", events[-1]["message"])
+        self.assertTrue(events[-1]["message"].startswith("새 Like 확인을 마쳤습니다."))  # stopped at the saved streak
         with closing(HistoryStore.for_storage(paths)) as store:
             self.assertEqual(store.review_pending(), {("9999", 1, "video")})
 

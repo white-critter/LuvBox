@@ -179,9 +179,28 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                 "key": "synthetic-photo", "author": "example", "body": "사진 설명을 확인합니다. " * 120,
                 "source": "https://x.com/example/status/100", "path": str(photo_path), "missing": False,
                 "missing_note": "", "preview": QUrl.fromLocalFile(str(photo_path)).toString(),
-                "media_type": "photo", "public_info": "landscape.png · 2026-10-25 14:00"}
+                "media_type": "photo", "public_info": "landscape.png · 2026-10-25 14:00",
+                # Enough chips that the tag row wraps in a narrow window, as a real photo's often do.
+                "hashtags": ["#여행사진", "#풍경사진", "#제주도", "#일출", "#바다", "#노을", "#하늘",
+                             "#구름", "#산책", "#주말"]}
             controller.library.changed.emit()
             dialog, media = find("previewDialog"), find("selectedMedia")
+
+            def tag_row_clear():
+                # 1.11.7: in a window 480 high the tag row lay half under the action buttons.
+                tools = find("previewTagTools")
+                actions = [item for item in dialog.findChildren(QQuickItem)
+                           if item.property("text") == "파일 열기" and item.property("visible")]
+                if not tools.property("visible") or not actions:
+                    raise AssertionError("The preview's tag row or actions are missing")
+                bottom = tools.mapToScene(QPointF(0, tools.height())).y()
+                top = actions[0].mapToScene(QPointF(0, 0)).y()
+                report.setdefault("tag_row", {})[f"{window.width()}x{window.height()}"] = [
+                    round(tools.mapToScene(QPointF(0, 0)).y()), round(bottom), round(top)]
+                # The column keeps its spacing between them; with none left the layout was already
+                # overflowing, and one more row of chips put the tag field under the buttons.
+                if bottom > top - 4:
+                    raise AssertionError("The tag row lies under the preview's action buttons")
             for width, height in ((680, 480), (1080, 760), (1600, 1000)):
                 window.showNormal()
                 window.resize(width, height)
@@ -197,6 +216,7 @@ def check_scene(*, baseline=False, screenshots=None, features=False):
                     raise AssertionError("Gallery dialog escaped its overlay")
                 action_buttons(dialog, ("닫기", "파일 열기", "폴더", "원문 보기"))
                 if not baseline:
+                    tag_row_clear()
                     action_buttons(dialog, ("이전", "다음", "−", "+", "화면 맞춤", "원본 100%", "창 최대화"))
                     if data["dialog"][0] < parent.width() - 26 or data["dialog"][1] < parent.height() - 26:
                         raise AssertionError("The preview retained its old fixed size cap")

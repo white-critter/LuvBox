@@ -298,7 +298,7 @@ class InteractiveSaveTests(unittest.TestCase):
         done = events[-1]
         self.assertEqual((result, done["status"], done["saved"], done["review_skipped"], done["review_never"]),
                          (0, "finished", 1, 0, 1))
-        self.assertIn("‘저장 안 함’으로 고른 파일 1개", done["message"])
+        self.assertIn("‘이 사진 다시 받지 않기’를 고른 1개", done["message"])
         self.assertEqual([event["tweet_id"] for event in events if event["type"] == "review-never"], ["100"])
         # A small preview is kept from the temporary file before it is removed.
         self.assertIn((("100", 1, "photo"), True, ".jpg"), recorder)

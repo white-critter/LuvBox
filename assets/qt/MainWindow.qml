@@ -2883,7 +2883,9 @@ ApplicationWindow {
                 objectName: "selectedMedia"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: previewDialog.detailsVisible ? 24 : 60
+                // The picture gives way first. In a window 480 high (a small laptop at 150%) a floor
+                // of 60 pushed the tag row under the action buttons (1.11.7).
+                Layout.minimumHeight: 24
                 sourceUrl: window.app ? window.app.library.selectedPreviewUrl : window.selectedThumb
                 mediaType: window.app ? window.app.library.selectedMediaType : "photo"
                 sourcePixelWidth: window.app ? window.app.library.selectedPixelWidth : 0

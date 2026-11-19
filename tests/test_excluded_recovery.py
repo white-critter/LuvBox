@@ -83,11 +83,11 @@ class ExcludedRecoveryTests(unittest.TestCase):
 
     def test_the_catalog_choice_survives_deleting_the_display_ledger(self):
         unsaved.record([{"tweet_id": "100", "num": 1, "media_type": "photo", "reason": unsaved.EXCLUDED,
-                         "author": "alice", "detail": "저장 확인에서 ‘저장 안 함’으로 골랐습니다."}],
+                         "author": "alice", "detail": "저장 확인에서 ‘이 사진 다시 받지 않기’를 골랐습니다."}],
                        account="alice", output_dir=str(self.output))
         unsaved.remove("alice", str(self.output), items=[("100", 1, "photo")])
         self.open_excluded()
-        self.assertEqual(self.records.unsavedRows[0]["detail"], "저장 확인에서 ‘저장 안 함’으로 골랐습니다.")
+        self.assertEqual(self.records.unsavedRows[0]["detail"], "저장 확인에서 ‘이 사진 다시 받지 않기’를 골랐습니다.")
         self.assertEqual(ignored(self.paths)[0], {("100", 1, "photo")})
 
     def test_clearing_the_failure_list_does_not_release_the_skip(self):
@@ -138,7 +138,7 @@ class ExcludedRecoveryTests(unittest.TestCase):
         self.records.setActive("unsaved", True)
         self.records.setUnsavedView("excluded")
         self.wait(lambda: not self.records.unsavedBusy and self.records.excludedCount == 1)
-        self.assertIn("저장 안 함", self.records.unsavedRows[0]["detail"])
+        self.assertIn("이 사진 다시 받지 않기", self.records.unsavedRows[0]["detail"])
         # The move copies the catalog. Both folders still hold the same choice.
         self.assertEqual(ignored(self.paths)[0], {("100", 1, "photo")})
         self.assertEqual(ignored(destination)[0], {("100", 1, "photo")})
@@ -191,9 +191,9 @@ class ExcludedPageTests(unittest.TestCase):
             elapsed = time.perf_counter() - query_started
             self.assertEqual((page["total"], page["pages"], len(page["rows"])), (120, 3, 50))
             self.assertEqual(page["rows"][0]["author"], "carol")
-            self.assertIn("저장 안 함", page["rows"][0]["detail"])
+            self.assertIn("이 사진 다시 받지 않기", page["rows"][0]["detail"])
             self.assertEqual(page["rows"][1]["author"], "crowd")
-            self.assertNotIn("저장 안 함", page["rows"][1]["detail"])
+            self.assertNotIn("이 사진 다시 받지 않기", page["rows"][1]["detail"])
             self.assertEqual(len(later["rows"]), 20)
             self.assertNotEqual(later["rows"][0]["tweet_id"], page["rows"][0]["tweet_id"])
             # The previous query scanned the catalog once per skip and took seconds at this size.

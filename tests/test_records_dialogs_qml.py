@@ -184,7 +184,7 @@ def scene():
              "duration": 133, "size_bytes": 340 * 1048576, "limit_mb": 200,
              "detail": "크기 제한(200MB)을 넘어 저장하지 않았습니다.", **{k: v for k, v in later.items() if k != "detail"}},
             {"tweet_id": "302", "num": 1, "media_type": "animated_gif", "reason": "excluded", "author": "dave",
-             "detail": "저장 확인에서 ‘저장 안 함’으로 골랐습니다."},
+             "detail": "저장 확인에서 ‘이 사진 다시 받지 않기’를 골랐습니다."},
         ]
         unsaved.record(fixture_rows, account="offline", output_dir=str(paths.output_dir))
         preview_cache = thumbcache.Cache("offline")

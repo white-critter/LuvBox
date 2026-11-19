@@ -1,18 +1,34 @@
 """Shared preferences for the Qt app, preserving existing and unknown keys."""
 
 from copy import deepcopy
+from datetime import datetime
 import json
 import os
 from pathlib import Path
 import tempfile
 import threading
 
-from .settings import load_settings, settings_path
+from .settings import SettingsDamaged, load_settings, settings_path
 from .file_mutex import file_mutex, replace_file
 
 
 _WRITE_LOCK = threading.RLock()
 _SAVE_ERROR = "설정을 저장하지 못했습니다. 저장 권한을 확인해 주세요."
+
+
+def _keep_damaged(target: Path) -> None:
+    """Rename a settings file nobody can read to settings.damaged-<time>.json beside it; never replace one."""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for number in range(100):
+        aside = target.with_name(f"settings.damaged-{stamp}" + (f"-{number}" if number else "") + ".json")
+        try:
+            os.rename(target, aside)
+            return
+        except FileExistsError:
+            continue
+        except OSError:
+            break
+    raise OSError(_SAVE_ERROR)
 
 
 def default_settings() -> dict:
@@ -48,9 +64,17 @@ class SettingsRepository:
             raise ValueError(_SAVE_ERROR)
         target = settings_path()
         with _WRITE_LOCK, file_mutex(target):
-            # A tolerant first display must not turn a damaged or inaccessible
-            # settings file into an empty document on the next update.
-            values = {**load_settings(strict=True), **deepcopy(changes)}
+            # A tolerant first display must not turn a damaged or inaccessible settings file into an
+            # empty document on the next update. One that cannot be read right now (locked, not
+            # permitted) stops the change. One that holds no readable settings (cut short, not JSON)
+            # used to stop every change for good; it is kept as it is under another name and the
+            # change starts a new file (qt_app tells the person at start).
+            try:
+                current = load_settings(strict=True)
+            except SettingsDamaged:
+                _keep_damaged(target)
+                current = {}
+            values = {**current, **deepcopy(changes)}
             try:
                 serialized = json.dumps(values, ensure_ascii=False, indent=2, allow_nan=False)
                 target.parent.mkdir(parents=True, exist_ok=True)

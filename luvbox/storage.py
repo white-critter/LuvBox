@@ -299,7 +299,7 @@ def missing_media_help(paths: StoragePaths) -> str:
         return (f"저장 폴더가 있는 드라이브({paths.media_dir.drive or anchor})가 연결되어 있지 않습니다. "
                 "외장·네트워크 드라이브를 연결한 뒤 다시 시도해 주세요.")
     return (f"저장 폴더를 찾을 수 없습니다: {paths.media_dir}\n"
-            "폴더를 옮기거나 이름을 바꿨다면 메인 화면의 ‘저장 폴더’에서 새 위치를 골라 주세요.")
+            "폴더를 옮기거나 이름을 바꿨다면 저장 화면 ‘저장 위치’의 ‘폴더 선택’으로 새 위치를 골라 주세요.")
 
 
 def _file_state(path: Path) -> list[int]:
@@ -434,7 +434,7 @@ def publish_snapshot(paths: StoragePaths) -> int:
     return written
 
 
-OUTPUT_BUSY_HELP = "이 저장 경로에서 다른 작업이 실행 중입니다. 먼저 실행한 작업을 종료해 주세요."
+OUTPUT_BUSY_HELP = "이 저장 폴더에서 다른 작업이 진행 중입니다. 예약한 자동 저장일 수 있으니 끝난 뒤 다시 시도해 주세요."
 _MIGRATION_HELP = "기록을 옮기지 못했습니다. 이전 기록은 보존했습니다. 폴더 권한과 다른 실행 중인 작업을 확인해 주세요."
 _HISTORY_DB = ".luvbox-history.sqlite3"
 

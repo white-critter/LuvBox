@@ -81,7 +81,7 @@ _REVIEW_ERROR = ("저장 여부 확인을 완료하지 못해 멈췄습니다. �
 # Why one media is listed as unsaved. Fixed sentences: a server reply never reaches the list.
 _FAILED_DETAIL = "파일을 받지 못했습니다. 연결 상태나 저장 폴더를 확인한 뒤 다시 시도해 주세요."
 _SIZE_DETAIL = "크기 제한({limit:,}MB)을 넘어 저장하지 않았습니다."
-_EXCLUDED_DETAIL = "저장 확인에서 ‘저장 안 함’으로 골랐습니다."
+_EXCLUDED_DETAIL = "저장 확인에서 ‘이 사진 다시 받지 않기’를 골랐습니다."
 _REFUSED_DETAIL = (f"사진 서버가 이 파일을 거부해 저장을 멈췄습니다. 같은 파일에서 {REFUSED_LIMIT}번 멈추면 "
                    "그다음 저장부터는 건너뜁니다.")
 _PASSED_BY_DETAIL = (f"사진 서버가 이 파일을 거부해 저장이 {REFUSED_LIMIT}번 멈췄습니다. 이제 저장할 때 건너뜁니다. "
@@ -2001,9 +2001,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             message = _retry_message(saved, sum(value == "existing" for value in recovered.values()),
                                      unavailable_tweets, absent_files, size_skipped)
         elif stop_reason == "caught-up":
+            # The counts are on the line above it; why a quick save stops was said as it began.
             status = "finished"
-            message = (f"새 Like 확인을 마쳤습니다. {saved:,}개를 저장했고, 이미 저장한 파일이 "
-                       f"{QUICK_STOP_AFTER}개 이어져 멈췄습니다.")
+            message = "새 Like 확인을 마쳤습니다."
         elif every_download_failed:
             exit_code = 1
             message = failed_download_message
@@ -2012,21 +2012,21 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             message = ("저장할 미디어를 찾지 못했습니다. 본인 계정으로 로그인했는지, "
                        "좋아요에 사진·영상이 있는지 확인해 주세요.")
         else:
-            message = ("X가 보여 주는 좋아요 목록을 모두 확인했습니다. "
-                       "삭제된 게시물이나 X가 더는 보여 주지 않는 오래된 좋아요는 빠질 수 있습니다.")
+            # That deleted or no longer shown likes are left out is said in the user guide; repeated
+            # after every save it made the line three sentences long (1.11.7).
+            message = "X가 보여 주는 좋아요 목록을 모두 확인했습니다."
             status = "finished"
         if review_skipped:
-            message += (f" 이번엔 건너뛴 파일 {review_skipped:,}개는 " +
-                        ("‘저장 못 한 미디어’에서 다시 선택할 수 있습니다." if targets else "다음 저장 때 다시 보여 드립니다."))
+            message += (f" 건너뛴 {review_skipped:,}개는 " +
+                        ("‘저장 못 한 미디어’에서 다시 고를 수 있습니다." if targets else "다음 저장 때 다시 보여 드립니다."))
         if review_never:
-            message += (f" ‘저장 안 함’으로 고른 파일 {review_never:,}개는 다시 묻지 않습니다. "
-                        "필요하면 ‘저장 못 한 미디어’의 ‘직접 제외’에서 다시 받을 수 있습니다.")
+            message += (f" ‘이 사진 다시 받지 않기’를 고른 {review_never:,}개는 다시 묻지 않습니다. "
+                        "‘저장 못 한 미디어’의 ‘직접 제외’에서 되돌릴 수 있습니다.")
         if failed and status == "finished" and not targets:
+            # The failed media are listed for another try, so this run went on past them.
             failures_listed = True
-            message += f" 받지 못한 미디어 {failed:,}개는 건너뛰고 다른 Like를 이어서 확인했습니다."
         if size_skipped or failed:
-            message += (f" 저장하지 못한 미디어 {size_skipped + failed:,}개는 ‘설정 › 고급 › 저장 못 한 미디어’에서 "
-                        "이유를 확인하고 다시 시도할 수 있습니다.")
+            message += f" 저장하지 못한 {size_skipped + failed:,}개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다."
         if preview_limited and status == "finished" and guard.retry_at:
             # The save went on, but the next one is refused until this time.
             message += f" 미리보기 요청이 X 요청 한도에 걸려 {guard.retry_label}(한국 시간) 이후에 다시 저장할 수 있습니다."

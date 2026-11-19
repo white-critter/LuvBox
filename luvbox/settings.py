@@ -32,6 +32,10 @@ class AppDataConflict(AppDataError):
     """Both data folders hold settings, a sign-in or records; the person decides."""
 
 
+class SettingsDamaged(AppDataError):
+    """The settings file is there, but holds nothing this version can read as settings."""
+
+
 def _leftover(name: str) -> bool:
     return name in _LEFTOVER_NAMES or (name.startswith("last-scheduled-") and name.endswith(".tmp"))
 
@@ -123,20 +127,40 @@ def settings_path() -> Path:
     return app_directory() / "settings.json"
 
 
+_UNREADABLE_HELP = "기존 설정을 읽지 못해 변경을 저장하지 않았습니다. 설정 파일을 확인한 뒤 다시 시도해 주세요."
+
+
 def load_settings(*, strict: bool = False) -> dict:
     # A failed migration must not be mistaken for absent preferences.
     path = settings_path()
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(value, dict):
-            return value
-        if strict:
-            raise ValueError("invalid settings object")
-        return {}
+        # utf-8-sig: a file saved again by an editor that adds a byte-order mark still reads.
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
         return {}
-    except (OSError, ValueError):
+    except ValueError:
+        # Not UTF-8 or not JSON: the file is there but holds no settings (SettingsRepository keeps it).
         if strict:
-            raise AppDataError("기존 설정을 읽지 못해 변경을 저장하지 않았습니다. "
-                               "설정 파일을 확인한 뒤 다시 시도해 주세요.") from None
+            raise SettingsDamaged(_UNREADABLE_HELP) from None
         return {}
+    except OSError:
+        # Locked or not permitted right now: it may be fine, so a change waits instead.
+        if strict:
+            raise AppDataError(_UNREADABLE_HELP) from None
+        return {}
+    if isinstance(value, dict):
+        return value
+    if strict:
+        raise SettingsDamaged(_UNREADABLE_HELP)
+    return {}
+
+
+def settings_damaged() -> bool:
+    """The settings file exists but cannot be read as settings (not merely locked, missing or moving)."""
+    try:
+        load_settings(strict=True)
+    except SettingsDamaged:
+        return True
+    except AppDataError:
+        return False
+    return False

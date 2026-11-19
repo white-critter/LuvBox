@@ -152,8 +152,8 @@ class SaveFailureTests(unittest.TestCase):
             code, finished, events = self.save(old + [gone])
             self.assertEqual((code, finished["status"], finished["scan_mode"]), (0, "finished", "full"))
             self.assertEqual((finished["saved"], finished["failed_media"]), (6, 1))
-            self.assertIn("받지 못한 미디어 1개는 건너뛰고 다른 Like를 이어서 확인했습니다", finished["message"])
-            self.assertIn("‘설정 › 고급 › 저장 못 한 미디어’", finished["message"])
+            self.assertEqual(finished["message"], "X가 보여 주는 좋아요 목록을 모두 확인했습니다. "
+                             "저장하지 못한 1개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다.")
             self.assertNotIn("연결과 저장 폴더를 확인", finished["message"])
             self.assertIn(("5000", 1, "photo"), self.listed())
             # The next quick save stops at the saved streak instead of meeting that media again.
@@ -179,8 +179,8 @@ class SaveFailureTests(unittest.TestCase):
             code, finished, events = self.save([("300", 1, "photo", "bob"), ("301", 1, "photo", "bob")] + old)
             self.assertEqual((code, finished["status"], finished["scan_mode"]), (0, "finished", "quick"))
             self.assertEqual((finished["saved"], finished["failed_media"]), (1, 1))
-            self.assertIn("새 Like 확인을 마쳤습니다. 1개를 저장했고", finished["message"])
-            self.assertIn("받지 못한 미디어 1개는 건너뛰고", finished["message"])
+            self.assertEqual(finished["message"],
+                             "새 Like 확인을 마쳤습니다. 저장하지 못한 1개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다.")
             # Liked recently, it is still above the saved streak: the next quick save tries it once more.
             QuietDownloader.missing = set()
             QuietDownloader.attempted = []
@@ -313,7 +313,7 @@ class SaveFailureTests(unittest.TestCase):
                 self.assertEqual((finished["saved"], finished["failed_media"]), (1 if index else 2, 1))
                 self.assertEqual([url for url in self.sent if _tweet(url) == "5000"], [refused])
                 self.assertIn("사진 서버 접근·연결 오류로 멈췄습니다", finished["message"])
-                self.assertIn("저장하지 못한 미디어 1개는 ‘설정 › 고급 › 저장 못 한 미디어’", finished["message"])
+                self.assertIn("저장하지 못한 1개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다", finished["message"])
                 self.assertEqual("다음 저장부터는 이 미디어를 건너뜁니다" in finished["message"],
                                  index == REFUSED_LIMIT - 1)
                 # It is listed, so the person can see what stops the save.
@@ -328,7 +328,7 @@ class SaveFailureTests(unittest.TestCase):
             self.assertEqual((finished["saved"], finished["failed_media"]), (3, 1))
             self.assertEqual([url for url in self.sent if _tweet(url) == "5000"], [])
             self.assertTrue(older.is_file())
-            self.assertIn("받지 못한 미디어 1개는 건너뛰고", finished["message"])
+            self.assertIn("저장하지 못한 1개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다", finished["message"])
             self.assertIn("‘다시 저장’", self.detail("5000"))
             # And the next quick save stops at the saved streak again.
             rows = [("204", 1, "photo", "bob")] + rows
@@ -372,7 +372,7 @@ class SaveFailureTests(unittest.TestCase):
                 self.assertEqual((code, finished["status"], finished["scan_mode"]), (1, "error", "full"))
                 self.assertEqual([url for url in self.sent if _tweet(url) == "5000"], [failing])
                 self.assertIn("사진 서버 접근·연결 오류로 멈췄습니다", finished["message"])
-                self.assertIn("저장하지 못한 미디어 1개는 ‘설정 › 고급 › 저장 못 한 미디어’", finished["message"])
+                self.assertIn("저장하지 못한 1개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다", finished["message"])
                 self.assertNotIn("건너뜁니다", finished["message"])
                 # and lists it with why, without promising that saves will pass it by.
                 self.assertIn(("5000", 1, "photo"), self.listed())

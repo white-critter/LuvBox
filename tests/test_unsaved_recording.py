@@ -77,7 +77,7 @@ class UnsavedRecordingTests(unittest.TestCase):
         self.assertIn("받지 못했습니다", row["detail"])
         self.assertIn("미디어를 찾았지만 1개를 저장하지 못했습니다", events[-1]["message"])
         self.assertNotIn("저장할 미디어를 찾지 못했습니다", events[-1]["message"])
-        self.assertIn("저장하지 못한 미디어 1개", events[-1]["message"])
+        self.assertIn("저장하지 못한 1개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다", events[-1]["message"])
 
     def test_an_empty_like_list_is_not_called_a_failed_download(self):
         code, events = self.run_with(QuietFailure, [])

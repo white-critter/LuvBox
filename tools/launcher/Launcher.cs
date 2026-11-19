@@ -70,7 +70,7 @@ namespace LuvBox
         public const string StartFailed =
             "앱을 시작하지 못했습니다.\nLuvBox.exe를 다시 받아 실행해 주세요.";
         public const string SameVersionRunning =
-            "같은 버전의 LuvBox가 실행 중이라 새 파일로 바꾸지 못했습니다.\n열려 있는 LuvBox를 닫고 다시 실행해 주세요.";
+            "같은 버전의 LuvBox가 실행 중이라 새 파일로 바꾸지 못했습니다.\n작업 표시줄 알림 영역의 LuvBox 아이콘을 오른쪽 클릭해 종료한 뒤 다시 실행해 주세요. 자동 저장 중이면 끝난 뒤에 실행해 주세요.";
         public const string Replaced =
             "LuvBox.exe가 방금 다른 버전으로 바뀌었습니다.\n다시 실행해 주세요.";
         public const string OldData =

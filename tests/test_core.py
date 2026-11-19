@@ -648,7 +648,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(events[-1]["status"], "finished")
         self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["skipped"]), ("quick", 2, 3))
-        self.assertIn("이어져 멈췄습니다", events[-1]["message"])
+        # The counts are shown beside it; the message stays one short sentence (1.11.7).
+        self.assertEqual(events[-1]["message"], "새 Like 확인을 마쳤습니다.")
         self.assertEqual(listed, ["200", "201", "100", "101", "102"])
         self.assertEqual(FakeHttpDownloader.downloaded[-2:], [
             "https://pbs.twimg.com/media/200_1?format=jpg&name=orig",
@@ -1200,7 +1201,7 @@ class CoreTests(unittest.TestCase):
                 result, events = self.worker(options=self.options)
             load.assert_not_called()
             self.assertNotEqual(result, 0)
-            self.assertIn("다른 저장 작업", events[-1]["message"])
+            self.assertIn("다른 저장이 진행 중", events[-1]["message"])
         finally:
             guard.close()
         result, events = self.worker([("100", 1, "photo", "alice")])
@@ -1220,7 +1221,7 @@ class CoreTests(unittest.TestCase):
             try:
                 result, events = self.worker([("100", 1, "photo", "alice")])
                 self.assertNotEqual(result, 0)
-                self.assertIn("다른 저장 작업", events[-1]["message"])
+                self.assertIn("다른 저장이 진행 중", events[-1]["message"])
                 self.assertEqual(catalog.runs()[0]["status"], "running")
             finally:
                 guard.close()

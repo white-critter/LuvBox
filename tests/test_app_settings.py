@@ -21,14 +21,17 @@ class SettingsIntegrityTests(unittest.TestCase):
             self.addCleanup(replacement.stop)
         self.repository = SettingsRepository()
 
-    def test_unreadable_or_corrupt_existing_preferences_are_never_replaced(self):
+    def test_corrupt_existing_preferences_are_kept_under_another_name(self):
+        # 1.11.7: refusing every later change left the app stuck with an error nobody could act on.
         for original in (b'{"account":"saved-account",', b"[]", b"\xff\xfe"):
             with self.subTest(original=original):
+                for path in self.path.parent.iterdir():
+                    path.unlink()
                 self.path.write_bytes(original)
-                with self.assertRaises(OSError):
-                    self.repository.update({"confirm_each": True})
-                self.assertEqual(self.path.read_bytes(), original)
-                self.assertEqual(list(self.path.parent.iterdir()), [self.path])
+                self.repository.update({"confirm_each": True})
+                kept = [path for path in self.path.parent.iterdir() if path != self.path]
+                self.assertEqual([path.read_bytes() for path in kept], [original])
+                self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"confirm_each": True})
 
     def test_read_permission_failure_cannot_erase_preferences(self):
         original = b'{"account":"saved-account","custom":42}'

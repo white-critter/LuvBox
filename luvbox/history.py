@@ -1899,7 +1899,7 @@ class HistoryStore:
             rows.append({
                 "tweet_id": choice["tweet_id"], "num": choice["num"], "media_type": choice["media_type"],
                 "author": author, "posted_at": posted, "updated_at": choice["updated_at"] or "",
-                "detail": ("저장 확인에서 ‘저장 안 함’으로 골랐습니다." if declined
+                "detail": ("저장 확인에서 ‘이 사진 다시 받지 않기’를 골랐습니다." if declined
                            else "다시 받지 않도록 빼 두었습니다."),
             })
         return rows

@@ -289,7 +289,7 @@ class RecordsControllerTests(unittest.TestCase):
         self.assertEqual(self.records.excludedCount, 1)
         self.records.setUnsavedView('excluded')
         self.wait(lambda: self.records.unsavedTotal == 1 and not self.records.unsavedBusy)
-        self.assertIn('저장 안 함', self.records.unsavedRows[0]['detail'])
+        self.assertIn('이 사진 다시 받지 않기', self.records.unsavedRows[0]['detail'])
 
     def test_changing_account_or_folder_drops_the_old_list(self):
         self.add([self.item('100')])
