@@ -51,7 +51,7 @@
 
 ## 문의·버그 신고
 
-**[여기에 글을 남겨 주세요](https://github.com/white-critter/LuvBox/issues/new/choose)** (GitHub 계정이 필요합니다). 버그, 불편한 점, 바라는 기능 모두 좋습니다.
+**[여기에 글을 남겨 주세요](https://naver.me/5Hyw0RwY)**. 버그, 불편한 점, 바라는 기능 모두 좋습니다.
 
 글은 누구나 볼 수 있으니 로그인 토큰·쿠키 같은 개인 정보는 올리지 마세요.
 
