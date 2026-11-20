@@ -10,6 +10,20 @@
 
 배포 검증은 `LuvBox.exe`의 체크섬과 꼬리표, 소스·라이선스 ZIP의 내용과 개인정보 제외를 확인합니다. 공개 뒤 올린 `LuvBox.exe`를 다시 받아 해시를 대조하고 한글·공백 경로에서, 격리한 `LOCALAPPDATA`로 실행합니다. 세부 로그와 화면은 `.test-output/`에 보관하며 배포 소스에 넣지 않습니다.
 
+## 2026-11-20 1.11.9 프로그램 검수
+
+- **계기·범위**: 1.11.8 배포 뒤 전체 프로그램 검수(꼭 필요한 성능 개선, 많이 어색한 UI/UX, 중요도 중간 이상의 문제·오작동, 꼭 필요할 때만 리팩토링, 앱 내외 문구·문서 재검토 및 시스템·개발자 내용 노출 축소)입니다. 백엔드·저장소·실행기·브라우저 확장, QML UI/UX, 사용자 노출 문서 전반을 재검토했습니다. 백엔드(`luvbox/*.py`, `entry.py`, `Launcher.cs`, 확장 스크립트)에서는 추가 버그·병목·리팩토링 대상이 확인되지 않아 변경하지 않았습니다.
+- **고친 것·UI/UX·문구**:
+  - `assets/qt/MainWindow.qml`, `PreferencesDialog.qml`: `previewDialog`의 `previewMetaScroll`·`bodyScroll` 세로 스크롤 위치를 사진 전환(`onOpenedKeyChanged`) 및 다시 열기(`onAboutToShow`) 시 `0`으로 초기화하고, `previewMetaScroll`·`preferencesScroll`에 `contentWidth: availableWidth`를 지정해 긴 정보 문자열로 인한 불필요한 가로 끌림을 막았습니다.
+  - `assets/qt/MainWindow.qml`: `datePickerPopup` 위치 계산을 `place()`로 분리하고 팝업이 열린 동안 `popupHost` 크기 변경 시 좌표를 재계산하도록 수정했습니다.
+  - `assets/qt/SchedulePanel.qml`, `DeleteConfirmation.qml`, `AlikeConfirmation.qml`: `footer: DialogButtons` 내부의 중복 `onAccepted`/`onRejected`를 제거해 확인·취소 1회 클릭당 대화상자 신호가 두 번 호출되지 않도록 수정했습니다.
+  - `tests/test_regression_1117.py`: `DamagedSettingsFileTests.setUp`에서 `luvbox.app_settings`를 `patch` 루프보다 먼저 불러와 모듈 단위 실행 시 `settings_path` 모의 객체가 남지 않도록 수정했습니다.
+  - `CHANGELOG.md`, `docs/사용안내.txt`, `assets/browser-extension/README.md`, `assets/browser-extension/PRIVACY.md`: 개발용 기록 링크(`changelog-detail.md`), 기술 용어(`exFAT`, `auth_token`, `AES-GCM`, `HMAC-SHA-256`, `DPAPI`, `127.0.0.1`, `매니페스트 오류` 등), 발행자 심사 메모와 개발자 방어 문구를 제거하고 사용자 안내로 재작성했습니다.
+- **새 검사**: `tests/test_regression_1119.py` 2개(`DocumentationWordingRegressionTests`, `QmlRegressionTests`) 및 관련 회귀·계약 검사(`test_regression_1117`, `test_regression_1118`, `test_guide_versions`, `test_release_contract`, `test_package_release`, `test_qt_theme`) **96개 실행(95개 통과·1개 생략, 실패 0)**.
+- **전체 실행**: `.\.venv\Scripts\python.exe -m unittest discover -s tests` — **1,852개 중 1,844개 통과·8개 생략(720.415초), 실패·오류 0**.
+- **소스 점검**: `pip check`, `tools/check_build_inputs.py`, `tools/package_release.py --check-guides`, `tools/release_key.py --check`, 격리된 `LOCALAPPDATA`·`QML_DISK_CACHE_PATH` 환경의 `entry.py --self-test`와 `entry.py --download-smoke`가 모두 종료 코드 0(`"ok": true`, `"version": "1.11.9"`, `"qml_errors": []`)으로 통과했습니다.
+- 실제 X 로그인·다운로드 및 Windows 작업 스케줄러의 실제 예약 실행은 검사 범위에서 제외했습니다.
+
 ## 2026-11-20 1.11.8 프로그램 검수
 
 - **계기·범위**: 1.11.7 배포 뒤 전체 프로그램 검수(꼭 필요한 성능 개선, 많이 어색한 UI/UX, 중요도 중간 이상의 문제·오작동, 꼭 필요할 때만 리팩토링, 앱 안팎의 문구와 문서를 이해하기 쉽게 다듬고 시스템·개발자 내용 노출 축소)입니다. 저장·서비스·예약·기록(`core.py`, `download_service.py`, `scheduled.py`, `qt_records.py`), 저장소·DB·중복·AI·캐시·복구·휴지통·삭제(`history.py`, `qt_library.py`, `storage.py`, `duplicates.py`, `clip_classifier.py`, `preview.py`, `thumbcache.py`, `recovery.py`, `recycling.py`, `deletion.py`), Qt 컨트롤러·단일 실행·실행기·확장·패키징(`qt_updater.py`, `qt_app.py`, `qt_gallery.py`, `qt_management.py`, `single_instance.py`, `login.py`, `qt_accounts.py`, `qt_browser_setup.py`, `entry.py`, `Launcher.cs`, `extension-page.js`, `package_release.py`), QML 화면(`MainWindow.qml`, `HelpButton.qml`, `RunHistoryDialog.qml`, `FlatCombo.qml`, `SavedDetails.qml`, `SchedulePanel.qml`, `PreferencesDialog.qml`, `DuplicateReview.qml`) 및 문서들을 검토·수정했습니다.

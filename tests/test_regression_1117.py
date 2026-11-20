@@ -22,6 +22,8 @@ class DamagedSettingsFileTests(unittest.TestCase):
     """A settings file that holds no readable settings must not block every later change."""
 
     def setUp(self):
+        from luvbox.app_settings import SettingsRepository
+
         temporary = tempfile.TemporaryDirectory(prefix="luvbox-settings-damaged-")
         self.addCleanup(temporary.cleanup)
         self.path = Path(temporary.name) / "settings.json"
@@ -29,7 +31,6 @@ class DamagedSettingsFileTests(unittest.TestCase):
             replacement = patch(name, return_value=self.path)
             replacement.start()
             self.addCleanup(replacement.stop)
-        from luvbox.app_settings import SettingsRepository
 
         self.repository = SettingsRepository()
 

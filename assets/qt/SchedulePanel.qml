@@ -232,8 +232,6 @@ ColumnLayout {
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
             FlatButton { id: scheduleCancel; text: "취소"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
-            onAccepted: confirmation.accept()
-            onRejected: confirmation.reject()
         }
     }
 }

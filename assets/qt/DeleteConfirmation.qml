@@ -69,7 +69,5 @@ FlatDialog {
             text: "취소"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
         }
-        onAccepted: dialog.accept()
-        onRejected: dialog.reject()
     }
 }

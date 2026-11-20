@@ -2,6 +2,21 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.11.9 — 2026-11-20
+
+1.11.8 전체 프로그램·UI/UX·문서 검수에서 확인된 QML 상호작용 버그와 사용자 문서의 개발 용어 노출을 수정했습니다.
+
+- **QML 미리보기 스크롤 초기화 및 가로 폭 고정 (`assets/qt/MainWindow.qml`, `assets/qt/PreferencesDialog.qml`)**:
+  - `previewDialog`에 `resetScroll()`을 추가해 `onOpenedKeyChanged`와 `onAboutToShow`에서 `previewMetaScroll`과 `bodyScroll`의 세로 `contentY`를 `0`으로 되돌려, 작은 창(`680×480`)이나 태그·본문이 많은 사진에서 스크롤한 뒤 이전·다음 사진으로 넘어가거나 창을 다시 열 때 새 사진의 정보 위쪽이 잘린 채 보이지 않도록 수정했습니다.
+  - `previewMetaScroll`과 `preferencesScroll`(`FocusScrollView`)에 `contentWidth: availableWidth`를 지정해, 긴 파일 정보의 `implicitWidth` 때문에 가로 스크롤바 없이도 내용 영역이 가로로 끌리던 문제를 막았습니다.
+- **달력 팝업 창 크기 변경 추적 (`assets/qt/MainWindow.qml`)**:
+  - `datePickerPopup`의 위치 계산을 `place()`로 분리하고 팝업이 열려 있을 때 `popupHost`의 `width`/`height` 변경을 감지해 `Qt.callLater(datePickerPopup.place)`로 좌표를 다시 맞추도록 수정했습니다.
+- **확인 대화상자 이중 신호 제거 (`assets/qt/SchedulePanel.qml`, `assets/qt/DeleteConfirmation.qml`, `assets/qt/AlikeConfirmation.qml`)**:
+  - `Dialog.footer`의 `DialogButtons`(`DialogButtonBox`)가 자동으로 `accept()`/`reject()`를 연결하는데도 내부에 중복 선언되어 있던 `onAccepted`/`onRejected`를 제거해 확인·취소 1회 클릭당 `Dialog.onAccepted`/`onRejected`가 두 번 호출되지 않게 했습니다.
+- **사용자 문서·문구 정리 (`CHANGELOG.md`, `docs/사용안내.txt`, `assets/browser-extension/README.md`, `assets/browser-extension/PRIVACY.md`)**:
+  - `CHANGELOG.md` 하단의 `docs/changelog-detail.md` 링크를 제거하고 과거 항목(`1.10.9`·`1.10.4`·`1.9.2`)의 기술 표현을 쉬운 말로 바꿨습니다.
+  - `docs/사용안내.txt`에서 `(auth_token)` 표기를 제거하고, 번들 문서인 `assets/browser-extension/README.md` 및 `PRIVACY.md`에서 발행자 메모·암호화 알고리즘·루프백 포트·개발자 방어 문구를 걷어내 사용자용 안내로 재작성했습니다.
+
 ## 1.11.8 — 2026-11-20
 
 1.11.7 전체 코드·성능·UI/UX·문서 검수에서 확인된 중간 이상 오류, 실제 병목, 어색한 UI/UX, 개발 용어 노출을 수정했습니다.

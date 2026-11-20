@@ -100,6 +100,7 @@ FlatDialog {
         id: scrollView
         objectName: "preferencesScroll"
         clip: true
+        contentWidth: availableWidth
         // The bar gets its own lane, so it never covers a control's right edge.
         rightPadding: ScrollBar.vertical.policy === ScrollBar.AlwaysOn ? 14 : 0
         ScrollBar.horizontal.policy: ScrollBar.AlwaysOff

@@ -2676,9 +2676,16 @@ ApplicationWindow {
                 noticeKey = ""
             }
         }
+        function resetScroll() {
+            if (previewMetaScroll.contentItem)
+                previewMetaScroll.contentItem.contentY = 0
+            if (bodyScroll.contentItem)
+                bodyScroll.contentItem.contentY = 0
+        }
         onOpenedKeyChanged: {
             notice = ""
             noticeKey = ""
+            resetScroll()
         }
         title: "미리보기"
         anchors.centerIn: parent
@@ -2774,6 +2781,7 @@ ApplicationWindow {
             notice = ""
             noticeKey = ""
             inlineTagField.text = ""
+            resetScroll()
             window.stopWheel()
         }
         onClosed: {
@@ -2945,6 +2953,7 @@ ApplicationWindow {
                                                 Math.max(36, previewContentColumn.height - previewTopControls.height - 48))
                 Layout.maximumHeight: Math.max(36, previewContentColumn.height - previewTopControls.height - 48)
                 clip: true
+                contentWidth: availableWidth
                 ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
                 ScrollBar.vertical.policy: previewMetaColumn.implicitHeight > height + 2
                     ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
@@ -3295,6 +3304,22 @@ ApplicationWindow {
             return false
         }
 
+        function place() {
+            if (!targetField || !popupHost)
+                return
+            const pos = targetField.mapToItem(popupHost, 0, targetField.height + 6)
+            const popupHeight = Math.max(308, height, implicitHeight)
+            x = Math.max(8, Math.min(popupHost.width - width - 8, pos.x))
+            y = Math.max(8, Math.min(popupHost.height - popupHeight - 8, pos.y))
+        }
+
+        Connections {
+            target: popupHost
+            enabled: datePickerPopup.visible
+            function onWidthChanged() { Qt.callLater(datePickerPopup.place) }
+            function onHeightChanged() { Qt.callLater(datePickerPopup.place) }
+        }
+
         function openFor(field) {
             window.stopWheel()
             targetField = field
@@ -3312,12 +3337,7 @@ ApplicationWindow {
                 viewYear = now.getFullYear()
                 viewMonth = now.getMonth()
             }
-            if (field && popupHost) {
-                const pos = field.mapToItem(popupHost, 0, field.height + 6)
-                const popupHeight = Math.max(308, height, implicitHeight)
-                x = Math.max(8, Math.min(popupHost.width - width - 8, pos.x))
-                y = Math.max(8, Math.min(popupHost.height - popupHeight - 8, pos.y))
-            }
+            place()
             open()
         }
 
