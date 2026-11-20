@@ -65,7 +65,7 @@ class ScheduledRunTests(unittest.TestCase):
         self.assertEqual(options.output_dir, str(self.output.resolve()))
         self.assertIn("새 Like만 빠르게 확인", log)
         self.assertIn("저장 · ", log)
-        self.assertIn("종료 · finished · 저장 1개", log)
+        self.assertIn("종료 · 완료 · 저장 1개", log)
         self.assertNotIn("old.jpg", log)
         self.assertEqual(self.run_saved(self.settings, full=True)[1][0].scan_mode, "full")
         # Earlier settings have no GIF choices; they keep converting at full size.

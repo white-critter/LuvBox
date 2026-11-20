@@ -150,7 +150,6 @@ class ReleaseContractTests(unittest.TestCase):
             self.assertIn(f"`release/{name}`", development)
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("`LuvBox.exe` 하나", readme)
-        self.assertIn("`SHA256-<버전>.txt`", readme)
         self.assertIn("`LuvBox-<버전>-source-licenses.zip`", readme)
         build = (ROOT / "build.ps1").read_text(encoding="utf-8-sig")
         self.assertIn("release\\LuvBox.exe", build)

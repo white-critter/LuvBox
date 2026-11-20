@@ -518,7 +518,9 @@ def run_saved(*, full: bool = False) -> int:
                                failed_media=int(event.get("failed_media") or 0), visited=int(event.get("visited") or 0), message=str(event.get("message", "")),
                                retry_at=str(event.get("retry_at") or ""), history_run_id=event.get("history_run_id"))
                 failed_new = int(event.get("failed_new_media") or 0)
-                write(f"종료 · {event.get('status')} · 저장 {event.get('saved', 0)}개 · 기존 {event.get('skipped', 0)}개 · "
+                status_text = {"finished": "완료", "stopped": "중단", "error": "실패",
+                               "interrupted": "중단"}.get(str(event.get("status") or ""), str(event.get("status") or ""))
+                write(f"종료 · {status_text} · 저장 {event.get('saved', 0)}개 · 기존 {event.get('skipped', 0)}개 · "
                       f"용량 초과 {event.get('size_skipped', 0)}개 · 저장 실패 {event.get('failed_media', 0)}개")
                 write(str(event.get("message", "")))
                 if event.get("retry_at"):

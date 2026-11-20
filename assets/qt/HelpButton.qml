@@ -24,6 +24,17 @@ AbstractButton {
     Keys.onReturnPressed: control.click()
     Keys.onEnterPressed: control.click()
 
+    function close() { card.close() }
+    onVisibleChanged: if (!visible) card.close()
+    Keys.onEscapePressed: event => {
+        if (card.visible) {
+            card.close()
+            event.accepted = true
+        } else {
+            event.accepted = false
+        }
+    }
+
     onClicked: {
         pinned = !(pinned && card.visible)
         if (pinned)
@@ -84,7 +95,7 @@ AbstractButton {
         bottomPadding: Theme.gapLarge
         modal: false
         focus: false
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+        closePolicy: Popup.CloseOnPressOutsideParent
         onClosed: control.pinned = false
         enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 120 } }
         exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 90 } }

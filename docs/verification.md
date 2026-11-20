@@ -10,6 +10,19 @@
 
 배포 검증은 `LuvBox.exe`의 체크섬과 꼬리표, 소스·라이선스 ZIP의 내용과 개인정보 제외를 확인합니다. 공개 뒤 올린 `LuvBox.exe`를 다시 받아 해시를 대조하고 한글·공백 경로에서, 격리한 `LOCALAPPDATA`로 실행합니다. 세부 로그와 화면은 `.test-output/`에 보관하며 배포 소스에 넣지 않습니다.
 
+## 2026-11-20 1.11.8 프로그램 검수
+
+- **계기·범위**: 1.11.7 배포 뒤 전체 프로그램 검수(꼭 필요한 성능 개선, 많이 어색한 UI/UX, 중요도 중간 이상의 문제·오작동, 꼭 필요할 때만 리팩토링, 앱 안팎의 문구와 문서를 이해하기 쉽게 다듬고 시스템·개발자 내용 노출 축소)입니다. 저장·서비스·예약·기록(`core.py`, `download_service.py`, `scheduled.py`, `qt_records.py`), 저장소·DB·중복·AI·캐시·복구·휴지통·삭제(`history.py`, `qt_library.py`, `storage.py`, `duplicates.py`, `clip_classifier.py`, `preview.py`, `thumbcache.py`, `recovery.py`, `recycling.py`, `deletion.py`), Qt 컨트롤러·단일 실행·실행기·확장·패키징(`qt_updater.py`, `qt_app.py`, `qt_gallery.py`, `qt_management.py`, `single_instance.py`, `login.py`, `qt_accounts.py`, `qt_browser_setup.py`, `entry.py`, `Launcher.cs`, `extension-page.js`, `package_release.py`), QML 화면(`MainWindow.qml`, `HelpButton.qml`, `RunHistoryDialog.qml`, `FlatCombo.qml`, `SavedDetails.qml`, `SchedulePanel.qml`, `PreferencesDialog.qml`, `DuplicateReview.qml`) 및 문서들을 검토·수정했습니다.
+- **고친 것·성능·UI/UX·문구**:
+  - 저장·서비스·예약·기록: Windows 공유 잠금 재시도(`_retry_sharing_lock`), 재시도 `ReviewNever` 기록 보완, `DownloadService` 중단 우선 확인·중복 `finished` 및 제어 파일 `OSError` 방어·`_run()` 시작 시 `_final` 초기화, 예약 실행 로그 한국어 상태(`완료`·`중단`·`실패`), `qt_records` 제외/해제 보호·경고 문구 유지 및 `append` 스냅샷 재사용을 반영했습니다.
+  - 저장소·중복·AI·캐시·복구·삭제: 키셋 페이지네이션 하한 및 `count_total=False`로 페이지 이동 시 반복 `COUNT(*)` 제거, `_upsert`의 `missing_since` 보존, `_merge_history` 빈 `image_hashes` 제너레이터 소비 버그 수정 및 `media_tags`/`ai_feedback` 정합성 정리, `duplicates` 동일 `dhash` 그룹화 및 strided bit mask 최적화, 손상 번들 ONNX 폴백 및 픽셀 디코드 확인, 손상 EXIF 방어 및 `Cache.prune()` 빠른 경로, `recovery` 같은 초 `kept` 충돌 처리, `recycling` FAT/exFAT `st_ino` 허용(NTFS/ReFS 엄격 유지), `deletion` 원시 예외 문자열 마스킹을 적용했습니다.
+  - Qt·단일 실행·실행기·확장·패키징: 업데이터 늦은 `check` 실패 무시 및 `install` 앞 중복 `check` 생략, 같은 출력 폴더 재선택 무시·폴더 마이그레이션 새로고침·이전 작업 `review` 실패 격리, `setLibrary` 중복 무시·`ai_counts` 초기화·`ManifestError` 분리, `SafeThumbnailProvider` `_wanted=None` 초기화 및 `_failures` 잠금 내 조기 반환, `InstanceGuard` 듣기 재시도 타이머, Firefox 확장 관리 주소 및 안내 문구 정정, `Launcher.cs` 공백 포함 무따옴표 경로 매칭·`Publish` 롤백·비잠금 I/O 즉시 실패, `extension-page.js` `finished` 가드, `package_release.py` 체크섬 스테이징 원자 교체를 적용했습니다.
+  - UI/UX·문서: 680×480 미리보기 하단 정보 영역 `FocusScrollView` 적용, 달력 팝업 좌표(`popupHost`), `HelpButton` Esc/숨김 닫기, `RunHistoryDialog` 좁은 창 제목 elide 및 리사이즈 상태 복구, `duplicateStripButtons` 반응형 열 수, `F`/`Delete` 미리보기 오류 배너, `saveReviewDialog` 뒤 영상 일시정지, 창 숨김 시 애니메이션 정지, `FlatCombo` 폭 제한, `teachMenu` 잠금 비활성화, `SchedulePanel` 삭제 확인 취소 우선 포커스를 반영하고, 사용자 문서에서 개발자 내용(체크섬·내부 버전·PR 등)을 빼고 ‘새 Like’를 ‘새 좋아요’로 다듬었습니다.
+- **새 검사**: `tests/test_regression_1118.py` **23개 모두 통과**(4.666초).
+- **전체 실행**: `.\.venv\Scripts\python.exe -m unittest discover -s tests` — **1,850개 중 1,842개 통과·8개 생략(725.566초), 실패·오류 0**.
+- **소스 점검**: `pip check`, `tools/check_build_inputs.py`, `tools/package_release.py --check-guides`, `tools/release_key.py --check`, 격리된 `LOCALAPPDATA`·`QML_DISK_CACHE_PATH` 환경의 `entry.py --self-test`와 `entry.py --download-smoke`가 모두 종료 코드 0(`"ok": true`, `"version": "1.11.8"`, `"qml_errors": []`)으로 통과했습니다.
+- 실제 X 로그인·다운로드 및 Windows 작업 스케줄러의 실제 예약 실행은 검사 범위에서 제외했습니다. 빌드 후 실행기 기반 시작 점검과 [1.11.8 릴리스](https://github.com/white-critter/LuvBox/releases/tag/v1.11.8) 공개 뒤 파일 검증을 이어서 진행합니다.
+
 ## 2026-11-19 1.11.7 프로그램 검수: 겹치는 상태·실패 경계·배율
 
 - **계기**: 1.11.6 배포 뒤 프로그램 검수(꼭 필요한 성능 개선, 많이 어색한 UI/UX, 중간 이상 문제·오작동, 꼭 필요할 때만 리팩토링, 글 다시 보기, 수정 시 재배포)와, 작업 중 받은 요청(저장이 끝났을 때의 안내가 길다)입니다. 모듈을 차례로 읽는 일은 지난 다섯 번에 했으므로, 두 상태가 겹치는 곳(중복 보기·저장 못 한 미디어·미리보기·여러 개 선택·필터·설정·저장 중·트레이·업데이트·예약 저장), 실패와 경계(손상된 설정·기록 파일, 사라진 저장 폴더, 앱 저장과 예약 저장이 겹칠 때, 저장 중 종료), 실제 기록 사본의 수치, 배율과 작은 창의 화면을 봤습니다.

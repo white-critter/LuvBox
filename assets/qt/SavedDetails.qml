@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 
 Frame {
     id: details
@@ -45,6 +46,8 @@ Frame {
                 BusyIndicator {
                     anchors.centerIn: parent
                     running: !!details.item.preview_loading
+                        && (!details.Window.window
+                            || (details.Window.window.visible && details.Window.window.visibility !== Window.Minimized))
                     visible: running
                 }
                 Column {

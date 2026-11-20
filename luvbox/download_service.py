@@ -167,19 +167,30 @@ class DownloadService:
             self._review_dirty = False
             self._review_response = None
         if dirty:
-            self._control.set_enabled(enabled)
+            try:
+                self._control.set_enabled(enabled)
+            except OSError:
+                with self._lock:
+                    self._review_dirty = True
         if response is not None:
             ident, action, enabled = response
-            self._control.respond(ident, action, enabled=enabled)
+            try:
+                self._control.respond(ident, action, enabled=enabled)
+            except OSError:
+                with self._lock:
+                    if self._review_response is None:
+                        self._review_response = response
 
     def _run(self, job_id, options):
         process = None
         return_code = 1
         forced = False
+        with self._lock:
+            self._final = False
         try:
             options = options.validate()
             with ExitStack() as resources:
-                folder = resources.enter_context(tempfile.TemporaryDirectory(prefix="luvbox-"))
+                folder = resources.enter_context(tempfile.TemporaryDirectory(prefix="luvbox-", ignore_cleanup_errors=True))
                 directory = Path(folder)
                 request = directory / "request.json"
                 events = directory / "events.jsonl"
@@ -213,32 +224,44 @@ class DownloadService:
                                 self._read_lines(job_id, partial + b"\n")
                             return_code = process.returncode
                             break
-                        self._update_control()
                         now = time.monotonic()
-                        if now - heartbeat_at >= 1:
-                            heartbeat_at = now
-                            try:
-                                self._control.heartbeat()
-                            except OSError:
-                                pass
                         if self._stop.is_set():
                             if stop_at is None:
                                 stop.touch(exist_ok=True)
                                 stop_at = now
                             elif now - stop_at > _STOP_GRACE_SECONDS and terminated_at is None:
                                 forced = True
-                                process.terminate()
+                                try:
+                                    process.terminate()
+                                except OSError:
+                                    pass
                                 terminated_at = now
                             elif terminated_at is not None and now - terminated_at > _KILL_GRACE_SECONDS:
                                 forced = True
-                                process.kill()
+                                try:
+                                    process.kill()
+                                except OSError:
+                                    pass
+                        self._update_control()
+                        if now - heartbeat_at >= 1:
+                            heartbeat_at = now
+                            try:
+                                self._control.heartbeat()
+                            except OSError:
+                                pass
                         time.sleep(.1)
                 process.wait()
         except ValueError as error:
-            self._emit(job_id, {"type": "finished", "status": "error", "message": str(error)})
+            with self._lock:
+                already_final = self._final
+            if not already_final:
+                self._emit(job_id, {"type": "finished", "status": "error", "message": str(error)})
         except Exception:
-            self._emit(job_id, {"type": "finished", "status": "error",
-                                "message": "저장 작업을 실행하지 못했습니다. 설정과 저장 위치를 확인해 주세요."})
+            with self._lock:
+                already_final = self._final
+            if not already_final:
+                self._emit(job_id, {"type": "finished", "status": "error",
+                                    "message": "저장 작업을 실행하지 못했습니다. 설정과 저장 위치를 확인해 주세요."})
         finally:
             if process is not None:
                 self._finish_process(process)

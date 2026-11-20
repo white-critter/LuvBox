@@ -106,7 +106,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             self._priority.clear()
             self._queued_size.clear()
             self._heap.clear()
-            self._wanted = set()
+            self._wanted = None
             self._failures.clear()
             self._published.clear()
             self._notified.clear()
@@ -122,7 +122,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             self._priority.clear()
             self._queued_size.clear()
             self._heap.clear()
-            self._wanted = set()
+            self._wanted = None
             self._failures.clear()
             self._published.clear()
             self._notified.clear()
@@ -218,7 +218,8 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._record("upload_request_ms", (time.perf_counter() - notified) * 1000)
             path = self._registry.get(key) if _KEY.fullmatch(key) else None
             scheduled = self._wanted is not None
-            if self._closed or path is None:
+            token = (key, width, height)
+            if self._closed or path is None or token in self._failures:
                 return self._output(QImage(), size)
         image, hit = self._read(key, path, width, height, decode=False)
         if hit:
@@ -244,7 +245,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             # Join that work instead of decoding the same image/video again.
             while token in self._inflight and not self._closed and self._registry.get(key) == path:
                 self._lock.wait()
-            if self._closed or self._registry.get(key) != path:
+            if self._closed or self._registry.get(key) != path or token in self._failures:
                 return self._output(QImage(), size)
             # Retire the queued copy before taking ownership of the decode;
             # otherwise a scheduler worker can start it at the same time.
@@ -369,10 +370,11 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._active -= 1
                 closed = self._closed
                 stale = generation != self._registry_generation
-                if not closed and not stale and image.isNull() and key in self._wanted:
+                if not closed and not stale and image.isNull() and self._wanted is not None and key in self._wanted:
                     self._failures.add(token)
                     failed = True
-                elif (not closed and not stale and not image.isNull() and key in self._wanted
+                elif (not closed and not stale and not image.isNull() and self._wanted is not None
+                      and key in self._wanted
                       and self._target_size == (width, height) and token not in self._published):
                     self._published.add(token)
                     publish = True
@@ -421,7 +423,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 with self._lock:
                     if self._lock.wait_for(
                             lambda: self._closed or generation != self._registry_generation
-                            or (not deliver and key not in self._wanted), timeout=delay):
+                            or (not deliver and (self._wanted is None or key not in self._wanted)), timeout=delay):
                         return QImage(), False
                 try:
                     current = path.stat()

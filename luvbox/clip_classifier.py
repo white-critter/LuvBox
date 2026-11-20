@@ -18,6 +18,7 @@ import gc
 import hashlib
 import os
 from pathlib import Path
+import struct
 import tempfile
 import threading
 from typing import Sequence
@@ -110,9 +111,13 @@ def is_model_ready(path: Path | None = None) -> bool:
     does not re-hash the 89 MB file on every batch.
     """
     global _VERIFIED_MODEL_SIG
-    target = path if path is not None else (
-        bundled_model_path() if bundled_model_path().is_file() else default_cache_dir() / MODEL_FILENAME
-    )
+    if path is None:
+        bundled = bundled_model_path()
+        if bundled.is_file() and is_model_ready(bundled):
+            return True
+        target = default_cache_dir() / MODEL_FILENAME
+    else:
+        target = path
     try:
         if not _safe_local_file(target):
             return False
@@ -327,7 +332,22 @@ def encode_skip_signature(image_path: Path | str) -> tuple[int, int] | None:
             with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
                 if img.width <= 0 or img.height <= 0 or img.width * img.height > MAX_PIXELS:
                     return signature
-    except (Image.UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+                transposed = ImageOps.exif_transpose(img)
+                try:
+                    w, h = transposed.size
+                    if w <= 0 or h <= 0:
+                        return signature
+                    rgb = transposed if transposed.mode == "RGB" else transposed.convert("RGB")
+                    try:
+                        rgb.load()
+                    finally:
+                        if rgb is not transposed:
+                            rgb.close()
+                finally:
+                    if transposed is not img:
+                        transposed.close()
+    except (Image.UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning,
+            SyntaxError, ValueError, TypeError, EOFError, struct.error):
         return signature
     except OSError as exc:
         return None if _transient_io(exc) else signature

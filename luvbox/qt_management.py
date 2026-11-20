@@ -7,6 +7,9 @@ from threading import Condition, Event, Thread
 
 from PySide6.QtCore import QObject, Property, Qt, QTimer, Signal, Slot
 
+from .qt_library import ManifestError
+from .recycling import RecyclingError
+
 
 # Seconds without a new job before the records copy and backup of a deletion are written.
 _SETTLE_AFTER = 20.0
@@ -214,12 +217,7 @@ class ManagementController(QObject):
                     result = self._library.deletionManifest(payload)
                     if self._stop.is_set(): result = {"rows": [], "cancelled": True}
                 elif kind == "prepare_alike":
-                    try:
-                        result = self._library.alikeManifest(payload)
-                    except (ValueError, OSError) as exc:
-                        # Why this photo cannot be sent is the person's to read: the manifest says it in words.
-                        self._delivered.emit((kind, generation, {}, str(exc) or "사진을 비교하지 못했습니다."))
-                        continue
+                    result = self._library.alikeManifest(payload)
                     if self._stop.is_set(): result = {"rows": [], "cancelled": True}
                 else:
                     from .deletion import run_deletion
@@ -233,6 +231,10 @@ class ManagementController(QObject):
                     result = dict(result, keys=_recycled_keys(manifest["rows"], result.get("paths")),
                                   alike=bool(manifest.get("alike")))
                 self._delivered.emit((kind, generation, result, ""))
+            except (ManifestError, RecyclingError) as exc:
+                fallback = ("사진을 비교하지 못했습니다." if kind == "prepare_alike"
+                            else "작업을 마치지 못했습니다. 계정·폴더·파일 상태를 확인해 주세요.")
+                self._delivered.emit((kind, generation, {}, str(exc) or fallback))
             except Exception:
                 self._delivered.emit((kind, generation, {}, "작업을 마치지 못했습니다. 계정·폴더·파일 상태를 확인해 주세요."))
 

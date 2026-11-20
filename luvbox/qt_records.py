@@ -15,6 +15,7 @@ from collections import deque
 from contextlib import closing
 from pathlib import Path
 import re
+import sqlite3
 from threading import Condition, Lock, Thread
 import uuid
 
@@ -27,8 +28,9 @@ from .core import RETRY_LIMIT
 from .history import HistoryError, HistoryStore, archive_key
 from .protection import AccountGuard, ProtectionError
 from .qt_library import _ReadOnlyHistory
+from .recovery import backup_catalog
 from .run_history import run_page
-from .storage import resolve_storage
+from .storage import MigrationError, OutputGuard, publish_snapshot, resolve_storage
 
 
 _STATUS = {"finished": ("완료", "ok"), "stopped": ("중단", "muted"), "error": ("실패", "error"),
@@ -46,8 +48,14 @@ _KINDS = {"unsaved": (unsaved.FAILED, unsaved.SIZE), "excluded": (unsaved.EXCLUD
 _UNSAVED_PAGE = 100
 _MISSING_DETAIL = "저장한 파일이 폴더에 없습니다. 앱 밖에서 지웠거나 옮긴 것으로 보입니다."
 _CATALOG_ERROR = "기록을 읽지 못했습니다. 저장 폴더와 기록 폴더를 확인해 주세요."
-# A finished run's message only repeats the standard summary; show it when it says more.
-_ROUTINE_MESSAGE = ("X가 보여 주는 좋아요 목록을 모두 확인했습니다", "새 Like 확인을 마쳤습니다")
+# A finished run's message repeats a standard summary; strip only that prefix so
+# any appended warning (cooldown, unsaved count, review note) remains visible.
+_ROUTINE_MESSAGE = (
+    "X가 보여 주는 좋아요 목록을 모두 확인했습니다. 삭제된 게시물이나 X가 더는 보여 주지 않는 오래된 좋아요는 빠질 수 있습니다.",
+    "X가 보여 주는 좋아요 목록을 모두 확인했습니다. 삭제된 게시물은 빠질 수 있습니다.",
+    "X가 보여 주는 좋아요 목록을 모두 확인했습니다.",
+    "새 Like 확인을 마쳤습니다.",
+)
 
 
 def display_time(value):
@@ -705,7 +713,7 @@ class RecordsController(QObject):
                     result = dict(run_page(paths, page), serial=serial)
                 elif kind == "unsaved":
                     view, page, serial, limit_mb, mode = payload
-                    if view != "missing" or mode != "append":
+                    if view != "missing" or mode == "replace":
                         self._missing_snapshot = None
 
                     def read(number, read_mode=mode):
@@ -852,7 +860,7 @@ class RecordsController(QObject):
             with closing(_ReadOnlyHistory(paths)) as store:
                 if hasattr(store, "_lost_items") and type(store).lost_media is HistoryStore.lost_media:
                     items = store._lost_items()
-                    if not through and generation is not None:
+                    if generation is not None:
                         self._missing_snapshot = (cache_key, items)
                 else:
                     found = store.lost_media(page=page, page_size=_UNSAVED_PAGE, through=through)
@@ -871,6 +879,17 @@ class RecordsController(QObject):
                          for row in found["rows"]]
         return found
 
+    def _finish_catalog_edit(self, paths):
+        try:
+            backup_catalog(paths.record_dir, paths.account)
+        except (OSError, sqlite3.Error, ValueError):
+            pass
+        if paths.output_dir.is_dir():
+            try:
+                publish_snapshot(paths)
+            except (MigrationError, OSError, sqlite3.Error, ValueError):
+                pass
+
     def _exclude_missing(self, account, output_dir, separate, items):
         paths = self._catalog(account, output_dir, separate)
         if paths is None:
@@ -878,12 +897,19 @@ class RecordsController(QObject):
         guard = AccountGuard(paths.account, sleep=lambda *_: None)
         guard.acquire(respect_cooldown=False)
         try:
-            store = HistoryStore(paths.record_dir, media_dir=paths.media_dir, output_dir=paths.output_dir,
-                                 legacy_dir=paths.legacy_dir)
+            output_guard = OutputGuard(paths.output_dir)
+            output_guard.acquire()
             try:
-                return store.exclude_lost(items)
+                store = HistoryStore.for_storage(paths, protected=True, create_media=False)
+                try:
+                    excluded = store.exclude_lost(items)
+                finally:
+                    store.close()
+                if excluded:
+                    self._finish_catalog_edit(paths)
+                return excluded
             finally:
-                store.close()
+                output_guard.close()
         finally:
             guard.close()
 
@@ -894,12 +920,18 @@ class RecordsController(QObject):
         guard = AccountGuard(paths.account, sleep=lambda *_: None)
         guard.acquire(respect_cooldown=False)
         try:
-            store = HistoryStore(paths.record_dir, media_dir=paths.media_dir, output_dir=paths.output_dir,
-                                 legacy_dir=paths.legacy_dir)
+            output_guard = OutputGuard(paths.output_dir)
+            output_guard.acquire()
             try:
-                released = store.release_excluded(items)
+                store = HistoryStore.for_storage(paths, protected=True, create_media=False)
+                try:
+                    released = store.release_excluded(items)
+                finally:
+                    store.close()
+                if released:
+                    self._finish_catalog_edit(paths)
             finally:
-                store.close()
+                output_guard.close()
         finally:
             guard.close()
         if released:
@@ -1033,8 +1065,12 @@ class RecordsController(QObject):
         if missed:
             counts.append(f"저장 못 함 {missed:,}개")
         message = str(row.get("message") or "")
-        if row.get("status") == "finished" and message.startswith(_ROUTINE_MESSAGE):
-            message = ""
+        if row.get("status") == "finished":
+            stripped = message.strip()
+            for prefix in _ROUTINE_MESSAGE:
+                if stripped == prefix or stripped.startswith(prefix + " "):
+                    message = stripped[len(prefix):].lstrip()
+                    break
         return dict(token=token, status=label, tone=tone, origin=_ORIGIN.get(row.get("origin"), ""),
                     when=display_time(row.get("started_at") or row.get("finished_at")),
                     account=("@" + row["account"]) if row.get("account") else "계정 미확인",

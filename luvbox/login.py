@@ -26,9 +26,9 @@ _LEGACY_HEADER = b"XlikeSaver-DPAPI-v1\0"
 _LEGACY_ENTROPY = b"XlikeSaver.session.v1"
 _MAX_SESSION_BYTES = 1024 * 1024
 _COOKIE_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
-_SESSION_HELP = "저장한 auth_token 연결을 사용할 수 없습니다. auth_token을 다시 입력해 주세요."
+_SESSION_HELP = "저장한 X 연결을 사용할 수 없습니다. 계정을 다시 연결해 주세요."
 _TOKEN_HELP = "auth_token 값을 확인해 주세요. 쿠키의 값만 입력하고 공백이나 따옴표는 포함하지 마세요."
-_STORE_HELP = "auth_token 연결 정보를 암호화해 저장하지 못했습니다. Windows 사용자 폴더의 쓰기 권한을 확인해 주세요."
+_STORE_HELP = "연결 정보를 암호화해 저장하지 못했습니다. Windows 사용자 폴더의 쓰기 권한을 확인해 주세요."
 _MAX_TOKEN_LENGTH = 4096
 _ACCOUNT_HELP = "연결된 계정을 확인하지 못했습니다. 계정을 다시 선택해 주세요."
 _USER_ID = re.compile(r"[1-9][0-9]{0,31}\Z")
@@ -442,7 +442,11 @@ def load_session_cookies(*, account: str | None = None) -> list[dict]:
         if not _has_auth(clean):
             raise ValueError
         return clean
-    except (OSError, ValueError, UnicodeError, TypeError):
+    except ValueError as error:
+        if error.args == (_ACCOUNT_HELP,):
+            raise
+        raise ValueError(_SESSION_HELP) from None
+    except (OSError, UnicodeError, TypeError):
         raise ValueError(_SESSION_HELP) from None
 
 

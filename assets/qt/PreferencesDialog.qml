@@ -21,7 +21,7 @@ FlatDialog {
         {label: "최대 720px", value: "720"}, {label: "최대 480px", value: "480"}
     ]
     readonly property var scanModes: [
-        {label: "새 Like만 확인", value: "quick"}, {label: "전체 목록 확인", value: "full"}
+        {label: "새 좋아요만 확인", value: "quick"}, {label: "전체 목록 확인", value: "full"}
     ]
     // In a wide window the settings stand in two columns (saving on the left, updates and
     // the advanced part on the right) and fit without scrolling; a narrow window stacks them.

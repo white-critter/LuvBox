@@ -179,7 +179,7 @@ def main() -> int:
                 # Do not serialize exception contents: they may contain a URL
                 # with credentials supplied by an upstream library.
                 emit({"type": "finished", "status": "error",
-                      "message": f"작업 중 오류가 발생했습니다 ({type(exc).__name__}). 입력과 작업 로그를 확인해 주세요."})
+                      "message": "작업 중 예기치 않은 오류가 발생했습니다. 저장 설정과 폴더 상태를 확인한 뒤 다시 시도해 주세요."})
                 return 1
 
     if len(sys.argv) > 1 and sys.argv[1] == "--run-saved":

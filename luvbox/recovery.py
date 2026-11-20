@@ -456,7 +456,12 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
         # A catalog already damaged before the rename was never copied to its
         # new name. Salvage it from the old name; that file stays where it is.
         name = legacy.name
-    kept = backup_directory() / f"{account}-{stamp}-damaged"
+    kept_base = backup_directory() / f"{account}-{stamp}-damaged"
+    kept = kept_base
+    suffix_num = 1
+    while kept.exists():
+        kept = kept_base.with_name(f"{kept_base.name}-{suffix_num}")
+        suffix_num += 1
     kept.mkdir(parents=True)
     for suffix in ("", "-wal", "-shm"):
         source = record_dir / (name + suffix)
@@ -464,6 +469,7 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
             shutil.copy2(source, kept / source.name)
     work = kept / "work"
     work.mkdir()
+    rebuilt = record_dir.parent / f".luvbox-history.repaired-{stamp}-{os.getpid()}.sqlite3"
     try:
         for suffix in ("", "-wal", "-shm"):
             source = kept / (name + suffix)
@@ -476,17 +482,17 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error:
             pass
-        rebuilt = record_dir / f".luvbox-history.repaired-{stamp}.sqlite3"
         # Old account-only backups cannot identify their output folder. Keep
         # them intact, but never mix an unrelated catalog into this repair.
         # An old-name file stays in place, so a copy SQLite cannot read at all
         # must not block the backup-only rebuild that worked before.
         result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir),
                                  skip_unreadable=name != HISTORY_NAME)
+        replace_file(rebuilt, record_dir / HISTORY_NAME)
         for suffix in ("-wal", "-shm"):
             (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
-        replace_file(rebuilt, record_dir / HISTORY_NAME)
     finally:
+        rebuilt.unlink(missing_ok=True)
         shutil.rmtree(work, ignore_errors=True)
     result["kept"] = str(kept)
     return result

@@ -20,6 +20,7 @@
   const confirmation = element("confirm-code");
   let ready = false;
   let busy = false;
+  let finished = false;
   let heartbeat;
   // One state word drives the page's look: which step is lit, the status tone.
   const show = (state, text) => {
@@ -55,6 +56,8 @@
     connect.disabled = busy || !ready || confirmation.disabled || !confirmation.checked;
   };
   const end = text => {
+    if (finished) return;
+    finished = true;
     clearInterval(heartbeat);
     confirmation.checked = false;
     confirmation.disabled = true;
@@ -78,6 +81,7 @@
     return inspectAccount();
   });
   send({type: "luvbox-status"}).then(result => {
+    if (finished) return;
     if (!result?.ok) throw new Error();
     element("pairing-code").textContent = result.code;
     confirmation.disabled = false;
@@ -85,11 +89,14 @@
     update();
     // MV3 may suspend an idle background worker after 30 seconds. A short,
     // memory-only pairing must survive while the user reads the consent page.
-    heartbeat = setInterval(() => send({type: "luvbox-status"})
-      .then(reply => { if (!reply?.ok) expired(); }, expired), 20000);
-  }).catch(expired);
+    heartbeat = setInterval(() => {
+      if (finished) return;
+      send({type: "luvbox-status"})
+        .then(reply => { if (!finished && !reply?.ok) expired(); }, () => { if (!finished) expired(); });
+    }, 20000);
+  }).catch(() => { if (!finished) expired(); });
   async function inspectAccount() {
-    if (busy || confirmation.disabled || !confirmation.checked) return;
+    if (finished || busy || confirmation.disabled || !confirmation.checked) return;
     busy = true;
     resetConnect();
     update();
@@ -98,7 +105,7 @@
     try {
       const result = await send({type: "luvbox-inspect"});
       // The pairing may have ended while the check ran; keep that notice.
-      if (confirmation.disabled) return;
+      if (finished || confirmation.disabled) return;
       if (!result?.ok && final.has(result?.code)) return end(failureText(result.code));
       // The box was unticked during the check: stay on the code step.
       if (!confirmation.checked) {
@@ -115,12 +122,13 @@
       ready = true;
       show("ready", "표시된 계정이 맞으면 아래 연결 버튼을 누르세요. 로그인은 앱에서 언제든 해제할 수 있습니다.");
     } catch {
+      if (finished || confirmation.disabled) return;
       showAccount("", "", "계정을 확인하지 못했습니다.");
       show("failed", failureText("account_error"));
     } finally {
       busy = false;
       // The re-check button appears once a first check has run.
-      if (confirmation.checked && !confirmation.disabled) inspect.hidden = false;
+      if (!finished && confirmation.checked && !confirmation.disabled) inspect.hidden = false;
       update();
     }
   }
@@ -128,12 +136,13 @@
     if (event.isTrusted) return inspectAccount();
   });
   connect.addEventListener("click", async event => {
-    if (!event.isTrusted || busy || !ready || !confirmation.checked) return;
+    if (!event.isTrusted || finished || busy || !ready || !confirmation.checked) return;
     busy = true;
     update();
     show("sending", "LuvBox로 전달하는 중…");
     try {
       const result = await send({type: "luvbox-connect", confirmed: true});
+      if (finished) return;
       if (!result?.ok) {
         if (final.has(result?.code)) return end(failureText(result.code));
         // Every submission needs a new account check, including a failed one.
@@ -142,6 +151,7 @@
         show("failed", failureText(result?.code));
         return;
       }
+      finished = true;
       clearInterval(heartbeat);
       confirmation.disabled = true;
       inspect.hidden = true;
@@ -150,6 +160,7 @@
       ready = false;
       show("done", "계정 정보를 전달했습니다. LuvBox 앱으로 돌아가 ‘이 계정 연결 승인’을 눌러야 저장됩니다(3분 안에). 이 탭은 닫아도 됩니다.");
     } catch {
+      if (finished) return;
       resetConnect();
       showAccount("", "", "‘계정 다시 확인’을 눌러 계정을 다시 확인하세요.");
       show("failed", "연결을 완료하지 못했습니다. 앱에서 연결을 다시 시작해 주세요.");

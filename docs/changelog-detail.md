@@ -2,6 +2,29 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.11.8 — 2026-11-20
+
+1.11.7 전체 코드·성능·UI/UX·문서 검수에서 확인된 중간 이상 오류, 실제 병목, 어색한 UI/UX, 개발 용어 노출을 수정했습니다.
+
+- **저장·서비스·실행 기록 (`core.py`, `download_service.py`, `scheduled.py`, `qt_records.py`)**:
+  - `core.py`의 `finalize_gif`·`review_download`·`finalize_reviewed`에 Windows 공유 잠금(`WinError 32/33`, `PermissionError`) 재시도(`_retry_sharing_lock`)를 추가했고, `targets` 재시도 중 `ReviewNever`가 발생하면 기존 기록 유무에 따라 `set_missing_ignored` 또는 `record_declined`와 `archive.add`를 남기도록 수정했습니다.
+  - `download_service.py`에서 `_stop` 시그널 확인을 제어 채널·하트비트보다 우선하고, 종료 이벤트(`finished`) 중복 송출 및 제어 파일 `OSError` 시 상태 덮어쓰기를 방지했습니다.
+  - `scheduled.py` 실행 로그에 영어 status 대신 한국어 상태(`완료`·`중단`·`실패`)를 기록하고, `qt_records.py`에서 제외/해제 작업에 `OutputGuard`·보호 백업·스냅샷 공개를 적용하며 스냅샷 재사용으로 `unsaved` 목록 중복 디스크 스캔을 제거하고 경고 문구를 보존하도록 보완했습니다.
+- **저장소·DB·중복·AI·캐시·복구·휴지통 (`history.py`, `qt_library.py`, `storage.py`, `duplicates.py`, `clip_classifier.py`, `preview.py`, `thumbcache.py`, `recovery.py`, `recycling.py`, `deletion.py`)**:
+  - `history.py`의 `_after_clause`에 선행 정렬 열 상·하한 조건을 추가하고 `count_total=False`로 페이지 이동 시 반복 `COUNT(*)`를 피하도록(`qt_library.py`에서 `has_more` 기반 전체 수 유지) 최적화했습니다. `_upsert`의 `missing_since` 보존, `_import_legacy`의 `updated_at` 갱신, `has_media_record()` 추가를 반영했습니다.
+  - `storage.py`의 `_valid_roots`에 Windows 대소문자 무시·부모-자식 연결 검사를 추가하고, `_merge_history`에서 동일 행 스킵 및 빈 `image_hashes` 병합 시 기존 클러스터 유지, 병합 후 `media_tags`와 `ai_feedback` 정합성 및 `source='ai'` 중복 정리를 적용했습니다.
+  - `duplicates.py`에서 동일 `dhash` 그룹화와 strided bit mask로 근사 중복 비교 속도를 개선하고, `clip_classifier.py`의 번들 모델 손상 시 사용자 캐시 폴백과 `encode_skip_signature` 실제 픽셀 디코드 확인을 추가했습니다.
+  - `preview.py`·`thumbcache.py`에서 손상 EXIF(`SyntaxError`/`struct.error`) 방어와 `previews_saved_at` 인덱스·`PRAGMA page_count` 기반 `Cache.prune()` 빠른 경로·`_known_files` 갱신을 추가했습니다.
+  - `recovery.py` 같은 초 `kept` 폴더 충돌 처리·`-wal`/`-shm` 정리 순서를 보완하고, `recycling.py`에서 FAT/exFAT의 `st_ino` 변경을 허용하되 NTFS/ReFS는 엄격 서명을 유지하며, `deletion.py` 원시 예외 문자열 유출을 차단했습니다.
+- **Qt 컨트롤러·단일 실행·실행기·확장·패키징 (`qt_updater.py`, `qt_app.py`, `qt_library.py`, `qt_gallery.py`, `qt_management.py`, `single_instance.py`, `login.py`, `qt_accounts.py`, `qt_browser_setup.py`, `entry.py`, `Launcher.cs`, `extension-page.js`, `package_release.py`)**:
+  - `qt_updater.py`가 다운로드/설치 대기 중 늦게 도착한 확인 실패(`check`)를 무시하고 대기 중인 `install` 앞의 중복 `check`를 건너뛰도록 수정했습니다.
+  - `qt_app.py`에서 같은 출력 폴더 재선택 무시, 폴더 마이그레이션 시 강제 새로고침, 이전 작업 `review` 실패 격리; `qt_library.py`에서 `setLibrary` 중복 호출 무시·`ai_counts` 초기화·`ManifestError`; `qt_management.py`에서 `ManifestError`/`RecyclingError` 외 원시 예외 마스킹; `qt_gallery.py`의 `_wanted=None` 초기화와 `_failures` 잠금 내 조기 반환; `single_instance.py`의 `_listen()` 재시도 타이머를 추가했습니다.
+  - `qt_accounts.py`·`login.py`·`qt_browser_setup.py`·`entry.py`의 기술 용어·오타(`Firefox` 확장 관리 주소 오류, `선택할`→`있는` 폴더, 예외 클래스명 및 없는 로그 안내)를 정리했습니다.
+  - `Launcher.cs`의 공백 포함 무따옴표 경로 `ArgumentTail` 매칭, `Publish` 롤백 복원, `AcquireGate` 비잠금 I/O 즉시 실패 처리를 적용했고, `extension-page.js`의 `finished` 가드 및 `package_release.py`의 체크섬 임시 파일 동시 교체를 적용했습니다.
+- **UI/UX·문서 (`assets/qt/*.qml`, `README.md`, `CHANGELOG.md`, `docs/사용안내.txt`, `assets/browser-extension/README.md`, `.github/ISSUE_TEMPLATE/bug.yml`, `docs/development.md`)**:
+  - 680×480 미리보기 하단 정보 영역을 `previewMetaScroll`(`FocusScrollView`)로 감싸고, 달력 팝업을 `popupHost` 좌표계로 맞추며, `HelpButton` Esc/숨김 닫기, `RunHistoryDialog` 좁은 창 제목 elide 및 리사이즈 상태 복구, `duplicateStripButtons` 반응형 열 수, `F`/`Delete` 미리보기 오류 배너, `saveReviewDialog` 뒤 영상 일시정지, 최소화 시 회전·진행 애니메이션 중지, `FlatCombo` 항목 폭 제한, `teachMenu` 잠금 비활성화, `SchedulePanel` 삭제 확인 시 취소 버튼 우선 포커스, 용어 통일(‘새 좋아요만’)을 적용했습니다.
+  - 사용자 문서·README·CHANGELOG에서 체크섬·내부 버전·PR·개발 용어를 제거했습니다.
+
 ## 1.11.7 — 2026-11-19
 
 1.11.6 검수입니다. 지난 다섯 번이 모듈을 차례로 읽었으므로, 이번에는 두 상태가 겹치는 곳, 실패·경계 상황(손상된 설정·기록 파일, 사라진 저장 폴더, 앱 저장과 예약 저장이 겹칠 때), 실제 기록 사본의 수치, 100%·125%·150% 배율과 680×480 창의 모든 화면을 봤습니다.

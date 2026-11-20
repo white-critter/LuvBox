@@ -367,6 +367,9 @@ def package(sign=None) -> None:
     descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".exe", dir=output)
     os.close(descriptor)
     staged_program = Path(filename)
+    descriptor, filename = tempfile.mkstemp(prefix=".release-", suffix=".txt", dir=output)
+    os.close(descriptor)
+    staged_checksum = Path(filename)
     try:
         with zipfile.ZipFile(staged, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
             archive.write(ROOT / "docs" / "사용안내.txt", "사용안내.txt")
@@ -410,6 +413,10 @@ def package(sign=None) -> None:
                 archive.write(python_license, "licenses/Python-LICENSE.txt")
         shutil.copyfile(single, staged_program)
         rows = [(_digest(staged_program), program_name), (_digest(staged), source_name)]
+        listing = format_checksums(rows)
+        if sign is not None:
+            listing = sign_checksums(__version__, listing, sign)
+        staged_checksum.write_text(listing, encoding="utf-8", newline="\n")
         # Compression can outlast a concurrent source edit or runtime rebuild.
         # Keep the previous release files unless the exact sealed inputs still
         # exist and the copied program is still the one that was checked.
@@ -417,13 +424,11 @@ def package(sign=None) -> None:
         _require_startup_report(staged_program)
         os.replace(staged_program, output / program_name)
         os.replace(staged, output / source_name)
+        os.replace(staged_checksum, output / checksum_name)
     finally:
         staged.unlink(missing_ok=True)
         staged_program.unlink(missing_ok=True)
-    listing = format_checksums(rows)
-    if sign is not None:
-        listing = sign_checksums(__version__, listing, sign)
-    (output / checksum_name).write_text(listing, encoding="utf-8", newline="\n")
+        staged_checksum.unlink(missing_ok=True)
     print(f"Release {__version__}: {program_name}, {checksum_name}, {source_name}"
           + (" (signed)" if sign is not None else " (not signed)"))
 

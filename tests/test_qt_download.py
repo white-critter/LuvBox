@@ -182,9 +182,11 @@ class ReviewFailureTests(unittest.TestCase):
             from luvbox.qt_app import ApplicationController
             controller = ApplicationController()
             try:
+                controller.download._running = True
+                controller.download._job_id = 1
                 missing = Path(folder) / "missing.jpg"
                 controller._commands.put(("review", {
-                    "id": "preview-1", "path": str(missing), "signature": [1, 2, 3, 4],
+                    "id": "preview-1", "job_id": 1, "path": str(missing), "signature": [1, 2, 3, 4],
                     "media_type": "photo",
                 }))
                 self.wait_for(lambda: controller.error != "")
@@ -192,6 +194,7 @@ class ReviewFailureTests(unittest.TestCase):
                 self.assertNotIn("권한", controller.error)
                 self.assertNotIn(str(missing), controller.error)
             finally:
+                controller.download._running = False
                 controller.requestClose()
                 self.wait_for(lambda: controller.shutdownReady)
 
@@ -204,6 +207,8 @@ class ReviewFailureTests(unittest.TestCase):
             from luvbox.qt_app import ApplicationController
             controller = ApplicationController()
             try:
+                controller.download._running = True
+                controller.download._job_id = 1
                 large_id = 13300401179940104648
                 event = {"type": "review-request", "id": "preview-2", "job_id": 1, "media_type": "photo",
                          "path": str(Path(folder) / "missing.jpg"),
@@ -217,5 +222,6 @@ class ReviewFailureTests(unittest.TestCase):
                 self.wait_for(lambda: controller.error != "")
                 self.assertEqual(controller.error, "저장 확인 중 파일이 바뀌었습니다.")
             finally:
+                controller.download._running = False
                 controller.requestClose()
                 self.wait_for(lambda: controller.shutdownReady)

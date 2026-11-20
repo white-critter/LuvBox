@@ -14,6 +14,7 @@ https://learn.microsoft.com/en-us/windows/win32/api/shobjidl_core/nf-shobjidl_co
 from __future__ import annotations
 
 import ctypes
+import hashlib
 import os
 import stat
 import struct
@@ -106,7 +107,41 @@ def _receipt_data(path: Path) -> tuple[str, int]:
     return name, size
 
 
-def verify_receipt(original: Path | str, destination: Path | str, expected) -> bool:
+_VOLUME_CACHE: dict[str, str] = {}
+_FAT_FILESYSTEMS = frozenset({"FAT", "FAT32", "EXFAT"})
+
+
+def _volume_filesystem(anchor: str) -> str:
+    if os.name != "nt" or not anchor:
+        return ""
+    key = os.path.normcase(anchor)
+    cached = _VOLUME_CACHE.get(key)
+    if cached is not None:
+        return cached
+    buffer = ctypes.create_unicode_buffer(64)
+    try:
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.GetVolumeInformationW.argtypes = [
+            ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
+            ctypes.POINTER(ctypes.c_uint32), ctypes.c_wchar_p, ctypes.c_uint32,
+        ]
+        kernel32.GetVolumeInformationW.restype = ctypes.c_int32
+        ok = kernel32.GetVolumeInformationW(anchor, None, 0, None, None, None, buffer, len(buffer))
+    except OSError:
+        ok = 0
+    filesystem = buffer.value.upper() if ok and buffer.value else ""
+    if filesystem:
+        _VOLUME_CACHE[key] = filesystem
+    return filesystem
+
+
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def verify_receipt(original: Path | str, destination: Path | str, expected, *, expected_hash: str | None = None) -> bool:
     """Verify an existing Shell receipt without moving or deleting anything."""
     try:
         expected = _signature(expected)
@@ -121,7 +156,17 @@ def verify_receipt(original: Path | str, destination: Path | str, expected) -> b
         receipt = destination.with_name("$I" + destination.name[2:])
         file_signature(receipt)
         name, size = _receipt_data(receipt)
-        return signature == expected and size == expected[2] and _same_path(name, original)
+        if not (size == expected[2] and _same_path(name, original)):
+            return False
+        if signature == expected:
+            return True
+        # FAT/FAT32/exFAT assigns nFileIndex from the directory slot, which changes
+        # when moved to $RECYCLE.BIN; match the remaining metadata and SHA-256 digest.
+        if (_volume_filesystem(original.anchor) in _FAT_FILESYSTEMS
+                and (signature[0], signature[2], signature[3]) == (expected[0], expected[2], expected[3])
+                and expected_hash is not None):
+            return _file_sha256(destination) == expected_hash
+        return False
     except (OSError, ValueError, UnicodeError):
         return False
 
@@ -314,6 +359,14 @@ def recycle_file(path: Path | str, expected=None) -> str:
     signature = file_signature(path)
     if expected is not None and signature != _signature(expected):
         raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로 고침해 주세요.")
+    expected_hash = None
+    if _volume_filesystem(path.anchor) in _FAT_FILESYSTEMS:
+        try:
+            expected_hash = _file_sha256(path)
+        except OSError as exc:
+            raise RecyclingError("파일을 확인하지 못했습니다. 파일 위치와 사용 중인 프로그램을 확인해 주세요.") from exc
+        if file_signature(path) != signature:
+            raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로 고침해 주세요.")
     outcome = None
     try:
         for delay in (0, 0.05, 0.1, 0.2):
@@ -336,7 +389,7 @@ def recycle_file(path: Path | str, expected=None) -> str:
             for delay in (0, 0.05, 0.1, 0.2):
                 if delay:
                     time.sleep(delay)
-                if verify_receipt(path, outcome.destination, signature):
+                if verify_receipt(path, outcome.destination, signature, expected_hash=expected_hash):
                     return outcome.destination
         message = outcome.pre_error or (
             _IN_USE_HELP if in_use and not missing

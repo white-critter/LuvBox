@@ -1,4 +1,4 @@
-# LuvBox 1.11.7 개발 안내
+# LuvBox 1.11.8 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -191,7 +191,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.11.7.txt`, `release/LuvBox-1.11.7-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.11.8.txt`, `release/LuvBox-1.11.8-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 
@@ -201,7 +201,7 @@ README, `CHANGELOG.md`, GitHub 릴리스 설명은 개발자가 아닌 사용자
 
 - **README**: 무엇을 하는 앱인지, 받는 법, 쓰는 법, 업데이트, 자주 묻는 것, 문의만 둡니다. 화면별 세부 동작은 [사용 안내](사용안내.txt)에, 개발 내용은 이 문서에 적습니다.
 - **`CHANGELOG.md`**: 버전마다 쉬운 말로 한 줄씩, 많아도 네 줄입니다. 사용자가 느끼는 변화만 적고 함수·파일 이름, 측정값, 검사 수, “DB 구조는 같습니다” 같은 문장은 넣지 않습니다. 기술적인 자세한 기록은 [자세한 변경 기록](changelog-detail.md)의 맨 위에 같은 버전 제목으로 적습니다.
-- **릴리스 설명**: 한 줄 소개, `### 주요 변경 사항`(쉬운 말의 목록 네 줄 안팎, 앱의 업데이트 알림에 그대로 나옵니다), `### 받는 법` 순서로 씁니다. 검증 결과·확인하지 못한 것·체크섬은 맨 아래 `<details>`(접힌 ‘개발자용 정보’) 안에 넣습니다.
+- **릴리스 설명**: 한 줄 소개, `### 주요 변경 사항`(쉬운 말의 목록 네 줄 안팎, 앱의 업데이트 알림에 그대로 나옵니다), `### 받는 법` 순서로 사용자용 안내만 적습니다. 검증 결과·확인하지 못한 것·체크섬·개발자 메모는 릴리스 본문에 적지 않고 [검증 기록](verification.md)과 [자세한 변경 기록](changelog-detail.md)에 남깁니다.
 
 `tools/build_snapshot.py`는 PyInstaller 직전 소스·QML·실행기 소스·배포 입력과 의존성 버전을 기록하고 빌드 후 EXE·실행 폴더 전체 파일의 상대 경로와 해시에 결합합니다. 패키징도 같은 기록을 검사하므로 소스·문서·의존성·번들 런타임이 바뀌면 다시 빌드합니다. 입력 기록과 시작 보고서는 `build/`, 생성 spec은 `build/spec/`에 두며 소스 최상위에 버전별 spec을 쌓지 않습니다. 프로젝트의 허용 소스 파일과 상위 폴더는 링크·junction·hardlink가 없어야 합니다.
 

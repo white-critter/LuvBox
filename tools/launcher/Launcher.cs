@@ -482,11 +482,17 @@ namespace LuvBox
                 {
                     return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
                 }
-                catch (IOException)
+                catch (IOException error)
                 {
                     // Finished by the other launcher; no need for the gate.
                     if (Ready())
                         return null;
+                    int hr = error.HResult;
+                    int win32 = hr & 0xFFFF;
+                    bool lockConflict = ((hr & unchecked((int)0xFFFF0000)) == unchecked((int)0x80070000))
+                        && (win32 == 32 || win32 == 33);
+                    if (!lockConflict)
+                        throw new LauncherError(ExitCodes.UnpackFailed, Messages.UnpackFailed);
                     if (DateTime.UtcNow > limit)
                         throw new LauncherError(ExitCodes.Busy, Messages.Busy);
                     Thread.Sleep(200);
@@ -707,7 +713,10 @@ namespace LuvBox
                 if (!MoveFolder(VersionRoot, aside, 3))
                     throw new LauncherError(ExitCodes.SameVersionRunning, Messages.SameVersionRunning);
                 if (!MoveFolder(temporary, VersionRoot, 20))
+                {
+                    MoveFolder(aside, VersionRoot, 3);
                     throw new LauncherError(ExitCodes.UnpackFailed, Messages.UnpackFailed);
+                }
                 TryDelete(aside);
                 return;
             }
@@ -1256,7 +1265,10 @@ namespace LuvBox
         [STAThread]
         static int Main()
         {
-            string arguments = ArgumentTail(Environment.CommandLine);
+            string self = null;
+            try { self = Process.GetCurrentProcess().MainModule.FileName; }
+            catch (Exception) { }
+            string arguments = ArgumentTail(Environment.CommandLine, self);
             bool interactive = arguments.Length == 0;
             // A scheduled save has no window either, and its failures are told
             // to the person. Diagnostic runs only return their code.
@@ -1264,7 +1276,7 @@ namespace LuvBox
                 && Environment.GetEnvironmentVariable("LUVBOX_LAUNCHER_SILENT") != "1";
             try
             {
-                string self = Process.GetCurrentProcess().MainModule.FileName;
+                self = self ?? Process.GetCurrentProcess().MainModule.FileName;
                 RemoveReplaced(self);
                 Footer footer = Footer.Read(self);
                 if (footer == null)
@@ -1305,20 +1317,53 @@ namespace LuvBox
         }
 
         /// <summary>Everything after the program name, exactly as it was typed.</summary>
-        static string ArgumentTail(string commandLine)
+        static string ArgumentTail(string commandLine, string executablePath = null)
         {
+            if (string.IsNullOrEmpty(commandLine))
+                return string.Empty;
             int index = 0;
-            if (commandLine.Length > 0 && commandLine[0] == '"')
+            while (index < commandLine.Length && (commandLine[index] == ' ' || commandLine[index] == '\t'))
+                index++;
+            if (index < commandLine.Length && commandLine[index] == '"')
             {
-                index = commandLine.IndexOf('"', 1);
+                index = commandLine.IndexOf('"', index + 1);
                 index = index < 0 ? commandLine.Length : index + 1;
             }
             else
             {
-                while (index < commandLine.Length && commandLine[index] != ' ' && commandLine[index] != '\t')
-                    index++;
+                int afterExecutable;
+                if (!string.IsNullOrEmpty(executablePath)
+                        && TryMatchExecutable(commandLine, index, executablePath, out afterExecutable))
+                {
+                    index = afterExecutable;
+                }
+                else if (!string.IsNullOrEmpty(executablePath)
+                         && executablePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)
+                         && TryMatchExecutable(commandLine, index, Path.ChangeExtension(executablePath, null), out afterExecutable))
+                {
+                    index = afterExecutable;
+                }
+                else
+                {
+                    while (index < commandLine.Length && commandLine[index] != ' ' && commandLine[index] != '\t')
+                        index++;
+                }
             }
             return commandLine.Substring(index).Trim(' ', '\t');
+        }
+
+        static bool TryMatchExecutable(string commandLine, int start, string candidate, out int after)
+        {
+            after = start;
+            if (string.IsNullOrEmpty(candidate) || commandLine.Length - start < candidate.Length)
+                return false;
+            if (string.Compare(commandLine, start, candidate, 0, candidate.Length, StringComparison.OrdinalIgnoreCase) != 0)
+                return false;
+            int end = start + candidate.Length;
+            if (end < commandLine.Length && commandLine[end] != ' ' && commandLine[end] != '\t')
+                return false;
+            after = end;
+            return true;
         }
 
         /// <summary>An update leaves the program it replaced beside this one; remove it.</summary>

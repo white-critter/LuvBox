@@ -37,10 +37,28 @@ _WORKING = {
     "install": "확장 설치를 준비하는 중…",
     "prepare": "확장 폴더를 준비하는 중…",
 }
+_MANAGERS = {"chrome": "chrome://extensions", "edge": "edge://extensions",
+             "firefox": "about:debugging#/runtime/this-firefox"}
+
+
+def _manager_error(identifier):
+    address = _MANAGERS.get(identifier)
+    if address:
+        return f"확장 관리를 열지 못했습니다. 주소창에서 {address}를 여세요."
+    return "확장 관리를 열지 못했습니다. 브라우저의 확장 관리 화면을 여세요."
+
+
+def _manager_copy_error(identifier):
+    address = _MANAGERS.get(identifier)
+    if address:
+        return f"주소를 복사하지 못했습니다. 주소창에 {address}를 입력해 주세요."
+    return "주소를 복사하지 못했습니다. 브라우저 주소창에 확장 관리 주소를 입력해 주세요."
+
+
 _ERRORS = {
     "discover": "브라우저를 확인하지 못했습니다. Chrome·Edge·Firefox 설치 상태를 확인해 주세요.",
     "select": "브라우저 선택을 저장하지 못했습니다. 이전 선택을 유지합니다. 사용자 폴더 권한을 확인해 주세요.",
-    "manager": "확장 관리를 열지 못했습니다. 주소창에서 chrome://extensions 또는 edge://extensions를 여세요.",
+    "manager": _manager_error(None),
     "copy": "확장 폴더를 준비하지 못했습니다. LuvBox 파일과 사용자 폴더 권한을 확인해 주세요.",
     "folder": "확장 폴더를 열지 못했습니다. LuvBox 파일과 사용자 폴더 권한을 확인해 주세요.",
     "x": "X를 열지 못했습니다. 브라우저에서 https://x.com/home을 여세요.",
@@ -48,12 +66,10 @@ _ERRORS = {
     "prepare": "확장 폴더를 준비하지 못했습니다. LuvBox 파일과 사용자 폴더 권한을 확인해 주세요.",
 }
 _COPY_ERRORS = {
-    "manager": "주소를 복사하지 못했습니다. 주소창에 chrome://extensions 또는 edge://extensions를 입력해 주세요.",
+    "manager": _manager_copy_error(None),
     "copy": "폴더 경로를 복사하지 못했습니다. ‘폴더 열기’를 사용해 주세요.",
     "install": "폴더 경로를 복사하지 못했습니다. 표시된 경로를 직접 복사해 주세요.",
 }
-_MANAGERS = {"chrome": "chrome://extensions", "edge": "edge://extensions",
-             "firefox": "about:debugging#/runtime/this-firefox"}
 _EXTENSION_FILES = ("manifest.json", "background.js", "profile.js", "connect.js", "connect.html",
                     "connect.css", "extension-page.js", "icons/icon-16.png", "icons/icon-32.png",
                     "icons/icon-48.png", "icons/icon-128.png")
@@ -288,7 +304,7 @@ class BrowserSetupController(QObject):
         if operation == "copy":
             return {"status": "확장 폴더 경로를 복사했습니다. 폴더 창 주소창에 붙여 넣고 Enter를 누르세요.",
                     "clipboard": str(folder), "path": str(folder)}
-        return {"status": "manifest.json을 선택한 폴더를 열었습니다. 확장 로드 창에서는 ‘문서’가 아니라 표시된 폴더를 사용하세요.",
+        return {"status": "manifest.json이 있는 폴더를 열었습니다. 확장 로드 창에서는 ‘문서’가 아니라 표시된 폴더를 사용하세요.",
                 "reveal": str(folder), "path": str(folder)}
 
     def _work(self):
@@ -300,7 +316,9 @@ class BrowserSetupController(QObject):
             try:
                 result = self._perform(operation, identifier)
             except Exception:
-                result = {"error": _ERRORS[operation]}
+                selected = identifier if identifier is not None else self._selected_browser
+                error = _manager_error(selected) if operation == "manager" else _ERRORS[operation]
+                result = {"error": error}
             self._completed.emit(operation, result)
 
     @Slot(str, object)
@@ -327,7 +345,8 @@ class BrowserSetupController(QObject):
             clipboard = QGuiApplication.clipboard()
             if clipboard is None:
                 self._status = ""
-                self._error = _COPY_ERRORS.get(operation, _ERRORS[operation])
+                self._error = (_manager_copy_error(self._selected_browser) if operation == "manager"
+                               else _COPY_ERRORS.get(operation, _ERRORS[operation]))
             else:
                 clipboard.setText(result["clipboard"])
         self.changed.emit()

@@ -828,7 +828,7 @@ class CoreTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertFalse(any("인증 토큰" in message or "로그인 상태" in message for message in messages), messages)
         self.assertIn("작성자 정보가 없는 게시물은 건너뛸 수 있습니다.", messages)
-        self.assertIn("국가 제한(withheld) 등으로 볼 수 없는 게시물은 건너뜁니다.", messages)
+        self.assertIn("국가·지역 제한 등으로 볼 수 없는 게시물은 건너뜁니다.", messages)
         self.assertIn("볼 수 없는 미디어(저작권·지역 제한 등)는 건너뜁니다.", messages)
         # The failed download stays the run's reason, not a post notice and not
         # "not found" because the tweet ID happens to contain 404.

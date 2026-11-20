@@ -41,7 +41,7 @@ ColumnLayout {
 
     Label {
         Layout.fillWidth: true
-        text: "매일 새 Like를 저장합니다."
+        text: "매일 새 좋아요를 저장합니다."
         color: Theme.textMuted
         textFormat: Text.PlainText
         wrapMode: Text.WordWrap
@@ -110,7 +110,7 @@ ColumnLayout {
                 && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running)
             onClicked: {
                 panel.action = panel.schedule.registered ? "update" : "create"
-                panel.requestedTime = timeField.text
+                panel.requestedTime = timeField.text.trim()
                 confirmation.open()
             }
         }
@@ -208,7 +208,12 @@ ColumnLayout {
             textFormat: Text.PlainText
             wrapMode: Text.WordWrap
         }
-        onOpened: scheduleConfirm.forceActiveFocus()
+        onOpened: {
+            if (panel.action === "remove")
+                scheduleCancel.forceActiveFocus()
+            else
+                scheduleConfirm.forceActiveFocus()
+        }
         onAccepted: {
             if (!panel.schedule)
                 return
@@ -226,7 +231,7 @@ ColumnLayout {
                 tone: "primary"
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
-            FlatButton { text: "취소"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
+            FlatButton { id: scheduleCancel; text: "취소"; DialogButtonBox.buttonRole: DialogButtonBox.RejectRole }
             onAccepted: confirmation.accept()
             onRejected: confirmation.reject()
         }

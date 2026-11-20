@@ -14,6 +14,7 @@ import io
 import os
 import re
 import sqlite3
+import struct
 import tempfile
 import threading
 import time
@@ -154,7 +155,8 @@ def decode(data: bytes):
                 return None
             picture.load()
             return picture.convert("RGBA")
-    except (OSError, ValueError, Image.DecompressionBombError):
+    except (OSError, ValueError, SyntaxError, TypeError, EOFError, struct.error,
+            Image.DecompressionBombError, Image.DecompressionBombWarning):
         return None
 
 
@@ -190,6 +192,7 @@ class Cache:
                 db.execute("CREATE TABLE IF NOT EXISTS previews (tweet_id TEXT NOT NULL, num INTEGER NOT NULL, "
                            "media_type TEXT NOT NULL, image BLOB NOT NULL, saved_at TEXT NOT NULL, "
                            "PRIMARY KEY(tweet_id,num,media_type))")
+                db.execute("CREATE INDEX IF NOT EXISTS previews_saved_at ON previews(saved_at)")
         except BaseException:
             db.close()
             raise
@@ -288,6 +291,13 @@ class Cache:
         """Drop the oldest previews once the cache is larger than ``limit``."""
         if limit is None:
             limit = LIMIT_BYTES
+        if self._db is None:
+            return 0
+        page_size = int(self._db.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(self._db.execute("PRAGMA page_count").fetchone()[0])
+        freelist_count = int(self._db.execute("PRAGMA freelist_count").fetchone()[0])
+        if max(0, page_count - freelist_count) * page_size <= limit:
+            return 0
         total = self.total_bytes()
         if total <= limit:
             return 0
@@ -307,8 +317,12 @@ class Cache:
         with self._db:
             self._db.executemany("DELETE FROM previews WHERE rowid=?", ((rowid,) for rowid in pending))
         _mark_pruned(self.path)
+        stamp = _file_identity(self.path)
         with _known_lock:
-            _known.pop(str(self.path), None)
+            name = str(self.path)
+            _known.pop(name, None)
+            if stamp is not None:
+                _known_files[name] = stamp
         return len(pending)
 
     def close(self) -> None:

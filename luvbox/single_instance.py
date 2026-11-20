@@ -99,6 +99,7 @@ class InstanceGuard(QObject):
         self._handler = None
         self._buffers = {}
         self._adopt = None
+        self._listen_retry = None
         self._stopped = False
         self.requests = 0
 
@@ -147,13 +148,24 @@ class InstanceGuard(QObject):
     def _listen(self):
         from PySide6.QtNetwork import QLocalServer
 
+        if self._server is not None or self._stopped or not self.owner:
+            return
         server = QLocalServer(self)
         server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
         server.newConnection.connect(self._accept)
         if server.listen(self.server_name):
             self._server = server
+            if self._listen_retry is not None:
+                self._listen_retry.stop()
         else:
             server.deleteLater()
+            if self._listen_retry is None:
+                timer = QTimer(self)
+                timer.setInterval(500)
+                timer.timeout.connect(self._listen)
+                self._listen_retry = timer
+            if not self._listen_retry.isActive():
+                self._listen_retry.start()
 
     def _ask_to_show(self) -> bool:
         from PySide6.QtNetwork import QLocalSocket
@@ -226,6 +238,8 @@ class InstanceGuard(QObject):
     def stopListening(self):
         """While closing: a new start waits for this program to end instead."""
         self._stopped = True
+        if self._listen_retry is not None:
+            self._listen_retry.stop()
         if self._server is not None:
             self._server.close()
             self._server.deleteLater()

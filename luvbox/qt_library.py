@@ -59,6 +59,10 @@ _AI_PROGRESS = ("AI 자동분류 중", "분류할 사진을 확인하는 중", "
 _STATISTICS_ERROR = "통계를 불러오지 못했습니다. 저장 폴더를 확인해 주세요."
 
 
+class ManifestError(ValueError):
+    """Safe user-facing rejection from building a deletion or alike manifest."""
+
+
 def _thumbnail_workers():
     """Thumbnail decoders for the gallery: two, or up to four on a PC with cores to spare.
 
@@ -227,6 +231,7 @@ class LibraryRepository:
         self._served = {}
         self._cursor = None
         self._cursor_offset = 0
+        self._known_total = 0
         self._scan_note = ""
         self._ai_wrote = False
         self._duplicate_cancel = Event()
@@ -241,6 +246,7 @@ class LibraryRepository:
             self._served.clear()
             self._cursor = None
             self._cursor_offset = 0
+            self._known_total = 0
 
     @staticmethod
     def _catalog_moved(previous, request):
@@ -303,6 +309,7 @@ class LibraryRepository:
                                                 ai_category=getattr(request, "ai_category", ""),
                                                 ai_origin=getattr(request, "ai_origin", ""), after=after)
                 else:
+                    page_kwargs = {"count_total": False} if (after is not None and type(store).record_page is HistoryStore.record_page) else {}
                     page = store.record_page(0 if after is not None else offset // limit, limit,
                                              media_type, request.query,
                                              order=request.order, author=request.author, include_deleted=False,
@@ -310,7 +317,8 @@ class LibraryRepository:
                                              favorite_only=request.favorite_only, user_tag=request.user_tag,
                                              duplicate_only=request.duplicate_only,
                                              ai_category=getattr(request, "ai_category", ""),
-                                             ai_origin=getattr(request, "ai_origin", ""))
+                                             ai_origin=getattr(request, "ai_origin", ""),
+                                             **page_kwargs)
                 idents = [
                     (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
                     for row in page["rows"]
@@ -372,7 +380,16 @@ class LibraryRepository:
                         self._cursor = ((int(last["cluster_id"]), int(last["cluster_rank"]))
                                         if grouped else page_cursor(last, request.order))
                         self._cursor_offset = offset + len(rows)
-                return page["total"], rows
+                    if not grouped and after is None:
+                        self._known_total = int(page.get("total") or 0)
+                    known_total = self._known_total
+                if grouped or page.get("total") is not None:
+                    total = int(page["total"])
+                elif not page.get("has_more"):
+                    total = offset + len(rows)
+                else:
+                    total = max(known_total, offset + len(rows) + 1)
+                return total, rows
         except FileNotFoundError:
             return 0, []
 
@@ -1284,12 +1301,12 @@ class LibraryRepository:
         """Capture displayed catalog identities without accepting paths from QML."""
         if (not isinstance(keys, (list, tuple)) or not 1 <= len(keys) <= MAX_SELECTION
                 or any(not isinstance(key, str) for key in keys)):
-            raise ValueError("휴지통으로 보낼 사진을 1~2,000개 선택해 주세요.")
+            raise ManifestError("휴지통으로 보낼 사진을 1~2,000개 선택해 주세요.")
         keys = list(dict.fromkeys(keys))
         with self._condition:
             request = self._request
             if request is None or any(key not in self._served for key in keys):
-                raise ValueError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
+                raise ManifestError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
             displayed = {key: self._served[key] for key in keys}
         rows = []
         kept = 0
@@ -1300,16 +1317,16 @@ class LibraryRepository:
                 path = self._path(store, row) if row is not None else None
                 previous_path, previous_signature = displayed[key]
                 if path is None or str(path) != previous_path or previous_signature is None:
-                    raise ValueError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
+                    raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
                 signature = file_signature(path)
                 if signature != previous_signature:
-                    raise ValueError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                    raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
                 rows.append(dict(row, _delete_signature=signature, _key=key))
             if request.duplicate_only:
                 rows, kept = self._copies_only(store, rows)
         with self._condition:
             if self._request is not request:
-                raise ValueError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
+                raise ManifestError("목록이 바뀌었습니다. 사진을 다시 선택해 주세요.")
         return {"location": request.location(), "rows": rows, "generation": request.generation, "kept": kept}
 
     @staticmethod
@@ -1364,51 +1381,51 @@ class LibraryRepository:
         from .duplicates import nearly_identical, pixel_vector, same_in_detail
 
         if not isinstance(key, str) or not key:
-            raise ValueError("비교할 사진을 다시 골라 주세요.")
+            raise ManifestError("비교할 사진을 다시 골라 주세요.")
         with self._condition:
             request = self._request
             if request is None or not request.duplicate_only or key not in self._served:
-                raise ValueError("목록이 바뀌었습니다. 사진을 다시 골라 주세요.")
+                raise ManifestError("목록이 바뀌었습니다. 사진을 다시 골라 주세요.")
             previous_path, previous_signature = self._served[key]
         with closing(_ReadOnlyHistory(request.location())) as store:
             store._folder_cache = {}
             row = self._row(store, key, request)
             path = self._path(store, row) if row is not None else None
             if path is None or str(path) != previous_path or previous_signature is None:
-                raise ValueError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
             signature = file_signature(path)
             if signature != previous_signature:
-                raise ValueError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
             identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
             groups = store.duplicate_members() if hasattr(store, "duplicate_members") else {}
             members = next((members for members in groups.values()
                             if any(member["identity"] == identity for member in members)), None)
             copies = set(store.duplicate_copy_identities() or ()) if members else set()
             if not members or members[0]["identity"] == identity or identity in copies:
-                raise ValueError("‘비슷함’으로 표시된 사진만 남길 사진과 비교해 휴지통으로 보낼 수 있습니다.")
+                raise ManifestError("‘비슷함’으로 표시된 사진만 남길 사진과 비교해 휴지통으로 보낼 수 있습니다.")
             mode, tweet, number, kind = members[0]["identity"]
             keeper_row = store.media_record(mode, {"tweet_id": tweet, "num": number, "type": kind})
             keeper = self._path(store, keeper_row) if keeper_row is not None else None
             if keeper is None:
-                raise ValueError("남길 사진 파일이 없어 이 사진을 보낼 수 없습니다.")
+                raise ManifestError("남길 사진 파일이 없어 이 사진을 보낼 수 없습니다.")
             keeper_signature = file_signature(keeper)
             if (os.path.normcase(os.path.realpath(keeper)) == os.path.normcase(os.path.realpath(path))
                     or (keeper_signature[1] and keeper_signature[:2] == signature[:2])):
-                raise ValueError("남길 사진이 이 사진과 같은 파일이라 보낼 수 없습니다.")
+                raise ManifestError("남길 사진이 이 사진과 같은 파일이라 보낼 수 없습니다.")
             if not (nearly_identical(pixel_vector(path), pixel_vector(keeper)) and same_in_detail(path, keeper)):
                 # In a group joined through a third photo, this one can be the same picture as that
                 # photo and still not pass beside the photo kept: say what can be done either way.
-                raise ValueError("남길 사진과 같은 사진으로 다시 확인되지 않아 보낼 수 없습니다. "
+                raise ManifestError("남길 사진과 같은 사진으로 다시 확인되지 않아 보낼 수 없습니다. "
                                  "‘중복 아님’으로 표시하거나 갤러리에서 휴지통으로 보내세요.")
             if file_signature(path) != signature or file_signature(keeper) != keeper_signature:
-                raise ValueError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
             favorites = store.favorite_identities_among([identity, members[0]["identity"]])
             shown = {"alike": self._compared(path, row, signature, identity in favorites),
                      "keeper": self._compared(keeper, keeper_row, keeper_signature,
                                               members[0]["identity"] in favorites)}
         with self._condition:
             if self._request is not request:
-                raise ValueError("목록이 바뀌었습니다. 사진을 다시 골라 주세요.")
+                raise ManifestError("목록이 바뀌었습니다. 사진을 다시 골라 주세요.")
         marked = dict(row, _delete_signature=signature, _key=key,
                       _alike_keeper=str(keeper), _alike_keeper_signature=keeper_signature)
         return {"location": request.location(), "rows": [marked], "generation": request.generation,
@@ -1444,6 +1461,7 @@ class LibraryRepository:
                 return False
             dropped = sum(1 for key in keys if self._served.pop(key, None) is not None)
             self._cursor_offset = max(0, self._cursor_offset - dropped)
+            self._known_total = max(0, self._known_total - dropped)
             return True
 
     def selectable_keys(self, keys):
@@ -1614,6 +1632,7 @@ class LibraryController(QObject):
         self._repository.provider = self.provider
         self.model = GalleryModel(self._repository.read, provider=self.provider, parent=self)
         self._generation = 0
+        self._library_set = False
         self._account = ""
         self._output_dir = ""
         self._separate_accounts = False
@@ -2079,10 +2098,15 @@ class LibraryController(QObject):
 
     @Slot(str, str, bool)
     def setLibrary(self, account, output_dir, separate_accounts):
-        self._account = account.strip().lstrip("@").lower()
-        self._output_dir = output_dir
-        self._separate_accounts = separate_accounts
+        normalized = account.strip().lstrip("@").lower()
+        library = (normalized, output_dir, bool(separate_accounts))
+        if self._library_set and library == (self._account, self._output_dir, bool(self._separate_accounts)):
+            return
+        self._library_set = True
+        self._account, self._output_dir, self._separate_accounts = library
         self._counts_loaded = False
+        self._ai_counts = []
+        self.aiCountsChanged.emit()
         self._authors = []
         self._authors_loaded = False
         self.authorsChanged.emit()
@@ -2098,7 +2122,6 @@ class LibraryController(QObject):
         self._distinct_undo = None
         self.duplicateDistinctChanged.emit()
         self._refresh(reload_authors=True)
-        library = (self._account, self._output_dir, bool(self._separate_accounts))
         if self._account and self._output_dir and library != self._auto_ai_seen:
             # Scheduled saves run while the app is closed; their photos are classified now.
             self._auto_ai_seen = library

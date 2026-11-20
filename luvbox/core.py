@@ -177,6 +177,24 @@ def _mark_transfer_complete(source: Path, modified=None) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _retry_sharing_lock(action, *, check_stop, verify=None):
+    """Retry a local move or unlink briefly while Windows preview/AV releases its handle."""
+    for pause in (0.02, 0.05, 0.1, 0.15, 0.2, 0.25, 0.25, None):
+        try:
+            return action()
+        except OSError as exc:
+            transient = os.name == "nt" and (
+                getattr(exc, "winerror", None) in {32, 33}
+                or (isinstance(exc, PermissionError) and not isinstance(exc, FileExistsError))
+            )
+            if not transient or pause is None:
+                raise
+            time.sleep(pause)
+            check_stop()
+            if verify is not None:
+                verify()
+
+
 def _review_file_signature(path: Path) -> tuple[int, int, int, int]:
     """Identify an ordinary temporary file before and after a preview wait."""
     details = path.lstat()
@@ -401,7 +419,7 @@ _SKIPPED_POST_NOTICES = (
     (re.compile(r"\Amedia unavailable\b"),
      "볼 수 없는 미디어(저작권·지역 제한 등)는 건너뜁니다."),
     (re.compile(r"\A'.*' \([0-9]+\)\Z", re.S),
-     "국가 제한(withheld) 등으로 볼 수 없는 게시물은 건너뜁니다."),
+     "국가·지역 제한 등으로 볼 수 없는 게시물은 건너뜁니다."),
     (re.compile(r"\A\"age-restricted"),
      "연령 제한 게시물은 X 계정의 민감한 콘텐츠 설정에 따라 보이지 않을 수 있습니다."),
     (re.compile(r"\A[0-9]+: missing 'author' data\Z"),
@@ -1225,8 +1243,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     review_resolved.add(identity)
                 try:
                     if targets:
-                        # A chosen missing file keeps its record and archive entry.
-                        history.set_missing_ignored([identity], True)
+                        if not history.exclude_lost([identity]):
+                            if history.has_media_record(identity):
+                                # A chosen missing/former-folder file keeps its record and archive entry.
+                                history.set_missing_ignored([identity], True)
+                            else:
+                                history.record_declined(normalized.folder_mode, kwdict, declined.path)
+                                self.archive.add(kwdict)
                     else:
                         # Like a file deleted with 'do not download again': known
                         # to the archive, listed with the hidden missing files.
@@ -1566,7 +1589,15 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     if not history.is_download_path(self.pathfmt.path):
                         raise exception.AbortExtraction("permissionerror unsafe GIF output")
                     try:
-                        _move_without_overwrite(converted, destination)
+                        def verify_converted():
+                            if not history.is_download_path(converted) or not history.is_download_path(destination):
+                                raise OSError("unsafe GIF output")
+
+                        _retry_sharing_lock(
+                            lambda: _move_without_overwrite(converted, destination),
+                            check_stop=check_stop,
+                            verify=verify_converted,
+                        )
                     except OSError:
                         guard.failure = "GIF 파일을 저장하지 못했습니다. 같은 이름의 파일이나 저장 폴더를 확인해 주세요. MP4 임시 파일은 보존했습니다."
                         raise exception.AbortExtraction(guard.failure) from None
@@ -1641,14 +1672,17 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # seconds. A stop or an outside edit in that interval must
                     # not discard a different file or record a new choice.
                     check_stop()
-                    if (not history.is_download_path(source) or
-                            _review_file_signature(source) != signature):
-                        raise OSError("review temporary file changed")
-                    for marker, marker_signature in markers:
-                        if (not history.is_download_path(marker) or
-                                _review_file_signature(marker) != marker_signature):
-                            raise OSError("review completion marker changed")
-                    source.unlink()
+                    def verify_unchanged():
+                        if (not history.is_download_path(source) or
+                                _review_file_signature(source) != signature):
+                            raise OSError("review temporary file changed")
+                        for marker, marker_signature in markers:
+                            if (not history.is_download_path(marker) or
+                                    _review_file_signature(marker) != marker_signature):
+                                raise OSError("review completion marker changed")
+
+                    verify_unchanged()
+                    _retry_sharing_lock(source.unlink, check_stop=check_stop, verify=verify_unchanged)
                     for marker, _ in markers:
                         marker.unlink()
                     if decision == "skip":
@@ -1682,10 +1716,20 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     self.keep_transfer(source, signature)
                     raise
                 try:
-                    if (not history.is_download_path(source) or not history.is_download_path(destination) or
-                            _review_file_signature(source) != signature):
-                        raise OSError("review temporary file changed")
-                    _move_without_overwrite(source, destination)
+                    def verify_ready():
+                        if (not history.is_download_path(source) or not history.is_download_path(destination) or
+                                _review_file_signature(source) != signature):
+                            raise OSError("review temporary file changed")
+
+                    verify_ready()
+                    _retry_sharing_lock(
+                        lambda: _move_without_overwrite(source, destination),
+                        check_stop=check_stop,
+                        verify=verify_ready,
+                    )
+                except exception.StopExtraction:
+                    self.keep_transfer(source, signature)
+                    raise
                 except OSError:
                     self.keep_transfer(source, signature)
                     guard.failure = _LOCAL_WRITE_ERROR
@@ -1899,8 +1943,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             scan_note = {
                 "ready": f"새 Like만 확인합니다. 이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다.",
                 "settings-changed": "동영상·GIF·용량 설정이 바뀌어 이번만 전체 목록을 확인합니다.",
-                "records-changed": "다른 계정의 저장 기록을 합쳐 이번만 전체 목록을 확인합니다.",
-            }.get(readiness, "이전 확인이 끝까지 되지 않아(첫 실행·중단·오류·시험 저장) 이번만 전체 목록을 확인합니다.")
+                "records-changed": "다른 PC나 폴더의 저장 기록을 합쳐 이번만 전체 목록을 확인합니다.",
+            }.get(readiness, "이전 확인이 끝까지 되지 않아(첫 실행·중단·오류) 이번만 전체 목록을 확인합니다.")
             if quick_scan and enabled_pending:
                 # Files skipped in a save review, and media released from '직접 제외'.
                 scan_note += f" 지난번에 건너뛰었거나 제외를 해제한 파일 {len(enabled_pending):,}개가 나올 때까지는 이어서 확인합니다."

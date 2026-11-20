@@ -231,9 +231,11 @@ def _after_clause(order, cursor):
         identity = _cursor_identity(*cursor[3:])
         column = ("COALESCE(media.saved_at,media.posted_at,'')" if order == "saved"
                   else "COALESCE(media.posted_at,'')")
-        return _ordered_after((column, "media.tweet_id", *_IDENTITY_COLUMNS),
-                              (True, True, False, False, False),
-                              (cursor[1], cursor[2], *identity))
+        clause, params = _ordered_after((column, "media.tweet_id", *_IDENTITY_COLUMNS),
+                                        (True, True, False, False, False),
+                                        (cursor[1], cursor[2], *identity))
+        # Leading bound lets SQLite seek on media_saved_order instead of scanning from row 0.
+        return f"({column} <= ? AND {clause})", (cursor[1], *params)
     if order == "posted_oldest":
         if len(cursor) != 7 or cursor[1] not in (0, 1) or not isinstance(cursor[2], str):
             raise HistoryError(_HISTORY_HELP)
@@ -241,27 +243,30 @@ def _after_clause(order, cursor):
             raise HistoryError(_HISTORY_HELP)
         _text_key(cursor[2])
         identity = _cursor_identity(*cursor[4:])
-        return _ordered_after(("(media.posted_at IS NULL)", "COALESCE(media.posted_at,'')",
-                               "media.tweet_id", *_IDENTITY_COLUMNS),
-                              (False, False, False, False, False, False),
-                              (cursor[1], cursor[2], cursor[3], *identity))
+        clause, params = _ordered_after(("(media.posted_at IS NULL)", "COALESCE(media.posted_at,'')",
+                                         "media.tweet_id", *_IDENTITY_COLUMNS),
+                                        (False, False, False, False, False, False),
+                                        (cursor[1], cursor[2], cursor[3], *identity))
+        return f"((media.posted_at IS NULL) >= ? AND {clause})", (cursor[1], *params)
     if order != "liked":
         raise HistoryError(_HISTORY_HELP)
     if cursor[1] == 1:
         if len(cursor) != 6 or not re.fullmatch(r"[0-9]{1,20}", str(cursor[2])):
             raise HistoryError(_HISTORY_HELP)
         identity = _cursor_identity(*cursor[3:])
-        return _ordered_after(("(likes.like_key IS NULL)", "media.tweet_id", *_IDENTITY_COLUMNS),
-                              (False, True, False, False, False),
-                              (1, cursor[2], *identity))
+        clause, params = _ordered_after(("(likes.like_key IS NULL)", "media.tweet_id", *_IDENTITY_COLUMNS),
+                                        (False, True, False, False, False),
+                                        (1, cursor[2], *identity))
+        return f"((likes.like_key IS NULL) >= ? AND {clause})", (1, *params)
     if (cursor[1] != 0 or len(cursor) != 7 or isinstance(cursor[2], bool)
             or not isinstance(cursor[2], (int, float)) or not math.isfinite(float(cursor[2]))
             or not re.fullmatch(r"[0-9]{1,20}", str(cursor[3]))):
         raise HistoryError(_HISTORY_HELP)
     identity = _cursor_identity(*cursor[4:])
-    return _ordered_after(("(likes.like_key IS NULL)", "likes.like_key", "media.tweet_id", *_IDENTITY_COLUMNS),
-                          (False, True, True, False, False, False),
-                          (0, float(cursor[2]), cursor[3], *identity))
+    clause, params = _ordered_after(("(likes.like_key IS NULL)", "likes.like_key", "media.tweet_id", *_IDENTITY_COLUMNS),
+                                    (False, True, True, False, False, False),
+                                    (0, float(cursor[2]), cursor[3], *identity))
+    return f"((likes.like_key IS NULL) >= ? AND {clause})", (0, *params)
 
 
 def _now() -> str:
@@ -902,6 +907,13 @@ class HistoryStore:
         if previous is not None:
             old = dict(previous)
             row.setdefault("last_path", old["last_path"])
+            if row.get("path"):
+                row.setdefault("missing_since", "")
+            elif replace_path and old["path"]:
+                row["last_path"] = old["path"]
+                row["missing_since"] = _now()
+            else:
+                row.setdefault("missing_since", old["missing_since"])
             if not row["author"] or (row["record_source"] in {"archive", "file_scan"} and old["author"]):
                 row["author"] = old["author"]
             if not row["author_id"]:
@@ -1188,6 +1200,21 @@ class HistoryStore:
                 (tweet_id, number, media_type, stamp))
 
     @_safe
+    def has_media_record(self, identity: tuple[str, int, str]) -> bool:
+        """Whether any layout holds a catalog row for ``identity``."""
+        tweet_id, number, media_type = identity
+        if (not isinstance(tweet_id, str) or not re.fullmatch(r"[0-9]{1,20}", tweet_id)
+                or isinstance(number, bool) or not isinstance(number, int)
+                or not 1 <= number <= 10000 or media_type not in _TYPES):
+            raise HistoryError(_HISTORY_HELP)
+        modes = sorted(_MODES)
+        marks = ",".join("?" for _ in modes)
+        return self._db.execute(
+            "SELECT 1 FROM media WHERE folder_mode IN (" + marks + ") "
+            "AND tweet_id=? AND num=? AND media_type=? LIMIT 1",
+            (*modes, tweet_id, number, media_type)).fetchone() is not None
+
+    @_safe
     def media_record(self, folder_mode: str, metadata: dict) -> dict | None:
         """Look up a single layout/media identity without changing its record."""
         tweet_id, number = self._key(metadata)
@@ -1472,9 +1499,9 @@ class HistoryStore:
             stamp = _now()
             self._write_batches(changed, lambda values: self._db.execute(
                 "UPDATE media SET last_path=CASE WHEN ?='' THEN path ELSE last_path END,"
-                "missing_since=CASE WHEN ?='' THEN ? ELSE '' END,path=?,filesize=? "
+                "missing_since=CASE WHEN ?='' THEN ? ELSE '' END,path=?,filesize=?,updated_at=? "
                 "WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND path=?",
-                (values[0], values[0], stamp, *values)))
+                (values[0], values[0], stamp, values[0], values[1], stamp, *values[2:])))
             self._restore_known_paths()
         archived = []
         for mode, name in _ARCHIVES.items():
@@ -2513,8 +2540,10 @@ class HistoryStore:
     @_safe
     def record_page(self, page=0, page_size=100, media_type="all", query="", *, order="saved", period=None,
                     author="", include_deleted=True, after=None, hashtag="", favorite_only=False, user_tag="",
-                    duplicate_only=False, ai_category="", ai_origin="") -> dict:
+                    duplicate_only=False, ai_category="", ai_origin="", count_total: bool = True) -> dict:
         if after is not None and page != 0:
+            raise HistoryError(_HISTORY_HELP)
+        if type(count_total) is not bool:
             raise HistoryError(_HISTORY_HELP)
         where, params = self._filter_clause(media_type, query, period, author, include_deleted, hashtag=hashtag,
                                             favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
@@ -2526,7 +2555,8 @@ class HistoryStore:
                                                              include_deleted=include_deleted, after=after,
                                                              hashtag=hashtag, favorite_only=favorite_only,
                                                              user_tag=user_tag, duplicate_only=duplicate_only,
-                                                             ai_category=ai_category, ai_origin=ai_origin))
+                                                             ai_category=ai_category, ai_origin=ai_origin),
+                          count_total=count_total)
 
     @_safe
     def authors(self, *, include_deleted=False) -> list[dict]:
@@ -3810,10 +3840,17 @@ class HistoryStore:
     def run_page(self, page=0, page_size=100) -> dict:
         return self._page("runs", (), page, page_size, self.runs)
 
-    def _page(self, table, params, page, page_size, reader):
+    def _page(self, table, params, page, page_size, reader, *, count_total: bool = True):
         if (isinstance(page, bool) or not isinstance(page, int) or page < 0 or
                 isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000):
             raise HistoryError(_HISTORY_HELP)
+        if not count_total:
+            if page != 0:
+                raise HistoryError(_HISTORY_HELP)
+            rows = reader(page_size + 1, 0)
+            has_more = len(rows) > page_size
+            return {"rows": rows[:page_size], "total": None, "has_more": has_more,
+                    "page": 0, "pages": 0, "page_size": page_size}
         # A short read snapshot keeps totals and rows consistent while the
         # downloader writes new records through a separate WAL connection.
         with self._read_snapshot():

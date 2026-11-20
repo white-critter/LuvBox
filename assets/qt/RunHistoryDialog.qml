@@ -24,6 +24,7 @@ FlatDialog {
     height: Math.min(chosenHeight, limitHeight)
     x: placedX
     y: placedY
+    onVisibleChanged: if (!visible) resizing = false
 
     function place() {
         if (!parent || resizing)
@@ -136,11 +137,13 @@ FlatDialog {
                             }
                         }
                         Label {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             text: card.modelData.when + (card.modelData.origin ? " · " + card.modelData.origin : "")
                             color: Theme.textMuted
                             textFormat: Text.PlainText
+                            elide: Text.ElideRight
                         }
-                        Item { Layout.fillWidth: true }
                         Label {
                             Layout.maximumWidth: card.width * 0.3
                             text: card.modelData.account
@@ -282,6 +285,7 @@ FlatDialog {
                 dialog.applySize(originWidth + point.x - originX, originHeight + point.y - originY)
             }
             onReleased: dialog.resizing = false
+            onCanceled: dialog.resizing = false
         }
     }
 }

@@ -340,6 +340,12 @@ class AccountController(QObject):
             result["cancelled"] = cancel.is_set()
             if operation == "browser" and not result["cancelled"]:
                 result["error"] = "계정 연결 승인 시간이 지났습니다. 다시 연결해 주세요."
+        except ValueError as error:
+            result["cancelled"] = cancel.is_set()
+            if not result["cancelled"]:
+                message = str(error).strip()
+                if message and not message.isascii():
+                    result["error"] = message
         except Exception:
             result["cancelled"] = cancel.is_set()
         finally:

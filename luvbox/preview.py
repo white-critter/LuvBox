@@ -184,11 +184,17 @@ def oriented_thumbnail(original: Image.Image, size) -> Image.Image:
     image first avoids a full-size copy for formats without JPEG's draft
     decoding, while preserving the displayed orientation and aspect ratio.
     """
-    orientation = original.getexif().get(274)
+    try:
+        orientation = original.getexif().get(274)
+    except (OSError, ValueError, SyntaxError, TypeError, struct.error):
+        orientation = 1
     bounds = size[::-1] if orientation in (5, 6, 7, 8) else size
     original.draft("RGB", bounds)
     original.thumbnail(bounds, Image.Resampling.LANCZOS)
-    image = ImageOps.exif_transpose(original)
+    try:
+        image = ImageOps.exif_transpose(original)
+    except (ValueError, SyntaxError, TypeError, struct.error):
+        image = original
     try:
         return image.convert("RGBA")
     finally:
@@ -257,7 +263,8 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
                     return Thumbnail(None, "큰 이미지입니다. 파일 열기로 확인해 주세요.")
                 image = oriented_thumbnail(original, size)
         return Thumbnail(image, note)
-    except (OSError, ValueError, UnidentifiedImageError, Image.DecompressionBombError,
+    except (OSError, ValueError, SyntaxError, TypeError, EOFError, struct.error,
+            UnidentifiedImageError, Image.DecompressionBombError,
             Image.DecompressionBombWarning, subprocess.SubprocessError) as exc:
         retryable = isinstance(exc, OSError) and (
             getattr(exc, "winerror", None) in {32, 33}

@@ -181,7 +181,7 @@ ComboBox {
         id: row
         required property var model
         required property int index
-        width: Math.max(control.popup.availableWidth, implicitWidth)
+        width: ListView.view ? ListView.view.width : control.popup.availableWidth
         height: Theme.controlHeight
         text: {
             const value = model.modelData !== undefined ? model.modelData : model

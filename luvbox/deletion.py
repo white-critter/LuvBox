@@ -7,11 +7,15 @@ from pathlib import Path
 import threading
 import uuid
 
-from .history import HistoryStore
-from .protection import AccountGuard
+from .history import HistoryError, HistoryStore
+from .protection import AccountGuard, ProtectionError
 from .recovery import backup_catalog
 from .recycling import RecyclingError, file_signature, recycle_file
 from .storage import OutputGuard, StoragePaths, publish_snapshot
+
+
+class _DeletionMessageError(ValueError):
+    """Fixed user-facing validation error inside run_deletion."""
 
 
 _NO_OTHER_COPY = "같은 내용의 다른 파일이 남는지 확인하지 못해 그대로 두었습니다."
@@ -198,7 +202,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
 
     try:
         if type(keep_deleted) is not bool:
-            raise ValueError("삭제 설정을 확인해 주세요.")
+            raise _DeletionMessageError("삭제 설정을 확인해 주세요.")
         if not candidates or stop.is_set():
             # Opening a catalog can create local bookkeeping. There is nothing
             # to prepare for a cancelled or empty selection.
@@ -211,7 +215,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
         else:
             initial_root = Path(location)
             if not initial_root.is_dir():
-                raise ValueError("기록된 저장 폴더를 찾을 수 없습니다. 파일 위치를 확인해 주세요.")
+                raise _DeletionMessageError("기록된 저장 폴더를 찾을 수 없습니다. 파일 위치를 확인해 주세요.")
         guard = OutputGuard(initial_root)
         guard.acquire()
         guards.append(guard)
@@ -243,7 +247,9 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                     raise RecyclingError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
                 manifest.append((row, signature, ""))
             except (OSError, ValueError, TypeError) as exc:
-                manifest.append((row, None, str(exc)))
+                message = (str(exc) if isinstance(exc, (RecyclingError, HistoryError, ProtectionError, _DeletionMessageError))
+                           else "파일을 확인하지 못했습니다.")
+                manifest.append((row, None, message))
 
         for row, signature, error in manifest:
             if stop.is_set():
@@ -297,11 +303,11 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 if uncertain:
                     warnings.append("휴지통 이동 결과가 확실하지 않아 중단했습니다. 파일과 Windows 휴지통을 확인해 주세요.")
                     break
-            except OSError as exc:
+            except OSError:
                 absent = store._deletion_path_absent(path)
                 result["failed"] += 1
                 processed += 1
-                store.finish_deletion(ident, "interrupted" if absent else "failed", str(exc))
+                store.finish_deletion(ident, "interrupted" if absent else "failed", "파일을 옮기지 못했습니다.")
                 failures.append(f"{Path(path).name}: 파일을 옮기지 못했습니다.")
                 progress(failures[-1])
                 if absent:
@@ -317,7 +323,9 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 store.finish_deletion(ident, "recycled", "Windows 휴지통으로 이동했습니다.", destination)
                 progress(f"{Path(path).name}: 휴지통으로 이동했습니다.")
     except Exception as exc:
-        warnings.append(f"작업을 중단했습니다. {exc}")
+        detail = (str(exc) if isinstance(exc, (RecyclingError, HistoryError, ProtectionError, _DeletionMessageError))
+                  else "파일 상태와 권한을 확인한 뒤 다시 시도해 주세요.")
+        warnings.append(f"작업을 중단했습니다. {detail}")
         # Do not perform more file operations after an unrecorded outcome.
         # Pending intents are settled under the same locks when possible.
         if store is not None and roots_locked:

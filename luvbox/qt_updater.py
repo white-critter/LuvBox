@@ -275,6 +275,10 @@ class UpdateController(QObject):
                 continue
             try:
                 if kind == "check":
+                    with self._jobs.mutex:
+                        install_queued = any(item[0] == "install" for item in self._jobs.queue)
+                    if install_queued:
+                        continue
                     result = ("checked", *self._check())
                 else:
                     result = self._install(**details)
@@ -397,6 +401,8 @@ class UpdateController(QObject):
         elif kind == "failed":
             stage, reason, message = result[1], result[2], result[3]
             if stage == "check":
+                if self._state in {"downloading", "ready"}:
+                    return
                 if self._manual:
                     self._error = message
                     self._state = "failed" if not self._found else "available"

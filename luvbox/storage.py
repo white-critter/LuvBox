@@ -713,7 +713,8 @@ def _valid_roots(db: sqlite3.Connection | None, output: Path) -> list[str]:
                 if not isinstance(item, str) or not Path(item).is_absolute():
                     raise MigrationError(_MIGRATION_HELP)
                 root = Path(item)
-                if _linked(root) or str(root.resolve()) != str(root):
+                if (_linked(root) or any(_linked(parent) for parent in root.parents if parent.anchor != str(parent))
+                        or os.path.normcase(str(root.resolve())) != os.path.normcase(str(root))):
                     raise MigrationError(_MIGRATION_HELP)
                 roots.append(str(root))
     return roots
@@ -728,14 +729,16 @@ def _media_score(row: dict) -> tuple:
 
 
 def _merge_media(previous: dict, incoming: dict) -> dict:
-    first, second = (incoming, previous) if _media_score(incoming) > _media_score(previous) else (previous, incoming)
+    left_score = _media_score(previous)
+    right_score = _media_score(incoming)
+    first, second = (incoming, previous) if right_score > left_score else (previous, incoming)
     # Older catalogs timestamp changes to the second. On a tie, an explicit
     # removal must win over a stale path, regardless of merge direction. The
     # present-file check below still preserves a real restored/alternate copy.
     latest = max((previous, incoming), key=lambda row: (
         row.get("updated_at") or "", bool(row.get("last_path") and not row.get("path"))))
     if (latest.get("last_path") and not latest.get("path")
-            and not any(_media_score(row)[0] for row in (previous, incoming))):
+            and not left_score[0] and not right_score[0]):
         # An intentionally removed file has no present path. A stale snapshot
         # must not refill that path and inflate the cached file statistics.
         first, second = latest, previous if latest is incoming else incoming
@@ -803,10 +806,14 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
         for incoming in _rows(source, "media"):
             identity = tuple(incoming[key] for key in keys)
             if identity in existing:
-                merged = _merge_media(existing[identity], incoming)
-                target.execute("DELETE FROM media WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?", identity)
-                _insert(target, "media", merged)
-                existing[identity] = merged
+                current = existing[identity]
+                if incoming == current:
+                    continue
+                merged = _merge_media(current, incoming)
+                if merged != current:
+                    target.execute("DELETE FROM media WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?", identity)
+                    _insert(target, "media", merged)
+                    existing[identity] = merged
             else:
                 _insert(target, "media", incoming)
                 existing[identity] = incoming
@@ -869,32 +876,42 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                  row.get("source") or "user", row.get("created_at") or ""))
     if "image_hashes" in source_tables:
         _prepare_table(target, source, "image_hashes")
-        has_cluster = "cluster_id" in _columns(target, "image_hashes")
-        # Cluster numbers belong to one complete scan of one catalog. Reusing
-        # them across catalogs can combine unrelated pictures into one group.
-        if has_cluster:
-            target.execute("UPDATE image_hashes SET cluster_id=0 WHERE cluster_id!=0")
-        if "file_signature" in _columns(target, "image_hashes"):
-            target.execute("UPDATE image_hashes SET file_signature='' WHERE file_signature!=''")
-        for row in _rows(source, "image_hashes"):
-            if has_cluster:
-                target.execute(
-                    "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,cluster_id,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
-                    "filesize=excluded.filesize,file_hash=excluded.file_hash,dhash=excluded.dhash,"
-                    "cluster_id=excluded.cluster_id,updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
-                    (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
-                     row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
-                     0, row.get("updated_at") or ""))
-            else:
-                target.execute(
-                    "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
-                    "filesize=excluded.filesize,file_hash=excluded.file_hash,dhash=excluded.dhash,"
-                    "updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
-                    (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
-                     row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
-                     row.get("updated_at") or ""))
+        incoming_hashes = _rows(source, "image_hashes")
+        try:
+            first_hash = next(incoming_hashes, None)
+            if first_hash is not None:
+                has_cluster = "cluster_id" in _columns(target, "image_hashes")
+                # Cluster numbers belong to one complete scan of one catalog. Reusing
+                # them across catalogs can combine unrelated pictures into one group.
+                # When the incoming snapshot carries no hash rows, keep local groups and cache.
+                if has_cluster:
+                    target.execute("UPDATE image_hashes SET cluster_id=0 WHERE cluster_id!=0")
+                if "file_signature" in _columns(target, "image_hashes"):
+                    target.execute("UPDATE image_hashes SET file_signature='' WHERE file_signature!=''")
+                def _hashes():
+                    yield first_hash
+                    yield from incoming_hashes
+                for row in _hashes():
+                    if has_cluster:
+                        target.execute(
+                            "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,cluster_id,updated_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                            "filesize=excluded.filesize,file_hash=excluded.file_hash,dhash=excluded.dhash,"
+                            "cluster_id=excluded.cluster_id,updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
+                            (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
+                             row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
+                             0, row.get("updated_at") or ""))
+                    else:
+                        target.execute(
+                            "INSERT INTO image_hashes(folder_mode,tweet_id,num,media_type,filesize,file_hash,dhash,updated_at) "
+                            "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                            "filesize=excluded.filesize,file_hash=excluded.file_hash,dhash=excluded.dhash,"
+                            "updated_at=excluded.updated_at WHERE excluded.updated_at>image_hashes.updated_at",
+                            (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
+                             row.get("filesize") or 0, row.get("file_hash") or "", row.get("dhash") or "",
+                             row.get("updated_at") or ""))
+        finally:
+            incoming_hashes.close()
     if "ai_embeddings" in source_tables:
         _prepare_table(target, source, "ai_embeddings")
         for row in _rows(source, "ai_embeddings"):
@@ -922,6 +939,42 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                 (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
                  row.get("category") or "", row.get("updated_at") or ""),
             )
+    target_tables = _tables(target)
+    if ("media_tags" in source_tables or "ai_feedback" in source_tables) and "media_tags" in target_tables:
+        if "source" not in _columns(target, "media_tags"):
+            target.execute("ALTER TABLE media_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
+        taught_keys = set()
+        if "ai_feedback" in target_tables:
+            for row in _rows(target, "ai_feedback"):
+                identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                taught_keys.add(identity)
+                target.execute(
+                    "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND source IN ('ai','confirmed')",
+                    identity,
+                )
+                category = row.get("category") or ""
+                if category:
+                    target.execute(
+                        "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                        "VALUES (?,?,?,?,?,'confirmed',?) ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) "
+                        "DO UPDATE SET source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
+                        (*identity, category, row.get("updated_at") or ""),
+                    )
+        ai_rows = target.execute(
+            "SELECT rowid, folder_mode, tweet_id, num, media_type "
+            "FROM media_tags WHERE source='ai' ORDER BY created_at DESC, tag DESC, rowid DESC"
+        ).fetchall()
+        seen_ai = set()
+        drop_ids = []
+        for row in ai_rows:
+            identity = (row[1], row[2], row[3], row[4])
+            if identity in taught_keys or identity in seen_ai:
+                drop_ids.append((row[0],))
+            else:
+                seen_ai.add(identity)
+        if drop_ids:
+            target.executemany("DELETE FROM media_tags WHERE rowid=?", drop_ids)
     if "ai_unreadable" in source_tables:
         _prepare_table(target, source, "ai_unreadable")
         for row in _rows(source, "ai_unreadable"):

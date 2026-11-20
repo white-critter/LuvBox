@@ -481,8 +481,11 @@ class ApplicationController(QObject):
             value = url.toLocalFile()
         if not value.strip() or "\x00" in value:
             return
+        cleaned = value.strip()
+        if cleaned == self._output:
+            return
         previous = self._output
-        self._output = value.strip()
+        self._output = cleaned
         self._persist({"output_dir": self._output}, rollback={"_output": ("output_dir", previous)})
         self._load_library()
         self._state_changed()
@@ -731,6 +734,7 @@ class ApplicationController(QObject):
         destination = resolve_storage(options.output_dir, options.account, options.separate_accounts)
         locations = snapshot.get("record_locations", {})
         previous = locations.get(options.account) if isinstance(locations, dict) else None
+        migrated = False
         if isinstance(previous, str) and previous.strip():
             source = resolve_storage(previous, options.account, options.separate_accounts)
             if source.output_dir != destination.output_dir:
@@ -743,15 +747,17 @@ class ApplicationController(QObject):
                         adopt_moved_folder(source, destination)
                     else:
                         initialize_storage(destination)
+                    migrated = True
                 else:
                     migrate_records(source, destination)
+                    migrated = True
         if saved_media_missing(destination):
             if destination.media_dir.anchor and not Path(destination.media_dir.anchor).exists():
                 raise ValueError("저장 드라이브를 연결해 주세요.")
             if "recreate" not in consents:
                 return {"choice": "recreate", "message": "저장 폴더를 찾을 수 없습니다. 이 위치에 새 폴더를 만들까요?"}
             options = replace(options, allow_recreate_media=True)
-        return {"options": options}
+        return {"options": options, "migrated": migrated}
 
     def _work(self):
         while True:
@@ -826,7 +832,13 @@ class ApplicationController(QObject):
                     message = str(error)
                 else:
                     message = "작업을 마치지 못했습니다. 저장 위치와 권한을 확인해 주세요."
-                result = {"revision": payload[0], "message": message} if kind == "settings" else message
+                if kind == "settings":
+                    result = {"revision": payload[0], "message": message}
+                elif kind == "review":
+                    result = {"job_id": payload.get("job_id") if isinstance(payload, dict) else None,
+                              "message": message}
+                else:
+                    result = message
                 self._completed.emit(kind, False, result)
 
     @Slot(str, bool, object)
@@ -836,6 +848,15 @@ class ApplicationController(QObject):
         if not success:
             if kind == "settings":
                 self._settings_finished(value["revision"], False)
+            elif kind == "review":
+                job_id = value.get("job_id") if isinstance(value, dict) else None
+                message = value.get("message", "") if isinstance(value, dict) else str(value)
+                if (self._download.running and not self._download.stopping
+                        and job_id == self._download.jobId):
+                    self._error = str(message)
+                    self._download.stop()
+                else:
+                    return
             else:
                 self._error = str(value)
             if kind == "prepare":
@@ -843,8 +864,6 @@ class ApplicationController(QObject):
                 self._record_manual_outcome({"status": "error", "message": str(value)})
             if kind == "repair":
                 self._repairing = False
-            if kind == "review":
-                self._download.stop()
             self._state_changed()
             return
         if kind == "settings":
@@ -872,6 +891,9 @@ class ApplicationController(QObject):
             self._message = self._error = ""
             self._pending_download = (revision, options)
             self._load_library()
+            if value.get("migrated"):
+                self._library.refresh()
+                self._records.refresh()
         elif kind == "repair":
             self._repairing = False
             self._download.markRepaired()
