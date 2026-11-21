@@ -494,12 +494,17 @@ class GalleryModel(QAbstractListModel):
     DetailRole = KeyRole + 8
     CopyRole = KeyRole + 9
 
-    def __init__(self, reader, *, provider=None, batch_size=200, parent=None):
+    def __init__(self, reader, *, provider=None, batch_size=200, image_provider="thumbs", lazy=False, parent=None):
         super().__init__(parent)
         if not callable(reader) or type(batch_size) is not int or not 1 <= batch_size <= 1000:
             raise ValueError("invalid gallery reader")
+        if not isinstance(image_provider, str) or not image_provider.isalnum():
+            raise ValueError("invalid image provider")
         self._reader = reader
         self._provider = provider
+        # The name the QML engine knows this model's thumbnail provider by ("thumbs" for the
+        # gallery, "localthumbs" for the 폴더 정리 tab), so the two never share a cache.
+        self._image_provider = image_provider
         self._batch_size = batch_size
         self._rows = []
         self._keys = set()
@@ -524,8 +529,17 @@ class GalleryModel(QAbstractListModel):
         self._pending = None
         self._delivered.connect(self._accept, Qt.ConnectionType.QueuedConnection)
         self._worker = Thread(target=self._work, name="qt-gallery-catalog", daemon=True)
-        self._worker.start()
-        self.loadMore()
+        # ``lazy``: the reading thread starts with the first page asked for (a tab that may
+        # never be shown costs no thread until then).
+        self._worker_started = False
+        if not lazy:
+            self._start_worker()
+            self.loadMore()
+
+    def _start_worker(self):
+        if not self._worker_started and not self._closed:
+            self._worker_started = True
+            self._worker.start()
 
     @Property(int, notify=changed)
     def count(self):
@@ -580,7 +594,7 @@ class GalleryModel(QAbstractListModel):
         return None
 
     def thumb_url(self, key):
-        return f"image://thumbs/{quote(key, safe='')}?generation={self._generation}"
+        return f"image://{self._image_provider}/{quote(key, safe='')}?generation={self._generation}"
 
     def setFavorite(self, key, favorite):
         pos = self._positions.get(key)
@@ -645,6 +659,7 @@ class GalleryModel(QAbstractListModel):
             return
         self._busy = True
         self.changed.emit()
+        self._start_worker()
         with self._condition:
             self._pending = (self._generation, self._query, len(self._rows), self._batch_size)
             self._condition.notify()
@@ -807,7 +822,8 @@ class GalleryModel(QAbstractListModel):
             self._pending = None
             self._condition.notify()
         bounded = max(0, min(float(timeout), 5.0))
-        self._worker.join(bounded)
+        if self._worker_started:
+            self._worker.join(bounded)
         self._busy = False
         stopped = not self._worker.is_alive()
         if self._provider is not None:

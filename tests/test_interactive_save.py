@@ -11,6 +11,8 @@ from unittest.mock import patch
 from gallery_dl.extractor.message import Message
 from PIL import Image
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_core
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import core
@@ -178,7 +180,7 @@ class InteractiveSaveTests(unittest.TestCase):
             result, events = self.worker(known + [older], review=again, options=quick)
             self.assertEqual((result, events[-1]["scan_mode"], events[-1]["review_skipped"]), (0, "quick", 1))
             self.assertIn("지난번에 건너뛰었거나 제외를 해제한 파일 1개", next(event["message"] for event in events
-                                                if event.get("type") == "log" and "새 Like만" in event.get("message", "")))
+                                                if event.get("type") == "log" and "새 좋아요만" in event.get("message", "")))
             self.assertEqual(self.pending(), {("99", 1, "photo")})
             # An unattended run (no review channel) saves it as before.
             result, events = self.worker(known + [older], options=quick)

@@ -25,7 +25,7 @@ try:
 except ModuleNotFoundError:      # run as a script: the tests folder is the path
     import app_data_isolation  # noqa: F401
 
-from luvbox import qt_app, qt_gallery, qt_library, qt_records, qt_wheel
+from luvbox import qt_app, qt_gallery, qt_library, qt_local_folder, qt_records, qt_wheel
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -36,10 +36,13 @@ CHILDREN = {
     "download": qt_app.DownloadController, "library": qt_app.LibraryController,
     "management": qt_app.ManagementController, "records": qt_app.RecordsController,
     "schedule": qt_app.ScheduleController, "updates": qt_app.UpdateController,
+    "localFolder": qt_local_folder.LocalFolderController,
+    "localManagement": qt_local_folder.LocalManagementController,
 }
 # List models a controller hands out, by the property's name, and who has it.
 MODELS = {"unsavedModel": (qt_records.UnsavedModel, "records"),
-          "duplicateGroupModel": (qt_library.DuplicateGroupModel, "library")}
+          "duplicateGroupModel": (qt_library.DuplicateGroupModel, "library"),
+          "folderModel": (qt_gallery.GalleryModel, "localFolder")}
 CLASSES = dict(CHILDREN, app=qt_app.ApplicationController, galleryModel=qt_gallery.GalleryModel,
                wheelInputFilter=qt_wheel.WheelInputFilter,
                **{name: cls for name, (cls, _owner) in MODELS.items()})

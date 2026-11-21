@@ -37,7 +37,7 @@ class SavedPreviewDecodeTests(unittest.TestCase):
                 first.save(path, save_all=True, append_images=[second], duration=[50, 50], loop=0)
             before = hashlib.sha256(path.read_bytes()).hexdigest()
             result = decode_saved_preview(path)
-            self.assertIn("첫 프레임", result["preview_note"])
+            self.assertIn("첫 장면", result["preview_note"])
             self.assertTrue(result["preview_url"].startswith("data:image/png;base64,"))
             with Image.open(BytesIO(base64.b64decode(result["preview_url"].split(",", 1)[1]))) as image:
                 self.assertLessEqual(image.width, 384)
@@ -57,7 +57,7 @@ class SavedPreviewDecodeTests(unittest.TestCase):
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             before = hashlib.sha256(path.read_bytes()).hexdigest()
             result = decode_saved_preview(path)
-            self.assertIn("첫 프레임", result["preview_note"])
+            self.assertIn("첫 장면", result["preview_note"])
             with Image.open(BytesIO(base64.b64decode(result["preview_url"].split(",", 1)[1]))) as image:
                 self.assertLessEqual(image.width, 384)
                 self.assertLessEqual(image.height, 288)

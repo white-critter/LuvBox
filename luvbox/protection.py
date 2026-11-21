@@ -27,14 +27,14 @@ API_INTERVAL = 10.0
 MEDIA_INTERVAL = 2.0
 DEFAULT_COOLDOWN = 15 * 60
 _KOREA = timezone(timedelta(hours=9))
-_STATE_HELP = "요청 보호 기록을 읽거나 저장하지 못해 중단했습니다. Windows 사용자 폴더의 권한을 확인해 주세요."
+_STATE_HELP = "저장 대기 상태를 확인하지 못해 중단했습니다. Windows 사용자 폴더의 권한을 확인해 주세요."
 _BUSY_HELP = "같은 X 계정으로 다른 저장이 진행 중입니다. 예약한 자동 저장일 수 있으니 끝난 뒤 다시 시도해 주세요."
 _AUTH_HELP = "X가 로그인 또는 접근을 거부해 중단했습니다. X에서 계정 상태를 직접 확인하고 필요하면 다시 로그인해 주세요."
 _LOCKED_HELP = "X가 계정 잠금 또는 추가 인증을 알려 중단했습니다. X에서 직접 계정 상태를 확인하고 인증을 완료해 주세요."
 _API_ERROR_HELP = "X 목록 서버 오류로 멈췄습니다. 잠시 후 다시 실행해 주세요."
 _MEDIA_ERROR_HELP = "사진 서버 접근·연결 오류로 멈췄습니다. 잠시 후 다시 실행해 주세요."
-_RESUME_ERROR_HELP = ("서버가 이어받기를 거부해 멈췄습니다. 받다 만 .part 파일은 남겨 두었습니다. "
-                      "계속 실패하면 그 .part 파일만 지우고 다시 실행하세요.")
+_RESUME_ERROR_HELP = ("서버가 이어받기를 거부해 멈췄습니다. 받다 만 임시 파일(.part)은 남겨 두었습니다. "
+                      "계속 실패하면 저장 폴더에서 해당 .part 파일만 지우고 다시 실행해 주세요.")
 
 
 class ProtectionError(RuntimeError):

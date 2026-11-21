@@ -36,7 +36,7 @@ def scene():
     from unittest.mock import patch
 
     from PIL import Image
-    from PySide6.QtCore import QCoreApplication, QEvent, qInstallMessageHandler
+    from PySide6.QtCore import QCoreApplication, QEvent, QObject, qInstallMessageHandler
     from PySide6.QtWidgets import QApplication
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
@@ -100,6 +100,7 @@ def scene():
         wheel_filter = WheelInputFilter()
         engine = QQmlApplicationEngine()
         engine.addImageProvider("thumbs", controller.library.provider)
+        engine.addImageProvider("localthumbs", controller.localFolder.provider)
         engine.addImageProvider(PREVIEW_PROVIDER, controller.records.preview_provider())
         engine.setInitialProperties({"appController": controller, "galleryModel": controller.library.model,
                                      "wheelInputFilter": wheel_filter})
@@ -122,6 +123,15 @@ def scene():
         wait(lambda: not controller.busy and library.filterAiCategory == "", "an unknown category clears the filter")
         settle(200)
         after_use = loaded()
+        # The 폴더 정리 tab shown, a folder listed and its AI tag list read: no classifier either.
+        window.setProperty("currentScreen", 3)
+        local = controller.localFolder
+        wait(lambda: window.findChild(QObject, "localFolderView") is not None, "folder tab made")
+        assert local.openFolder(str(paths.media_dir))
+        wait(lambda: local.hasFolder and not local.filesLocked and local.model.rowCount() >= 1, "folder listed")
+        assert list(local.aiCategories) == NAMES, local.aiCategories
+        settle(200)
+        after_folder = loaded()
 
         controller.requestClose()
         wait(lambda: controller.shutdownReady, "shutdown")
@@ -131,7 +141,8 @@ def scene():
         engine = None
         delete(controller)
         controller = None
-        print(json.dumps({"ok": True, "after_start": after_start, "after_use": after_use}))
+        print(json.dumps({"ok": True, "after_start": after_start, "after_use": after_use,
+                          "after_folder": after_folder}))
     except BaseException:
         import shutil
         import traceback
@@ -205,7 +216,7 @@ class StartSceneTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         report = json.loads(result.stdout.splitlines()[-1])
         self.assertTrue(report["ok"])
-        self.assertEqual((report["after_start"], report["after_use"]), ([], []))
+        self.assertEqual((report["after_start"], report["after_use"], report["after_folder"]), ([], [], []))
 
 
 if __name__ == "__main__":

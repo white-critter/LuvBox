@@ -46,7 +46,7 @@ def file_signature(path: Path | str) -> tuple[int, int, int, int]:
     try:
         info = path.lstat()
         if not stat.S_ISREG(info.st_mode) or _linked(info):
-            raise RecyclingError("일반 파일만 휴지통으로 보낼 수 있습니다. 링크는 건너뜁니다.")
+            raise RecyclingError("일반 파일만 휴지통으로 보낼 수 있습니다. 바로 가기 파일은 건너뜁니다.")
         for parent in path.parents:
             if _linked(parent.lstat()):
                 raise RecyclingError("연결된 폴더 안의 파일은 안전하게 확인할 수 없어 건너뜁니다.")
@@ -74,7 +74,7 @@ def _signature(value) -> tuple[int, int, int, int]:
             raise ValueError
         return tuple(value)
     except (TypeError, ValueError):
-        raise RecyclingError("파일 확인 정보가 올바르지 않습니다. 목록을 새로 고침해 주세요.") from None
+        raise RecyclingError("파일 상태를 다시 확인해야 합니다. 목록을 새로고침한 뒤 다시 시도해 주세요.") from None
 
 
 def _same_path(left: Path | str, right: Path | str) -> bool:

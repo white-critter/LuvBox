@@ -213,7 +213,11 @@ class StorageHistoryMediaRegressionTests(unittest.TestCase):
             cluster = t_store._db.execute("SELECT cluster_id FROM image_hashes WHERE tweet_id='10'").fetchone()[0]
             self.assertEqual(cluster, 7)
             ai_tags = t_store._db.execute("SELECT tag, source FROM media_tags WHERE tweet_id='10' AND source IN ('ai','confirmed')").fetchall()
-            self.assertEqual([tuple(r) for r in ai_tags], [("동물", "confirmed")])
+            # Several AI tags per photo: the taught "동물" shows as confirmed, and this PC's own
+            # estimate "인물" stays (an answer about one tag says nothing about another).
+            self.assertEqual(sorted(tuple(r) for r in ai_tags), [("동물", "confirmed"), ("인물", "ai")])
+            self.assertEqual([tuple(row) for row in t_store._db.execute(
+                "SELECT tag, label FROM ai_tag_feedback WHERE tweet_id='10'").fetchall()], [("동물", 1)])
 
     def test_duplicates_identical_dhash_grouping_and_strided_masks(self):
         from luvbox.duplicates import _close_hash_pairs
@@ -451,7 +455,7 @@ class QtControllerRegressionTests(unittest.TestCase):
                 "status": "finished",
                 "saved": 1,
                 "skipped": 0,
-                "message": "새 Like 확인을 마쳤습니다. 저장하지 못한 1개는 확인해 주세요.",
+                "message": "새 좋아요 확인을 마쳤습니다. 저장하지 못한 1개는 확인해 주세요.",
             })
             self.assertIn("저장하지 못한 1개는 확인해 주세요.", row["message"])
 
@@ -810,7 +814,7 @@ def qml_scene():
                     stack.extend(node.childItems())
             def visible_log_button():
                 return next((c for c in walk_visual(run_list.property("contentItem"))
-                             if c.property("text") == "로그" and c.property("visible")), None)
+                             if c.property("text") == "상세 기록" and c.property("visible")), None)
             wait(lambda: visible_log_button() is not None, "run history log button materialized")
             log_btn = visible_log_button()
             assert log_btn.mapToScene(QPointF(log_btn.property("width"), 0)).x() <= run_list.mapToScene(QPointF(run_list.property("width"), 0)).x() + 1

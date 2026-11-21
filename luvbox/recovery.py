@@ -296,7 +296,7 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
             with connection:
                 for table in ("media", "runs", "catalog_meta", "likes", "tweets", "missing_choices",
                               "deletion_items", "favorites", "media_tags", "image_hashes",
-                              "ai_embeddings", "ai_feedback", "ai_unreadable"):
+                              "ai_embeddings", "ai_feedback", "ai_tag_feedback", "ai_unreadable"):
                     target = [row[1] for row in connection.execute(f'PRAGMA table_info("{table}")')]
                     rows = []
                     for source in sources:
@@ -341,6 +341,13 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
                                      ") VALUES (" + ",".join("?" for _ in columns) + ")")
                         connection.executemany(statement, ([row[name] for name in columns] for row in batch))
                     counts[table] = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] - before
+                # A catalog from before multi-label teaching holds only single answers. The fresh
+                # catalog above was marked as converted while it was still empty, so convert here.
+                from .storage import _feedback_to_tag_feedback
+                _feedback_to_tag_feedback(connection, connection.execute(
+                    "SELECT folder_mode, tweet_id, num, media_type, category, updated_at FROM ai_feedback").fetchall())
+                connection.execute("UPDATE media_tags SET source='ai' WHERE tag='' AND source='confirmed'")
+                counts["ai_tag_feedback"] = connection.execute('SELECT COUNT(*) FROM "ai_tag_feedback"').fetchone()[0]
                 if fallback_media_count is not None and counts["media"] != fallback_media_count:
                     # The fallback is the only readable source. Its rows must
                     # all survive the real schema's constraints; IGNORE must

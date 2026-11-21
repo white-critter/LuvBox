@@ -41,7 +41,7 @@ _LEGACY_TASKS = ("XlikeSaver 자동 저장",)
 _KEEP_LOGS = 30
 _KOREA = timezone(timedelta(hours=9))
 _TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])\Z")
-_SCHEDULE_HELP = "작업 스케줄러에 연결하지 못했습니다. 잠시 후 다시 시도해 주세요(회사·학교 PC는 관리자 정책 확인)."
+_SCHEDULE_HELP = "Windows 자동 실행 예약을 설정하지 못했습니다. 잠시 뒤 다시 시도해 주세요. (회사·학교 PC에서는 관리자 제한으로 막혀 있을 수 있습니다.)"
 
 
 class ScheduleError(RuntimeError):
@@ -247,7 +247,7 @@ def register_task(time_of_day: str) -> None:
     """Register or replace the daily task for this executable."""
     program, arguments = launch_parts()
     _powershell(_REGISTER_SCRIPT, task=TASK_NAME, program=program, arguments=arguments,
-                time=normal_time(time_of_day), description="러브박스(LuvBox): 새 Like를 매일 저장합니다.",
+                time=normal_time(time_of_day), description="러브박스(LuvBox): 새 좋아요를 매일 저장합니다.",
                 legacy="|".join(_LEGACY_TASKS))
 
 
@@ -412,7 +412,7 @@ def _remember_outcome(outcome: dict) -> None:
     except ActivityError:
         # A successful save remains successful, but the last-result view can
         # still tell the person the independent history could not be written.
-        outcome["history_error"] = "실행 기록을 보관하지 못했습니다. 앱 데이터 폴더의 권한과 디스크 여유 공간을 확인해 주세요."
+        outcome["history_error"] = "실행 기록을 보관하지 못했습니다. LuvBox 기록 폴더의 권한과 디스크 여유 공간을 확인해 주세요."
     try:
         _write_last_run(outcome)
     except (OSError, ValueError):
@@ -425,10 +425,11 @@ _CLASSIFY_SECONDS = 600
 
 
 def _classify_saved(options, write) -> None:
-    """Give the photos this run saved their AI category, when the model is already on this PC.
+    """Give the photos this run saved their AI tags, when the model is already on this PC.
 
-    Never part of the run's outcome: the files are saved, and anything left is
-    classified when the app is opened. Nothing is downloaded for this.
+    The AI tags and what they learned come from the shared AI profile, the same
+    the window uses. Never part of the run's outcome: the files are saved, and
+    anything left is classified when the app is opened. Nothing is downloaded for this.
     """
     try:
         from .clip_model import model_file_present
@@ -482,7 +483,7 @@ def run_saved(*, full: bool = False) -> int:
         path = directory / f"scheduled-{stamp}.log"
         stream = path.open("a", encoding="utf-8")
     except OSError:
-        return cannot_start("자동 저장 기록을 만들지 못했습니다. 앱 데이터 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요.")
+        return cannot_start("자동 저장 기록을 만들지 못했습니다. LuvBox 기록 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요.")
     outcome["log"] = str(path)
     log_failed = False
     code = 1
@@ -526,7 +527,7 @@ def run_saved(*, full: bool = False) -> int:
                 if event.get("retry_at"):
                     write("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))
 
-        write("예약 실행 시작 · " + ("전체 목록 다시 확인" if full else "새 Like만 빠르게 확인"))
+        write("예약 실행 시작 · " + ("전체 목록 다시 확인" if full else "새 좋아요만 빠르게 확인"))
         try:
             if log_failed:
                 raise OSError("log write failed")
@@ -536,11 +537,13 @@ def run_saved(*, full: bool = False) -> int:
             options = _options_from_settings(settings, full)
         except ValueError as exc:
             # Only this app's fixed validation messages reach this handler.
-            write(str(exc))
-            outcome["message"] = str(exc)
+            raw = str(exc).strip()
+            msg = raw if raw and not raw.isascii() else "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요."
+            write(msg)
+            outcome["message"] = msg
             code = 1
         except OSError:
-            outcome["message"] = ("자동 저장 기록을 만들지 못했습니다. 앱 데이터 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요."
+            outcome["message"] = ("자동 저장 기록을 만들지 못했습니다. LuvBox 기록 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요."
                                   if log_failed else "저장된 설정의 폴더 경로를 확인하지 못했습니다. 앱에서 저장 폴더를 확인해 주세요.")
             write(outcome["message"])
             code = 1
@@ -570,8 +573,8 @@ def run_saved(*, full: bool = False) -> int:
         if code == 0 and outcome["status"] == "finished":
             outcome["status"] = "partial"
         if "자동 저장 기록을 만들지 못했습니다" not in outcome["message"]:
-            outcome["message"] = (outcome["message"] + " 자동 저장 로그를 끝까지 기록하지 못했습니다. "
-                                  "앱 데이터 폴더의 권한과 디스크 여유 공간을 확인해 주세요.").strip()
+            outcome["message"] = (outcome["message"] + " 자동 저장 상세 기록을 끝까지 남기지 못했습니다. "
+                                  "LuvBox 기록 폴더의 권한과 디스크 여유 공간을 확인해 주세요.").strip()
     failed = ((code != 0 or outcome["status"] == "error") and not busy) or log_failed
     # Media that failed on their own are listed and do not fail the run. Every
     # new media failing with nothing saved is still worth the dialog, once:

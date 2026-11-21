@@ -350,7 +350,7 @@ class InstallTests(ReleaseServerCase):
         with patch.object(Path, "open", side_effect=PermissionError("read-only folder")):
             self.fails("replace", updater.install, self.downloaded, self.launcher, self.digest)
         self.assertEqual(self.launcher.read_bytes(), self.old)
-        self.assertIn("릴리스 페이지에서 직접", updater.MESSAGES["replace"])
+        self.assertIn("다운로드 페이지에서 직접", updater.MESSAGES["replace"])
 
     def test_an_earlier_replaced_program_still_in_use_gets_the_next_name(self):
         earlier = updater.replaced_name(self.launcher)

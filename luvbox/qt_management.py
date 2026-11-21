@@ -131,6 +131,22 @@ class ManagementController(QObject):
             self._status = ""
             self.changed.emit()
             return
+        # A '비슷함' photo goes only alone, compared with the photo its group keeps. Picked with its
+        # check box and sent like a copy, it always stayed and nothing moved: one picked alone opens
+        # the comparison, several picked alone are told so before anything is checked. Mixed with
+        # copies, the copies go and the confirmation says the '비슷함' ones stay.
+        keys = list(keys)
+        alike = getattr(self._library, "alikeKeys", None)
+        alike = alike(keys) if callable(alike) else []
+        if alike and len(alike) == len(keys):
+            if len(keys) == 1:
+                self.prepareAlikeDelete(keys[0])
+                return
+            self._error = ("‘비슷함’ 사진은 한 장씩 휴지통으로 보낼 수 있습니다. "
+                           "한 장만 골라 남길 사진과 비교한 뒤 보내 주세요.")
+            self._status = ""
+            self.changed.emit()
+            return
         self._mutating = True
         self._stop.clear()
         self._error = ""
@@ -179,7 +195,7 @@ class ManagementController(QObject):
             self.cancelDelete()
             return
         self._stop.set()
-        self._status = "관리 작업을 중단하는 중입니다"
+        self._status = "휴지통 이동을 중단하는 중입니다"
         self.changed.emit()
 
     def _enqueue(self, kind, payload):
@@ -220,11 +236,8 @@ class ManagementController(QObject):
                     result = self._library.alikeManifest(payload)
                     if self._stop.is_set(): result = {"rows": [], "cancelled": True}
                 else:
-                    from .deletion import run_deletion
                     manifest, keep = payload
-                    result = run_deletion(manifest["location"], manifest["rows"], keep, self._stop,
-                                          lambda event: self._delivered.emit(("progress", generation, event, "")),
-                                          settle=False)
+                    result = self._recycle(manifest, keep, generation)
                     if result.get("unsettled"):
                         location = manifest["location"]
                         unsettled[str(getattr(location, "record_dir", location))] = location
@@ -237,6 +250,14 @@ class ManagementController(QObject):
                 self._delivered.emit((kind, generation, {}, str(exc) or fallback))
             except Exception:
                 self._delivered.emit((kind, generation, {}, "작업을 마치지 못했습니다. 계정·폴더·파일 상태를 확인해 주세요."))
+
+    def _recycle(self, manifest, keep_deleted, generation):
+        """Move the confirmed files (on the worker). The 폴더 정리 tab replaces this with its own checks."""
+        from .deletion import run_deletion
+
+        return run_deletion(manifest["location"], manifest["rows"], keep_deleted, self._stop,
+                            lambda event: self._delivered.emit(("progress", generation, event, "")),
+                            settle=False)
 
     @Slot(object)
     def _accept(self, event):

@@ -83,8 +83,8 @@ def plan_extension_launch(browser, running, folder):
         return {"status": "Firefox에서 ‘임시 부가 기능 로드’를 누른 뒤 표시된 폴더의 manifest.json을 선택하세요. "
                 "임시 확장은 Firefox를 다시 시작하면 제거됩니다."}
     return {"status": "확장은 자동으로 설치되지 않습니다. 확장 관리에서 개발자 모드를 켜고 한 번만 직접 불러와 주세요. "
-            "폴더 창이 ‘문서’에서 열려도 그 폴더를 선택하지 마세요. 복사된 경로를 주소창에 붙여 넣고, "
-            "manifest.json이 있는 폴더를 선택하세요."}
+            "폴더 창이 ‘문서’에서 열려도 그 폴더를 선택하지 마세요. 복사된 경로를 주소창에 붙여 넣어 "
+            "표시된 확장 폴더를 선택하세요."}
 
 
 class BrowserSetupController(QObject):
@@ -299,13 +299,15 @@ class BrowserSetupController(QObject):
                     "reveal": str(folder)}
         if operation == "prepare":
             return {"status": "Firefox에서는 이 폴더의 manifest.json을 선택하세요." if kind == "firefox" else
-                              "아래 경로만 선택하세요. ‘문서’ 폴더를 고르면 매니페스트 오류가 납니다.",
+                              "아래에 표시된 폴더만 선택하세요. ‘문서’ 폴더를 고르면 확장이 불러와지지 않습니다.",
                     "path": str(folder)}
         if operation == "copy":
             return {"status": "확장 폴더 경로를 복사했습니다. 폴더 창 주소창에 붙여 넣고 Enter를 누르세요.",
                     "clipboard": str(folder), "path": str(folder)}
-        return {"status": "manifest.json이 있는 폴더를 열었습니다. 확장 로드 창에서는 ‘문서’가 아니라 표시된 폴더를 사용하세요.",
-                "reveal": str(folder), "path": str(folder)}
+        status = ("manifest.json이 있는 폴더를 열었습니다. Firefox에서는 이 폴더 안의 manifest.json 파일을 선택하세요."
+                  if kind == "firefox" else
+                  "확장 폴더를 열었습니다. 확장 불러오기 창에서는 ‘문서’가 아니라 표시된 폴더를 선택하세요.")
+        return {"status": status, "reveal": str(folder), "path": str(folder)}
 
     def _work(self):
         while True:

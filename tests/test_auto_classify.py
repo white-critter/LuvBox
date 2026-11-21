@@ -28,7 +28,7 @@ if _QT:
     from PySide6.QtCore import QCoreApplication
     from tests.test_qt_preview_navigation import PagedRepository
     from luvbox import qt_app
-    from luvbox.qt_library import LibraryController, LibraryRepository, _Request, _store_labels
+    from luvbox.qt_library import LibraryController, LibraryRepository, _Request
 
 ACCOUNT = "offline"
 
@@ -40,7 +40,7 @@ class ModelFileTests(unittest.TestCase):
         environment = patch.dict(os.environ, {"LOCALAPPDATA": folder.name})
         environment.start()
         self.addCleanup(environment.stop)
-        self.target = Path(folder.name) / "LuvBox" / "models" / "clip" / clip_model.MODEL_FILENAME
+        self.target = Path(folder.name) / "LuvBox" / "models" / "siglip2" / clip_model.MODEL_FILENAME
 
     def test_no_file_means_no_model(self):
         self.assertEqual(clip_model.default_cache_dir() / clip_model.MODEL_FILENAME, self.target)
@@ -109,9 +109,16 @@ class PendingTests(unittest.TestCase):
 
     def classify(self, store, tweet, label="일러스트"):
         identity = ("flat", tweet, 1, "photo")
-        store.save_embeddings([(*identity, b"\0" * 2048, 0.9)])
+        store.save_embeddings([(*identity, b"\0" * 3072, 0.9)])
         if label is not None:
-            _store_labels(store, [(*identity, label)])
+            store.replace_ai_tags([(*identity, [label] if label else [])])
+            self.scored(store)
+
+    def scored(self, store):
+        """As a finished classification leaves it: scored with the shared rules as they are now."""
+        from luvbox.ai_profile import AiProfileStore
+        with closing(AiProfileStore()) as profile:
+            store.set_ai_scored_state(profile.rules_version(), clip_model.ACTIVE_MODEL_ID)
 
     def test_a_photo_without_a_category_is_work(self):
         self.assertTrue(self.repository.auto_ai_pending(1))
@@ -135,6 +142,36 @@ class PendingTests(unittest.TestCase):
             self.classify(store, "101")
             self.classify(store, "102", label=None)
         self.assertTrue(self.repository.auto_ai_pending(1))
+
+    def test_changed_ai_tags_are_work_even_without_the_model(self):
+        """Scoring stored features again needs no model file, and the AI tags are shared by every library."""
+        from luvbox.ai_profile import AiProfileStore
+        with self.store() as store:
+            self.classify(store, "101")
+            self.classify(store, "102")
+        self.model.stop()
+        try:
+            self.assertFalse(self.repository.auto_ai_pending(1))
+            with closing(AiProfileStore()) as profile:
+                profile.add_tag("고양이")
+            self.assertTrue(self.repository.auto_ai_pending(1))
+            with self.store() as store:
+                self.scored(store)
+            self.assertFalse(self.repository.auto_ai_pending(1))
+        finally:
+            self.model.start()
+
+    def test_an_old_models_feature_is_work_only_with_the_new_model_here(self):
+        with self.store() as store:
+            for tweet in ("101", "102"):
+                store.save_embeddings([("flat", tweet, 1, "photo", b"\0" * 2048, 0.9)], clip_model.LEGACY_MODEL_ID)
+                store.replace_ai_tags([("flat", tweet, 1, "photo", ["일러스트"])])
+        self.assertTrue(self.repository.auto_ai_pending(1))
+        self.model.stop()
+        try:
+            self.assertFalse(self.repository.auto_ai_pending(1))
+        finally:
+            self.model.start()
 
     def test_a_missing_file_and_an_undecodable_photo_are_no_work(self):
         with self.store() as store:

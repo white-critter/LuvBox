@@ -180,7 +180,7 @@ class SaveFailureTests(unittest.TestCase):
             self.assertEqual((code, finished["status"], finished["scan_mode"]), (0, "finished", "quick"))
             self.assertEqual((finished["saved"], finished["failed_media"]), (1, 1))
             self.assertEqual(finished["message"],
-                             "새 Like 확인을 마쳤습니다. 저장하지 못한 1개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다.")
+                             "새 좋아요 확인을 마쳤습니다. 저장하지 못한 1개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다.")
             # Liked recently, it is still above the saved streak: the next quick save tries it once more.
             QuietDownloader.missing = set()
             QuietDownloader.attempted = []

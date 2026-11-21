@@ -1,7 +1,7 @@
-"""Download and cache the ONNX CLIP vision model.
+"""Download and cache the ONNX SigLIP 2 vision model.
 
-Downloads the lightweight quantized CLIP ViT-B/32 vision model from Hugging Face
-with strict SHA-256 validation into %LOCALAPPDATA%\\LuvBox\\models\\clip.
+Downloads the quantized SigLIP 2 Base Patch16-224 vision encoder from Hugging Face,
+pinned to one commit and checked by size and SHA-256, into %LOCALAPPDATA%/LuvBox/models/siglip2.
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ __all__ = [
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Download and verify CLIP vision model for LuvBox.")
+    parser = argparse.ArgumentParser(description="Download and verify the SigLIP 2 vision model for LuvBox.")
     parser.add_argument("--check", action="store_true", help="Check if model is present and valid")
     parser.add_argument("--dest", type=Path, default=None, help="Custom destination file path")
     args = parser.parse_args()
@@ -61,7 +61,7 @@ def main():
         print(f"Model already present and verified: {target}")
         sys.exit(0)
 
-    print(f"Downloading CLIP vision model to {target}...")
+    print(f"Downloading the SigLIP 2 vision model to {target}...")
 
     def progress(cur, tot):
         pct = (cur / tot * 100) if tot else 0

@@ -16,7 +16,7 @@ Row {
         onClicked: controls.preview.zoomOut()
     }
     Label {
-        text: Math.round(controls.preview.zoomPercent) + "%"
+        text: controls.preview.ready ? Math.round(controls.preview.zoomPercent) + "%" : "—"
         width: Math.max(54, implicitWidth)
         height: 36
         verticalAlignment: Text.AlignVCenter
@@ -36,6 +36,7 @@ Row {
     }
     FlatButton {
         text: "화면 맞춤"
+        enabled: controls.preview.ready
         tip: "화면에 맞추기 (0)"
         onClicked: controls.preview.fit()
     }

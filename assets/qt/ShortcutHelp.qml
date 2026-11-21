@@ -36,6 +36,20 @@ FlatDialog {
             { keys: "F5", text: "새로고침 · 새 사진 보기" },
             { keys: "F1", text: "단축키 보기" }
         ] },
+        { title: "폴더 정리", rows: [
+            { keys: "Ctrl+F", text: "파일명 검색" },
+            { keys: "Enter · Space", text: "미리보기 · 여러 개 선택 중에는 선택·해제" },
+            { keys: "F", text: "즐겨찾기 추가·해제" },
+            { keys: "B", text: "즐겨찾기만 보기" },
+            { keys: "D", text: "중복 사진만 보기" },
+            { keys: "Ctrl+A", text: "불러온 사진 모두 선택" },
+            { keys: "Ctrl+클릭", text: "선택 추가·해제" },
+            { keys: "Shift+클릭", text: "범위 선택" },
+            { keys: "끌기", text: "사각형 선택 · Ctrl로 추가" },
+            { keys: "Delete", text: "선택한 사진을 휴지통으로" },
+            { keys: "Esc", text: "선택 해제 · 선택 끝내기" },
+            { keys: "F5", text: "새로고침" }
+        ] },
         { title: "미리보기", rows: [
             { keys: "← · →", text: "이전 · 다음 사진" },
             { keys: "F", text: "즐겨찾기 추가·해제" },
@@ -46,6 +60,55 @@ FlatDialog {
             { keys: "Esc", text: "미리보기 닫기" }
         ] }
     ]
+
+    component SectionBox: ColumnLayout {
+        id: section
+        property var sectionData: ({ title: "", rows: [] })
+        spacing: 6
+        Label {
+            text: section.sectionData.title || ""
+            font.bold: true
+            font.pixelSize: Theme.fontSection
+            color: Theme.text
+            textFormat: Text.PlainText
+        }
+        Repeater {
+            model: section.sectionData.rows || []
+            delegate: RowLayout {
+                id: entry
+                required property var modelData
+                Layout.fillWidth: true
+                spacing: Theme.gap
+                Accessible.role: Accessible.StaticText
+                Accessible.name: entry.modelData.keys + ": " + entry.modelData.text
+                Rectangle {
+                    Layout.preferredWidth: 112
+                    Layout.preferredHeight: 26
+                    Layout.alignment: Qt.AlignTop
+                    radius: Theme.radiusSmall
+                    color: Theme.field
+                    border.width: 1
+                    border.color: Theme.lineStrong
+                    Label {
+                        anchors.centerIn: parent
+                        text: entry.modelData.keys
+                        font.pixelSize: Theme.fontCaption
+                        color: Theme.text
+                        textFormat: Text.PlainText
+                    }
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: entry.modelData.text
+                    color: Theme.textMuted
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    verticalAlignment: Text.AlignVCenter
+                    Layout.minimumHeight: 26
+                }
+            }
+        }
+    }
 
     onOpened: closeButton.forceActiveFocus()
     contentItem: FocusScrollView {
@@ -61,57 +124,24 @@ FlatDialog {
             columns: dialog.wide ? 2 : 1
             columnSpacing: Theme.gapSection
             rowSpacing: Theme.gapLarge
-            Repeater {
-                model: dialog.sections
-                delegate: ColumnLayout {
-                    id: section
-                    required property var modelData
+            SectionBox {
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
+                Layout.alignment: Qt.AlignTop
+                sectionData: dialog.sections[0]
+            }
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.preferredWidth: 1
+                Layout.alignment: Qt.AlignTop
+                spacing: Theme.gapLarge
+                SectionBox {
                     Layout.fillWidth: true
-                    Layout.preferredWidth: 1
-                    Layout.alignment: Qt.AlignTop
-                    spacing: 6
-                    Label {
-                        text: section.modelData.title
-                        font.bold: true
-                        font.pixelSize: Theme.fontSection
-                        color: Theme.text
-                    }
-                    Repeater {
-                        model: section.modelData.rows
-                        delegate: RowLayout {
-                            id: entry
-                            required property var modelData
-                            Layout.fillWidth: true
-                            spacing: Theme.gap
-                            Accessible.role: Accessible.StaticText
-                            Accessible.name: entry.modelData.keys + ": " + entry.modelData.text
-                            Rectangle {
-                                Layout.preferredWidth: 112
-                                Layout.preferredHeight: 26
-                                Layout.alignment: Qt.AlignTop
-                                radius: Theme.radiusSmall
-                                color: Theme.field
-                                border.width: 1
-                                border.color: Theme.lineStrong
-                                Label {
-                                    anchors.centerIn: parent
-                                    text: entry.modelData.keys
-                                    font.pixelSize: Theme.fontCaption
-                                    color: Theme.text
-                                    textFormat: Text.PlainText
-                                }
-                            }
-                            Label {
-                                Layout.fillWidth: true
-                                text: entry.modelData.text
-                                color: Theme.textMuted
-                                wrapMode: Text.WordWrap
-                                textFormat: Text.PlainText
-                                verticalAlignment: Text.AlignVCenter
-                                Layout.minimumHeight: 26
-                            }
-                        }
-                    }
+                    sectionData: dialog.sections[1]
+                }
+                SectionBox {
+                    Layout.fillWidth: true
+                    sectionData: dialog.sections[2]
                 }
             }
         }

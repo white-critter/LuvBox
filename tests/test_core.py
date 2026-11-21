@@ -649,7 +649,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(events[-1]["status"], "finished")
         self.assertEqual((events[-1]["scan_mode"], events[-1]["saved"], events[-1]["skipped"]), ("quick", 2, 3))
         # The counts are shown beside it; the message stays one short sentence (1.11.7).
-        self.assertEqual(events[-1]["message"], "새 Like 확인을 마쳤습니다.")
+        self.assertEqual(events[-1]["message"], "새 좋아요 확인을 마쳤습니다.")
         self.assertEqual(listed, ["200", "201", "100", "101", "102"])
         self.assertEqual(FakeHttpDownloader.downloaded[-2:], [
             "https://pbs.twimg.com/media/200_1?format=jpg&name=orig",

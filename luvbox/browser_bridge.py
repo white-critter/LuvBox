@@ -65,7 +65,7 @@ p{overflow-wrap:anywhere}.guide{margin:0 0 12px;color:#f4f1f1}.guide b{font-weig
 <p class="guide">이 화면이 그대로라면 이 브라우저 프로필에 확장이 없거나 꺼져 있습니다. LuvBox의 X 연결 창에 있는
 <b>‘확장 설치·연결 도움말’</b>을 따르세요. 확장의 응답이 없으면 그 도움말이 저절로 펼쳐집니다.</p>
 <p class="guide">이미 설치했다면 같은 프로필인지 확인하고, 확장 관리에서 LuvBox 확장을 새로고침한 뒤 앱에서 연결을 취소하고 다시 시작하세요.</p>
-<p class="help">브라우저의 비밀번호는 LuvBox에 전달되지 않습니다. 연결을 승인하면 X 로그인 쿠키와 계정 정보가 이 컴퓨터의 LuvBox에만
+<p class="help">브라우저의 비밀번호는 LuvBox에 전달되지 않습니다. 연결을 승인하면 X 로그인 정보와 계정 정보가 이 컴퓨터의 LuvBox에만
 전달됩니다. 이 탭을 닫거나 앱에서 취소하면 연결이 중단됩니다.</p>
 </main></body></html>""".encode("utf-8")
 

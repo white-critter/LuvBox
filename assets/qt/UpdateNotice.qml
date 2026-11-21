@@ -77,7 +77,7 @@ Card {
                         if (notice.phase === "ready")
                             return notice.saving ? "저장이 끝나면 다시 시작하세요." : "다시 시작하면 적용됩니다."
                         if (notice.phase === "available" && !notice.updates.canInstall)
-                            return "릴리스 페이지에서 LuvBox.exe를 받으세요."
+                            return "다운로드 페이지에서 LuvBox.exe를 받으세요."
                         if (notice.phase === "available")
                             return "지금 버전 " + notice.updates.currentVersion
                         return ""
@@ -105,8 +105,8 @@ Card {
                 objectName: "updateReleasePageButton"
                 visible: notice.phase === "failed"
                     || (notice.phase === "available" && !!notice.updates && !notice.updates.canInstall)
-                text: "릴리스 페이지"
-                Accessible.name: "릴리스 페이지 열기"
+                text: "다운로드 페이지"
+                Accessible.name: "다운로드 페이지 열기"
                 onClicked: notice.updates.openReleasePage()
             }
             FlatButton {

@@ -64,7 +64,7 @@ def session_path() -> Path:
 def _dpapi(data: bytes, *, protect: bool, entropy: bytes | None = None) -> bytes:
     """Protect/unprotect bytes with Windows DPAPI's current-user scope."""
     if os.name != "nt":
-        raise ValueError("auth_token 연결 정보 저장은 Windows에서 사용할 수 있습니다.")
+        raise ValueError("로그인 정보 저장은 Windows에서만 사용할 수 있습니다.")
     from ctypes import wintypes
 
     class DataBlob(ctypes.Structure):

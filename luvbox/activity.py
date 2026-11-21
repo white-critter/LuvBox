@@ -23,7 +23,7 @@ from .file_mutex import file_mutex
 MAX_OUTCOMES = 1000
 _WRITE_LOCK = threading.RLock()
 _KOREA = timezone(timedelta(hours=9))
-_ERROR = "실행 기록을 읽거나 저장하지 못했습니다. 앱 데이터 폴더의 권한을 확인해 주세요."
+_ERROR = "실행 기록을 읽거나 저장하지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요."
 _COLUMNS = ("run_id", "origin", "account", "output_dir", "started_at", "finished_at", "status",
             "saved", "skipped", "size_skipped", "failed_media", "visited", "message", "code", "retry_at", "log",
             "history_run_id", "legacy")

@@ -49,6 +49,11 @@ def default_settings() -> dict:
         # Give newly saved photos their AI category without being asked. It needs the model that the
         # first classification downloads; nothing is fetched for it.
         "auto_classify": True,
+        # The 폴더 정리 tab: the folder opened last (opened again only when the tab is shown), the
+        # folders opened recently (newest first, at most ten), whether subfolders are read, and
+        # whether what is taught there teaches the AI tags of the whole program.
+        "local_folder_last": "", "local_folder_recent": [],
+        "local_folder_subfolders": True, "local_folder_share_learning": True,
     }
 
 

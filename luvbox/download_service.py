@@ -255,7 +255,9 @@ class DownloadService:
             with self._lock:
                 already_final = self._final
             if not already_final:
-                self._emit(job_id, {"type": "finished", "status": "error", "message": str(error)})
+                raw = str(error).strip()
+                msg = raw if raw and not raw.isascii() else "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요."
+                self._emit(job_id, {"type": "finished", "status": "error", "message": msg})
         except Exception:
             with self._lock:
                 already_final = self._final

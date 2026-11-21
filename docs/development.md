@@ -1,4 +1,4 @@
-# LuvBox 1.11.9 개발 안내
+# LuvBox 1.12.0 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -29,7 +29,10 @@ Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사�
 | `assets/qt/Theme.qml`, `qmldir`, `Flat*.qml`, `Card.qml`, `Glow.qml`, `DialogButtons.qml`, `SettingRow.qml`, `WrapRow.qml` | 테마 값 한 곳, 화면이 함께 쓰는 버튼·입력·메뉴·대화상자 틀·카드·붉은 빛 |
 | `qt_accounts.py`, `qt_browser_setup.py`, `browser_discovery.py`, `login.py`, `browser_bridge.py` | 연결 승인·확장 설치 안내·DPAPI 계정 보관 |
 | `qt_download.py`, `qt_saved_preview.py`, `download_service.py`, `core.py`, `review.py` | 저장 상태·선택적 첫 장면, 별도 worker와 IPC, 실제 다운로드와 저장 여부 확인 |
-| `qt_library.py`, `qt_gallery.py`, `qt_wheel.py`, `duplicates.py`, `clip_classifier.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력, 중복 탐지(완전 일치, 선택 시 픽셀 확인), 로컬 AI CLIP 자동 분류 |
+| `qt_library.py`, `qt_gallery.py`, `qt_wheel.py`, `duplicates.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력, 중복 탐지(완전 일치, 선택 시 픽셀 확인) |
+| `clip_model.py`, `clip_classifier.py`, `ai_profile.py`, `tag_learner.py`, `assets/qt/AiTagManagerDialog.qml` | 로컬 AI 태그: SigLIP 2 이미지 특징(768차원, 모델 파일은 첫 분류 때 내려받음)과 기본 5개 태그의 zero-shot 점수, 모든 보관함이 함께 쓰는 AI 태그·학습 예시·학습 결과(`%LOCALAPPDATA%\LuvBox\ai-profile\profile.sqlite3`, 표준 라이브러리만 사용), 태그별 학습(예시 0장 zero-shot·1~4장 닮은 사진·5장 이상 로지스틱 회귀)과 채점, AI 태그 관리 화면 |
+| `ai_pipeline.py` | 갤러리와 폴더 정리가 함께 쓰는 AI 태그 단계: 가르친 사진 먼저 특징 만들기, 공통 프로필의 예시 맞추기, 예시가 바뀐 태그 다시 학습, 나머지 특징을 만들며 바로 채점, 규칙이 바뀌었으면 전체 다시 채점 |
+| `local_store.py`, `local_deletion.py`, `qt_local_folder.py`, `assets/qt/LocalFolderView.qml` | ‘폴더 정리’ 탭: 이 PC의 폴더를 갤러리처럼 보기. 폴더 안에는 아무것도 쓰지 않고 목록·해시·특징·태그·‘중복 아님’ 표시를 `%LOCALAPPDATA%\LuvBox\local-folders\<폴더 키>.sqlite3`에 둠(크기·수정 시각이 같은 파일은 다시 계산하지 않음, 링크·정션·앱 데이터 폴더는 들어가지 않음, 클라우드에만 있는 파일은 열지 않음), 갤러리와 같은 확인을 거치는 휴지통 이동, 갤러리 컨트롤러를 물려받은 화면 컨트롤러(타일 키 `g<세대>_lf_<번호>`, 썸네일 제공자 `localthumbs`) |
 | `unsaved_preview.py` | 저장하지 못한 미디어의 작은 미리보기 한 장을 X 이미지 서버에서 받아 로컬 캐시에 보관 |
 | `app_settings.py`, `settings.py`, `file_mutex.py`, `qt_schedule.py`, `scheduled.py`, `activity.py` | 설정·일일 예약·수동/자동 실행 결과와 프로세스 간 변경 보호 |
 | `history.py`, `storage.py`, `recovery.py`, `deletion.py`, `recycling.py`, `qt_management.py` | 기록·갤러리 필터의 읽기, 경로 승인·이전·사본·복구와 휴지통 이동 |
@@ -191,7 +194,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.11.9.txt`, `release/LuvBox-1.11.9-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.12.0.txt`, `release/LuvBox-1.12.0-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·이 문서의 제목과 산출물 이름·변경 사항 최신 항목이 제품 버전과 같은지 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`, `tests/test_guide_versions.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 

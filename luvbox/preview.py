@@ -242,14 +242,14 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
             if result.returncode or not result.stdout:
                 return Thumbnail(None, "동영상 미리보기를 만들지 못했습니다. 파일 열기로 확인해 주세요.")
             source = BytesIO(result.stdout)
-            note = "동영상 · 첫 프레임"
+            note = "동영상 · 첫 장면"
         elif kind in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
             # Own the stream even when Pillow fails during its initial read,
             # before it can return an image context manager to close it.
             source = path.open("rb")
             if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
                 return Thumbnail(None, "큰 이미지입니다. 파일 열기로 확인해 주세요.")
-            note = "GIF · 첫 프레임" if kind == ".gif" else "사진 미리보기"
+            note = "GIF · 첫 장면" if kind == ".gif" else "사진 미리보기"
         else:
             return Thumbnail(None, "미리보기를 지원하지 않는 파일입니다.")
         _prepare_decoders(kind == ".mp4")

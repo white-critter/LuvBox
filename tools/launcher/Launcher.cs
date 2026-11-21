@@ -58,13 +58,13 @@ namespace LuvBox
     internal static class Messages
     {
         public const string NoApplication =
-            "이 파일에는 앱이 들어 있지 않습니다.\n릴리스에서 LuvBox.exe를 다시 받아 주세요.";
+            "이 파일에는 앱이 들어 있지 않습니다.\n다운로드 페이지에서 LuvBox.exe를 다시 받아 주세요.";
         public const string Damaged =
-            "LuvBox.exe가 손상되었습니다. 받는 중에 끊겼거나 파일이 바뀐 것 같습니다.\n릴리스에서 다시 받아 주세요.";
+            "LuvBox.exe가 손상되었습니다. 받는 중에 끊겼거나 파일이 바뀐 것 같습니다.\n다운로드 페이지에서 다시 받아 주세요.";
         public const string UnpackFailed =
-            "앱을 이 PC에 준비하지 못했습니다.\n디스크 여유 공간(약 300MB)과 사용자 폴더의 AppData\\Local\\LuvBox 쓰기 권한을 확인한 뒤 다시 실행해 주세요.";
+            "앱을 이 PC에 준비하지 못했습니다.\n디스크 여유 공간(약 300MB)과 Windows 사용자 폴더의 쓰기 권한을 확인한 뒤 다시 실행해 주세요.";
         public const string UnsafeLocation =
-            "앱을 풀어 둘 폴더가 다른 위치로 연결되어 있어 중단했습니다.\n사용자 폴더의 AppData\\Local\\LuvBox와 그 안의 app 폴더가 일반 폴더인지 확인해 주세요.";
+            "앱을 준비할 폴더가 다른 위치로 연결되어 있어 실행을 멈췄습니다.\nWindows 사용자 폴더 안의 LuvBox 폴더가 일반 폴더인지 확인해 주세요.";
         public const string Busy =
             "다른 LuvBox가 준비를 마치지 못하고 있습니다.\n잠시 뒤 다시 실행해 주세요.";
         public const string StartFailed =

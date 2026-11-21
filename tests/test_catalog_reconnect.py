@@ -749,7 +749,11 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.user_tags(), [{"tag": "좋은 사진", "count": 1}])
         self.assertEqual(self.store.classification_of("flat", "300", 1, "photo")["category"], "풍경·배경")
         self.assertEqual(self.store.record_page(ai_category="풍경·배경", include_deleted=False)["total"], 1)
-        self.assertEqual(self.store.record_page(ai_category="인물", include_deleted=False)["total"], 0)
+        # A photo carries several AI tags: an answer about one tag says nothing about another,
+        # so the estimate the new place already had stays beside the taught one.
+        self.assertEqual(self.store.record_page(ai_category="인물", include_deleted=False)["total"], 1)
+        self.assertEqual(self.store.tag_feedback([("flat", "300", 1, "photo")]),
+                         {("flat", "300", 1, "photo"): {"풍경·배경": 1}})
         # The old record keeps what it had; nothing is deleted.
         self.assertTrue(self.store._db.execute(
             "SELECT 1 FROM favorites WHERE folder_mode='author' AND tweet_id='300'").fetchone())
@@ -766,7 +770,10 @@ class StoreTests(unittest.TestCase):
 
         self.assertEqual(self.store.classification_of("flat", "300", 1, "photo")["category"], "인물")
         self.assertEqual(self.store.record_page(ai_category="인물", include_deleted=False)["total"], 1)
-        self.assertEqual(self.store.record_page(ai_category="풍경·배경", include_deleted=False)["total"], 0)
+        # The AI list of a tag also shows the photos the person tagged that way themselves.
+        self.assertEqual(self.store.record_page(ai_category="풍경·배경", include_deleted=False)["total"], 1)
+        self.assertEqual(self.store.record_page(ai_category="풍경·배경", ai_origin="confirmed",
+                                                include_deleted=False)["total"], 0)
         self.assertCountEqual(self.store.item_tags("flat", "300", 1, "photo"),
                               [{"tag": "인물", "source": "confirmed"}, {"tag": "풍경·배경", "source": "user"}])
 

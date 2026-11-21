@@ -202,7 +202,7 @@ def resolve_storage(output_dir: str | Path, account: str, separate_accounts: boo
     record = root / _output_key(output) / folder
     for path in (root, record.parent, record):
         if _linked(path):
-            raise ValueError("이 PC의 기록 폴더가 다른 위치에 연결되어 있습니다. 앱 데이터 폴더를 확인해 주세요.")
+            raise ValueError("이 PC의 기록 폴더가 다른 위치에 연결되어 있습니다. LuvBox 기록 폴더를 확인해 주세요.")
     return StoragePaths(output, legacy if separate_accounts else output, record, legacy,
                         account, separate_accounts, snapshot)
 
@@ -403,7 +403,7 @@ def publish_snapshot(paths: StoragePaths) -> int:
     # failed because another connection held a write lock. Merge it first; a
     # still-unreadable valid copy must not be silently overwritten.
     if _merge_changed_snapshot(checked):
-        raise MigrationError("저장 폴더의 기록 사본을 아직 합치지 못해 그대로 보존했습니다. 다음 저장 때 다시 시도합니다.")
+        raise MigrationError("저장 폴더에 있던 이전 기록을 아직 합치지 못해 그대로 두었습니다. 다음 저장 때 다시 시도합니다.")
     snapshot = checked.snapshot_dir
     snapshot.mkdir(parents=True, exist_ok=True)
     if _linked(snapshot) or not snapshot.resolve().is_relative_to(checked.output_dir):
@@ -633,7 +633,9 @@ def _sanitize_shared_history(path: Path) -> None:
         for name in triggers:
             db.execute('DROP TRIGGER "' + name.replace('"', '""') + '"')
         if metadata is not None:
-            db.execute("DELETE FROM catalog_meta WHERE key='allowed_media_roots'")
+            db.execute("DELETE FROM catalog_meta WHERE key IN "
+                       "('allowed_media_roots','ai_feedback_migrated_v2',"
+                       "'ai_scored_rules_version','ai_scored_model_id')")
             if db.execute("SELECT 1 FROM catalog_meta WHERE key='allowed_media_roots' LIMIT 1").fetchone():
                 raise MigrationError(_MIGRATION_HELP)
 
@@ -767,6 +769,64 @@ def _merge_media(previous: dict, incoming: dict) -> dict:
             # Enriching catalog information does not embed it into this file.
             result["author_metadata_status"] = "pending"
     return result
+
+
+_TAG_FEEDBACK_SQL = (
+    "CREATE TABLE IF NOT EXISTS ai_tag_feedback (folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, "
+    "num INTEGER NOT NULL, media_type TEXT NOT NULL, tag TEXT NOT NULL, label INTEGER NOT NULL, "
+    "updated_at TEXT NOT NULL, PRIMARY KEY(folder_mode, tweet_id, num, media_type, tag))",
+    "CREATE INDEX IF NOT EXISTS ai_tag_feedback_tag ON ai_tag_feedback(tag, label)",
+)
+_UPSERT_TAG_FEEDBACK = (
+    "INSERT INTO ai_tag_feedback(folder_mode,tweet_id,num,media_type,tag,label,updated_at) VALUES (?,?,?,?,?,?,?) "
+    "ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO UPDATE SET label=excluded.label,"
+    "updated_at=excluded.updated_at WHERE excluded.updated_at>ai_tag_feedback.updated_at")
+
+
+def _feedback_tag(tag) -> str:
+    """A stored tag as the catalog keeps it, or "" when it cannot be one."""
+    if not isinstance(tag, str) or not tag or len(tag) > 50 or tag != tag.strip() or tag.startswith("#"):
+        return ""
+    return "" if any(ord(char) < 32 or ord(char) == 127 for char in tag) else tag
+
+
+def _feedback_to_tag_feedback(db: sqlite3.Connection, rows) -> int:
+    """Turn single-label answers (``ai_feedback``) into answers per AI tag.
+
+    A category becomes "+1 for that tag". "None of these" (an empty category)
+    becomes "not this" for each of the five default tags, which were the only
+    choices then. A later answer about the same photo and tag wins. ``rows``
+    are (folder_mode, tweet_id, num, media_type, category, updated_at).
+    """
+    from .clip_model import DEFAULT_CATEGORIES
+
+    for statement in _TAG_FEEDBACK_SQL:
+        db.execute(statement)
+    typed_known = "media_tags" in _tables(db) and "source" in _columns(db, "media_tags")
+
+    def typed(identity, tag):
+        # A tag the person typed on the photo outweighs an earlier "not this" (HistoryStore.add_tag
+        # clears it): an old answer merged or rebuilt later must not bring that refusal back.
+        return typed_known and db.execute(
+            "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=? "
+            "AND source='user' LIMIT 1", (*identity, tag)).fetchone() is not None
+
+    written = 0
+    for row in rows:
+        folder_mode, tweet_id, num, media_type, category, updated_at = tuple(row)[:6]
+        if not isinstance(tweet_id, str) or not isinstance(updated_at, str):
+            continue
+        if category:
+            tag = _feedback_tag(category)
+            answers = [(tag, 1)] if tag else []
+        else:
+            answers = [(name, -1) for name in DEFAULT_CATEGORIES]
+        for tag, label in answers:
+            if label < 0 and typed((folder_mode, tweet_id, num, media_type), tag):
+                continue
+            written += db.execute(_UPSERT_TAG_FEEDBACK,
+                                  (folder_mode, tweet_id, num, media_type, tag, label, updated_at)).rowcount
+    return written
 
 
 def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> None:
@@ -913,23 +973,36 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
         finally:
             incoming_hashes.close()
     if "ai_embeddings" in source_tables:
+        from .clip_model import ACTIVE_MODEL_ID, LEGACY_MODEL_ID, embedding_bytes
+
         _prepare_table(target, source, "ai_embeddings")
+        if "model_id" not in _columns(target, "ai_embeddings"):
+            target.execute("ALTER TABLE ai_embeddings ADD COLUMN model_id TEXT NOT NULL DEFAULT "
+                           f"'{LEGACY_MODEL_ID}'")
         for row in _rows(source, "ai_embeddings"):
             blob = row.get("embedding")
             if isinstance(blob, memoryview):
                 blob = blob.tobytes()
-            if not isinstance(blob, (bytes, bytearray)) or len(blob) != 2048:
+            # A snapshot from before the SigLIP 2 switch has no model column: its features are CLIP's.
+            model_id = row.get("model_id") or LEGACY_MODEL_ID
+            size = embedding_bytes(model_id)
+            if not size or not isinstance(blob, (bytes, bytearray)) or len(blob) != size:
                 continue
+            # A feature of the current model is never replaced by an old model's, however recent;
+            # within one model the newer one wins.
             target.execute(
-                "INSERT INTO ai_embeddings(folder_mode,tweet_id,num,media_type,embedding,confidence,updated_at) "
-                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
-                "embedding=excluded.embedding,confidence=excluded.confidence,updated_at=excluded.updated_at "
-                "WHERE excluded.updated_at>ai_embeddings.updated_at",
+                "INSERT INTO ai_embeddings(folder_mode,tweet_id,num,media_type,embedding,confidence,updated_at,model_id) "
+                "VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode,tweet_id,num,media_type) DO UPDATE SET "
+                "embedding=excluded.embedding,confidence=excluded.confidence,updated_at=excluded.updated_at,"
+                "model_id=excluded.model_id "
+                "WHERE (excluded.model_id=ai_embeddings.model_id AND excluded.updated_at>ai_embeddings.updated_at) "
+                "OR (excluded.model_id=? AND ai_embeddings.model_id!=?)",
                 (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], bytes(blob),
-                 row.get("confidence"), row.get("updated_at") or ""),
+                 row.get("confidence"), row.get("updated_at") or "", model_id, ACTIVE_MODEL_ID, ACTIVE_MODEL_ID),
             )
     if "ai_feedback" in source_tables:
         _prepare_table(target, source, "ai_feedback")
+        incoming_feedback = []
         for row in _rows(source, "ai_feedback"):
             target.execute(
                 "INSERT INTO ai_feedback(folder_mode,tweet_id,num,media_type,category,updated_at) "
@@ -939,42 +1012,61 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                 (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
                  row.get("category") or "", row.get("updated_at") or ""),
             )
+            incoming_feedback.append((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"],
+                                      row.get("category") or "", row.get("updated_at") or ""))
+        # A PC still on single-label teaching writes only ai_feedback: its answers count per tag here.
+        _feedback_to_tag_feedback(target, incoming_feedback)
+    if "ai_tag_feedback" in source_tables:
+        for statement in _TAG_FEEDBACK_SQL:
+            target.execute(statement)
+        target_tables = _tables(target)
+        typed_check = "media_tags" in target_tables and "source" in _columns(target, "media_tags")
+        for row in _rows(source, "ai_tag_feedback"):
+            tag = _feedback_tag(row.get("tag"))
+            if not tag or row.get("label") not in (1, -1) or not isinstance(row.get("updated_at"), str):
+                continue
+            if int(row["label"]) < 0 and typed_check and target.execute(
+                    "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND tag=? AND source='user' LIMIT 1",
+                    (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"], tag)).fetchone() is not None:
+                continue
+            target.execute(_UPSERT_TAG_FEEDBACK, (row["folder_mode"], row["tweet_id"], row["num"],
+                                                  row["media_type"], tag, row["label"], row["updated_at"]))
     target_tables = _tables(target)
-    if ("media_tags" in source_tables or "ai_feedback" in source_tables) and "media_tags" in target_tables:
+    if (("media_tags" in source_tables or "ai_feedback" in source_tables or "ai_tag_feedback" in source_tables)
+            and "media_tags" in target_tables):
         if "source" not in _columns(target, "media_tags"):
             target.execute("ALTER TABLE media_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
-        taught_keys = set()
-        if "ai_feedback" in target_tables:
-            for row in _rows(target, "ai_feedback"):
+        if "ai_tag_feedback" in target_tables:
+            target.execute(
+                "DELETE FROM ai_tag_feedback WHERE label=-1 AND EXISTS ("
+                "SELECT 1 FROM media_tags mt WHERE mt.folder_mode=ai_tag_feedback.folder_mode "
+                "AND mt.tweet_id=ai_tag_feedback.tweet_id AND mt.num=ai_tag_feedback.num "
+                "AND mt.media_type=ai_tag_feedback.media_type AND mt.tag=ai_tag_feedback.tag "
+                "AND mt.source='user')"
+            )
+            # Several AI tags per photo. An answer about one tag decides only that tag:
+            # "yes" shows it as confirmed (a typed tag stays the person's), "not this" removes it.
+            for row in _rows(target, "ai_tag_feedback"):
                 identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                taught_keys.add(identity)
-                target.execute(
-                    "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-                    "AND source IN ('ai','confirmed')",
-                    identity,
-                )
-                category = row.get("category") or ""
-                if category:
+                if row["label"] == 1:
                     target.execute(
                         "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
                         "VALUES (?,?,?,?,?,'confirmed',?) ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) "
                         "DO UPDATE SET source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
-                        (*identity, category, row.get("updated_at") or ""),
-                    )
-        ai_rows = target.execute(
-            "SELECT rowid, folder_mode, tweet_id, num, media_type "
-            "FROM media_tags WHERE source='ai' ORDER BY created_at DESC, tag DESC, rowid DESC"
-        ).fetchall()
-        seen_ai = set()
-        drop_ids = []
-        for row in ai_rows:
-            identity = (row[1], row[2], row[3], row[4])
-            if identity in taught_keys or identity in seen_ai:
-                drop_ids.append((row[0],))
-            else:
-                seen_ai.add(identity)
-        if drop_ids:
-            target.executemany("DELETE FROM media_tags WHERE rowid=?", drop_ids)
+                        (*identity, row["tag"], row.get("updated_at") or ""))
+                else:
+                    target.execute(
+                        "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                        "AND tag=? AND source IN ('ai','confirmed')", (*identity, row["tag"]))
+        # The empty AI row only says "looked at, no AI tag" (1.11.9 stored "none of these" as a
+        # confirmed one): it is an AI row, and it goes where a real AI tag is.
+        target.execute("UPDATE media_tags SET source='ai' WHERE tag='' AND source='confirmed'")
+        target.execute(
+            "DELETE FROM media_tags WHERE source='ai' AND tag='' AND EXISTS (SELECT 1 FROM media_tags AS other "
+            "WHERE other.folder_mode=media_tags.folder_mode AND other.tweet_id=media_tags.tweet_id "
+            "AND other.num=media_tags.num AND other.media_type=media_tags.media_type "
+            "AND other.source='ai' AND other.tag!='')")
     if "ai_unreadable" in source_tables:
         _prepare_table(target, source, "ai_unreadable")
         for row in _rows(source, "ai_unreadable"):
@@ -1009,7 +1101,10 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
             previous[row["id"]] = row
     if "catalog_meta" in source_tables:
         _prepare_table(target, source, "catalog_meta")
-        for key, value in source.execute("SELECT key,value FROM catalog_meta WHERE key NOT IN ('allowed_media_roots','quick_scan_merge_run')"):
+        for key, value in source.execute(
+                "SELECT key,value FROM catalog_meta WHERE key NOT IN "
+                "('allowed_media_roots','quick_scan_merge_run','ai_feedback_migrated_v2',"
+                "'ai_scored_rules_version','ai_scored_model_id')"):
             if key == "review_pending":
                 from .history import _review_pending_items
                 # Same-account copies may have skipped different files. Keep
@@ -1098,11 +1193,36 @@ _MEDIA_MARK_ID = ("folder_mode", "tweet_id", "num", "media_type")
 _MOVED_MARK_KEYS = {
     "favorites": _MEDIA_MARK_ID,
     "media_tags": (*_MEDIA_MARK_ID, "tag"),
+    "ai_tag_feedback": (*_MEDIA_MARK_ID, "tag"),
 }
 _MOVED_MARK_COLUMNS = {
     "favorites": (*_MOVED_MARK_KEYS["favorites"], "created_at"),
     "media_tags": (*_MOVED_MARK_KEYS["media_tags"], "source", "created_at"),
+    "ai_tag_feedback": (*_MOVED_MARK_KEYS["ai_tag_feedback"], "label", "updated_at"),
 }
+
+
+def _rekey_ai_profile_scope(source: StoragePaths, destination: StoragePaths) -> None:
+    try:
+        from .ai_profile import AiProfileError, AiProfileStore, output_key, profile_path
+
+        if not profile_path().is_file():
+            return
+        old_key = output_key(source.output_dir)
+        new_key = output_key(destination.output_dir)
+        if old_key == new_key:
+            return
+        account = destination.account
+        with closing(AiProfileStore()) as profile:
+            profile.rekey_scope(
+                "x",
+                f"{old_key}/{account}",
+                f"{new_key}/{account}",
+                f"x:{old_key}:{account}:",
+                f"x:{new_key}:{account}:",
+            )
+    except (AiProfileError, OSError, sqlite3.Error):
+        pass
 
 
 def _moved_snapshot_edits(database: Path, snapshot: Path | None) -> dict | None:
@@ -1124,17 +1244,43 @@ def _moved_snapshot_edits(database: Path, snapshot: Path | None) -> dict | None:
             if not re.fullmatch(r"[a-z][a-z0-9_]*", table):
                 return None
             current = f'SELECT * FROM main."{table}"'
+            columns = _columns(db, table)
             if table not in baseline_tables:
+                if table == "ai_tag_feedback":
+                    if tuple(columns) != _MOVED_MARK_COLUMNS[table]:
+                        return None
+                    inserts = db.execute(current).fetchall()
+                    if inserts:
+                        edits[table] = ([], inserts)
+                    continue
                 if db.execute(current + " LIMIT 1").fetchone() is not None:
                     return None
                 continue
-            columns = _columns(db, table)
-            if columns != [row[1] for row in db.execute(f'PRAGMA baseline.table_info("{table}")')]:
+            baseline_columns = [row[1] for row in db.execute(f'PRAGMA baseline.table_info("{table}")')]
+            if columns != baseline_columns:
+                if table == "ai_embeddings" and columns == [*baseline_columns, "model_id"]:
+                    from .clip_model import LEGACY_MODEL_ID
+                    mismatch = db.execute(
+                        'SELECT 1 FROM main."ai_embeddings" WHERE model_id != ? LIMIT 1',
+                        (LEGACY_MODEL_ID,),
+                    ).fetchone()
+                    if mismatch is not None:
+                        return None
+                    cols_sql = ",".join(f'"{col}"' for col in baseline_columns)
+                    before = f'SELECT {cols_sql} FROM baseline."{table}"'
+                    current_shared = f'SELECT {cols_sql} FROM main."{table}"'
+                    removed, added = before + " EXCEPT " + current_shared, current_shared + " EXCEPT " + before
+                    if any(db.execute(d + " LIMIT 1").fetchone() is not None for d in (removed, added)):
+                        return None
+                    continue
                 return None
             before = f'SELECT * FROM baseline."{table}"'
             if table == "catalog_meta":
-                # Opening a traveling copy strips former-root approvals.
-                before += " WHERE key != 'allowed_media_roots'"
+                # Opening a traveling copy strips former-root approvals; PC-local AI state stays per PC.
+                meta_filter = (" WHERE key NOT IN ('allowed_media_roots','ai_feedback_migrated_v2',"
+                               "'ai_scored_rules_version','ai_scored_model_id')")
+                before += meta_filter
+                current += meta_filter
             removed, added = before + " EXCEPT " + current, current + " EXCEPT " + before
             if table in _MOVED_MARK_COLUMNS:
                 if tuple(columns) != _MOVED_MARK_COLUMNS[table]:
@@ -1179,13 +1325,18 @@ def _moved_destination_edits(source: StoragePaths, destination: StoragePaths) ->
 def _apply_moved_mark_edits(database: Path, edits: dict) -> None:
     """Apply destination choices while carrying forward the original catalog's edits."""
     with closing(sqlite3.connect(database, timeout=1)) as db, db:
+        if "ai_tag_feedback" in edits:
+            for statement in _TAG_FEEDBACK_SQL:
+                db.execute(statement)
         for table, (deletes, inserts) in edits.items():
-            predicate = " AND ".join(key + "=?" for key in _MOVED_MARK_KEYS[table])
-            db.executemany(f"DELETE FROM {table} WHERE {predicate}", deletes)
-            columns = _MOVED_MARK_COLUMNS[table]
-            names = ",".join(columns)
-            parameters = ",".join("?" for _ in columns)
-            db.executemany(f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({parameters})", inserts)
+            if deletes:
+                predicate = " AND ".join(key + "=?" for key in _MOVED_MARK_KEYS[table])
+                db.executemany(f"DELETE FROM {table} WHERE {predicate}", deletes)
+            if inserts:
+                columns = _MOVED_MARK_COLUMNS[table]
+                names = ",".join(columns)
+                parameters = ",".join("?" for _ in columns)
+                db.executemany(f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({parameters})", inserts)
 
 
 def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
@@ -1250,6 +1401,7 @@ def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
                 _write_snapshot_state(destination, seen)
         with closing(HistoryStore.for_storage(destination, protected=True)) as store:
             moved = store.adopt_moved_root(source.output_dir)
+        _rekey_ai_profile_scope(source, destination)
         try:
             publish_snapshot(destination)
         except (MigrationError, OSError, sqlite3.Error, ValueError):
@@ -1356,6 +1508,7 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
         databases = sum((stage / name).is_file() for name in _DATABASES)
         _publish_records(destination, stage)
         stage = None
+        _rekey_ai_profile_scope(source, destination)
         try:
             publish_snapshot(destination)
         except (MigrationError, OSError, sqlite3.Error, ValueError):
@@ -1481,7 +1634,7 @@ class OutputGuard:
                 file.close()
             if error.errno in {11, 13, 35}:
                 raise ProtectionError(OUTPUT_BUSY_HELP) from None
-            raise ProtectionError("저장 경로의 작업 보호 기록을 만들지 못했습니다. Windows 사용자 폴더 권한을 확인해 주세요.") from None
+            raise ProtectionError("저장 작업을 시작할 준비를 하지 못했습니다. Windows 사용자 폴더 권한을 확인해 주세요.") from None
         finally:
             if registry is not None:
                 registry.close()

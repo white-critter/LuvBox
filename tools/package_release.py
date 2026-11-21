@@ -68,6 +68,7 @@ SOURCE_FILES = (
     "tools/exiftool/download.py", "tools/package_release.py", "tools/check_build_inputs.py", "tools/build_snapshot.py",
     "tools/benchmark_history.py", "tools/benchmark_preview.py",
     "tools/bench_clip.py", "tools/clip/download.py", "tools/clip/README.md",
+    "tools/clip/precompute_siglip2_anchors.py",
     "tests/browser_bridge_extension_harness.js", "tests/browser_extension_real_check.js",
     "tools/ffmpeg/build.py", "tools/ffmpeg/README.md", "tools/ffmpeg/manifest.json",
     "tools/ffmpeg/configure-flags.json", "tools/ffmpeg/build-info.txt", "tools/ffmpeg/LICENSE.LGPLv2.1.txt",

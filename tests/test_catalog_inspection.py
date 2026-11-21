@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
+from luvbox.clip_model import ACTIVE_MODEL_ID, embedding_bytes
 from luvbox.history import HistoryStore
 
 
@@ -53,7 +54,7 @@ class DuplicateCountMatchesTheViewTests(_Store):
 
 
 class RemovingATagAndTheAiMarkTests(_Store):
-    BLOB = bytes(2048)
+    BLOB = bytes(embedding_bytes(ACTIVE_MODEL_ID))
 
     def marks(self, identity):
         return [tuple(row) for row in self.store._db.execute(
@@ -73,8 +74,25 @@ class RemovingATagAndTheAiMarkTests(_Store):
         self.store.save_embeddings([(*identity, self.BLOB, 0.5)])
         self.store.replace_estimated_labels([(*identity, "인물")])
         self.store.add_tag(*identity, "인물")          # the person's tag takes the AI label's place
-        self.assertEqual(self.marks(identity), [("인물", "user")])
+        self.assertEqual(self.marks(identity), [("", "ai"), ("인물", "user")])
+        self.assertEqual(self.store.count_embeddings_without_labels(), 0)
         self.assertTrue(self.store.remove_tag(*identity, "인물"))
+        self.assertEqual(self.marks(identity), [("", "ai")])
+        self.assertEqual(self.store.count_embeddings_without_labels(), 0)
+
+    def test_taking_away_a_tag_typed_under_another_record_of_the_file_is_no_not_this(self):
+        """The chip shows the tag as typed when any record of the file has it typed; × removes that."""
+        identity = self.photo(303)
+        path = self.root / "a_303_1.jpg"
+        self.store.record_media("author", {"tweet_id": "303", "num": 1, "type": "photo", "author": "a"}, path)
+        other = ("author", "303", 1, "photo")
+        self.store.save_embeddings([(*identity, self.BLOB, 0.5)])
+        self.store.replace_estimated_labels([(*identity, "인물")])
+        self.store.add_tag(*other, "인물")
+        self.assertEqual(self.store.item_tags(*identity), [{"tag": "인물", "source": "user"}])
+        self.assertTrue(self.store.remove_tag(*identity, "인물"))
+        self.assertEqual(self.store.item_tags(*identity), [])
+        self.assertEqual(self.store.tag_feedback(), {})
         self.assertEqual(self.marks(identity), [("", "ai")])
         self.assertEqual(self.store.count_embeddings_without_labels(), 0)
 

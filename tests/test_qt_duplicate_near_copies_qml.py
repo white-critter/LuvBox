@@ -306,7 +306,7 @@ def scene(shots=None):
         assert not any(files[number].exists() for number in (501, 601, 602))
         assert all(files[number].exists() for number in (502, 503, 603, 701))
         status = controller.management.status
-        assert "그대로 두었습니다" in status and "화질만 다른 사진 포함" in status, status
+        assert "그대로 두었습니다" in status and "비슷한 사진도 검사" in status, status
         wait(lambda: [marks(group) for group in library.duplicateGroups] == [[("502", True, False), ("503", False, False)]],
              "the photo kept and the similar one stay a group")
         wait(lambda: [b for card in every("duplicateGroup") for b in badges(card)] == [("남김", False), ("비슷함", True)],
@@ -317,6 +317,20 @@ def scene(shots=None):
         wait(lambda: "선택할 중복 사본이 없습니다" in window.property("transientNotice"), "nothing left to offer")
         assert library.selectedCount == 0
         shot("5-similar-left")
+
+        assert find("galleryDuplicateNear").property("text") == "비슷한 사진도 검사"
+        # Picked alone with its check box and sent with "휴지통으로", the similar photo opens the
+        # comparison it needs. (It used to go the copies' way, stay, and nothing moved.)
+        similar = every("duplicateTile", every("duplicateGroup")[0])[1]
+        press(similar)
+        wait(lambda: library.selectedCount == 1, "the similar photo picked alone")
+        click("galleryRecycleSelected")
+        dialog = find("alikeConfirmation")
+        wait(lambda: dialog.property("visible"), "the comparison opened")
+        shot("6-similar-compared")
+        click("confirmAlikeRecycle")
+        wait(lambda: not controller.management.mutating and not files[503].exists(), "the similar photo sent")
+        assert files[502].exists() and files[701].exists()
 
         controller.requestClose()
         wait(lambda: controller.shutdownReady, "shutdown")

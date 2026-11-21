@@ -276,7 +276,7 @@ def scene(shots=None):
         for name in ("runHistoryDialog", "shortcutHelp", "statisticsDialog"):
             dialog, showing = opened(name, 0)
             closed(dialog, name)
-        for name in ("aiClearConfirm", "repairDialog", "storageDialog"):
+        for name in ("aiClearConfirm", "repairDialog", "storageDialog", "aiTagManagerDialog"):
             dialog, showing = opened(name, 1)
             assert len(showing) == 1, (name, showing)
             closed(dialog, name)
@@ -308,6 +308,19 @@ def scene(shots=None):
         window.setProperty("currentScreen", 0)
         settle(80)
         assert emphasised() == ["saveStartButton"], emphasised()
+        # Three tabs, one chosen at a time; the 폴더 정리 tab without a folder has one main button.
+        tabs = [find(name) for name in ("navSave", "navGallery", "navLocalFolder")]
+        assert [tab.property("text") for tab in tabs] == ["저장", "갤러리", "폴더 정리"]
+        for screen, chosen in ((0, "navSave"), (1, "navGallery"), (2, "navGallery"), (3, "navLocalFolder")):
+            window.setProperty("currentScreen", screen)
+            settle(40)
+            assert [tab.objectName() for tab in tabs if tab.property("checked")] == [chosen], (screen, chosen)
+        wait(lambda: find("localFolderView").property("visible"), "folder tab shown")
+        settle(80)
+        assert emphasised() == ["localFolderChoose"], emphasised()
+        shot("8-folder-tab")
+        window.setProperty("currentScreen", 0)
+        settle(40)
 
         controller.requestClose()
         wait(lambda: controller.shutdownReady, "shutdown")

@@ -132,7 +132,7 @@ result.image.close()
         Image.new("RGB", (300, 100), "red").save(gif, save_all=True,
                         append_images=[Image.new("RGB", (300, 100), "blue")], duration=100, loop=0)
         result = thumbnail(gif)
-        self.assertIn("첫 프레임", result.note)
+        self.assertIn("첫 장면", result.note)
         self.assertEqual(result.image.getpixel((10, 10)), (255, 0, 0, 255))
 
     def test_all_exif_orientations_preserve_pixels_aspect_and_source(self):
@@ -266,7 +266,7 @@ result.image.close()
         self.assertIsNotNone(result.image)
         self.assertLessEqual(result.image.width, PREVIEW_SIZE[0])
         self.assertLessEqual(result.image.height, PREVIEW_SIZE[1])
-        self.assertIn("첫 프레임", result.note)
+        self.assertIn("첫 장면", result.note)
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
 
 

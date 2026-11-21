@@ -10,26 +10,29 @@ import QtQuick.Layouts
 FlatDialog {
     id: dialog
     property var app: null
+    // The gallery's recycling by default; the 폴더 정리 tab gives its own, and a folder has no saves to skip.
+    property var manager: app ? app.management : null
+    property bool showKeepDeleted: true
     objectName: "alikeConfirmation"
     parent: Overlay.overlay
     title: "이 사진을 휴지통으로 보낼까요?"
     preferredWidth: 1000
     height: parent ? Math.max(320, Math.min(760, parent.height - windowMargin)) : 640
-    readonly property var shown: app ? app.management.deleteAlike : ({})
+    readonly property var shown: manager ? manager.deleteAlike : ({})
     // Let go of both pictures before the move: Windows keeps a file that is being read.
     property bool released: false
     onAboutToShow: released = false
     // The switch starts on: fetched again at the next full save, this photo would be grouped
     // with the one kept all over again.
-    onOpened: { keepDeleted.checked = true; cancelButton.forceActiveFocus() }
+    onOpened: { keepDeleted.checked = dialog.showKeepDeleted; cancelButton.forceActiveFocus() }
     onRejected: {
         released = true
-        if (app) app.management.cancelDelete()
+        if (manager) manager.cancelDelete()
     }
     onAccepted: {
         released = true
-        let keep = keepDeleted.checked
-        Qt.callLater(function() { if (dialog.app) dialog.app.management.confirmDelete(keep) })
+        let keep = dialog.showKeepDeleted && keepDeleted.checked
+        Qt.callLater(function() { if (dialog.manager) dialog.manager.confirmDelete(keep) })
     }
 
     component Side: ColumnLayout {
@@ -85,8 +88,8 @@ FlatDialog {
                 anchors.margins: Theme.gapSmall
                 source: dialog.released || !dialog.visible ? "" : (side.photo.url || "")
                 // Both drawn at the size of the box, so the two read at one scale.
-                sourceSize.width: Math.min(2048, Math.max(1, Math.round(width * Math.max(1, Screen.devicePixelRatio))))
-                sourceSize.height: Math.min(2048, Math.max(1, Math.round(height * Math.max(1, Screen.devicePixelRatio))))
+                sourceSize.width: Math.min(2048, Math.max(256, Math.ceil(width * Math.max(1, Screen.devicePixelRatio) / 256) * 256))
+                sourceSize.height: Math.min(2048, Math.max(256, Math.ceil(height * Math.max(1, Screen.devicePixelRatio) / 256) * 256))
                 fillMode: Image.PreserveAspectFit
                 autoTransform: true
                 asynchronous: true
@@ -154,13 +157,15 @@ FlatDialog {
         Label {
             objectName: "alikeSummaryText"
             Layout.fillWidth: true
-            text: dialog.app ? dialog.app.management.deleteSummary : ""
+            text: dialog.manager ? dialog.manager.deleteSummary : ""
             color: Theme.textMuted
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
         }
         FlatSwitch {
             id: keepDeleted
+            objectName: "alikeKeepSwitch"
+            visible: dialog.showKeepDeleted
             Layout.fillWidth: true
             trailing: true
             text: "다음 저장에서 다시 받지 않기"

@@ -154,8 +154,8 @@ FlatDialog {
                         FlatButton {
                             visible: card.modelData.hasLog
                             compact: true
-                            text: "로그"
-                            Accessible.name: "실행 로그 열기"
+                            text: "상세 기록"
+                            Accessible.name: "실행 상세 기록 열기"
                             onClicked: dialog.records.openLog(card.modelData.token)
                             onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                         }

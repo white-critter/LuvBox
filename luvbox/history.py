@@ -20,8 +20,9 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .storage import (_RECORD_FOLDERS, StoragePaths, _DamagedDatabase, migrate_legacy_databases,
-                      prepare_storage, records_root)
+from .clip_model import ACTIVE_MODEL_ID, CATEGORY_NAMES, LEGACY_MODEL_ID, embedding_bytes
+from .storage import (_RECORD_FOLDERS, StoragePaths, _DamagedDatabase, _feedback_to_tag_feedback,
+                      migrate_legacy_databases, prepare_storage, records_root)
 
 
 _KOREA = timezone(timedelta(hours=9))
@@ -66,8 +67,17 @@ _MEDIA_READ_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS media_source_url_missing ON media(source_url) WHERE source_url=''",
 )
 _PERIOD_FIELDS = {"posted": "media.posted_at", "saved": "media.saved_at"}
-_AI_CATEGORIES = frozenset({"일러스트", "인물", "동물", "짤·텍스트", "풍경·배경"})
-_EMBEDDING_BYTES = 512 * 4
+# The five default AI tags. Any tag can be an AI tag now (see ai_profile); these
+# names still decide what an old single-label "none of these" answer meant.
+_AI_CATEGORIES = frozenset(CATEGORY_NAMES)
+_TAG_LIMIT = 50
+# Photos a scoring pass writes in one transaction.
+_LABEL_CHUNK = 200
+# The empty AI row: a classification looked at the photo and gave it no AI tag. Up to
+# 1.11.9 "none of these" stored it as source='confirmed'; it is the same mark.
+_LOOKED_AT = ("INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+              "VALUES (?,?,?,?,'','ai',?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) "
+              "DO UPDATE SET source='ai'")
 # 'retry' runs download chosen missing files by tweet, not the Like list.
 _SCAN_MODES = {"full", "quick", "retry"}
 _DELETION_STATUSES = {"pending", "recycled", "failed", "cancelled", "interrupted"}
@@ -394,6 +404,21 @@ def _on_file(mark: str, media: str = "media") -> str:
     )
 
 
+def _ai_tag_predicate(media: str) -> str:
+    """SQL with two ``?`` (the tag twice): the record carries this AI tag.
+
+    An AI label (estimated or confirmed) belongs to the record it was given to;
+    a tag the person typed belongs to the file, whichever record was shown.
+    """
+    return (
+        f"(EXISTS (SELECT 1 FROM media_tags AS label WHERE label.folder_mode={media}.folder_mode "
+        f"AND label.tweet_id={media}.tweet_id AND label.num={media}.num AND label.media_type={media}.media_type "
+        "AND label.tag=? AND label.source IN ('ai','confirmed')) "
+        f"OR EXISTS (SELECT 1 FROM media_tags AS mark WHERE {_on_file('mark', media)} "
+        "AND +mark.source='user' AND +mark.tag=?))"
+    )
+
+
 def _other_file(alias: str, media: str) -> str:
     """SQL fragment after the join of ``h2``/``m2``: a listed record of a different file than ``media``."""
     return (
@@ -526,7 +551,7 @@ class HistoryStore:
             # Flush WAL commits so progress is more durable after an OS crash.
             # Hardware/filesystem failures still cannot be fully guaranteed.
             self._db.execute("PRAGMA synchronous=FULL")
-            self._db.executescript("""
+            self._db.executescript(f"""
                 CREATE TABLE IF NOT EXISTS media (
                     folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
                     media_type TEXT NOT NULL, author TEXT NOT NULL DEFAULT '',
@@ -591,7 +616,7 @@ class HistoryStore:
                 CREATE TABLE IF NOT EXISTS ai_embeddings (
                     folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
                     media_type TEXT NOT NULL, embedding BLOB NOT NULL, confidence REAL,
-                    updated_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL, model_id TEXT NOT NULL DEFAULT '{LEGACY_MODEL_ID}',
                     PRIMARY KEY(folder_mode, tweet_id, num, media_type)
                 );
                 CREATE TABLE IF NOT EXISTS ai_feedback (
@@ -605,6 +630,16 @@ class HistoryStore:
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY(folder_mode, tweet_id, num, media_type)
                 );
+                -- What the person said about one AI tag on one photo: +1 "yes", -1 "not this".
+                -- A photo can carry several AI tags, so this replaces ai_feedback's single answer;
+                -- ai_feedback is kept for older versions that read a merged snapshot.
+                CREATE TABLE IF NOT EXISTS ai_tag_feedback (
+                    folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
+                    media_type TEXT NOT NULL, tag TEXT NOT NULL, label INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(folder_mode, tweet_id, num, media_type, tag)
+                );
+                CREATE INDEX IF NOT EXISTS ai_tag_feedback_tag ON ai_tag_feedback(tag, label);
                 CREATE TABLE IF NOT EXISTS image_hashes (
                     folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
                     media_type TEXT NOT NULL, filesize INTEGER NOT NULL,
@@ -681,6 +716,25 @@ class HistoryStore:
                     self._db.execute("CREATE INDEX IF NOT EXISTS image_hashes_cluster ON image_hashes(cluster_id)")
                 if "file_signature" not in hash_columns:
                     self._db.execute("ALTER TABLE image_hashes ADD COLUMN file_signature TEXT NOT NULL DEFAULT ''")
+                # Features stored before the SigLIP 2 switch are CLIP ViT-B/32's (512-d). They keep
+                # that model id and are never read as SigLIP features.
+                embedding_columns = {row["name"] for row in self._db.execute("PRAGMA table_info(ai_embeddings)")}
+                if "model_id" not in embedding_columns:
+                    self._db.execute("ALTER TABLE ai_embeddings ADD COLUMN model_id TEXT NOT NULL DEFAULT "
+                                     f"'{LEGACY_MODEL_ID}'")
+                # Each answer of the single-label teaching becomes one answer per tag, once.
+                migrated = self._db.execute(
+                    "SELECT 1 FROM catalog_meta WHERE key='ai_feedback_migrated_v2'").fetchone()
+                if migrated is None:
+                    _feedback_to_tag_feedback(self._db, self._db.execute(
+                        "SELECT folder_mode, tweet_id, num, media_type, category, updated_at FROM ai_feedback"
+                    ).fetchall())
+                    # The old "none of these" row is the empty AI row now (see _LOOKED_AT).
+                    self._db.execute("UPDATE media_tags SET source='ai' WHERE tag='' AND source='confirmed'")
+                    self._db.execute("INSERT OR REPLACE INTO catalog_meta(key, value) "
+                                     "VALUES ('ai_feedback_migrated_v2', '1')")
+            self._known_tables = None
+            self._known_columns = None
             self._media_roots = self._read_media_roots()
         except sqlite3.DatabaseError as exc:
             # Check ambiguous failures before closing this constructor's
@@ -1153,18 +1207,41 @@ class HistoryStore:
                 " AND source='user' AND tag!='' "
                 "ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO UPDATE SET source='user'",
                 (row["folder_mode"], *record))
-            taught = self._db.execute(
-                "INSERT INTO ai_feedback(folder_mode,tweet_id,num,media_type,category,updated_at) "
-                "SELECT ?,tweet_id,num,media_type,category,updated_at FROM ai_feedback " + where +
-                " ON CONFLICT DO NOTHING", (row["folder_mode"], *record)).rowcount
-            if taught:
-                # As set_taught_categories leaves it: the taught label replaces the estimate.
-                self._db.execute("DELETE FROM media_tags " + where + " AND source IN ('ai','confirmed')", target)
+            # The file is the same, so are its image feature and the AI tags it was given, all of them.
+            self._db.execute(
+                "INSERT INTO ai_embeddings(folder_mode,tweet_id,num,media_type,embedding,confidence,updated_at,model_id) "
+                "SELECT ?,tweet_id,num,media_type,embedding,confidence,updated_at,model_id FROM ai_embeddings "
+                + where + " ON CONFLICT DO NOTHING", (row["folder_mode"], *record))
+            if self._db.execute("SELECT 1 FROM media_tags " + where + " AND source='ai' LIMIT 1", target).fetchone() is None:
                 self._db.execute(
                     "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
                     "SELECT ?,tweet_id,num,media_type,tag,source,created_at FROM media_tags " + where +
-                    " AND source='confirmed' ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO NOTHING",
+                    " AND source='ai' ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO NOTHING",
                     (row["folder_mode"], *record))
+            # Kept for older versions that read a merged snapshot.
+            self._db.execute(
+                "INSERT INTO ai_feedback(folder_mode,tweet_id,num,media_type,category,updated_at) "
+                "SELECT ?,tweet_id,num,media_type,category,updated_at FROM ai_feedback " + where +
+                " ON CONFLICT DO NOTHING", (row["folder_mode"], *record))
+            # Each answer about an AI tag goes along; a later answer already here wins.
+            self._db.execute(
+                "INSERT INTO ai_tag_feedback(folder_mode,tweet_id,num,media_type,tag,label,updated_at) "
+                "SELECT ?,tweet_id,num,media_type,tag,label,updated_at FROM ai_tag_feedback " + where +
+                " ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO UPDATE SET "
+                "label=excluded.label, updated_at=excluded.updated_at "
+                "WHERE excluded.updated_at > ai_tag_feedback.updated_at", (row["folder_mode"], *record))
+            # As set_tag_feedback leaves it: "yes" shows the tag as confirmed, "not this" takes it away.
+            for answer in self._db.execute(
+                    "SELECT tag, label, updated_at FROM ai_tag_feedback " + where, target).fetchall():
+                if answer["label"] > 0:
+                    self._db.execute(
+                        "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                        "VALUES (?,?,?,?,?,'confirmed',?) ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) "
+                        "DO UPDATE SET source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
+                        (*target, answer["tag"], answer["updated_at"]))
+                else:
+                    self._db.execute("DELETE FROM media_tags " + where + " AND tag=? AND source IN ('ai','confirmed')",
+                                     (*target, answer["tag"]))
 
     @_safe
     def record_declined(self, folder_mode: str, metadata: dict, path: Path | str) -> None:
@@ -2438,7 +2515,8 @@ class HistoryStore:
                                    " AND +mark.source='user' AND +mark.tag=?)")
                     params.append(tag)
         if ai_category:
-            if not isinstance(ai_category, str) or ai_category not in _AI_CATEGORIES or not has_media_tags:
+            tag = _normalize_tag(ai_category) if isinstance(ai_category, str) else ""
+            if not tag or len(tag) > _TAG_LIMIT or not has_media_tags:
                 clauses.append("0")
             else:
                 origin = ai_origin if ai_origin in {"ai", "confirmed"} else ""
@@ -2447,13 +2525,12 @@ class HistoryStore:
                                    "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
                                    "AND media_tags.media_type=media.media_type AND media_tags.tag=? "
                                    "AND media_tags.source=?)")
-                    params.extend((ai_category, origin))
+                    params.extend((tag, origin))
                 else:
-                    clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
-                                   "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
-                                   "AND media_tags.media_type=media.media_type AND media_tags.tag=? "
-                                   "AND media_tags.source IN ('ai','confirmed'))")
-                    params.append(ai_category)
+                    # One list per AI tag: what the AI gave the photo, what the person confirmed,
+                    # and the photos the person tagged that way themselves.
+                    clauses.append(_ai_tag_predicate("media"))
+                    params.extend((tag, tag))
         if duplicate_only:
             if not has_image_hashes:
                 clauses.append("0")
@@ -2679,34 +2756,72 @@ class HistoryStore:
             found.update((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows)
         return found
 
+    def _forget_refusals(self, identities, tag: str) -> None:
+        """A tag the person puts on a photo outweighs an earlier "not this" for the same tag."""
+        if not self._has_table("ai_tag_feedback"):
+            return
+        records = []
+        for ident in identities:
+            records.extend(self._file_records(*tuple(ident)[:4]))
+        self._db.executemany(
+            "DELETE FROM ai_tag_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+            "AND tag=? AND label<0", [(*record, tag) for record in records])
+
     @_safe
     def add_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str, source: str = "user") -> bool:
         tag = _normalize_tag(tag)
-        if not tag or len(tag) > 50:
+        if not tag or len(tag) > _TAG_LIMIT:
             return False
         with self._db:
+            if source == "user":
+                self._keep_looked_at([(folder_mode, tweet_id, num, media_type)], tag)
             self._db.execute(
                 "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
                 "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
                 "source=CASE WHEN excluded.source='user' THEN 'user' ELSE media_tags.source END",
                 (folder_mode, tweet_id, num, media_type, tag, source, _now())
             )
+            if source == "user":
+                self._forget_refusals([(folder_mode, tweet_id, num, media_type)], tag)
             return True
+
+    def _keep_looked_at(self, identities, tag: str) -> None:
+        """Typing the tag the AI gave keeps the photo counted as looked at (inside a transaction).
+
+        The typed tag takes the AI row's place; without the empty AI row the photo
+        would count as never classified, and once the person took the tag away
+        again the next run would put the AI's guess straight back.
+        """
+        stamp = _now()
+        for ident in identities:
+            record = tuple(ident[:4])
+            if self._db.execute(
+                    "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND tag=? AND source='ai'", (*record, tag)).fetchone() is None:
+                continue
+            if self._db.execute(
+                    "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND source='ai' AND tag NOT IN ('', ?) LIMIT 1", (*record, tag)).fetchone() is None:
+                self._db.execute(_LOOKED_AT, (*record, stamp))
 
     @_safe
     def add_tags_batch(self, identities: list[tuple], tag: str, source: str = "user") -> int:
         tag = _normalize_tag(tag)
-        if not identities or not tag or len(tag) > 50 or not self._has_table("media_tags"):
+        if not identities or not tag or len(tag) > _TAG_LIMIT or not self._has_table("media_tags"):
             return 0
         now = _now()
         rows = [(ident[0], ident[1], ident[2], ident[3], tag, source, now) for ident in identities]
         with self._db:
+            if source == "user":
+                self._keep_looked_at(identities, tag)
             self._db.executemany(
                 "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
                 "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
                 "source=CASE WHEN excluded.source='user' THEN 'user' ELSE media_tags.source END",
                 rows
             )
+            if source == "user":
+                self._forget_refusals(identities, tag)
         return len(rows)
 
     @_safe
@@ -2714,64 +2829,75 @@ class HistoryStore:
         tag = _normalize_tag(tag)
         if not tag:
             return False
-        removed = False
         with self._db:
             own = (folder_mode, tweet_id, num, media_type)
-            for record in self._file_records(*own):
-                row = self._db.execute(
-                    "SELECT source FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
-                    (*record, tag),
-                ).fetchone()
-                if row is None or (record != own and row["source"] != "user"):
-                    # Another record's own AI label is that record's; a tag the
-                    # person typed belongs to the file and goes everywhere.
-                    continue
+            records = self._file_records(*own)
+            row = self._db.execute(
+                "SELECT source FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
+                (*own, tag),
+            ).fetchone()
+            # The chip shows the tag as typed when any record of the file has it typed (item_tags);
+            # the × means what the chip showed.
+            typed = any(self._db.execute(
+                "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=? "
+                "AND source='user'", (*record, tag)).fetchone() is not None for record in records)
+            if not typed and row is not None and row["source"] in ("ai", "confirmed"):
+                # Taking an AI tag away says "not this" about the photo: remembered per tag, so
+                # neither the next classification nor a merged snapshot puts it back, and the
+                # AI learns from it.
+                self._apply_tag_feedback(records, tag, -1, _now())
+                return True
+            if row is not None and row["source"] == "ai":
+                # The AI's own row of this tag goes with the typed one; the photo stays looked at.
+                self._keep_looked_at([own], tag)
+            removed = False
+            for record in records:
+                # A tag the person typed belongs to the file and goes from every record;
+                # another record's own AI label is that record's.
                 cur = self._db.execute(
-                    "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=?",
-                    (*record, tag)
-                )
-                removed = removed or cur.rowcount > 0
-                if cur.rowcount > 0:
-                    taught = (
-                        self._db.execute(
-                            "SELECT category FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                            record,
-                        ).fetchone()
-                        if self._has_table("ai_feedback")
-                        else None
-                    )
-                    if taught is not None:
-                        if (taught["category"] or "") == tag:
-                            self._db.execute(
-                                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
-                                (*record, tag, "confirmed", _now()),
-                            )
-                    else:
-                        has_ai_tag = self._db.execute(
-                            "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-                            "AND source='ai' LIMIT 1",
-                            record,
-                        ).fetchone() is not None
-                        has_embedding = (
-                            self._has_table("ai_embeddings")
-                            and self._db.execute(
-                                "SELECT 1 FROM ai_embeddings WHERE folder_mode=? AND tweet_id=? AND num=? "
-                                "AND media_type=? LIMIT 1",
-                                record,
-                            ).fetchone() is not None
-                        )
-                        if row["source"] == "ai" or (tag in _AI_CATEGORIES and has_embedding and not has_ai_tag):
-                            # Keep an empty AI evaluation marker so incremental scans do not
-                            # re-apply a tag that the user explicitly removed. Only a tag named
-                            # like a category stood in for the AI label: removing any other tag
-                            # of a photo not classified yet must leave it to be classified.
-                            self._db.execute(
-                                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
-                                (*record, "", "ai", _now()),
-                            )
+                    "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=? "
+                    "AND (source='user' OR (folder_mode=? AND tweet_id=? AND num=? AND media_type=?))",
+                    (*record, tag, *own))
+                if cur.rowcount <= 0:
+                    continue
+                removed = True
+                # A "yes" taught for this tag still holds; the label stays as confirmed.
+                taught = self._db.execute(
+                    "SELECT label FROM ai_tag_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND tag=?", (*record, tag)).fetchone() if self._has_table("ai_tag_feedback") else None
+                if taught is not None and taught["label"] > 0:
+                    self._db.execute(
+                        "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                        "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                        (*record, tag, "confirmed", _now()))
         return removed
+
+    def _apply_tag_feedback(self, records, tag: str, label: int, stamp: str) -> None:
+        """Record one answer about ``tag`` on these records and show it (inside a transaction).
+
+        "Yes" shows the tag as confirmed, unless the person typed it themselves.
+        "Not this" removes the AI and confirmed label of that tag; a record left
+        with no AI tag keeps the empty AI row, so it counts as looked at.
+        """
+        for record in records:
+            self._db.execute(
+                "INSERT INTO ai_tag_feedback(folder_mode, tweet_id, num, media_type, tag, label, updated_at) "
+                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
+                "label=excluded.label, updated_at=excluded.updated_at", (*record, tag, label, stamp))
+            if label > 0:
+                self._db.execute(
+                    "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
+                    "source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
+                    (*record, tag, "confirmed", stamp))
+                continue
+            self._db.execute(
+                "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND tag=? "
+                "AND source IN ('ai','confirmed')", (*record, tag))
+            if self._db.execute(
+                    "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND source='ai' AND tag!='' LIMIT 1", record).fetchone() is None:
+                self._db.execute(_LOOKED_AT, (*record, stamp))
 
     @_safe
     def item_tags(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> list[dict]:
@@ -2866,33 +2992,48 @@ class HistoryStore:
             )
         return applied
 
+    def _model_match(self, alias: str) -> str:
+        """SQL: the feature of ``alias`` is one of the model given by ``_model_params``.
+
+        A catalog not yet opened for writing since the SigLIP 2 switch has no
+        model column; all its features are then the old model's.
+        """
+        if self._has_column("ai_embeddings", "model_id"):
+            return f"{alias}.model_id=? AND LENGTH({alias}.embedding)=?"
+        return f"?=? AND LENGTH({alias}.embedding)=?"
+
+    def _model_params(self, model_id: str) -> tuple:
+        prefix = () if self._has_column("ai_embeddings", "model_id") else (LEGACY_MODEL_ID,)
+        return (*prefix, model_id, embedding_bytes(model_id))
+
     @_safe
-    def photos_without_embeddings(self) -> list[dict]:
-        """Active photos that do not yet have a stored CLIP embedding."""
+    def photos_without_embeddings(self, model_id: str = ACTIVE_MODEL_ID) -> list[dict]:
+        """Active photos without a stored feature of ``model_id``.
+
+        A photo that has only an older model's feature is among them: it is encoded once more.
+        """
         if not self._has_table("ai_embeddings"):
             return self.photo_records_for_scan()
+        match = self._model_match("e")
         return self._read_rows(
             "SELECT folder_mode, tweet_id, num, media_type, path, filename "
             "FROM media WHERE media_type='photo' AND " + _listed("media") + " "
             "AND NOT EXISTS (SELECT 1 FROM ai_embeddings e WHERE e.folder_mode=media.folder_mode "
-            "AND e.tweet_id=media.tweet_id AND e.num=media.num AND e.media_type=media.media_type) "
-            "ORDER BY rowid ASC"
+            "AND e.tweet_id=media.tweet_id AND e.num=media.num AND e.media_type=media.media_type "
+            "AND " + match + ") ORDER BY rowid ASC",
+            self._model_params(model_id),
         )
 
-    def _unlabeled_embedding_sql(self) -> str:
-        """Photos that have a CLIP embedding but no AI evaluation.
+    def _embedding_sql(self, unlabeled: bool) -> str:
+        """Listed photos with a feature of the model given as the first parameters.
 
-        Clearing AI tags removes that evaluation. A manual removal leaves an
-        empty ``source='ai'`` row, and a taught photo has feedback. Neither matches.
+        ``unlabeled`` keeps only photos no classification has looked at yet:
+        clearing AI tags removes that evaluation, while every scored photo keeps
+        at least one ``source='ai'`` row (the empty one when no AI tag applied).
         """
-        feedback = ""
-        if self._has_table("ai_feedback"):
-            feedback = (
-                "AND NOT EXISTS (SELECT 1 FROM ai_feedback f WHERE f.folder_mode=e.folder_mode "
-                "AND f.tweet_id=e.tweet_id AND f.num=e.num AND f.media_type=e.media_type) "
-            )
+        match = self._model_match("e")
         tags = ""
-        if self._has_table("media_tags"):
+        if unlabeled and self._has_table("media_tags"):
             tags = (
                 "AND NOT EXISTS (SELECT 1 FROM media_tags t WHERE t.folder_mode=e.folder_mode "
                 "AND t.tweet_id=e.tweet_id AND t.num=e.num AND t.media_type=e.media_type "
@@ -2902,19 +3043,23 @@ class HistoryStore:
             "FROM ai_embeddings e "
             "JOIN media m ON m.folder_mode=e.folder_mode AND m.tweet_id=e.tweet_id "
             "AND m.num=e.num AND m.media_type=e.media_type "
-            "WHERE m.media_type='photo' AND " + _listed("m") + " "
-            + feedback + tags
+            "WHERE " + match + " AND m.media_type='photo' AND " + _listed("m") + " " + tags
         )
 
     @_safe
-    def count_embeddings_without_labels(self) -> int:
+    def count_embeddings(self, model_id: str = ACTIVE_MODEL_ID, *, unlabeled: bool = False) -> int:
         if not self._has_table("ai_embeddings"):
             return 0
-        row = self._db.execute("SELECT COUNT(*) " + self._unlabeled_embedding_sql()).fetchone()
+        row = self._db.execute("SELECT COUNT(*) " + self._embedding_sql(unlabeled),
+                               self._model_params(model_id)).fetchone()
         return int(row[0] or 0) if row else 0
 
-    def iter_embeddings_without_labels(self, batch: int = 256):
-        """Yield unlabeled embeddings in rowid order without holding the whole table.
+    @_safe
+    def count_embeddings_without_labels(self, model_id: str = ACTIVE_MODEL_ID) -> int:
+        return self.count_embeddings(model_id, unlabeled=True)
+
+    def iter_embeddings(self, model_id: str = ACTIVE_MODEL_ID, batch: int = 512, *, unlabeled: bool = False):
+        """Yield listed photos' features of one model in rowid order, a batch at a time.
 
         Callers that already hold the catalog lock iterate this directly. It is
         not wrapped, so a failed read surfaces to that caller.
@@ -2928,21 +3073,26 @@ class HistoryStore:
             "e.media_type AS media_type, e.embedding AS embedding, e.confidence AS confidence, "
             "m.rowid AS rowid "
         )
+        params = self._model_params(model_id)
         while True:
             rows = self._read_rows(
-                columns + self._unlabeled_embedding_sql() + " AND m.rowid>? ORDER BY m.rowid ASC LIMIT ?",
-                (last, batch),
+                columns + self._embedding_sql(unlabeled) + " AND m.rowid>? ORDER BY m.rowid ASC LIMIT ?",
+                (*params, last, batch),
             )
             if not rows:
                 return
             last = int(rows[-1]["rowid"])
             yield rows
 
+    def iter_embeddings_without_labels(self, batch: int = 256, model_id: str = ACTIVE_MODEL_ID):
+        """Unscored photos only; see ``iter_embeddings``."""
+        yield from self.iter_embeddings(model_id, batch, unlabeled=True)
+
     @_safe
-    def embeddings_without_labels(self) -> list[dict]:
-        """Active photos that have a CLIP embedding but no AI evaluation."""
+    def embeddings_without_labels(self, model_id: str = ACTIVE_MODEL_ID) -> list[dict]:
+        """Active photos that have a feature of ``model_id`` but no AI evaluation."""
         rows = []
-        for batch in self.iter_embeddings_without_labels():
+        for batch in self.iter_embeddings_without_labels(model_id=model_id):
             for row in batch:
                 row.pop("rowid", None)
                 rows.append(row)
@@ -2966,22 +3116,24 @@ class HistoryStore:
         return found
 
     @_safe
-    def embeddings_for(self, identities) -> dict:
-        """Stored CLIP embeddings for the requested identities only."""
+    def embeddings_for(self, identities, model_id: str = ACTIVE_MODEL_ID) -> dict:
+        """Stored features of ``model_id`` for the requested identities only."""
         found = {}
         if not identities or not self._has_table("ai_embeddings"):
             return found
+        size = embedding_bytes(model_id)
+        match = self._model_match("ai_embeddings")
         for clause, params in _identity_chunks(identities):
             rows = self._read_rows(
                 "SELECT folder_mode, tweet_id, num, media_type, embedding, confidence FROM ai_embeddings "
-                f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})",
-                params,
+                f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause}) AND " + match,
+                (*params, *self._model_params(model_id)),
             )
             for row in rows:
                 blob = row["embedding"]
                 if isinstance(blob, memoryview):
                     blob = blob.tobytes()
-                if isinstance(blob, (bytes, bytearray)) and len(blob) == _EMBEDDING_BYTES:
+                if isinstance(blob, (bytes, bytearray)) and len(blob) == size:
                     found[(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])] = (
                         bytes(blob), row["confidence"],
                     )
@@ -2989,9 +3141,10 @@ class HistoryStore:
 
     @_safe
     def feedback_count(self) -> int:
-        if not self._has_table("ai_feedback"):
+        """Answers about AI tags (one per photo and tag)."""
+        if not self._has_table("ai_tag_feedback"):
             return 0
-        row = self._db.execute("SELECT COUNT(*) FROM ai_feedback").fetchone()
+        row = self._db.execute("SELECT COUNT(*) FROM ai_tag_feedback").fetchone()
         return int(row[0] or 0) if row else 0
 
     @_safe
@@ -3052,186 +3205,309 @@ class HistoryStore:
         return removed
 
     @_safe
-    def save_embeddings(self, rows: list[tuple]) -> int:
+    def save_embeddings(self, rows: list[tuple], model_id: str = ACTIVE_MODEL_ID) -> int:
         """rows are (folder_mode, tweet_id, num, media_type, embedding_bytes, confidence)."""
         if not rows or not self._has_table("ai_embeddings"):
+            return 0
+        size = embedding_bytes(model_id)
+        if not size:
             return 0
         now = _now()
         stored = []
         for row in rows:
             blob = row[4]
-            if not isinstance(blob, (bytes, bytearray)) or len(blob) != _EMBEDDING_BYTES:
+            if not isinstance(blob, (bytes, bytearray)) or len(blob) != size:
                 continue
             confidence = row[5]
             if confidence is not None and not isinstance(confidence, (int, float)):
                 confidence = None
-            stored.append((row[0], row[1], row[2], row[3], bytes(blob), confidence, now))
+            stored.append((row[0], row[1], row[2], row[3], bytes(blob), confidence, now, model_id))
         if not stored:
             return 0
         with self._db:
             self._db.executemany(
-                "INSERT INTO ai_embeddings(folder_mode, tweet_id, num, media_type, embedding, confidence, updated_at) "
-                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
-                "embedding=excluded.embedding, confidence=excluded.confidence, updated_at=excluded.updated_at",
+                "INSERT INTO ai_embeddings(folder_mode, tweet_id, num, media_type, embedding, confidence, updated_at, "
+                "model_id) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
+                "embedding=excluded.embedding, confidence=excluded.confidence, updated_at=excluded.updated_at, "
+                "model_id=excluded.model_id",
                 stored,
             )
         return len(stored)
 
+    def _feedback_rows(self, identities=None) -> list[dict]:
+        if not self._has_table("ai_tag_feedback"):
+            return []
+        if identities is None:
+            return self._read_rows("SELECT folder_mode, tweet_id, num, media_type, tag, label FROM ai_tag_feedback")
+        rows = []
+        for clause, params in _identity_chunks(identities):
+            rows.extend(self._read_rows(
+                "SELECT folder_mode, tweet_id, num, media_type, tag, label FROM ai_tag_feedback "
+                f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})", params))
+        return rows
+
     @_safe
-    def learning_state(self, *, include_embeddings: bool = True) -> tuple[dict, dict, dict]:
+    def tag_feedback(self, identities=None) -> dict[tuple, dict[str, int]]:
+        """``{identity: {tag: +1 or -1}}`` of what the person answered about AI tags."""
+        found: dict[tuple, dict[str, int]] = {}
+        for row in self._feedback_rows(identities):
+            found.setdefault((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]), {})[row["tag"]] = (
+                1 if row["label"] > 0 else -1)
+        return found
+
+    @_safe
+    def learning_state(self, *, include_embeddings: bool = True,
+                       model_id: str = ACTIVE_MODEL_ID) -> tuple[dict, dict, dict]:
         """Return ``(embeddings, feedback, estimated)``.
 
-        ``embeddings`` maps an identity to ``(bytes, confidence)``. ``feedback`` maps
-        an identity to the taught category (``""`` means none of the five).
-        ``estimated`` maps an identity to the current non-empty AI tag.
-        Pass ``include_embeddings=False`` when only the taught labels and current
-        tags are needed. A library with no teaching then skips the embedding blobs.
+        ``embeddings`` maps an identity to ``(bytes, confidence)`` of ``model_id``'s
+        feature; ``feedback`` maps it to ``{tag: +1 or -1}``; ``estimated`` maps it
+        to the set of its AI-estimated tags (empty for a photo looked at that got none).
         """
-        embeddings, feedback, estimated = {}, {}, {}
-        if include_embeddings and self._has_table("ai_embeddings"):
-            for row in self._read_rows(
-                "SELECT folder_mode, tweet_id, num, media_type, embedding, confidence FROM ai_embeddings"
-            ):
-                blob = row["embedding"]
-                if isinstance(blob, memoryview):
-                    blob = blob.tobytes()
-                if isinstance(blob, (bytes, bytearray)) and len(blob) == _EMBEDDING_BYTES:
+        embeddings, estimated = {}, {}
+        if include_embeddings:
+            for batch in self.iter_embeddings(model_id, 1000):
+                for row in batch:
                     embeddings[(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])] = (
-                        bytes(blob), row["confidence"],
-                    )
-        if self._has_table("ai_feedback"):
-            for row in self._read_rows("SELECT folder_mode, tweet_id, num, media_type, category FROM ai_feedback"):
-                feedback[(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])] = row["category"] or ""
+                        bytes(row["embedding"]), row["confidence"])
+        feedback = self.tag_feedback()
         if self._has_table("media_tags"):
             for row in self._read_rows(
                 "SELECT folder_mode, tweet_id, num, media_type, tag FROM media_tags WHERE source='ai'"
             ):
                 ident = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                tags = estimated.setdefault(ident, set())
                 if row["tag"]:
-                    estimated[ident] = row["tag"]
-                elif ident not in estimated:
-                    estimated[ident] = ""
+                    tags.add(row["tag"])
         return embeddings, feedback, estimated
 
     @_safe
+    def ai_tags_of(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> list[dict]:
+        """The AI tags shown on one photo: ``[{tag, source, confirmed}]``, confirmed ones first."""
+        if not self._has_table("media_tags"):
+            return []
+        rows = self._read_rows(
+            "SELECT tag, source FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+            "AND source IN ('ai','confirmed') AND tag!='' ORDER BY source='ai', created_at ASC, tag ASC",
+            (folder_mode, tweet_id, num, media_type))
+        return [{"tag": row["tag"], "source": row["source"], "confirmed": row["source"] == "confirmed"}
+                for row in rows]
+
+    @_safe
     def classification_of(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> dict:
-        """The category shown for one photo, and whether the user confirmed it."""
+        """The first AI tag shown for one photo, whether the person confirmed it, and the photo's score.
+
+        A photo can carry several AI tags (``ai_tags_of``); this is the one older
+        callers show. ``confirmed`` is also true for a photo whose AI tags the
+        person all turned down.
+        """
         category, confirmed, confidence = "", False, None
-        if self._has_table("ai_feedback"):
-            # What the person taught while any record of this file was shown.
+        tags = self.ai_tags_of(folder_mode, tweet_id, num, media_type)
+        if tags:
+            category, confirmed = tags[0]["tag"], tags[0]["confirmed"]
+        elif self._has_table("ai_tag_feedback"):
             for record in self._file_records(folder_mode, tweet_id, num, media_type):
-                row = self._db.execute(
-                    "SELECT category FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                    record,
-                ).fetchone()
-                if row is not None:
-                    category = row["category"] or ""
+                if self._db.execute(
+                        "SELECT 1 FROM ai_tag_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                        "LIMIT 1", record).fetchone() is not None:
                     confirmed = True
                     break
-        if not confirmed and self._has_table("media_tags"):
-            row = self._db.execute(
-                "SELECT tag FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-                "AND source='ai' AND tag != ''",
-                (folder_mode, tweet_id, num, media_type),
-            ).fetchone()
-            if row is not None:
-                category = row["tag"] or ""
         if self._has_table("ai_embeddings"):
-            row = self._db.execute(
-                "SELECT confidence FROM ai_embeddings WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                (folder_mode, tweet_id, num, media_type),
-            ).fetchone()
+            with closing(self._db.execute(
+                f"SELECT confidence FROM ai_embeddings WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                f"AND {self._model_match('ai_embeddings')}",
+                (folder_mode, tweet_id, num, media_type, *self._model_params(ACTIVE_MODEL_ID)),
+            )) as cursor:
+                row = cursor.fetchone()
             if row is not None:
                 confidence = row["confidence"]
         return {"category": category, "confirmed": confirmed, "confidence": confidence}
 
-    @_safe
-    def set_taught_categories(self, identities: list[tuple], category: str) -> int:
-        """Remember one category for each photo and show it as a confirmed label.
-
-        ``category`` is one of the five names, or ``""`` for none of them.
-        A free-form user tag with the same text is left as a user tag.
-        """
-        if category not in _AI_CATEGORIES and category != "":
-            return 0
-        if not identities or not self._has_table("ai_feedback"):
-            return 0
-        now = _now()
-        ident_rows = []
-        seen = set()
-        for folder_mode, tweet_id, num, media_type in identities:
+    def _file_set(self, identities) -> list[tuple]:
+        records, seen = [], set()
+        for ident in identities:
             # Every record of the file learns the same answer, so it holds
             # whichever record later stands for the file.
-            for record in self._file_records(folder_mode, tweet_id, num, media_type):
+            for record in self._file_records(*tuple(ident)[:4]):
                 if record not in seen:
                     seen.add(record)
-                    ident_rows.append(record)
-        feedback_rows = [(f, t, n, m, category, now) for f, t, n, m in ident_rows]
-        tag_rows = [(f, t, n, m, category or "", "confirmed", now) for f, t, n, m in ident_rows]
+                    records.append(record)
+        return records
+
+    @_safe
+    def set_tag_feedback(self, identities: list[tuple], tag: str, positive: bool) -> int:
+        """Remember "yes, this" (or "not this") about one AI tag on each photo and show it.
+
+        Other AI tags of the photos are left as they are. Returns how many photos
+        were given the answer.
+        """
+        tag = _normalize_tag(tag)
+        if not identities or not tag or len(tag) > _TAG_LIMIT or not self._has_table("ai_tag_feedback"):
+            return 0
+        stamp = _now()
         with self._db:
-            self._db.executemany(
-                "INSERT INTO ai_feedback(folder_mode, tweet_id, num, media_type, category, updated_at) "
-                "VALUES (?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
-                "category=excluded.category, updated_at=excluded.updated_at",
-                feedback_rows,
-            )
-            self._db.executemany(
-                "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-                "AND source IN ('ai','confirmed')",
-                ident_rows,
-            )
-            if category:
-                self._db.executemany(
-                    "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
-                    "source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
-                    tag_rows,
-                )
-            else:
-                self._db.executemany(
-                    "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                    "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
-                    tag_rows,
-                )
+            self._apply_tag_feedback(self._file_set(identities), tag, 1 if positive else -1, stamp)
         return len(identities)
 
     @_safe
-    def replace_estimated_labels(self, labels: list[tuple]) -> int:
-        """labels are (folder_mode, tweet_id, num, media_type, tag). Skips taught photos."""
-        if not labels or not self._has_table("media_tags"):
+    def refuse_ai_tags(self, identities: list[tuple]) -> int:
+        """"None of these": "not this" for every AI tag the photos show now. Returns the answers stored."""
+        if not identities or not self._has_table("ai_tag_feedback"):
             return 0
-        feedback = set()
-        if self._has_table("ai_feedback"):
-            feedback = {
-                (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                for row in self._read_rows("SELECT folder_mode, tweet_id, num, media_type FROM ai_feedback")
-            }
-        changed = 0
-        final_by_ident: dict[tuple, str] = {}
-        for folder_mode, tweet_id, num, media_type, tag in labels:
-            ident = (folder_mode, tweet_id, num, media_type)
-            if ident in feedback:
-                continue
-            if tag not in _AI_CATEGORIES and tag != "":
-                continue
-            final_by_ident[ident] = tag
-            changed += 1
-        if not final_by_ident:
-            return 0
-        now = _now()
-        delete_rows = list(final_by_ident.keys())
-        insert_rows = [(*ident, tag, "ai", now) for ident, tag in final_by_ident.items()]
+        stamp = _now()
+        answers = 0
+        applied: set[tuple[tuple, str]] = set()
+        looked_at: list[tuple] = []
+        looked_set: set[tuple] = set()
         with self._db:
-            self._db.executemany(
-                "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? AND source='ai'",
-                delete_rows,
-            )
-            self._db.executemany(
-                "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
-                "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
-                insert_rows,
-            )
-        return changed
+            for ident in identities:
+                file_records = self._file_records(*tuple(ident)[:4])
+                if not file_records:
+                    continue
+                shown = set()
+                for record in file_records:
+                    for row in self._db.execute(
+                            "SELECT tag FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                            "AND source IN ('ai','confirmed') AND tag!=''", record).fetchall():
+                        shown.add(row["tag"])
+                if not shown:
+                    for record in file_records:
+                        if record not in looked_set:
+                            looked_set.add(record)
+                            looked_at.append(record)
+                    continue
+                for tag in sorted(shown):
+                    pending = [record for record in file_records if (record, tag) not in applied]
+                    if not pending:
+                        continue
+                    self._apply_tag_feedback(pending, tag, -1, stamp)
+                    for record in pending:
+                        applied.add((record, tag))
+                    answers += len(pending)
+            for record in looked_at:
+                self._db.execute(_LOOKED_AT, (*record, stamp))
+        return answers
+
+    @_safe
+    def set_taught_categories(self, identities: list[tuple], category: str) -> int:
+        """The single-label teaching of earlier versions: "yes" for one tag, or "" for none of the shown ones."""
+        if not identities:
+            return 0
+        if category:
+            return self.set_tag_feedback(identities, category, True)
+        self.refuse_ai_tags(identities)
+        return len(identities)
+
+    # What ai_pipeline asks of a store: a photo is named by its record (a 4-tuple) here.
+    @staticmethod
+    def row_identity(row) -> tuple:
+        return (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+
+    @staticmethod
+    def feature_row(ident, blob) -> dict:
+        return {"folder_mode": ident[0], "tweet_id": ident[1], "num": ident[2], "media_type": ident[3],
+                "embedding": blob}
+
+    def save_features(self, triples) -> int:
+        """``(ident, feature bytes, confidence)`` of the current model."""
+        return self.save_embeddings([(*ident, blob, confidence) for ident, blob, confidence in triples],
+                                    ACTIVE_MODEL_ID)
+
+    def remember_unreadable_idents(self, triples) -> int:
+        """``(ident, filesize, mtime_ns)`` of photos the model could not read."""
+        return self.remember_unreadable([(*ident, size, mtime) for ident, size, mtime in triples])
+
+    def store_ai_tags(self, pairs) -> tuple[int, int]:
+        """``(ident, tags)``: see replace_ai_tags."""
+        return self.replace_ai_tags([(*ident, tags) for ident, tags in pairs])
+
+    @_safe
+    def replace_ai_tags(self, rows) -> tuple[int, int]:
+        """Store what a classification estimated: rows are (folder_mode, tweet_id, num, media_type, tags).
+
+        Each photo's AI-estimated tags become exactly ``tags``, except a tag the
+        person answered about or typed on that photo: the person's decision is
+        never overridden. A photo left with none keeps the empty AI row, which
+        marks it as looked at. Returns ``(photos changed, photos that now show
+        an AI tag among them)``.
+        """
+        if not rows or not self._has_table("media_tags"):
+            return 0, 0
+        wanted: dict[tuple, list[str]] = {}
+        for row in rows:
+            ident = tuple(row[:4])
+            tags = []
+            for tag in row[4] or ():
+                clean = _normalize_tag(tag)
+                if clean and len(clean) <= _TAG_LIMIT and clean not in tags:
+                    tags.append(clean)
+            wanted[ident] = tags
+        changed = tagged = 0
+        idents = list(wanted)
+        for start in range(0, len(idents), _LABEL_CHUNK):
+            chunk = idents[start:start + _LABEL_CHUNK]
+            stamp = _now()
+            with self._db:
+                if not self._db.in_transaction:
+                    self._db.execute("BEGIN IMMEDIATE")
+                record_to_idents: dict[tuple, list[tuple]] = {}
+                all_records: list[tuple] = []
+                seen_records: set[tuple] = set()
+                for ident in chunk:
+                    for rec in self._file_records(*ident):
+                        record_to_idents.setdefault(rec, []).append(ident)
+                        if rec not in seen_records:
+                            seen_records.add(rec)
+                            all_records.append(rec)
+                decided: dict[tuple, set] = {}
+                current: dict[tuple, set] = {}
+                for rec, answers in self.tag_feedback(all_records).items():
+                    for target_ident in record_to_idents.get(rec, ()):
+                        decided.setdefault(target_ident, set()).update(answers)
+                for clause, params in _identity_chunks(all_records):
+                    for row in self._read_rows(
+                            "SELECT folder_mode, tweet_id, num, media_type, tag, source FROM media_tags "
+                            f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})", params):
+                        rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                        if row["source"] == "ai" and rec in wanted:
+                            current.setdefault(rec, set()).add(row["tag"])
+                        elif row["tag"]:
+                            for target_ident in record_to_idents.get(rec, ()):
+                                decided.setdefault(target_ident, set()).add(row["tag"])
+                updates = []
+                for ident in chunk:
+                    final = {tag for tag in wanted[ident] if tag not in decided.get(ident, set())} or {""}
+                    if current.get(ident) == final:
+                        continue
+                    updates.append((ident, final))
+                for ident, final in updates:
+                    self._db.execute("DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? "
+                                     "AND media_type=? AND source='ai'", ident)
+                    if final == {""}:
+                        self._db.execute(_LOOKED_AT, (*ident, stamp))
+                    else:
+                        self._db.executemany(
+                            "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
+                            "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
+                            [(*ident, tag, "ai", stamp) for tag in sorted(final)])
+                    changed += 1
+                    if final != {""}:
+                        tagged += 1
+        return changed, tagged
+
+    @_safe
+    def replace_estimated_labels(self, labels: list[tuple]) -> int:
+        """labels are (folder_mode, tweet_id, num, media_type, tag); one estimated tag ("" for none) per photo.
+
+        The last label given for a photo counts. Returns how many labels were given.
+        """
+        if not labels:
+            return 0
+        final: dict[tuple, list[str]] = {}
+        for folder_mode, tweet_id, num, media_type, tag in labels:
+            final[(folder_mode, tweet_id, num, media_type)] = [tag] if tag else []
+        self.replace_ai_tags([(*ident, tags) for ident, tags in final.items()])
+        return len(labels)
 
     @_safe
     def clear_ai_tags(self) -> int:
@@ -3243,6 +3519,7 @@ class HistoryStore:
                 "SELECT COUNT(*) FROM media_tags WHERE source = 'ai' AND tag != ''"
             ).fetchone()[0]
             self._db.execute("DELETE FROM media_tags WHERE source = 'ai'")
+            self._db.execute("DELETE FROM catalog_meta WHERE key IN ('ai_scored_rules_version','ai_scored_model_id')")
             return int(visible_count)
 
     @_safe
@@ -3258,6 +3535,126 @@ class HistoryStore:
             "GROUP BY media_tags.tag ORDER BY count DESC, media_tags.tag ASC"
         )
         return {r["tag"]: r["count"] for r in rows}
+
+    @_safe
+    def ai_tag_counts(self, tags) -> dict[str, int]:
+        """Files under each AI tag's list: AI-estimated or confirmed, or typed by the person (see the filter)."""
+        names = [tag for tag in dict.fromkeys(_normalize_tag(tag) for tag in tags) if tag and len(tag) <= _TAG_LIMIT]
+        if not names or not self._has_table("media_tags"):
+            return {}
+        marks = ",".join("?" for _ in names)
+        rows = self._read_rows(
+            "SELECT tag, COUNT(*) AS count FROM (SELECT DISTINCT mark.tag AS tag, media.rowid AS file "
+            "FROM media_tags AS mark "
+            f"CROSS JOIN media ON media.folder_mode IN {_MODE_LIST} AND media.tweet_id=mark.tweet_id "
+            "AND ((mark.source IN ('ai','confirmed') AND mark.folder_mode=media.folder_mode AND mark.num=media.num "
+            "AND mark.media_type=media.media_type) OR (mark.source='user' AND " + _on_file("mark") + ")) "
+            f"WHERE mark.tag IN ({marks}) AND " + _listed("media") + ") GROUP BY tag", names)
+        return {row["tag"]: int(row["count"]) for row in rows}
+
+    @_safe
+    def ai_scored_state(self) -> tuple[str, str]:
+        """``(rules version, model id)`` this catalog's AI tags were last fully scored with."""
+        found = {row["key"]: row["value"] for row in self._read_rows(
+            "SELECT key, value FROM catalog_meta WHERE key IN ('ai_scored_rules_version','ai_scored_model_id')")}
+        return found.get("ai_scored_rules_version", ""), found.get("ai_scored_model_id", "")
+
+    @_safe
+    def set_ai_scored_state(self, rules_version: int, model_id: str) -> None:
+        with self._db:
+            self._db.executemany("INSERT OR REPLACE INTO catalog_meta(key, value) VALUES (?,?)",
+                                 (("ai_scored_rules_version", str(int(rules_version))),
+                                  ("ai_scored_model_id", str(model_id))))
+
+    @_safe
+    def ai_examples(self, tags, model_id: str = ACTIVE_MODEL_ID) -> list[tuple]:
+        """What this catalog teaches the shared AI profile, for these tags.
+
+        Rows are (identity, tag, label, feature bytes) of listed photos that have
+        a feature of ``model_id``: every answer about an AI tag, and every photo
+        the person tagged with one of ``tags`` themselves (a "yes"). A typed tag
+        outweighs an answer about the same tag.
+        """
+        names = [tag for tag in dict.fromkeys(_normalize_tag(tag) for tag in tags) if tag and len(tag) <= _TAG_LIMIT]
+        if not names or not self._has_table("ai_embeddings"):
+            return []
+        marks = ",".join("?" for _ in names)
+        match = self._model_match("e")
+        params = self._model_params(model_id)
+        found: dict[tuple, tuple] = {}
+        join = ("CROSS JOIN media ON media.folder_mode IN " + _MODE_LIST + " AND media.tweet_id=mark.tweet_id "
+                "AND " + _on_file("mark") + " "
+                "JOIN ai_embeddings e ON e.folder_mode=media.folder_mode AND e.tweet_id=media.tweet_id "
+                "AND e.num=media.num AND e.media_type=media.media_type AND " + match + " ")
+        if self._has_table("ai_tag_feedback"):
+            for row in self._read_rows(
+                    "SELECT media.folder_mode AS folder_mode, media.tweet_id AS tweet_id, media.num AS num, "
+                    "media.media_type AS media_type, mark.tag AS tag, mark.label AS label, e.embedding AS embedding "
+                    "FROM ai_tag_feedback AS mark " + join +
+                    f"WHERE mark.tag IN ({marks}) AND " + _listed("media") + " ORDER BY mark.updated_at ASC",
+                    (*params, *names)):
+                ident = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                found[(ident, row["tag"])] = (ident, row["tag"], 1 if row["label"] > 0 else -1, bytes(row["embedding"]))
+        if self._has_table("media_tags"):
+            for row in self._read_rows(
+                    "SELECT media.folder_mode AS folder_mode, media.tweet_id AS tweet_id, media.num AS num, "
+                    "media.media_type AS media_type, mark.tag AS tag, e.embedding AS embedding "
+                    "FROM media_tags AS mark " + join +
+                    f"WHERE mark.source='user' AND mark.tag IN ({marks}) AND " + _listed("media"),
+                    (*params, *names)):
+                ident = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                found[(ident, row["tag"])] = (ident, row["tag"], 1, bytes(row["embedding"]))
+        return list(found.values())
+
+    @_safe
+    def taught_identities(self, tags) -> set[tuple]:
+        """Listed photos the person answered about, or tagged with one of ``tags`` themselves."""
+        names = [tag for tag in dict.fromkeys(_normalize_tag(tag) for tag in tags) if tag and len(tag) <= _TAG_LIMIT]
+        found = set()
+        join = (f"CROSS JOIN media ON media.folder_mode IN {_MODE_LIST} AND media.tweet_id=mark.tweet_id "
+                "AND " + _on_file("mark") + " ")
+        select = "SELECT DISTINCT media.folder_mode, media.tweet_id, media.num, media.media_type "
+        if self._has_table("ai_tag_feedback"):
+            with closing(self._db.execute(select + "FROM ai_tag_feedback AS mark " + join + "WHERE " + _listed("media"))) as cur:
+                for row in cur:
+                    found.add(tuple(row))
+        if names and self._has_table("media_tags"):
+            marks = ",".join("?" for _ in names)
+            with closing(self._db.execute(
+                    select + "FROM media_tags AS mark " + join +
+                    f"WHERE mark.source='user' AND mark.tag IN ({marks}) AND " + _listed("media"),
+                    names)) as cur:
+                for row in cur:
+                    found.add(tuple(row))
+        return found
+
+    @_safe
+    def background_embeddings(self, tag: str, limit: int, model_id: str = ACTIVE_MODEL_ID) -> list[bytes]:
+        """Features of up to ``limit`` listed photos that do not carry ``tag`` in any way, spread over the library."""
+        clean = _normalize_tag(tag)
+        wanted = int(limit)
+        if not clean or wanted <= 0 or not self._has_table("ai_embeddings"):
+            return []
+        total = self.count_embeddings(model_id)
+        if not total:
+            return []
+        fb_clause = ""
+        fb_params: tuple = ()
+        if self._has_table("ai_tag_feedback"):
+            fb_clause = ("AND NOT EXISTS (SELECT 1 FROM ai_tag_feedback AS fb "
+                         f"WHERE {_on_file('fb', 'm')} AND fb.tag=?) ")
+            fb_params = (clean,)
+        base = ("SELECT e.embedding AS embedding " + self._embedding_sql(False) +
+                "AND NOT " + _ai_tag_predicate("m") + " " + fb_clause)
+        base_params = (*self._model_params(model_id), clean, clean, *fb_params)
+        step = max(1, total // max(1, wanted))
+        rows = self._read_rows(base + "AND (m.rowid % ?)=0 ORDER BY m.rowid LIMIT ?", (*base_params, step, wanted))
+        if step > 1 and len(rows) < wanted:
+            rows.extend(self._read_rows(
+                base + "AND (m.rowid % ?)!=0 ORDER BY m.rowid LIMIT ?",
+                (*base_params, step, wanted - len(rows)),
+            ))
+        return [bytes(row["embedding"]) for row in rows]
 
     @_safe
     def save_image_hashes(self, hashes: list[tuple]) -> int:

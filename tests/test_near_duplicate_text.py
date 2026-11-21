@@ -347,7 +347,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual((result["recycled"], result["protected"]), (0, 1))
         self.assertTrue(self.files["201"].is_file())
         self.assertIn("그대로 두었습니다", result["message"])
-        self.assertIn("화질만 다른 사진 포함", result["message"])
+        self.assertIn("비슷한 사진도 검사", result["message"])
 
     def test_a_file_with_the_same_bytes_in_a_near_group_still_goes(self):
         twin = self.paths.output_dir / "writer_202_1.jpg"

@@ -2,6 +2,26 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.12.0 — 2026-11-21
+
+사용자 지정 AI 태그·공통 AI 프로필·SigLIP 2 전환(Phase 1), 내 PC 사진 폴더를 정리하는 ‘폴더 정리’ 탭(Phase 2), 그리고 전체 프로그램·성능·UI/UX·안정성·문구 검수 수정을 반영했습니다.
+
+- **SigLIP 2 이미지 특징 모델 전환 및 사용자 지정 AI 태그·공통 AI 프로필 (`luvbox/clip_model.py`, `luvbox/ai_anchors.py`, `luvbox/clip_classifier.py`, `luvbox/ai_profile.py`, `luvbox/tag_learner.py`, `luvbox/ai_pipeline.py`, `assets/qt/AiTagManagerDialog.qml`)**:
+  - 로컬 비전 모델을 SigLIP 2 Base Patch16-224 양자화 ONNX(768차원)로 전환하고 기본 5개 태그의 사전 계산 텍스트 앵커 및 멀티 라벨 점수화를 도입했습니다.
+  - `%LOCALAPPDATA%\LuvBox\ai-profile\profile.sqlite3` 공통 AI 프로필(`AiProfileStore`)에 태그 규칙·학습 예시·가중치를 보관해 X 갤러리와 폴더 정리 탭이 학습 결과를 공유하며, 예시 수에 따라 `anchor` / `neighbor` / `prototype` / `linear`(로지스틱 회귀) 단계로 학습·채점합니다.
+  - `classify_batch`를 규칙 종류별 행렬 곱(`E @ W.T`)으로 벡터화하고, 임베딩 BLOB 일괄 디코딩(`b"".join`) 및 `rescore_store` 4096장 단위 스트리밍 재채점을 적용했습니다.
+  - 좁은 코사인 분포에서 `linear` 편향 진동을 막기 위해 사전 로짓 보정 이후 가중치·편향 학습률을 분리하고, 배경 임베딩이 축적되면 기존 `neighbor` 규칙이 자동으로 `linear`로 승격되도록 보완했습니다.
+  - 다중 사진 `AI 태그 아님` 실행 시 선택된 사진마다 실제 보유했던 AI 태그만 부정 예시로 기록하도록 격리하고, 공유 학습을 끈 개인 가르치기(`shared=False`) 후 재채점 마커(`ai_scored_state`)가 덮어써지지 않도록 수정했습니다.
+- **‘폴더 정리’ 탭 (`luvbox/local_store.py`, `luvbox/local_deletion.py`, `luvbox/qt_local_folder.py`, `assets/qt/LocalFolderView.qml`)**:
+  - 선택한 폴더 안에는 아무 파일도 쓰지 않고 `%LOCALAPPDATA%\LuvBox\local-folders\<폴더 키>.sqlite3`에 파일 목록·해시·임베딩·태그·‘중복 아님’ 표시를 보관하며, 심볼릭 링크·정션·앱 데이터 폴더·클라우드 전용 파일은 제외합니다.
+  - 스캔 시 변경 없는 파일의 메타데이터 재조회를 생략하고 고아 썸네일을 자동 정리(`prune_orphan_thumbs`)하며, 중복 보기가 아닐 때는 코사인 유사도 그래프 계산 없이 중복 배지 수만 경량 조회(`duplicate_badge_count`)하도록 최적화했습니다.
+  - 분할된 중복 묶음에서 ‘중복 아님’ 취소·초기화 시 연결된 하위 묶음을 모두 재병합해 코사인 클러스터를 재계산하고, 삭제 후 1장만 남은 묶음 번호를 즉시 정리하도록 수정했습니다.
+- **QML UI/UX·바인딩·단축키 및 사용자 문구·문서 개선 (`assets/qt/*.qml`, `luvbox/*.py`, `README.md`, `docs/사용안내.txt`)**:
+  - `LocalFolderView.qml`과 `AiTagManagerDialog.qml`의 명령형 대입으로 끊기던 선언적 바인딩 7건을 `Qt.binding`으로 복원하고, `Ctrl+F` 입력 시 즐겨찾기(`F`)가 함께 토글되던 보조키 충돌과 방향키 이동 시 `selectedKey` 동기화를 수정했습니다.
+  - `LocalFolderView.qml` 미리보기를 `MediaPreview` + `PreviewZoomControls`로 업그레이드하고, 최근 폴더 빠른 전환 메뉴·폴더 닫기·태그 칩 클릭 필터·검색어 지우기·필터 초기화·중복 도움말 팝오버를 추가했습니다.
+  - `ShortcutHelp.qml`을 넓이에 따라 2열로 배치해 1280×860 창에서 화면 밖으로 넘치던 문제를 해결하고 폴더 정리 단축키를 보강했습니다.
+  - UI 경계에서 원시 예외 문자열 노출을 막는 `_safe_ui_error`를 적용하고, 앱 전반의 개발·시스템 용어와 내부 경로 안내를 일반 사용자용 한국어 표현으로 정리했습니다.
+
 ## 1.11.9 — 2026-11-20
 
 1.11.8 전체 프로그램·UI/UX·문서 검수에서 확인된 QML 상호작용 버그와 사용자 문서의 개발 용어 노출을 수정했습니다.

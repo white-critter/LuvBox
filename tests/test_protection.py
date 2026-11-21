@@ -101,9 +101,9 @@ class ProtectionTests(unittest.TestCase):
         self.guard.protect_session(session)
         request = SimpleNamespace(url="https://pbs.twimg.com/media/photo")
         with patch("luvbox.protection.os.fsync", side_effect=PermissionError), \
-                self.assertRaisesRegex(ProtectionError, "보호 기록"):
+                self.assertRaisesRegex(ProtectionError, "저장 대기 상태"):
             session.send(request)
-        with self.assertRaisesRegex(ProtectionError, "보호 기록"):
+        with self.assertRaisesRegex(ProtectionError, "저장 대기 상태"):
             session.send(request)
         self.assertEqual(original.call_count, 1)
         self.assertEqual(list(self.root.glob("cooldown-*.tmp")), [])
@@ -239,7 +239,7 @@ class ProtectionTests(unittest.TestCase):
                 with self.subTest(content_range=content_range), \
                         self.assertRaisesRegex(ProtectionError, "이어받기") as raised:
                     session.send(request)
-                self.assertIn(".part 파일은 남겨", str(raised.exception))
+                self.assertIn("임시 파일(.part)은 남겨", str(raised.exception))
                 self.assertIn("다시 실행", str(raised.exception))
                 self.assertNotIn("private", str(raised.exception))
             response.close.assert_called_once()
@@ -278,7 +278,7 @@ class ProtectionTests(unittest.TestCase):
         for value in ('{"until":"nan"}', "{}", "invalid"):
             self.guard.state_path.write_text(value, encoding="utf-8")
             guard = AccountGuard("offline", sleep=Mock(), root=self.root)
-            with self.subTest(value=value), self.assertRaisesRegex(ProtectionError, "보호 기록"):
+            with self.subTest(value=value), self.assertRaisesRegex(ProtectionError, "저장 대기 상태"):
                 guard.acquire()
             self.assertIsNone(guard._lock_file)
 

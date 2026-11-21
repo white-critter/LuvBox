@@ -19,8 +19,8 @@ class _DeletionMessageError(ValueError):
 
 
 _NO_OTHER_COPY = "같은 내용의 다른 파일이 남는지 확인하지 못해 그대로 두었습니다."
-_NEAR_ONLY = ("‘화질만 다른 사진 포함’으로 묶인 사진은 내용이 완전히 같은 파일이 남을 때만 사본으로 보냅니다. "
-              "‘비슷함’ 사진은 그 사진의 ‘비교’로 남길 사진과 나란히 본 뒤 한 장씩 보낼 수 있습니다.")
+_NEAR_ONLY = ("‘비슷한 사진도 검사’로 묶인 사진은 내용이 완전히 같은 파일이 남을 때만 사본으로 보냅니다. "
+              "‘비슷함’ 사진은 한 장만 골라 휴지통으로 보내면 남길 사진과 나란히 비교한 뒤 보낼 수 있습니다.")
 _ALIKE_NOT_KEPT = "남길 사진이 그대로 있고 같은 사진인지 다시 확인하지 못해 그대로 두었습니다."
 
 
@@ -351,7 +351,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                     if location.output_dir.is_dir():
                         publish_snapshot(location)
                 except Exception:
-                    warnings.append("저장 폴더의 기록 사본은 다음 저장 때 갱신합니다.")
+                    warnings.append("저장 폴더의 백업 기록은 다음 저장 때 함께 반영합니다.")
                 try:
                     if backup_catalog(location.record_dir, location.account) is None:
                         warnings.append("이 PC의 기록 백업을 만들지 못했습니다.")
@@ -361,10 +361,10 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
             try:
                 guard.close()
             except Exception:
-                warnings.append("저장 폴더의 작업 보호 정리를 마치지 못했습니다. 앱을 다시 시작해 주세요.")
+                warnings.append("저장 폴더의 작업 정리를 마치지 못했습니다. 앱을 다시 시작해 주세요.")
         if account_guard is not None:
             try:
                 account_guard.close()
             except Exception:
-                warnings.append("계정의 작업 보호 정리를 마치지 못했습니다. 앱을 다시 시작해 주세요.")
+                warnings.append("계정 작업 정리를 마치지 못했습니다. 앱을 다시 시작해 주세요.")
     return finished()

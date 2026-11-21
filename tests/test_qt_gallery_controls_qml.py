@@ -28,6 +28,7 @@ def scene():
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtQuick import QQuickItem
     from PySide6.QtQuickControls2 import QQuickStyle
     from shiboken6 import delete
 
@@ -490,9 +491,16 @@ def scene():
         assert named == [("여행", False), ("풍경·배경", True)], named
         shown = sorted(item.property("text") for item in named_items("previewTagName"))
         assert shown == ["#여행", "AI · #풍경·배경"], shown
+        # An AI tag carries "yes" and "not this"; a typed tag only its remove mark.
+        marks = {chip.property("tagName"): sorted(item.objectName() for item in chip.findChildren(QQuickItem)
+                                                  if item.objectName().startswith("previewTag")
+                                                  and item.objectName() != "previewTagName" and item.property("visible"))
+                 for chip in chips}
+        assert marks == {"여행": ["previewTagRemove"], "풍경·배경": ["previewTagConfirm", "previewTagRemove"]}, marks
         compact = find("previewAiCorrect").property("height")
         assert compact >= 28, compact
-        for name in ("inlineTagField", "inlineTagAdd", "previewAiConfirm"):
+        assert find("previewAiCorrect").property("text") == "+ AI 태그"
+        for name in ("inlineTagField", "inlineTagAdd"):
             assert find(name).property("height") == compact, (name, find(name).property("height"))
         assert all(chip.property("height") == compact for chip in chips), "chips are as tall as the buttons"
         assert find("inlineTagAdd").property("font").pixelSize() >= 13

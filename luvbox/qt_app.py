@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import os
 import re
 from pathlib import Path
 from queue import Queue
@@ -19,6 +20,7 @@ from .qt_accounts import AccountController
 from .qt_browser_setup import BrowserSetupController
 from .qt_download import DownloadController
 from .qt_library import LibraryController
+from .qt_local_folder import LocalFolderController, LocalManagementController
 from .qt_schedule import ScheduleController
 from .qt_management import ManagementController
 from .qt_records import PREVIEW_PROVIDER, RecordsController
@@ -89,6 +91,15 @@ class ApplicationController(QObject):
             self._preferences["max_video_mb"] = defaults["max_video_mb"]
         if self._preferences.get("gallery_density") not in (0, 1, 2) or type(self._preferences["gallery_density"]) is not int:
             self._preferences["gallery_density"] = defaults["gallery_density"]
+        # The 폴더 정리 tab's own settings; a damaged value is the first setting again.
+        if not isinstance(self._preferences.get("local_folder_last"), str):
+            self._preferences["local_folder_last"] = defaults["local_folder_last"]
+        recent = self._preferences.get("local_folder_recent")
+        self._preferences["local_folder_recent"] = (
+            [item for item in recent if isinstance(item, str) and item][:10] if isinstance(recent, list) else [])
+        for name in ("local_folder_subfolders", "local_folder_share_learning"):
+            if type(self._preferences.get(name)) is not bool:
+                self._preferences[name] = defaults[name]
         self._account = str(self._preferences.get("account") or "")
         self._output = str(self._preferences.get("output_dir") or defaults["output_dir"])
         locations = self._preferences.get("record_locations", {})
@@ -131,6 +142,14 @@ class ApplicationController(QObject):
         # Newly saved photos get their AI category without being asked, unless switched off.
         self._library.setAutoClassify(self._preferences.get("auto_classify") is not False)
         self._management = ManagementController(self._library, self)
+        # The 폴더 정리 tab: a folder of this PC, with the gallery's tools and the same AI tags.
+        self._local_folder = LocalFolderController(self)
+        self._local_folder.setAutoClassify(self._preferences.get("auto_classify") is not False)
+        self._local_folder.restore_preferences(self._preferences["local_folder_last"],
+                                               self._preferences["local_folder_recent"],
+                                               self._preferences["local_folder_subfolders"],
+                                               self._preferences["local_folder_share_learning"])
+        self._local_management = LocalManagementController(self._local_folder, self)
         self._records = RecordsController(self)
         self._records.setVideoLimit(self._preferences["max_video_mb"])
         self._schedule = ScheduleController(self)
@@ -141,6 +160,16 @@ class ApplicationController(QObject):
         self._schedule.changed.connect(self._state_changed)
         self._management.changed.connect(self._state_changed)
         self._management.libraryChanged.connect(self._managed_library_changed)
+        self._local_management.changed.connect(self._state_changed)
+        self._local_management.libraryChanged.connect(self._local_library_changed)
+        self._local_folder.overlapChanged.connect(self._state_changed)
+        # An AI tag added, switched or taught in one tab is the other tab's too (one shared profile).
+        self._library.aiProfileChanged.connect(self._local_folder.reloadAiProfile)
+        self._local_folder.aiProfileChanged.connect(self._library.reloadAiProfile)
+        for signal in (self._local_folder.folderChanged, self._local_folder.recentFoldersChanged,
+                       self._local_folder.shareLearningChanged):
+            signal.connect(self._remember_local_folder)
+        self._local_folder.folderForgotten.connect(self._forget_local_folder)
         self._records.retryRequested.connect(self.retryUnsaved)
         self._records.catalogChanged.connect(self._records_changed_gallery)
         self._download.eventReceived.connect(self._download_event)
@@ -154,6 +183,8 @@ class ApplicationController(QObject):
         self._schedule.shutdownFinished.connect(lambda: self._part_closed("schedule"))
         self._management.shutdownFinished.connect(lambda: self._part_closed("management"))
         self._records.shutdownFinished.connect(lambda: self._part_closed("records"))
+        self._local_folder.shutdownFinished.connect(lambda: self._part_closed("local_folder"))
+        self._local_management.shutdownFinished.connect(lambda: self._part_closed("local_management"))
         self._updates.shutdownFinished.connect(lambda: self._part_closed("updates"))
         self._completed.connect(self._accept, Qt.ConnectionType.QueuedConnection)
         self._commands = Queue()
@@ -210,6 +241,14 @@ class ApplicationController(QObject):
     @Property(QObject, constant=True)
     def management(self):
         return self._management
+
+    @Property(QObject, constant=True)
+    def localFolder(self):
+        return self._local_folder
+
+    @Property(QObject, constant=True)
+    def localManagement(self):
+        return self._local_management
 
     @Property(QObject, constant=True)
     def records(self):
@@ -320,7 +359,8 @@ class ApplicationController(QObject):
         return bool(self._closing or self._preparing or self._repairing or self._pending_start is not None
                     or self._pending_download is not None or self._save_after_settings
                     or self._accounts.busy or self._download.running
-                    or self._schedule.mutating or self._management.mutating)
+                    or self._schedule.mutating or self._management.mutating
+                    or (self._local_folder.overlapsXLibrary and self._local_management.mutating))
 
     @Property(bool, notify=changed)
     def busy(self):
@@ -354,6 +394,8 @@ class ApplicationController(QObject):
             return self._schedule.status
         if self._management.mutating:
             return self._management.status
+        if self._local_folder.overlapsXLibrary and self._local_management.mutating:
+            return self._local_management.status or "겹치는 폴더 정리 작업이 끝날 때까지 기다립니다"
         return self._message or self._download.status
 
     @Property(str, notify=changed)
@@ -373,8 +415,9 @@ class ApplicationController(QObject):
         return self._gallery_dirty
 
     def _state_changed(self):
+        local_delete_overlap = self._local_folder.overlapsXLibrary and self._local_management.mutating
         locked = (self._closing or self._preparing or self._repairing or self._pending_start is not None
-                  or bool(self._pending_settings) or self._download.running)
+                  or bool(self._pending_settings) or self._download.running or local_delete_overlap)
         account_locked = locked or self._schedule.mutating or self._management.mutating
         if self._accounts.locked != account_locked:
             self._accounts.setLocked(account_locked)
@@ -384,6 +427,10 @@ class ApplicationController(QObject):
         management_locked = locked or self._accounts.busy or self._schedule.mutating
         if self._management.locked != management_locked and not self._closing:
             self._management.setLocked(management_locked)
+        # A folder inside the X save folder waits for a running save before files go to the Recycle Bin.
+        local_locked = self._local_folder.overlapsXLibrary and self._download.running
+        if self._local_management.locked != local_locked and not self._closing:
+            self._local_management.setLocked(local_locked)
         self.changed.emit()
 
     def _persist(self, changes, *, rollback=None):
@@ -427,6 +474,7 @@ class ApplicationController(QObject):
                     self._download.setDetailsEnabled(bool(value))
                 if name == "auto_classify":
                     self._library.setAutoClassify(value is not False)
+                    self._local_folder.setAutoClassify(value is not False)
                 if name == "update_check":
                     self._updates.set_auto_check(value)
                 if name == "max_video_mb":
@@ -519,6 +567,7 @@ class ApplicationController(QObject):
             self._download.setDetailsEnabled(value)
         if name == "auto_classify":
             self._library.setAutoClassify(value)
+            self._local_folder.setAutoClassify(value)
         if name == "update_check":
             self._updates.set_auto_check(value)
         if name == "separate_accounts":
@@ -558,6 +607,11 @@ class ApplicationController(QObject):
         self._library.setLibrary(account, self._output, self._preferences["separate_accounts"])
         self._management.setLibrary(account, self._output, self._preferences["separate_accounts"])
         self._records.setLibrary(account, self._output, self._preferences["separate_accounts"])
+        # Every account's save folder: a photo recycled in the folder tab may be any account's saved photo.
+        locations = self._preferences.get("record_locations", {})
+        saved = [folder for folder in (locations.values() if isinstance(locations, dict) else ())
+                 if isinstance(folder, str)]
+        self._local_folder.checkXOverlap([self._output, *saved])
 
     @Slot(bool)
     def galleryVisible(self, visible):
@@ -628,6 +682,38 @@ class ApplicationController(QObject):
         self._gallery_dirty = False
         self._library.refresh()
         self.changed.emit()
+
+    def _local_library_changed(self):
+        """Files of the 폴더 정리 tab went to the Recycle Bin."""
+        keys = self._local_management.takeRecycledKeys()
+        if keys is None or (keys and not self._local_folder.removeDeleted(keys)):
+            self._local_folder.refresh()
+        if self._local_folder.overlapsXLibrary:
+            # The same files are in the X save folder: the gallery lists them until it reads again.
+            self._gallery_dirty = True
+            if self._gallery_visible:
+                self.refreshGallery()
+        self.changed.emit()
+
+    def _forget_local_folder(self, path):
+        """A folder taken off the recent list is not the one opened at the next start either."""
+        last = self._preferences.get("local_folder_last")
+        if not self._closing and isinstance(last, str) and last and os.path.normcase(last) == os.path.normcase(path):
+            self._persist({"local_folder_last": ""})
+
+    def _remember_local_folder(self):
+        """Keep the 폴더 정리 tab's folder and switches for the next start."""
+        if self._closing:
+            return
+        local = self._local_folder
+        changes = {"local_folder_recent": list(local.recentFolders),
+                   "local_folder_subfolders": bool(local.includeSubfolders),
+                   "local_folder_share_learning": bool(local.shareLearning)}
+        if local.folderPath:
+            changes["local_folder_last"] = local.folderPath
+        changes = {name: value for name, value in changes.items() if self._preferences.get(name) != value}
+        if changes:
+            self._persist(changes)
 
     @Slot()
     def startSave(self):
@@ -829,7 +915,8 @@ class ApplicationController(QObject):
                     # Lock messages are fixed text; anything else may name a path.
                     message = str(error) if isinstance(error, ProtectionError) else _REPAIR_ERROR
                 elif isinstance(error, ValueError) and kind in {"prepare", "open"}:
-                    message = str(error)
+                    raw = str(error).strip()
+                    message = raw if raw and not raw.isascii() else "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요."
                 else:
                     message = "작업을 마치지 못했습니다. 저장 위치와 권한을 확인해 주세요."
                 if kind == "settings":
@@ -901,7 +988,7 @@ class ApplicationController(QObject):
             self._error = ""
             self._message = (f"기록 복구를 마쳤습니다 · 파일 기록 {counts.get('media', 0):,}개, "
                              f"실행 기록 {counts.get('runs', 0):,}개를 살렸습니다. "
-                             f"손상된 원본은 {value.get('kept', '')}에 보관했습니다.")
+                             "손상된 원본은 기록 폴더의 백업에 따로 보관했습니다.")
             warnings = [item for item in value.get("warnings") or [] if isinstance(item, str) and item]
             if warnings:
                 self._message += " " + " ".join(warnings)
@@ -1028,6 +1115,8 @@ class ApplicationController(QObject):
         self._management.shutdown()
         self._records.shutdown()
         self._updates.shutdown()
+        self._local_folder.shutdown()
+        self._local_management.shutdown()
         self._close_timer.start()
         self.changed.emit()
 
@@ -1036,7 +1125,7 @@ class ApplicationController(QObject):
 
     def _finish_close(self):
         if self._shutdown_parts >= {"accounts", "download", "library", "browser_setup", "schedule", "management",
-                                     "records", "updates"}:
+                                     "records", "updates", "local_folder", "local_management"}:
             if not self._io_shutdown_queued:
                 self._io_shutdown_queued = True
                 self._commands.put(("quit", None))
@@ -1245,6 +1334,7 @@ def launch(*, startup_probe=None):
     wheel_input = WheelInputFilter()
     engine = QQmlApplicationEngine()
     engine.addImageProvider("thumbs", controller._library.provider)
+    engine.addImageProvider("localthumbs", controller._local_folder.provider)
     engine.addImageProvider(PREVIEW_PROVIDER, controller._records.preview_provider())
     engine.setInitialProperties({"galleryModel": controller._library.model,
                                  "wheelInputFilter": wheel_input, "appController": controller,
@@ -1256,6 +1346,7 @@ def launch(*, startup_probe=None):
         application.exec()
         wheel_input.close()
         controller._library.provider = None
+        controller._local_folder.provider = None
         delete(engine)
         if startup_probe is None:
             launcher.signal_ready()
@@ -1296,6 +1387,7 @@ def launch(*, startup_probe=None):
     tray.close()
     wheel_input.close()
     controller._library.provider = None
+    controller._local_folder.provider = None
     restart = controller.updates.restart_pending and launcher.launcher_path()
     del first_frame
     delete(engine)

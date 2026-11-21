@@ -10,6 +10,19 @@
 
 배포 검증은 `LuvBox.exe`의 체크섬과 꼬리표, 소스·라이선스 ZIP의 내용과 개인정보 제외를 확인합니다. 공개 뒤 올린 `LuvBox.exe`를 다시 받아 해시를 대조하고 한글·공백 경로에서, 격리한 `LOCALAPPDATA`로 실행합니다. 세부 로그와 화면은 `.test-output/`에 보관하며 배포 소스에 넣지 않습니다.
 
+## 2026-11-21 1.12.0 사용자 지정 AI 태그·폴더 정리 및 프로그램 검수
+
+- **계기·범위**: SigLIP 2 기반 사용자 지정 AI 태그·공통 AI 프로필(Phase 1)과 내 PC 폴더를 정리하는 ‘폴더 정리’ 탭(Phase 2) 구현 뒤 전체 프로그램 검수(성능 개선, 어색하거나 불편한 UI/UX 개선, 문제점·오류·오작동 수정, 안정성 개선, 리팩토링, 앱 내외 문구·문서의 일반 사용자 친화적 수정)입니다.
+- **고친 것·성능·UI/UX·문구**:
+  - AI·저장소·프로필(`tag_learner.py`, `ai_pipeline.py`, `ai_profile.py`, `clip_model.py`, `clip_classifier.py`, `history.py`, `storage.py`, `recovery.py`): `classify_batch` 행렬 곱 벡터화, 임베딩 BLOB 일괄 디코딩 및 4096장 스트리밍 재채점, 좁은 코사인 분포 로지스틱 회귀 수렴 안정화, 배경 축적 시 `neighbor` → `linear` 자동 승격, `AiProfileStore` `BEGIN IMMEDIATE` 트랜잭션 및 잠금 재시도, 비유한(`NaN`/`Inf`) 임베딩 방어, 개인 학습(`shared=False`) 상태 보존, 카탈로그 재연결·복구 시 `media_embeddings` 및 `ai_scored_state` 보존을 반영했습니다.
+  - 폴더 정리·컨트롤러(`local_store.py`, `local_deletion.py`, `qt_local_folder.py`, `qt_library.py`, `qt_app.py`): 변경 없는 파일 메타데이터 재조회 생략, 고아 썸네일 정리, 일반 보기 시 코사인 클러스터링 생략(`duplicate_badge_count`), 분할 중복 묶음의 ‘중복 아님’ 취소·초기화 연결 요소 재병합 및 단건 잔류 묶음 정리, 다중 선택 `AI 태그 아님` 사진별 태그 격리, 썸네일 완료 신호 25ms 배치 플러시, 삭제 전 미리보기 핸들 해제 및 Windows 경로 `normcase` 검증을 반영했습니다.
+  - QML 화면(`LocalFolderView.qml`, `AiTagManagerDialog.qml`, `ShortcutHelp.qml`, `MainWindow.qml`, `DuplicateReview.qml`, `AlikeConfirmation.qml`, `PreviewZoomControls.qml`, `PreferencesDialog.qml`): 명령형 대입으로 끊기던 선언적 바인딩 7건 `Qt.binding` 복원, `Ctrl+F`와 `F` 단축키 충돌 수정, 방향키 `selectedKey` 동기화, 폴더 정리 미리보기 `MediaPreview` + `PreviewZoomControls` 적용, 최근 폴더 메뉴·폴더 닫기·필터 초기화·중복 도움말 카드, `ShortcutHelp.qml` 2열 배치로 1280×860 창 넘침 해결을 적용했습니다.
+  - 문구·문서(`README.md`, `CHANGELOG.md`, `docs/사용안내.txt`, `Launcher.cs`, `luvbox/*.py`, `assets/qt/*.qml`): 개발·시스템 용어와 원시 경로 안내(`%LOCALAPPDATA%` 등), 파이썬 예외 원문 노출을 제거하고 새 기능 안내로 갱신했습니다.
+- **새 검사**: `tests/test_ai_profile.py`, `tests/test_tag_learner.py`, `tests/test_custom_ai_tags.py`, `tests/test_local_store.py`, `tests/test_local_deletion.py`, `tests/test_local_folder_controller.py`, `tests/test_qt_ai_tags_qml.py`, `tests/test_qt_local_folder_qml.py`, `tests/test_qt_app_local_folder.py`, `tests/test_alike_choice.py` 및 `tests/test_regression_1119.py` 추가 검증 통과.
+- **전체 실행**: `.\.venv\Scripts\python.exe -m unittest discover -s tests` — **1,993개 중 1,985개 통과·8개 생략, 실패·오류 0**.
+- **소스 점검**: `pip check`, `tools/check_build_inputs.py`, `tools/package_release.py --check-guides`, `tools/release_key.py --check`, 격리된 `LOCALAPPDATA`·`QML_DISK_CACHE_PATH` 환경의 `entry.py --self-test`와 `entry.py --download-smoke`가 모두 종료 코드 0(`"ok": true`, `"version": "1.12.0"`, `"qml_errors": []`)으로 통과했습니다.
+- 실제 X 로그인·다운로드 및 Windows 작업 스케줄러의 실제 예약 실행은 검사 범위에서 제외했습니다.
+
 ## 2026-11-20 1.11.9 프로그램 검수
 
 - **계기·범위**: 1.11.8 배포 뒤 전체 프로그램 검수(꼭 필요한 성능 개선, 많이 어색한 UI/UX, 중요도 중간 이상의 문제·오작동, 꼭 필요할 때만 리팩토링, 앱 내외 문구·문서 재검토 및 시스템·개발자 내용 노출 축소)입니다. 백엔드·저장소·실행기·브라우저 확장, QML UI/UX, 사용자 노출 문서 전반을 재검토했습니다. 백엔드(`luvbox/*.py`, `entry.py`, `Launcher.cs`, 확장 스크립트)에서는 추가 버그·병목·리팩토링 대상이 확인되지 않아 변경하지 않았습니다.

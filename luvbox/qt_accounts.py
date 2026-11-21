@@ -15,7 +15,7 @@ from .browser_discovery import open_browser_url
 
 _PAIRING_CODE = re.compile(r"[A-Z0-9_-]{8}\Z", re.ASCII)
 _CONNECT_ERROR = "연결하지 못했습니다. 확장 연결을 확인하고 다시 시도해 주세요."
-_TOKEN_ERROR = "auth_token 값과 Windows 저장 권한을 확인해 주세요."
+_TOKEN_ERROR = "입력한 로그인 토큰 값과 Windows 저장 권한을 확인해 주세요."
 _ACCOUNT_ERROR = "계정을 변경하지 못했습니다. 다시 시도해 주세요."
 _DISCONNECT_ERROR = "연결을 해제하지 못했습니다. 다시 시도해 주세요."
 _CANCELLED = "연결을 취소했습니다."

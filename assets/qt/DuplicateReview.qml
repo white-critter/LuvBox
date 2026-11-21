@@ -17,7 +17,11 @@ Item {
     property int tileWidth: 168
     signal previewRequested(string key)
 
-    readonly property var library: app ? app.library : null
+    // The gallery's by default; the 폴더 정리 tab gives its own controller and recycling.
+    property var library: app ? app.library : null
+    property var manager: app ? app.management : null
+    // What keeps "비교" waiting: an X save in the gallery; the 폴더 정리 tab gives its own Recycle Bin's lock.
+    property bool workBusy: !!app && app.busy
     // While the list is read again after a change, the cards on screen are the earlier ones.
     readonly property bool settling: !!library && library.duplicatesSettling
     readonly property int tileHeight: Math.round(tileWidth * 0.75) + 50
@@ -102,8 +106,8 @@ Item {
                     Label {
                         objectName: "duplicateGroupTitle"
                         Layout.fillWidth: true
-                        text: "묶음 " + card.number + " · 같은 사진 " + card.size + "장"
-                            + (card.items.length < card.size ? " (" + card.items.length + "장 표시)" : "")
+                        text: "묶음 " + card.number + (card.copies.length === 0 ? " · 비슷한 사진 " : " · 같은 사진 ")
+                            + card.size + "장" + (card.items.length < card.size ? " (" + card.items.length + "장 표시)" : "")
                         font.bold: true
                         font.pixelSize: Theme.fontSection
                         color: Theme.text
@@ -142,6 +146,7 @@ Item {
                         focusPolicy: Qt.TabFocus
                         text: card.copiesSelected ? "선택 해제" : "사본 " + card.copies.length + "장 선택"
                         enabled: card.copies.length > 0 && !!review.library && !review.library.copiesLocked && !review.settling
+                        tip: card.copies.length === 0 ? "완전히 같은 사본이 없습니다. 각 사진의 ‘비교’로 확인하세요" : ""
                         Accessible.name: "묶음 " + card.number + " " + text
                         onClicked: {
                             if (card.copiesSelected)
@@ -347,8 +352,8 @@ Item {
                             Rectangle {
                                 id: compare
                                 objectName: "duplicateCompare"
-                                readonly property bool available: !!review.app && !review.settling && !review.app.busy
-                                    && !review.library.filesLocked && !review.app.management.mutating
+                                readonly property bool available: !!review.app && !!review.library && !review.settling
+                                    && !review.workBusy && !review.library.filesLocked && !!review.manager && !review.manager.mutating
                                 anchors.left: roleBadge.right
                                 anchors.leftMargin: Theme.gapTiny
                                 anchors.verticalCenter: roleBadge.verticalCenter
@@ -397,7 +402,7 @@ Item {
                                         : "작업이 끝난 뒤 비교할 수 있습니다"
                                     function open() {
                                         if (compare.available && compare.visible)
-                                            review.app.management.prepareAlikeDelete(tile.modelData.key)
+                                            review.manager.prepareAlikeDelete(tile.modelData.key)
                                     }
                                     onClicked: open()
                                     // A double-click here is two presses of this button, not "look at it large".

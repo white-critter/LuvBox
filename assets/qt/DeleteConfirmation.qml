@@ -5,6 +5,10 @@ import QtQuick.Layouts
 FlatDialog {
     id: dialog
     property var app: null
+    // The gallery's by default; the 폴더 정리 tab gives its own, and a folder has no saves to skip.
+    property var library: app ? app.library : null
+    property var manager: app ? app.management : null
+    property bool showKeepDeleted: true
     objectName: "deleteConfirmation"
     parent: Overlay.overlay
     title: "휴지통으로 이동할까요?"
@@ -13,18 +17,19 @@ FlatDialog {
     readonly property int chromeHeight: topPadding + bottomPadding
         + (header && header.implicitHeight > 0 ? header.implicitHeight + spacing : 0)
         + (footer && footer.implicitHeight > 0 ? footer.implicitHeight + spacing : 0)
-    height: Math.min(Math.max(200, summary.implicitHeight + keepDeleted.implicitHeight + Theme.gap + chromeHeight + 6),
+    height: Math.min(Math.max(200, summary.implicitHeight + (keepDeleted.visible ? keepDeleted.implicitHeight + Theme.gap : 0)
+                              + chromeHeight + 6),
                      420, parent ? Math.max(200, parent.height - 32) : 420)
     // From the duplicate view the switch starts on: a copy fetched again at the next full save
     // would be the same duplicate again. From the gallery it starts off, as before.
     onOpened: {
-        keepDeleted.checked = !!app && app.library.filterDuplicateOnly
+        keepDeleted.checked = dialog.showKeepDeleted && !!library && library.filterDuplicateOnly
         cancelButton.forceActiveFocus()
     }
-    onRejected: if (app) app.management.cancelDelete()
+    onRejected: if (manager) manager.cancelDelete()
     onAccepted: {
-        let keep = keepDeleted.checked
-        Qt.callLater(function() { if (dialog.app) dialog.app.management.confirmDelete(keep) })
+        let keep = dialog.showKeepDeleted && keepDeleted.checked
+        Qt.callLater(function() { if (dialog.manager) dialog.manager.confirmDelete(keep) })
     }
     contentItem: ColumnLayout {
         spacing: Theme.gap
@@ -42,7 +47,7 @@ FlatDialog {
                 // The width of the view, not of the content: a long line then wraps
                 // instead of running out of the dialog.
                 width: summaryScroll.availableWidth
-                text: dialog.app ? dialog.app.management.deleteSummary : ""
+                text: dialog.manager ? dialog.manager.deleteSummary : ""
                 color: Theme.textMuted
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
@@ -51,6 +56,7 @@ FlatDialog {
         FlatSwitch {
             id: keepDeleted
             objectName: "deleteKeepSwitch"
+            visible: dialog.showKeepDeleted
             Layout.fillWidth: true
             trailing: true
             text: "다음 저장에서 다시 받지 않기"

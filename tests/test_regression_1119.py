@@ -28,7 +28,16 @@ class DocumentationWordingRegressionTests(unittest.TestCase):
         self.assertNotIn("릴리스의 서명", changelog)
 
         guide = (ROOT / "docs" / "사용안내.txt").read_text(encoding="utf-8")
-        self.assertNotIn("auth_token", guide)
+        for forbidden in ("auth_token", "분류 고치기", "AppData\\Local\\LuvBox\\app", "%LOCALAPPDATA%", "매니페스트 오류"):
+            self.assertNotIn(forbidden, guide)
+        for required in ("폴더 정리", "AI 태그 관리"):
+            self.assertIn(required, guide)
+
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for forbidden in ("AppData\\Local\\LuvBox\\app", "%LOCALAPPDATA%"):
+            self.assertNotIn(forbidden, readme)
+        for required in ("폴더 정리", "AI 태그 관리"):
+            self.assertIn(required, readme)
 
         ext_readme = (ROOT / "assets" / "browser-extension" / "README.md").read_text(encoding="utf-8")
         for forbidden in (

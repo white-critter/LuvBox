@@ -34,7 +34,8 @@ ApplicationWindow {
         preferencesDialog.visible || saveReviewDialog.visible || storageDialog.visible || repairDialog.visible ||
         folderDialog.visible || deleteConfirmation.visible || alikeConfirmation.visible || scheduleDialog.visible ||
         runHistoryDialog.visible || datePickerPopup.visible || statisticsDialog.visible ||
-        tagBatchPopup.visible || aiClearConfirm.visible || teachPopup.visible || shortcutHelp.visible
+        tagBatchPopup.visible || aiClearConfirm.visible || teachPopup.visible || shortcutHelp.visible ||
+        aiTagManagerDialog.visible || (!!localFolderLoader.item && localFolderLoader.item.modalOpen)
     // A focused or open list takes letters for itself (jumping to "@bob" must not
     // toggle the favorites filter), so the single-letter shortcuts wait.
     readonly property bool listEngaged: [thumbSizeChoice, mediaFilter, orderChoice, authorFilter, hashtagFilter,
@@ -42,6 +43,9 @@ ApplicationWindow {
         function(combo) { return combo.activeFocus || combo.popup.visible })
     // An open menu is in the same position: a letter typed over it is not meant for the grid.
     readonly property bool menuOpen: aiMenu.visible || teachMenu.visible
+        || (!!localFolderLoader.item && localFolderLoader.item.menuOpen)
+    // The 폴더 정리 tab is made the first time it is shown (and then opens the folder opened last).
+    property bool folderTabSeen: false
     // Duplicates are reviewed group by group, not in the flat grid.
     readonly property bool duplicateMode: !!app && app.library.filterDuplicateOnly
     onDuplicateModeChanged: {
@@ -121,12 +125,20 @@ ApplicationWindow {
     onCurrentScreenChanged: {
         stopWheel()
         datePickerPopup.close()
+        aiMenu.close()
+        teachMenu.close()
+        if (localFolderLoader.item)
+            localFolderLoader.item.closeMenus()
         if (app) {
             app.galleryVisible(currentScreen === 1)
             app.records.setActive("unsaved", currentScreen === 2)
         }
         if (currentScreen === 1)
             Qt.callLater(updateFocus)
+        if (currentScreen === 3) {
+            folderTabSeen = true
+            Qt.callLater(function() { if (localFolderLoader.item) localFolderLoader.item.takeFocus() })
+        }
         Qt.callLater(fitSaveWindow)
     }
     onSavedDetailVisibleChanged: Qt.callLater(fitSaveWindow)
@@ -376,10 +388,11 @@ ApplicationWindow {
         densityChoice = choice
     }
 
+    readonly property int scheduledThumbWidth: Math.min(384, Math.max(1, Math.round((tileWidth - 28) * thumbnailPixelRatio)))
+    readonly property int scheduledThumbHeight: Math.min(384, Math.max(1, Math.round((Math.round(tileWidth * 0.75) - 16) * thumbnailPixelRatio)))
+
     function scheduledThumbSize() {
-        let ratio = thumbnailPixelRatio
-        return [Math.min(384, Math.max(1, Math.round((tileWidth - 28) * ratio))),
-                Math.min(384, Math.max(1, Math.round((Math.round(tileWidth * 0.75) - 16) * ratio)))]
+        return [scheduledThumbWidth, scheduledThumbHeight]
     }
 
     property int anchorGeneration: 0
@@ -551,12 +564,14 @@ ApplicationWindow {
             app.management.prepareDelete([app.library.selectedKey])
     }
 
+    // "Yes, this tag" for the opened photo or the picked ones; an empty tag turns down
+    // every AI tag they show.
     function teachCategory(category, selection) {
         if (!app)
             return
         const started = selection ? app.library.teachSelection(category) : app.library.teachSelected(category)
         if (started) {
-            const name = category.length ? category : "어느 쪽도 아님"
+            const name = category.length ? "#" + category : "AI 태그 모두 아님"
             flashNotice(name + " 분류 저장 중…")
         }
     }
@@ -635,6 +650,7 @@ ApplicationWindow {
                 Layout.rightMargin: Theme.gapLarge
             }
             FlatButton {
+                objectName: "navSave"
                 text: "저장"
                 tone: "nav"
                 checkable: true
@@ -645,14 +661,27 @@ ApplicationWindow {
                 }
             }
             FlatButton {
+                objectName: "navGallery"
                 text: "갤러리"
                 tone: "nav"
                 checkable: true
                 // Screen 2, the unsaved media, is reached from the gallery and belongs to it.
-                checked: window.currentScreen >= 1
+                checked: window.currentScreen === 1 || window.currentScreen === 2
                 onClicked: {
                     window.currentScreen = 1
-                    checked = Qt.binding(function() { return window.currentScreen >= 1 })
+                    checked = Qt.binding(function() { return window.currentScreen === 1 || window.currentScreen === 2 })
+                }
+            }
+            // Screen 3: a folder of this PC, with the gallery's duplicate and AI tools.
+            FlatButton {
+                objectName: "navLocalFolder"
+                text: "폴더 정리"
+                tone: "nav"
+                checkable: true
+                checked: window.currentScreen === 3
+                onClicked: {
+                    window.currentScreen = 3
+                    checked = Qt.binding(function() { return window.currentScreen === 3 })
                 }
             }
             Item { Layout.fillWidth: true }
@@ -681,7 +710,7 @@ ApplicationWindow {
                 text: "단축키"
                 tone: "ghost"
                 focusPolicy: Qt.TabFocus
-                visible: !!window.app && window.currentScreen === 1
+                visible: !!window.app && (window.currentScreen === 1 || window.currentScreen === 3)
                 enabled: window.app && !window.app.closing
                 Accessible.name: "단축키 안내"
                 tip: "단축키 보기 (F1)"
@@ -1319,6 +1348,7 @@ ApplicationWindow {
                             readonly property string applied: window.app ? window.app.library.filterAiCategory : ""
                             chosen: applied.length > 0
                             dropdown: true
+                            dropdownOpen: aiMenu.visible
                             text: window.app && window.app.library.aiScanning ? "AI 분류 중…"
                                 : (applied.length ? "AI 분류: " + applied : "AI 분류")
                             Accessible.name: applied.length ? "AI 분류 " + applied + " 보는 중" : "AI 분류"
@@ -1849,8 +1879,8 @@ ApplicationWindow {
                                 enabled: !!window.app && !window.app.library.busy
                                 checkable: true
                                 checked: window.duplicateNear
-                                text: "화질만 다른 사진 포함"
-                                Accessible.name: "크기나 화질만 다른 같은 사진도 찾기"
+                                text: "비슷한 사진도 검사"
+                                Accessible.name: "크기나 화질만 다른 비슷한 사진도 찾기"
                                 tip: "크기·화질이 다른 같은 사진도 찾기"
                                 onClicked: {
                                     window.duplicateNear = !window.duplicateNear
@@ -2220,8 +2250,8 @@ ApplicationWindow {
                                 anchors.margins: 8
                                 height: Math.round(window.tileWidth * 0.75) - 16
                                 source: tile.activeTile && tile.thumbReady ? tile.thumbUrl : ""
-                                sourceSize.width: window.scheduledThumbSize()[0]
-                                sourceSize.height: window.scheduledThumbSize()[1]
+                                sourceSize.width: window.scheduledThumbWidth
+                                sourceSize.height: window.scheduledThumbHeight
                                 asynchronous: true
                                 cache: false
                                 fillMode: Image.PreserveAspectFit
@@ -2237,34 +2267,39 @@ ApplicationWindow {
                                 Column {
                                     anchors.centerIn: parent
                                     spacing: 6
-                                    Canvas {
+                                    Loader {
                                         anchors.horizontalCenter: parent.horizontalCenter
                                         width: 32
                                         height: 26
-                                        onPaint: {
-                                            const ctx = getContext("2d")
-                                            ctx.reset()
-                                            ctx.strokeStyle = Theme.textFaint
-                                            ctx.lineWidth = 1.6
-                                            ctx.lineJoin = "round"
-                                            ctx.lineCap = "round"
-                                            ctx.strokeRect(2, 2, 28, 22)
-                                            ctx.beginPath()
-                                            ctx.arc(10, 9.5, 2.2, 0, Math.PI * 2)
-                                            ctx.stroke()
-                                            ctx.beginPath()
-                                            ctx.moveTo(5, 21)
-                                            ctx.lineTo(13, 13)
-                                            ctx.lineTo(18, 18)
-                                            ctx.lineTo(23, 14)
-                                            ctx.lineTo(27, 21)
-                                            ctx.stroke()
-                                            ctx.strokeStyle = Theme.accent
-                                            ctx.lineWidth = 1.8
-                                            ctx.beginPath()
-                                            ctx.moveTo(4, 4)
-                                            ctx.lineTo(28, 22)
-                                            ctx.stroke()
+                                        active: tile.imageMissing
+                                        sourceComponent: Canvas {
+                                            width: 32
+                                            height: 26
+                                            onPaint: {
+                                                const ctx = getContext("2d")
+                                                ctx.reset()
+                                                ctx.strokeStyle = Theme.textFaint
+                                                ctx.lineWidth = 1.6
+                                                ctx.lineJoin = "round"
+                                                ctx.lineCap = "round"
+                                                ctx.strokeRect(2, 2, 28, 22)
+                                                ctx.beginPath()
+                                                ctx.arc(10, 9.5, 2.2, 0, Math.PI * 2)
+                                                ctx.stroke()
+                                                ctx.beginPath()
+                                                ctx.moveTo(5, 21)
+                                                ctx.lineTo(13, 13)
+                                                ctx.lineTo(18, 18)
+                                                ctx.lineTo(23, 14)
+                                                ctx.lineTo(27, 21)
+                                                ctx.stroke()
+                                                ctx.strokeStyle = Theme.accent
+                                                ctx.lineWidth = 1.8
+                                                ctx.beginPath()
+                                                ctx.moveTo(4, 4)
+                                                ctx.lineTo(28, 22)
+                                                ctx.stroke()
+                                            }
                                         }
                                     }
                                     Label {
@@ -2520,6 +2555,23 @@ ApplicationWindow {
                 tileWidth: window.tileWidth
                 onBackRequested: window.currentScreen = 1
             }
+
+            // Screen 3: 폴더 정리. Made the first time it is shown, so the start and the gallery's
+            // controls stay as they were for anyone who never opens it.
+            Loader {
+                id: localFolderLoader
+                objectName: "localFolderLoader"
+                active: window.folderTabSeen
+                sourceComponent: Component {
+                    LocalFolderView {
+                        app: window.app
+                        tileWidth: window.tileWidth
+                        popupParent: popupHost
+                        windowModalOpen: window.modalOpen
+                        windowShown: window.windowShown
+                    }
+                }
+            }
         }
     }
 
@@ -2641,7 +2693,7 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "F1"
-        enabled: window.currentScreen === 1 && !window.modalOpen && !!window.app && !window.app.closing
+        enabled: (window.currentScreen === 1 || window.currentScreen === 3) && !window.modalOpen && !!window.app && !window.app.closing
         onActivated: shortcutHelp.open()
     }
     Shortcut {
@@ -3046,6 +3098,9 @@ ApplicationWindow {
                                 readonly property string tagName: modelData.tag || ""
                                 readonly property bool isConfirmed: modelData.source === "confirmed"
                                 readonly property bool isAi: modelData.source === "ai" || isConfirmed
+                                // A tag the person typed that is also an AI tag teaches that tag.
+                                readonly property bool teaches: !isAi && !!window.app
+                                    && window.app.library.aiCategories.indexOf(tagName) >= 0
                                 color: userTagMouse.containsMouse ? (isAi ? Theme.aiTagHover : Theme.userTagHover) : (isAi ? Theme.aiTagFill : Theme.userTagFill)
                                 radius: Theme.radiusSmall
                                 border.width: 1
@@ -3060,12 +3115,13 @@ ApplicationWindow {
 
                                     Label {
                                         objectName: "previewTagName"
-                                        text: (isAi ? "AI · #" : "#") + (modelData.tag || "")
+                                        text: (isAi ? "AI · #" : "#") + (modelData.tag || "") + (isConfirmed ? " ✓" : "")
                                         font.pixelSize: Theme.fontSmall
                                         color: isAi ? Theme.aiTagText : Theme.userTagText
                                         ToolTip.visible: userTagMouse.containsMouse
-                                        ToolTip.text: isConfirmed ? "지정한 AI 분류 보기"
-                                            : (isAi ? "AI 자동분류 보기" : "이 태그만 보기")
+                                        ToolTip.text: isConfirmed ? "맞다고 알려 준 AI 태그 · 모아보기"
+                                            : (isAi ? "AI가 붙인 태그 · 모아보기"
+                                                    : (teaches ? "내 태그 (AI 학습 사용 중) · 모아보기" : "이 태그만 보기"))
                                         MouseArea {
                                             id: userTagMouse
                                             anchors.fill: parent
@@ -3080,8 +3136,33 @@ ApplicationWindow {
                                             }
                                         }
                                     }
+                                    // "Yes, this" for a tag the AI guessed: it is kept and the AI learns from it.
                                     Label {
-                                        visible: !isAi
+                                        objectName: "previewTagConfirm"
+                                        visible: modelData.source === "ai"
+                                        text: "✓"
+                                        font.pixelSize: Theme.fontSmall
+                                        font.bold: true
+                                        leftPadding: 3
+                                        rightPadding: 1
+                                        color: confirmMouse.containsMouse ? Theme.good : Theme.textMuted
+                                        ToolTip.visible: confirmMouse.containsMouse
+                                        ToolTip.text: "맞아요 · AI 학습에 반영"
+                                        MouseArea {
+                                            id: confirmMouse
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            hoverEnabled: true
+                                            enabled: !window.app || !window.app.library.tagsLocked
+                                            onClicked: {
+                                                if (window.app && window.app.library.teachTag(window.app.library.selectedKey,
+                                                                                              modelData.tag, true))
+                                                    window.flashNotice("#" + modelData.tag + " 분류를 배우는 중…")
+                                            }
+                                        }
+                                    }
+                                    Label {
+                                        objectName: "previewTagRemove"
                                         text: "×"
                                         font.pixelSize: Theme.fontSmall
                                         font.bold: true
@@ -3089,7 +3170,7 @@ ApplicationWindow {
                                         rightPadding: 3
                                         color: removeMouse.containsMouse ? Theme.error : Theme.textMuted
                                         ToolTip.visible: removeMouse.containsMouse
-                                        ToolTip.text: "태그 삭제"
+                                        ToolTip.text: isAi ? "이 태그 아님 · AI 학습에 반영" : "태그 삭제"
                                         MouseArea {
                                             id: removeMouse
                                             anchors.fill: parent
@@ -3143,49 +3224,20 @@ ApplicationWindow {
                                         inlineTagField.text = ""
                                 }
                             }
-                            Label {
-                                visible: {
-                                    if (!window.app || window.app.library.selectedMediaType !== "photo")
-                                        return false
-                                    return window.app.library.selectedAiConfirmed || window.app.library.selectedAiCategory.length > 0
-                                }
-                                text: {
-                                    if (!window.app)
-                                        return ""
-                                    const library = window.app.library
-                                    if (library.selectedAiConfirmed && library.selectedAiCategory.length)
-                                        return library.selectedAiCategory + " · 확정"
-                                    if (library.selectedAiConfirmed)
-                                        return "분류 없음 · 확정"
-                                    return "AI " + library.selectedAiCategory
-                                        + (library.selectedAiConfidence.length ? " " + library.selectedAiConfidence : "")
-                                }
-                                color: Theme.textMuted
-                                font.pixelSize: Theme.fontSmall
-                            }
-                            FlatButton {
-                                objectName: "previewAiConfirm"
-                                text: "맞아요"
-                                compact: true
-                                visible: !!window.app && window.app.library.selectedAiCategory.length > 0 && !window.app.library.selectedAiConfirmed
-                                enabled: !!window.app && !window.app.library.tagsLocked
-                                onClicked: {
-                                    if (window.app)
-                                        window.teachCategory(window.app.library.selectedAiCategory, false)
-                                }
-                            }
+                            // An AI tag the AI did not give: the person names it, and photos like this one follow.
                             FlatButton {
                                 objectName: "previewAiCorrect"
-                                text: "분류 고치기"
+                                text: "+ AI 태그"
                                 compact: true
+                                focusPolicy: Qt.TabFocus
                                 visible: !!window.app && window.app.library.selectedMediaType === "photo"
                                 enabled: !!window.app && !window.app.library.tagsLocked
-                                tip: "AI 분류 지정 · 닮은 사진에도 적용"
+                                tip: "AI 태그 지정 · 닮은 사진에도 적용"
                                 onClicked: {
                                     if (!window.app)
                                         return
                                     teachMenu.targetKey = window.app.library.selectedKey
-                                    teachMenu.popup()
+                                    teachMenu.popup(previewAiCorrect, 0, previewAiCorrect.height + 4)
                                 }
                             }
                         }
@@ -3649,6 +3701,12 @@ ApplicationWindow {
         parent: popupHost
     }
 
+    AiTagManagerDialog {
+        id: aiTagManagerDialog
+        parent: popupHost
+        app: window.app
+    }
+
     StatisticsDialog {
         id: statisticsDialog
         objectName: "statisticsDialog"
@@ -3688,7 +3746,7 @@ ApplicationWindow {
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         anchors.centerIn: parent
         width: 320
-        height: 380
+        height: Math.min(380, parent ? Math.max(200, parent.height - 48) : 380)
         padding: 16
         background: Card {
             topColor: Theme.dialogTop
@@ -3700,27 +3758,49 @@ ApplicationWindow {
             anchors.fill: parent
             spacing: 10
             Label {
-                text: "선택한 사진을 이 분류로 가르칩니다."
+                text: "선택한 사진에 이 AI 태그가 맞다고 알려 줍니다. 닮은 사진에도 적용됩니다."
                 color: Theme.text
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
-            Repeater {
-                model: window.app ? window.app.library.aiCategories : []
-                delegate: FlatButton {
-                    required property string modelData
-                    Layout.fillWidth: true
-                    text: modelData
-                    enabled: window.app && !window.app.library.tagsLocked
-                    onClicked: {
-                        window.teachCategory(modelData, true)
-                        teachPopup.close()
+            FocusScrollView {
+                id: teachScroll
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                contentWidth: availableWidth
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ColumnLayout {
+                    width: teachScroll.availableWidth
+                    spacing: Theme.gapSmall
+                    Label {
+                        Layout.fillWidth: true
+                        visible: !window.app || window.app.library.aiCategories.length === 0
+                        text: "켜져 있는 AI 태그가 없습니다. AI 태그 관리에서 추가해 주세요."
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontSmall
+                        wrapMode: Text.Wrap
+                    }
+                    Repeater {
+                        model: window.app ? window.app.library.aiCategories : []
+                        delegate: FlatButton {
+                            required property string modelData
+                            Layout.fillWidth: true
+                            text: "#" + modelData
+                            enabled: window.app && !window.app.library.tagsLocked
+                            onClicked: {
+                                window.teachCategory(modelData, true)
+                                teachPopup.close()
+                            }
+                        }
                     }
                 }
             }
             FlatButton {
+                objectName: "teachPopupRefuse"
                 Layout.fillWidth: true
-                text: "어느 쪽도 아님"
+                text: "AI 태그 모두 아님"
+                tip: "보이는 AI 태그를 모두 빼고 AI 학습에 반영합니다"
                 enabled: window.app && !window.app.library.tagsLocked
                 onClicked: {
                     window.teachCategory("", true)
@@ -3758,6 +3838,11 @@ ApplicationWindow {
         }
         FlatMenuSeparator {}
         FlatMenuItem {
+            objectName: "galleryAiManage"
+            text: "AI 태그 관리…"
+            onTriggered: aiTagManagerDialog.open()
+        }
+        FlatMenuItem {
             objectName: "galleryAiClassify"
             text: window.app && window.app.library.aiScanning ? "분류 중단" : "AI 자동분류 실행"
             enabled: !!window.app && (window.app.library.aiScanning || !window.app.library.busy)
@@ -3785,7 +3870,7 @@ ApplicationWindow {
             model: window.app ? window.app.library.aiCategories : []
             FlatMenuItem {
                 required property string modelData
-                text: modelData
+                text: "#" + modelData
                 enabled: !!window.app && !window.app.library.tagsLocked
                 onTriggered: {
                     if (!window.app || window.app.library.tagsLocked)
@@ -3800,8 +3885,9 @@ ApplicationWindow {
             onObjectAdded: (index, object) => teachMenu.insertItem(index, object)
             onObjectRemoved: (index, object) => teachMenu.removeItem(object)
         }
+        FlatMenuSeparator {}
         FlatMenuItem {
-            text: "어느 쪽도 아님"
+            text: "AI 태그 모두 아님"
             enabled: !!window.app && !window.app.library.tagsLocked
             onTriggered: {
                 if (!window.app || window.app.library.tagsLocked)
@@ -3973,6 +4059,7 @@ ApplicationWindow {
                 shortcutHelp.close()
                 tagBatchPopup.close()
                 aiClearConfirm.close()
+                aiTagManagerDialog.close()
                 teachPopup.close()
                 teachMenu.close()
                 aiMenu.close()
@@ -3983,6 +4070,8 @@ ApplicationWindow {
                 alikeConfirmation.close()
                 duplicateHelp.close()
                 datePickerPopup.close()
+                if (localFolderLoader.item)
+                    localFolderLoader.item.closeAll()
             }
         }
         function onLoginRequested() { connectionDialog.open() }

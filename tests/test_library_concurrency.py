@@ -196,6 +196,28 @@ class LibraryScanOverlapTests(unittest.TestCase):
         self.wait(lambda: not self.library.busy)
         self.assertEqual(self.library._generation, generation + 1)
 
+    def test_a_count_read_before_a_scan_ended_does_not_undo_the_scan(self):
+        """A reload's count read can answer after a duplicate scan that ended later; the scan's count stays."""
+        counting, answer = Event(), Event()
+
+        def slow_count(generation=None):
+            counting.set()
+            answer.wait(5)
+            return 0
+
+        self.repo.duplicate_counts = slow_count
+        self.repo.scan_duplicates = lambda generation, progress_callback=None, epoch=None: 3
+        self.library.refresh()                         # reads the counts again, as after a change
+        self.assertTrue(counting.wait(3))
+        self.assertTrue(self.library.scanDuplicates())
+        self.wait(lambda: not self.library.filesLocked and self.library.duplicateCount == 3)
+        answer.set()                                   # the older read answers now
+        until = time.monotonic() + 0.3
+        while time.monotonic() < until:
+            self.app.processEvents()
+            time.sleep(0.005)
+        self.assertEqual(self.library.duplicateCount, 3)
+
     def test_teaching_refuses_tag_edits_until_it_finishes(self):
         self.library._exclusive = "teach"
         self.assertTrue(self.library.tagsLocked)

@@ -72,7 +72,7 @@ _COMPATIBILITY_ERROR = ("프로그램 파일이 손상되어 저장을 시작하
                         "LuvBox.exe를 다시 받아 실행해 주세요.")
 _HISTORY_ERROR = "저장 이력을 기록하지 못했습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
 _METADATA_ERROR = "출처 또는 작성자를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다."
-_SNAPSHOT_ERROR = "저장 폴더에 기록 사본을 쓰지 못했습니다. 기록은 이 PC에 있고 다음 저장 때 다시 씁니다."
+_SNAPSHOT_ERROR = "저장 폴더에 백업 기록을 남기지 못했습니다. 기록은 이 PC에 안전하게 저장됐으며 다음 저장 때 다시 반영합니다."
 _DATE_MOVE_ERROR = "저장 완료일 폴더로 옮기지 못했습니다. 기존 파일 위치와 중복 방지 기록은 보존했습니다."
 _LOCAL_WRITE_ERROR = ("파일을 쓰지 못해 멈췄습니다. 폴더 쓰기 권한, 디스크 공간, 파일을 쓰는 다른 프로그램을 "
                       "확인한 뒤 다시 실행해 주세요. 받은 파일은 그대로 있습니다.")
@@ -369,10 +369,10 @@ class JobOptions:
     def validate(self) -> "JobOptions":
         account = _normal_account(self.account)
         if not isinstance(self.folder_mode, str) or self.folder_mode.strip().lower() not in _FOLDER_MODES:
-            raise ValueError("저장 방식은 작성자별, 날짜별, 구분 없이 중 하나를 선택해 주세요.")
+            raise ValueError("폴더 구성은 한 폴더에 저장, 작성자별 폴더, 저장일별 폴더 중 하나를 선택해 주세요.")
         folder_mode = self.folder_mode.strip().lower()
         if not isinstance(self.scan_mode, str) or self.scan_mode.strip().lower() not in _SCAN_MODES:
-            raise ValueError("확인 범위는 ‘새 Like만 빠르게’ 또는 ‘전체 목록 다시 확인’ 중 하나를 선택해 주세요.")
+            raise ValueError("목록 확인 범위는 ‘새 좋아요만 확인’ 또는 ‘전체 목록 확인’ 중 하나를 선택해 주세요.")
         scan_mode = self.scan_mode.strip().lower()
         if type(self.include_videos) is not bool or type(self.include_gifs) is not bool:
             raise ValueError("동영상과 GIF 저장 여부를 확인해 주세요.")
@@ -388,7 +388,7 @@ class JobOptions:
                 not isinstance(self.gif_size, str) or self.gif_size not in GIF_SIZES):
             raise ValueError("움직이는 GIF 저장 형식과 GIF 크기를 다시 선택해 주세요.")
         if isinstance(self.max_video_mb, bool) or not isinstance(self.max_video_mb, int) or self.max_video_mb < 0:
-            raise ValueError("동영상·GIF 크기 한도는 0 이상의 정수 MB로 입력해 주세요. 0은 제한 없음입니다.")
+            raise ValueError("동영상·GIF 크기 제한은 0 이상의 숫자(MB)로 입력해 주세요. 0은 제한 없음입니다.")
         if not isinstance(self.targets, (list, tuple)):
             raise ValueError("다시 받을 파일 목록을 확인해 주세요.")
         targets = tuple(dict.fromkeys(self.targets))
@@ -448,7 +448,7 @@ def _safe_diagnostic(message: str) -> str:
     if text.startswith(("authorizationerror:", "authrequired: protected tweet", "authrequired: nsfw tweet")):
         return "X가 접근을 거부했습니다. X에서 계정 상태·추가 인증과 게시물 접근 권한을 확인해 주세요."
     if _AUTH_TERMS.search(text):
-        return "X 연결이 만료됐습니다. ‘X 연결’에서 브라우저를 다시 연결하거나 새 토큰을 입력해 주세요."
+        return "X 로그인이 만료됐습니다. ‘X 연결’에서 다시 연결해 주세요."
     if re.search(r"\b403\b", text):
         # A denied post, challenge or proxy is not proof of an expired login.
         return "X가 접근을 거부했습니다. X에서 계정 상태·추가 인증과 게시물 접근 권한을 확인해 주세요."
@@ -1934,14 +1934,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         scan_note = ""
         if targets:
             scan_note = (f"선택한 미디어 {len(targets):,}개(트윗 {len(_retry_groups(normalized.targets)):,}개)를 다시 받습니다. "
-                         "Like 목록 대신 트윗마다 X 요청을 1번씩 보냅니다.")
+                         "좋아요 목록 대신 트윗마다 X 요청을 1번씩 보냅니다.")
         elif normalized.scan_mode == "quick":
             readiness = history.quick_scan_readiness(normalized.folder_mode, normalized.media_signature)
             if readiness == "ready" and review_unknown:
                 readiness = "incomplete"
             quick_scan = readiness == "ready"
             scan_note = {
-                "ready": f"새 Like만 확인합니다. 이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다.",
+                "ready": f"새 좋아요만 확인합니다. 이미 저장한 파일이 {QUICK_STOP_AFTER}개 이어지면 멈춥니다.",
                 "settings-changed": "동영상·GIF·용량 설정이 바뀌어 이번만 전체 목록을 확인합니다.",
                 "records-changed": "다른 PC나 폴더의 저장 기록을 합쳐 이번만 전체 목록을 확인합니다.",
             }.get(readiness, "이전 확인이 끝까지 되지 않아(첫 실행·중단·오류) 이번만 전체 목록을 확인합니다.")
@@ -2047,7 +2047,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         elif stop_reason == "caught-up":
             # The counts are on the line above it; why a quick save stops was said as it began.
             status = "finished"
-            message = "새 Like 확인을 마쳤습니다."
+            message = "새 좋아요 확인을 마쳤습니다."
         elif every_download_failed:
             exit_code = 1
             message = failed_download_message
@@ -2083,7 +2083,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     except ValueError as exc:
         # Only our validation messages are permitted here.
         if active_job is None:
-            message = str(exc)
+            raw = str(exc).strip()
+            message = raw if raw and not raw.isascii() else "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요."
         else:
             message = _safe_diagnostic(str(exc))
         exit_code = 1
@@ -2116,7 +2117,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             # stop: the run stays an error, so the next save checks the whole list.
             status, exit_code = "error", 4
             message = (f"미디어 {failed:,}개를 받지 못했고 ‘저장 못 한 미디어’ 목록에도 남기지 못했습니다. "
-                       "앱 데이터 폴더의 권한과 디스크 여유 공간을 확인해 주세요. 다음 저장에서 전체 목록을 다시 확인합니다.")
+                       "LuvBox 기록 폴더의 권한과 디스크 여유 공간을 확인해 주세요. 다음 저장에서 전체 목록을 다시 확인합니다.")
         elif (listed and refused_now in unsaved_items and status == "error"
               and refused_runs.get(refused_now, 0) + 1 >= REFUSED_LIMIT):
             message += f" 같은 미디어에서 {REFUSED_LIMIT}번 멈춰 다음 저장부터는 이 미디어를 건너뜁니다."
@@ -2205,7 +2206,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     if author_deferred:
         emit({"type": "log", "level": "info",
               "message": f"이미 있던 파일 {author_deferred:,}개의 작성자 정보를 저장 기록에 반영했습니다. "
-                         "기존 파일의 메타데이터는 유지했습니다."})
+                         "기존 파일 안의 정보는 그대로 두었습니다."})
     if status == "error":
         emit({"type": "log", "level": "error", "message": message})
     if handler.auth_state:

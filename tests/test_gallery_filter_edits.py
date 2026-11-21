@@ -58,14 +58,14 @@ class GalleryFilterEditTests(unittest.TestCase):
         self.wait(lambda: not self.library.selectionBusy and self.library.selectedKey == key)
         return key.split("_")[2]
 
-    def assert_remaining(self, removed):
+    def assert_remaining(self, removed, total=6):
         self.wait(lambda: not self.library.model.busy)
         while self.library.model.canFetchMore():
             self.library.model.loadMore()
             self.wait(lambda: not self.library.model.busy)
         actual = {row["key"].split("_")[2] for row in self.library.model._rows}
         self.assertEqual(actual, {str(n) for n in range(101, 108)} - {removed})
-        self.assertEqual(self.library.model.total, 6)
+        self.assertEqual(self.library.model.total, total)
         self.assertEqual(len(list(self.output.glob("*.jpg"))), 7)
 
     def test_unfavorite_updates_the_filtered_list_and_preserves_the_last_page(self):
@@ -80,11 +80,16 @@ class GalleryFilterEditTests(unittest.TestCase):
         self.assertTrue(self.library.removeSelectedTag("여행"))
         self.assert_remaining(removed)
 
-    def test_replacing_an_ai_label_with_a_user_tag_updates_the_ai_list(self):
+    def test_typing_an_ai_tags_name_keeps_the_photo_in_its_ai_list(self):
+        """The AI list of a tag shows the photos the person tagged that way too (one list per tag)."""
         self.library.setAiFilter("인물", "")
-        removed = self.open_first()
+        kept = self.open_first()
+        resets = []
+        self.library.model.modelReset.connect(lambda: resets.append(1))
         self.assertTrue(self.library.addSelectedTag("인물"))
-        self.assert_remaining(removed)
+        self.assert_remaining(None, total=7)
+        self.assertEqual(resets, [])
+        self.assertIn(kept, {row["key"].split("_")[2] for row in self.library.model._rows})
 
     def test_removing_an_ai_label_updates_the_ai_list(self):
         self.library.setAiFilter("인물", "")
@@ -168,9 +173,14 @@ class GalleryFilterEditTests(unittest.TestCase):
             self.assertEqual((taught["category"], taught["confirmed"]), ("인물", True))
             self.assertIn({"tag": "인물", "source": "confirmed"}, store.item_tags("flat", "101", 1, "photo"))
 
-            store.save_embeddings([("flat", "102", 1, "photo", b"\x00" * (512 * 4), 0.9)])
+            # Taking away a tag the person typed is not a "not this" (it may have been a typo).
+            # The AI had looked at this photo (its 인물 row became the typed tag), so it stays
+            # looked at instead of getting the AI's guess straight back on the next run.
+            store.save_embeddings([("flat", "102", 1, "photo", b"\x00" * (768 * 4), 0.9)])
             self.assertTrue(store.add_tag("flat", "102", 1, "photo", "인물", source="user"))
             self.assertTrue(store.remove_tag("flat", "102", 1, "photo", "인물"))
+            self.assertEqual(store.tag_feedback([("flat", "102", 1, "photo")]), {})
+            self.assertEqual(store.item_tags("flat", "102", 1, "photo"), [{"tag": "여행", "source": "user"}])
             self.assertEqual(store.count_embeddings_without_labels(), 0)
 
     def test_cancelled_partial_ai_scan_settles_active_ai_filter(self):

@@ -9,7 +9,7 @@ Button {
     implicitHeight: Theme.controlHeight
     hoverEnabled: true
     focusPolicy: Qt.TabFocus
-    Accessible.name: windowAction === "close" ? "트레이로 숨기기" : windowAction === "minimize" ? "최소화"
+    Accessible.name: windowAction === "close" ? "알림 영역으로 숨기기" : windowAction === "minimize" ? "최소화"
         : windowAction === "restore" ? "창 복원" : "최대화"
     ToolTip.visible: hovered
     ToolTip.delay: 600

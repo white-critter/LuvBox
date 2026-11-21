@@ -747,7 +747,7 @@ class MediaTests(unittest.TestCase):
                 self.assertEqual(events[-1]["skipped"], 1)
                 self.assertEqual(events[-1]["size_skipped"], 0)
                 self.assertIn("이어받기", events[-1]["message"])
-                self.assertIn(".part 파일은 남겨", events[-1]["message"])
+                self.assertIn("임시 파일(.part)은 남겨", events[-1]["message"])
                 self.assertEqual(send.call_count, 1)
                 self.assertEqual(send.call_args.args[0].headers["Range"], f"bytes={len(partial_bytes)}-")
                 response.close.assert_called_once()

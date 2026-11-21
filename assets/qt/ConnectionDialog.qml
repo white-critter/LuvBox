@@ -393,7 +393,7 @@ FlatDialog {
 
                 Label {
                     Layout.fillWidth: true
-                    text: "Chrome에서 F12 › Application › Cookies › https://x.com의 auth_token 값을 복사하세요."
+                    text: "Chrome에서 F12 › 애플리케이션(Application) › 쿠키(Cookies) › https://x.com의 auth_token 값을 복사하세요."
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                 }
@@ -418,7 +418,7 @@ FlatDialog {
                 }
                 FlatButton {
                     Layout.fillWidth: true
-                    text: "토큰 보관"
+                    text: "토큰 저장"
                     tone: "primary"
                     enabled: !dialog.unavailable && !dialog.accounts.busy && tokenField.text.trim().length > 0
                     onClicked: dialog.submitToken()

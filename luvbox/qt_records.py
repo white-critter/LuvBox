@@ -54,6 +54,7 @@ _ROUTINE_MESSAGE = (
     "X가 보여 주는 좋아요 목록을 모두 확인했습니다. 삭제된 게시물이나 X가 더는 보여 주지 않는 오래된 좋아요는 빠질 수 있습니다.",
     "X가 보여 주는 좋아요 목록을 모두 확인했습니다. 삭제된 게시물은 빠질 수 있습니다.",
     "X가 보여 주는 좋아요 목록을 모두 확인했습니다.",
+    "새 좋아요 확인을 마쳤습니다.",
     "새 Like 확인을 마쳤습니다.",
 )
 
@@ -407,7 +408,7 @@ class RecordsController(QObject):
                 raise OSError
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
         except (OSError, ValueError):
-            self._run_error = "로그 파일을 열지 못했습니다."
+            self._run_error = "상세 기록 파일을 열지 못했습니다."
             self.changed.emit()
 
     # -- unsaved media -------------------------------------------------------------------
@@ -778,7 +779,7 @@ class RecordsController(QObject):
             except (ProtectionError, HistoryError) as exc:
                 result, error = {}, str(exc)
             except Exception:
-                result, error = {}, ("목록을 읽지 못했습니다. 앱 데이터 폴더의 권한을 확인해 주세요."
+                result, error = {}, ("목록을 읽지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요."
                                      if kind in {"runs", "unsaved", "counts"} else
                                      "저장하지 못한 미디어 목록을 갱신하지 못했습니다.")
             # Errors belong to the request too. An older failed read must not

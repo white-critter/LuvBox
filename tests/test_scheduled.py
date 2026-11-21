@@ -46,7 +46,7 @@ class ScheduledRunTests(unittest.TestCase):
             emit({"type": "skipped", "path": "old.jpg"})
             emit({"type": "saved", "path": str(self.output / "100_1.jpg")})
             emit({"type": "finished", "status": "finished", "saved": 1, "skipped": 1, "size_skipped": 0,
-                  "message": "새 Like 확인을 마쳤습니다.", "retry_at": ""})
+                  "message": "새 좋아요 확인을 마쳤습니다.", "retry_at": ""})
             return 0
 
         with patch("luvbox.scheduled.load_settings", return_value=settings), \
@@ -63,7 +63,7 @@ class ScheduledRunTests(unittest.TestCase):
         self.assertEqual((options.folder_mode, options.include_videos, options.include_gifs, options.max_video_mb,
                           options.separate_accounts), ("date", False, True, 50, True))
         self.assertEqual(options.output_dir, str(self.output.resolve()))
-        self.assertIn("새 Like만 빠르게 확인", log)
+        self.assertIn("새 좋아요만 빠르게 확인", log)
         self.assertIn("저장 · ", log)
         self.assertIn("종료 · 완료 · 저장 1개", log)
         self.assertNotIn("old.jpg", log)
@@ -77,7 +77,7 @@ class ScheduledRunTests(unittest.TestCase):
         cases = (
             ({}, "저장된 설정이 없습니다"),
             (dict(self.settings, record_locations={"offline_test": str(self.root / "다른 폴더")}), "저장 폴더 변경이 끝나지"),
-            (dict(self.settings, max_video_mb="200"), "0 이상의 정수"),
+            (dict(self.settings, max_video_mb="200"), "0 이상의 숫자"),
             (dict(self.settings, gif_format=["gif"]), "GIF 저장 형식"),
             (dict(self.settings, gif_size="1080"), "GIF 저장 형식"),
         )
@@ -216,7 +216,7 @@ class ScheduledRunTests(unittest.TestCase):
             self.assertEqual(scheduled.run_saved(), 0)
         row = outcome_page()["rows"][0]
         self.assertEqual((row["status"], row["saved"], row["history_run_id"]), ("partial", 1, 42))
-        self.assertIn("로그를 끝까지 기록하지 못했습니다", row["message"])
+        self.assertIn("상세 기록을 끝까지 남기지 못했습니다", row["message"])
         self.assertNotIn("private details", row["message"])
         self.notify.assert_called_once()
 
@@ -422,7 +422,7 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertIn("Unregister-ScheduledTask", self.script(run.call_args))
         with self.powershell(returncode=1), self.assertRaises(scheduled.ScheduleError) as failure:
             scheduled.register_task("07:30")
-        self.assertIn("작업 스케줄러", str(failure.exception))
+        self.assertIn("Windows 자동 실행 예약", str(failure.exception))
 
     def test_status_reports_whether_this_version_is_registered(self):
         with self.powershell(b'{"registered": false}'):

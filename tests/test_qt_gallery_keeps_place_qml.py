@@ -469,16 +469,18 @@ def tag_scene():
         assert {"tag": "여행", "count": 4} in library.userTags, library.userTags
         assert find("galleryAddTagSelected").property("enabled"), "a second tag can go to the same photos"
 
-        # A tag named like the AI category the list shows turns that label into the person's own tag:
-        # those photos leave the list, so this one tag reads the list again.
+        # A tag typed with the name of the AI tag the list shows keeps those photos in that list:
+        # the list shows typed tags of that name too, so nothing is read again.
         library.setAiFilter("인물", "")
         wait(lambda: not model.busy and model.count == 10, "photos the AI put among people")
         people = keys()[:2]
         for key in people:
             library.toggleSelection(key)
+        del resets[:]
         assert library.addTagToSelection("인물") == 2
-        wait(lambda: not model.busy and model.count == 8, "the two photos left the AI list")
-        assert not {_identity(key) for key in people} & {_identity(key) for key in keys()}, keys()
+        settle(300)
+        assert not model.busy and model.count == 10 and resets == [], (model.count, resets)
+        assert keys()[:2] == people, keys()
 
         controller.requestClose()
         wait(lambda: controller.shutdownReady, "shutdown")

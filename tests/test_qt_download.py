@@ -82,12 +82,12 @@ class DownloadStatusTests(unittest.TestCase):
         controller, service = self.controller()
         service.pending.extend((
             {"type": "finished", "status": "finished", "job_id": 7, "saved": 2, "skipped": 1,
-             "message": "새 Like 확인을 마쳤습니다. 2개를 저장했습니다."},
+             "message": "새 좋아요 확인을 마쳤습니다. 2개를 저장했습니다."},
             {"type": "process_exit", "job_id": 7, "code": 0},
         ))
         controller._pump()
         self.assertEqual(controller.status, "저장했습니다")
-        self.assertEqual(controller.notice, "새 Like 확인을 마쳤습니다. 2개를 저장했습니다.")
+        self.assertEqual(controller.notice, "새 좋아요 확인을 마쳤습니다. 2개를 저장했습니다.")
         self.assertEqual(controller.savedCount, 2)
         self.assertEqual(controller.skippedCount, 1)
         self.assertFalse(controller.running)

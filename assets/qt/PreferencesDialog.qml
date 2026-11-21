@@ -167,7 +167,7 @@ FlatDialog {
                     objectName: "autoClassifyHint"
                     Layout.fillWidth: true
                     Layout.topMargin: -Theme.gapTiny
-                    text: "처음 한 번은 갤러리의 ‘AI 분류’에서 직접 실행해 주세요."
+                    text: "처음 한 번은 갤러리나 폴더 정리의 ‘AI 분류’에서 실행해 주세요."
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                     font.pixelSize: Theme.fontCaption
@@ -312,6 +312,8 @@ FlatDialog {
                         text: "고급"
                         checkable: true
                         Accessible.name: "고급 설정"
+                        Keys.onReturnPressed: advancedToggle.toggle()
+                        Keys.onEnterPressed: advancedToggle.toggle()
                         HoverHandler {
                             cursorShape: Qt.PointingHandCursor
                         }

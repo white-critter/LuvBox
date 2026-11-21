@@ -33,7 +33,7 @@ MAX_ITEMS = 500
 FAILED, SIZE, EXCLUDED = "failed", "size", "excluded"
 REASONS = (FAILED, SIZE, EXCLUDED)
 _WRITE_LOCK = threading.RLock()
-_ERROR = "저장하지 못한 미디어 목록을 읽거나 갱신하지 못했습니다. 앱 데이터 폴더의 권한을 확인해 주세요."
+_ERROR = "저장하지 못한 미디어 목록을 읽거나 갱신하지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요."
 _MEDIA_TYPES = {"photo", "video", "animated_gif"}
 _COLUMNS = ("account", "folder", "tweet_id", "media_type", "num", "reason", "author", "posted_at", "width",
             "height", "duration", "size_bytes", "limit_mb", "detail", "attempts", "first_seen", "last_seen")
