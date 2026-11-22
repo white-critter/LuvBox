@@ -574,9 +574,13 @@ def _merge_snapshot_copies(files: dict[str, Path], paths: StoragePaths, parent: 
                 copied = folder / name
                 if merged[name] != copied:
                     _backup_database(merged[name], copied)
+                allowed_roots = None
+                if name == _HISTORY_DB:
+                    with closing(sqlite3.connect(copied.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                        allowed_roots = [paths.output_dir, *_valid_roots(db, paths.output_dir)]
                 # _merge_history deliberately keeps the destination's local
                 # root approvals and ignores the incoming root declaration.
-                _merge_database(name, copied, incoming)
+                _merge_database(name, copied, incoming, allowed_roots=allowed_roots)
                 merged[name] = copied
             finally:
                 incoming.unlink(missing_ok=True)
@@ -722,17 +726,41 @@ def _valid_roots(db: sqlite3.Connection | None, output: Path) -> list[str]:
     return roots
 
 
-def _media_score(row: dict) -> tuple:
-    path = Path(row["path"]) if row.get("path") else None
+def _normalize_roots(allowed_roots) -> list[str] | None:
+    if allowed_roots is None:
+        return None
+    normalized = []
+    for item in allowed_roots:
+        if not item:
+            continue
+        text = os.path.normcase(os.path.normpath(str(item)))
+        normalized.append(text.rstrip("\\/") or text)
+    return normalized
+
+
+def _path_in_roots(raw_path, norm_roots: list[str] | None) -> bool:
+    if not raw_path or not isinstance(raw_path, str) or not Path(raw_path).is_absolute():
+        return False
+    if raw_path.startswith("\\\\"):
+        return False
+    if norm_roots is None:
+        return True
+    candidate = os.path.normcase(os.path.normpath(raw_path))
+    return any(candidate == root or candidate.startswith(root + os.sep) for root in norm_roots)
+
+
+def _media_score(row: dict, *, allow_probe: bool = True) -> tuple:
+    path = Path(row["path"]) if allow_probe and row.get("path") else None
     return (bool(path and path.is_file() and not _linked(path)), row.get("record_source") == "saved",
             row.get("posted_source") == "metadata", row.get("metadata_status") == "embedded",
             row.get("author_metadata_status") == "embedded",
             row.get("updated_at") or "")
 
 
-def _merge_media(previous: dict, incoming: dict) -> dict:
-    left_score = _media_score(previous)
-    right_score = _media_score(incoming)
+def _merge_media(previous: dict, incoming: dict, *, allowed_roots=None) -> dict:
+    norm_roots = _normalize_roots(allowed_roots)
+    left_score = _media_score(previous, allow_probe=_path_in_roots(previous.get("path"), None))
+    right_score = _media_score(incoming, allow_probe=_path_in_roots(incoming.get("path"), norm_roots))
     first, second = (incoming, previous) if right_score > left_score else (previous, incoming)
     # Older catalogs timestamp changes to the second. On a tie, an explicit
     # removal must win over a stale path, regardless of merge direction. The
@@ -829,7 +857,50 @@ def _feedback_to_tag_feedback(db: sqlite3.Connection, rows) -> int:
     return written
 
 
-def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> None:
+def _reconcile_tag_feedback(db: sqlite3.Connection) -> None:
+    """Keep media_tags and ai_tag_feedback consistent after merging or applying moved-folder edits."""
+    tables = _tables(db)
+    if "media_tags" not in tables:
+        return
+    if "source" not in _columns(db, "media_tags"):
+        db.execute("ALTER TABLE media_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
+    if "ai_tag_feedback" in tables:
+        db.execute(
+            "DELETE FROM ai_tag_feedback WHERE label=-1 AND EXISTS ("
+            "SELECT 1 FROM media_tags mt WHERE mt.folder_mode=ai_tag_feedback.folder_mode "
+            "AND mt.tweet_id=ai_tag_feedback.tweet_id AND mt.num=ai_tag_feedback.num "
+            "AND mt.media_type=ai_tag_feedback.media_type AND mt.tag=ai_tag_feedback.tag "
+            "AND mt.source='user')"
+        )
+        # Several AI tags per photo. An answer about one tag decides only that tag:
+        # "yes" shows it as confirmed (a typed tag stays the person's), "not this" removes it.
+        for row in _rows(db, "ai_tag_feedback"):
+            identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+            if row["label"] == 1:
+                db.execute(
+                    "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                    "VALUES (?,?,?,?,?,'confirmed',?) ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) "
+                    "DO UPDATE SET source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
+                    (*identity, row["tag"], row.get("updated_at") or ""),
+                )
+            else:
+                db.execute(
+                    "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND tag=? AND source IN ('ai','confirmed')",
+                    (*identity, row["tag"]),
+                )
+    # The empty AI row only says "looked at, no AI tag" (1.11.9 stored "none of these" as a
+    # confirmed one): it is an AI row, and it goes where a real AI tag is.
+    db.execute("UPDATE media_tags SET source='ai' WHERE tag='' AND source='confirmed'")
+    db.execute(
+        "DELETE FROM media_tags WHERE source='ai' AND tag='' AND EXISTS (SELECT 1 FROM media_tags AS other "
+        "WHERE other.folder_mode=media_tags.folder_mode AND other.tweet_id=media_tags.tweet_id "
+        "AND other.num=media_tags.num AND other.media_type=media_tags.media_type "
+        "AND other.source='ai' AND other.tag!='')"
+    )
+
+
+def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection, *, allowed_roots=None) -> None:
     def quick_boundary(db):
         tables = _tables(db)
         stored = db.execute("SELECT value FROM catalog_meta WHERE key='quick_scan_merge_run'").fetchone() \
@@ -869,7 +940,7 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                 current = existing[identity]
                 if incoming == current:
                     continue
-                merged = _merge_media(current, incoming)
+                merged = _merge_media(current, incoming, allowed_roots=allowed_roots)
                 if merged != current:
                     target.execute("DELETE FROM media WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?", identity)
                     _insert(target, "media", merged)
@@ -1035,38 +1106,7 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
     target_tables = _tables(target)
     if (("media_tags" in source_tables or "ai_feedback" in source_tables or "ai_tag_feedback" in source_tables)
             and "media_tags" in target_tables):
-        if "source" not in _columns(target, "media_tags"):
-            target.execute("ALTER TABLE media_tags ADD COLUMN source TEXT NOT NULL DEFAULT 'user'")
-        if "ai_tag_feedback" in target_tables:
-            target.execute(
-                "DELETE FROM ai_tag_feedback WHERE label=-1 AND EXISTS ("
-                "SELECT 1 FROM media_tags mt WHERE mt.folder_mode=ai_tag_feedback.folder_mode "
-                "AND mt.tweet_id=ai_tag_feedback.tweet_id AND mt.num=ai_tag_feedback.num "
-                "AND mt.media_type=ai_tag_feedback.media_type AND mt.tag=ai_tag_feedback.tag "
-                "AND mt.source='user')"
-            )
-            # Several AI tags per photo. An answer about one tag decides only that tag:
-            # "yes" shows it as confirmed (a typed tag stays the person's), "not this" removes it.
-            for row in _rows(target, "ai_tag_feedback"):
-                identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                if row["label"] == 1:
-                    target.execute(
-                        "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
-                        "VALUES (?,?,?,?,?,'confirmed',?) ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) "
-                        "DO UPDATE SET source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
-                        (*identity, row["tag"], row.get("updated_at") or ""))
-                else:
-                    target.execute(
-                        "DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-                        "AND tag=? AND source IN ('ai','confirmed')", (*identity, row["tag"]))
-        # The empty AI row only says "looked at, no AI tag" (1.11.9 stored "none of these" as a
-        # confirmed one): it is an AI row, and it goes where a real AI tag is.
-        target.execute("UPDATE media_tags SET source='ai' WHERE tag='' AND source='confirmed'")
-        target.execute(
-            "DELETE FROM media_tags WHERE source='ai' AND tag='' AND EXISTS (SELECT 1 FROM media_tags AS other "
-            "WHERE other.folder_mode=media_tags.folder_mode AND other.tweet_id=media_tags.tweet_id "
-            "AND other.num=media_tags.num AND other.media_type=media_tags.media_type "
-            "AND other.source='ai' AND other.tag!='')")
+        _reconcile_tag_feedback(target)
     if "ai_unreadable" in source_tables:
         _prepare_table(target, source, "ai_unreadable")
         for row in _rows(source, "ai_unreadable"):
@@ -1131,7 +1171,7 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection) -> No
                        (str(maximum),))
 
 
-def _merge_database(name: str, target_path: Path, source_path: Path) -> None:
+def _merge_database(name: str, target_path: Path, source_path: Path, *, allowed_roots=None) -> None:
     with closing(sqlite3.connect(target_path, timeout=1)) as target:
         with closing(sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True, timeout=1)) as source:
             _integrity(source)
@@ -1141,7 +1181,7 @@ def _merge_database(name: str, target_path: Path, source_path: Path) -> None:
                         raise MigrationError(_MIGRATION_HELP)
                     target.executemany("INSERT OR IGNORE INTO archive(entry) VALUES (?)", source.execute("SELECT entry FROM archive"))
                 elif name == _HISTORY_DB:
-                    _merge_history(target, source)
+                    _merge_history(target, source, allowed_roots=allowed_roots)
                 else:
                     raise MigrationError(_MIGRATION_HELP)
             _integrity(target)
@@ -1281,15 +1321,40 @@ def _moved_snapshot_edits(database: Path, snapshot: Path | None) -> dict | None:
                                "'ai_scored_rules_version','ai_scored_model_id')")
                 before += meta_filter
                 current += meta_filter
+            elif table == "media_tags":
+                tag_filter = " WHERE source != 'ai'"
+                before += tag_filter
+                current += tag_filter
             removed, added = before + " EXCEPT " + current, current + " EXCEPT " + before
             if table in _MOVED_MARK_COLUMNS:
                 if tuple(columns) != _MOVED_MARK_COLUMNS[table]:
                     return None
                 key_count = len(_MOVED_MARK_KEYS[table])
-                deletes = [row[:key_count] for row in db.execute(removed)]
                 inserts = db.execute(added).fetchall()
+                inserted_keys = {tuple(row[:key_count]) for row in inserts}
+                if table == "media_tags":
+                    source_index = columns.index("source")
+                    deletes = [
+                        (*row[:key_count], row[source_index])
+                        for row in db.execute(removed)
+                        if tuple(row[:key_count]) not in inserted_keys
+                    ]
+                else:
+                    deletes = [
+                        tuple(row[:key_count])
+                        for row in db.execute(removed)
+                        if tuple(row[:key_count]) not in inserted_keys
+                    ]
                 if deletes or inserts:
                     edits[table] = (deletes, inserts)
+            elif table == "ai_feedback":
+                if db.execute(added + " LIMIT 1").fetchone() is not None:
+                    return None
+                if tuple(columns[:5]) != (*_MEDIA_MARK_ID, "category"):
+                    return None
+                deletes = [tuple(row[:5]) for row in db.execute(removed)]
+                if deletes:
+                    edits[table] = (deletes, [])
             elif any(db.execute(difference + " LIMIT 1").fetchone() is not None for difference in (removed, added)):
                 return None
         return edits
@@ -1328,15 +1393,72 @@ def _apply_moved_mark_edits(database: Path, edits: dict) -> None:
         if "ai_tag_feedback" in edits:
             for statement in _TAG_FEEDBACK_SQL:
                 db.execute(statement)
+        tables = _tables(db)
         for table, (deletes, inserts) in edits.items():
+            if table == "ai_feedback":
+                if deletes and "ai_feedback" in tables:
+                    db.executemany(
+                        "DELETE FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                        "AND category=?",
+                        deletes,
+                    )
+                continue
             if deletes:
                 predicate = " AND ".join(key + "=?" for key in _MOVED_MARK_KEYS[table])
-                db.executemany(f"DELETE FROM {table} WHERE {predicate}", deletes)
+                if table == "media_tags":
+                    key_count = len(_MOVED_MARK_KEYS[table])
+                    typed_deletes = [row for row in deletes if len(row) > key_count]
+                    plain_deletes = [row for row in deletes if len(row) == key_count]
+                    if typed_deletes:
+                        db.executemany(f"DELETE FROM {table} WHERE {predicate} AND source=?", typed_deletes)
+                    if plain_deletes:
+                        db.executemany(f"DELETE FROM {table} WHERE {predicate} AND source != 'ai'", plain_deletes)
+                else:
+                    db.executemany(f"DELETE FROM {table} WHERE {predicate}", deletes)
             if inserts:
                 columns = _MOVED_MARK_COLUMNS[table]
                 names = ",".join(columns)
                 parameters = ",".join("?" for _ in columns)
-                db.executemany(f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({parameters})", inserts)
+                if table == "ai_tag_feedback":
+                    db.executemany(
+                        f"INSERT INTO {table} ({names}) VALUES ({parameters}) "
+                        "ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
+                        "label=excluded.label, updated_at=excluded.updated_at "
+                        "WHERE excluded.updated_at >= ai_tag_feedback.updated_at",
+                        inserts,
+                    )
+                elif table == "media_tags":
+                    db.executemany(
+                        f"INSERT INTO {table} ({names}) VALUES ({parameters}) "
+                        "ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO UPDATE SET "
+                        "source=CASE WHEN media_tags.source='user' OR excluded.source='user' "
+                        "THEN 'user' ELSE excluded.source END, "
+                        "created_at=CASE WHEN media_tags.source='user' AND excluded.source!='user' "
+                        "THEN media_tags.created_at ELSE excluded.created_at END",
+                        inserts,
+                    )
+                else:
+                    db.executemany(f"INSERT OR REPLACE INTO {table} ({names}) VALUES ({parameters})", inserts)
+        if "media_tags" in edits or "ai_tag_feedback" in edits:
+            _reconcile_tag_feedback(db)
+            refusals = [row for row in edits.get("ai_tag_feedback", ([], []))[1] if len(row) >= 7 and row[5] < 0]
+            if refusals:
+                seen_idents = set()
+                for row in refusals:
+                    ident = tuple(row[:4])
+                    if ident in seen_idents:
+                        continue
+                    seen_idents.add(ident)
+                    if db.execute(
+                        "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                        "AND source='ai' LIMIT 1",
+                        ident,
+                    ).fetchone() is None:
+                        db.execute(
+                            "INSERT OR IGNORE INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                            "VALUES (?,?,?,?,'','ai',?)",
+                            (*ident, row[6] or ""),
+                        )
 
 
 def adopt_moved_folder(source: StoragePaths, destination: StoragePaths) -> int:
@@ -1484,7 +1606,7 @@ def migrate_records(source: StoragePaths, destination: StoragePaths) -> Migratio
                 incoming = stage / (name + ".incoming")
                 try:
                     _backup_database(old, incoming)
-                    _merge_database(name, stage / name, incoming)
+                    _merge_database(name, stage / name, incoming, allowed_roots=roots)
                 finally:
                     incoming.unlink(missing_ok=True)
         history_path = stage / _HISTORY_DB

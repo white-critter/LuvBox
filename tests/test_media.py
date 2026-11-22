@@ -869,7 +869,7 @@ class MediaTests(unittest.TestCase):
             code, events = self.worker([("100", 1, "photo", "alice")])
         self.assertNotEqual(code, 0)
         self.assertEqual(events[-1]["status"], "error")
-        self.assertIn("저장 이력", events[-1]["message"])
+        self.assertIn("저장 기록", events[-1]["message"])
         self.assertEqual(self.archive_keys(), {"twitter100_1"})
         code, events = self.worker([("100", 1, "photo", "alice")])
         self.assertEqual(code, 0)

@@ -238,7 +238,7 @@ Item {
 
     BusyIndicator {
         anchors.centerIn: parent
-        running: preview.loading || (preview.externalBusy && !preview.ready)
+        running: preview.visible && preview.playing && (preview.loading || (preview.externalBusy && !preview.ready))
         visible: running
         Accessible.name: "미리보기 불러오는 중"
     }

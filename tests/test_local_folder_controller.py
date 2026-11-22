@@ -485,6 +485,26 @@ class AiTests(FolderControllerCase):
         self.settle()
         self.assertNotIn("cat7.png", self.captions())
 
+    def test_clearing_ai_tags_stops_auto_classify_until_explicit_run(self):
+        self.open()
+        self.tag_cats(6)
+        self.classify()
+        self.assertTrue(self.controller.clearAiTags())
+        self.wait(lambda: not self.controller.filesLocked and self.controller.aiScanning is False, "cleared", 30)
+        self.assertFalse(self.controller._repository.auto_ai_pending(self.controller._generation))
+        self.add("cat", "new_after_clear.png", spread=0.35)
+        self.encoded.clear()
+        self.controller._auto_ai_timer.setInterval(10)
+        self.controller.refreshFolder()
+        self.wait(lambda: not self.controller.filesLocked, "refreshed", 30)
+        until = time.monotonic() + 0.4
+        while time.monotonic() < until:
+            self.app.processEvents()
+            time.sleep(0.01)
+        self.assertEqual(self.encoded, [])
+        self.classify()
+        self.assertIn("new_after_clear.png", self.encoded)
+
 
 if __name__ == "__main__":
     unittest.main()

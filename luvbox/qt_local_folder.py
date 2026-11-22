@@ -21,6 +21,7 @@ import re
 import stat
 import subprocess
 import threading
+import time
 
 from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 
@@ -35,6 +36,7 @@ from .thumbcache import cloud_only
 
 _KEY = re.compile(r"g([0-9]+)_lf_([0-9]{1,12})\Z")
 FOLDER_ORDERS = ("modified", "name", "size")
+_FOLDER_MEDIA_TYPES = ("all", "photo", "animated_gif")
 RECENT_LIMIT = 10
 _MISSING = "파일이 없습니다. 폴더에서 옮겨졌거나 지워졌을 수 있습니다."
 _CLOUD = "이 파일은 클라우드에만 있습니다. 탐색기에서 받은 뒤 다시 열 수 있습니다."
@@ -78,7 +80,7 @@ class _FolderRequest:
     def filters(self):
         return dict(query=self.query, favorite_only=self.favorite_only, user_tag=self.user_tag,
                     ai_category=self.ai_category, duplicate_only=self.duplicate_only,
-                    media_type=self.media_type)
+                    media_type="all" if self.duplicate_only else self.media_type)
 
 
 def _modified(mtime_ns) -> str:
@@ -96,6 +98,7 @@ class LocalFolderRepository(LibraryRepository):
     def __init__(self):
         super().__init__()
         self.share_learning = True
+        self._profile_lock = threading.Lock()
 
     @staticmethod
     def _catalog_moved(previous, request):
@@ -120,23 +123,23 @@ class LocalFolderRepository(LibraryRepository):
 
     @staticmethod
     def _locate_row(store, row):
-        """``(path, kind)``: ready, cloud or missing."""
+        """``(path, kind, details)``: ready, cloud or missing."""
         if row is None or not row.get("present"):
-            return None, "missing"
+            return None, "missing", None
         path = store.path_of(row["rel_path"])
         if path is None:
-            return None, "missing"
+            return None, "missing", None
         try:
             details = path.stat()
         except OSError:
-            return None, "missing"
+            return None, "missing", None
         if not stat.S_ISREG(details.st_mode):
-            return None, "missing"
+            return None, "missing", None
         # A cloud service can free or hydrate a listed photo at any time: live attributes decide,
         # never a cached cloud flag or an operation that triggers a Windows cloud download.
         if cloud_only(path, status=details):
-            return path, "cloud"
-        return path, "ready"
+            return path, "cloud", details
+        return path, "ready", details
 
     def _example_scope(self, request):
         key = folder_key(request.root)
@@ -149,6 +152,7 @@ class LocalFolderRepository(LibraryRepository):
             return 0, []
         try:
             with closing(request.store()) as store:
+                store._folder_cache = {}
                 if request.duplicate_only:
                     total, page = store.duplicate_page(offset, limit, **request.filters())
                 else:
@@ -156,14 +160,9 @@ class LocalFolderRepository(LibraryRepository):
                 rows, served = [], {}
                 for row in page:
                     key = f"g{request.generation}_lf_{int(row['rowid'])}"
-                    path, kind = self._locate_row(store, row)
-                    stamp = None
-                    if kind == "ready":
-                        try:
-                            info = path.stat()
-                            stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-                        except OSError:
-                            path, kind = None, "missing"
+                    path, kind, info = self._locate_row(store, row)
+                    stamp = ((info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+                             if kind == "ready" and info is not None else None)
                     served[key] = (str(path) if kind == "ready" else "", stamp)
                     with self._condition:
                         if self._request is not request:
@@ -258,7 +257,7 @@ class LocalFolderRepository(LibraryRepository):
             row = store.row(rowid)
             if row is None:
                 return None
-            path, kind = self._locate_row(store, row)
+            path, kind, _info = self._locate_row(store, row)
             width = height = raw_width = raw_height = 0
             if kind == "ready" and row["media_type"] == "photo":
                 from .preview import photo_info
@@ -323,16 +322,19 @@ class LocalFolderRepository(LibraryRepository):
         clean = valid_tag(tag)
         if not clean or not self.share_learning:
             return
-        profile = _open_profile()
-        if profile is None:
-            return
-        try:
-            with closing(profile):
-                if clean in profile.known_tag_names():
-                    kind, scope, example_id = self._example_scope(request)
-                    ai_pipeline.sync_examples(store, profile, kind, scope, example_id, [clean])
-        except Exception:
-            pass
+        with self._profile_lock:
+            if not self.share_learning:
+                return
+            profile = _open_profile()
+            if profile is None:
+                return
+            try:
+                with closing(profile):
+                    if clean in profile.known_tag_names():
+                        kind, scope, example_id = self._example_scope(request)
+                        ai_pipeline.sync_examples(store, profile, kind, scope, example_id, [clean])
+            except Exception:
+                pass
 
     def _rel_paths(self, store, keys, request):
         found = self._rows_for_keys(store, keys, request)
@@ -357,57 +359,67 @@ class LocalFolderRepository(LibraryRepository):
         except LocalFolderError:
             return 0
 
-    def remove_tag(self, key, generation, tag):
+    def remove_tag_detailed(self, key, generation, tag):
         request = self.current(generation)
         if request is None:
-            return False
+            return False, False
         try:
             with closing(request.store()) as store:
                 rels = self._rel_paths(store, [key], request)
-                removed = bool(rels) and bool(store.remove_tag(rels[0], tag))
+                if not rels:
+                    return False, False
+                source, confirmed_restored = store.remove_tag_result(rels[0], tag)
+                removed = bool(source)
                 if removed:
                     self._teach_profile(store, request, tag)
-                return removed
+                return removed, confirmed_restored
         except LocalFolderError:
-            return False
+            return False, False
 
-    def sync_tag_examples(self, generation, tags):
+    def remove_tag(self, key, generation, tag):
+        return self.remove_tag_detailed(key, generation, tag)[0]
+
+    def sync_tag_examples(self, generation, tags, epoch=None):
         from . import ai_pipeline
 
-        request = self.current(generation)
         names = [valid_tag(tag) for tag in tags if valid_tag(tag)]
-        if request is None or not names or not self.share_learning:
+        if not names:
             return False
-        profile = _open_profile()
-        if profile is None:
-            return False
-        try:
-            with closing(profile), closing(request.store()) as store:
-                known = set(profile.known_tag_names())
-                names = [tag for tag in names if tag in known]
-                kind, scope, example_id = self._example_scope(request)
-                return ai_pipeline.sync_examples(store, profile, kind, scope, example_id, names) if names else False
-        except Exception:
-            return False
+        with self._profile_lock:
+            request = self._catalog_request(generation, epoch) if epoch is not None else self.current(generation)
+            if request is None or not self.share_learning:
+                return False
+            profile = _open_profile()
+            if profile is None:
+                return False
+            try:
+                with closing(profile), closing(request.store()) as store:
+                    known = set(profile.known_tag_names())
+                    names = [tag for tag in names if tag in known]
+                    kind, scope, example_id = self._example_scope(request)
+                    return ai_pipeline.sync_examples(store, profile, kind, scope, example_id, names) if names else False
+            except Exception:
+                return False
 
     def set_share_learning(self, enabled, generation=None):
         """Sharing switched off takes this folder's examples out of the shared profile; on brings them back."""
         from . import ai_pipeline
 
-        self.share_learning = bool(enabled)
-        request = self.current(generation)
-        profile = _open_profile() if request is not None else None
-        if profile is None:
-            return
-        try:
-            with closing(profile), closing(request.store()) as store:
-                kind, scope, example_id = self._example_scope(request)
-                if self.share_learning:
-                    ai_pipeline.sync_examples(store, profile, kind, scope, example_id)
-                else:
-                    profile.remove_scope_examples(kind, scope)
-        except Exception:
-            pass
+        with self._profile_lock:
+            self.share_learning = bool(enabled)
+            request = self.current(generation)
+            profile = _open_profile() if request is not None else None
+            if profile is None:
+                return
+            try:
+                with closing(profile), closing(request.store()) as store:
+                    kind, scope, example_id = self._example_scope(request)
+                    if self.share_learning:
+                        ai_pipeline.sync_examples(store, profile, kind, scope, example_id)
+                    else:
+                        profile.remove_scope_examples(kind, scope)
+            except Exception:
+                pass
 
     # -- the folder itself ------------------------------------------------------------------
     def sync_folder(self, generation, epoch=None, progress_callback=None):
@@ -439,9 +451,14 @@ class LocalFolderRepository(LibraryRepository):
             if self._catalog_request(generation, epoch) is None:
                 raise ScanCancelled("폴더가 바뀌어 작업을 멈췄습니다.")
 
+        self._dup_synced_changes = False
         try:
             with closing(request.store()) as store:
-                store.sync_folder(request.include_subfolders, check_cancel)
+                store._folder_cache = {}
+                synced = store.sync_folder(request.include_subfolders, check_cancel)
+                self._dup_synced_changes = bool(
+                    synced.get("added") or synced.get("changed") or synced.get("gone") or synced.get("restored")
+                )
                 pending = store.photos_to_hash()
                 total = len(pending)
                 hashed = []
@@ -457,7 +474,9 @@ class LocalFolderRepository(LibraryRepository):
                             continue
                     except (OSError, ValueError):
                         continue
-                    hashed.append((row["rel_path"], file_hash or "", dhash or "", ":".join(map(str, before))))
+                    if not file_hash:
+                        continue
+                    hashed.append((row["rel_path"], file_hash, dhash or "", ":".join(map(str, before))))
                     if len(hashed) >= 64:
                         store.save_hashes(hashed)
                         hashed.clear()
@@ -466,11 +485,16 @@ class LocalFolderRepository(LibraryRepository):
                 store.save_hashes(hashed)
                 seen_files = set()
                 items = []
+                stale_updates = []
                 for row in store.hashed_photos():
+                    check_cancel()
                     path = store.path_of(row["rel_path"])
                     if path is None:
                         continue
                     try:
+                        info = path.stat()
+                        if not stat.S_ISREG(info.st_mode) or cloud_only(path, status=info):
+                            continue
                         sig = file_signature(path)
                     except OSError:
                         continue
@@ -479,8 +503,25 @@ class LocalFolderRepository(LibraryRepository):
                         if (volume, number) in seen_files:
                             continue
                         seen_files.add((volume, number))
-                    items.append({"key": row["rel_path"], "file_hash": row["file_hash"], "filesize": row["filesize"],
-                                  "dhash": row["dhash"], "path": str(path), "favorite": bool(row["favorite"])})
+                    sig_str = ":".join(map(str, sig))
+                    file_hash, dhash, filesize = row["file_hash"], row["dhash"], row["filesize"]
+                    if row.get("file_signature") != sig_str:
+                        try:
+                            file_hash, dhash = compute_image_hashes(path)
+                            after = file_signature(path)
+                        except (OSError, ValueError):
+                            continue
+                        if after != sig or not file_hash:
+                            continue
+                        filesize = after[2]
+                        stale_updates.append((row["rel_path"], file_hash, dhash or "", sig_str, after[2], after[3]))
+                        if len(stale_updates) >= 64:
+                            store.save_hashes(stale_updates)
+                            stale_updates.clear()
+                    items.append({"key": row["rel_path"], "file_hash": file_hash, "filesize": filesize,
+                                  "dhash": dhash, "path": str(path), "favorite": bool(row["favorite"])})
+                if stale_updates:
+                    store.save_hashes(stale_updates)
                 groups = cluster_images(items, near=bool(near), check_cancel=check_cancel,
                                         progress=compare_callback)
                 grouped = store.save_clusters([[item["key"] for item in group] for group in groups],
@@ -570,6 +611,8 @@ class LocalFolderRepository(LibraryRepository):
 
         try:
             with closing(request.store()) as store:
+                if store.ai_cleared():
+                    return False
                 if not store.count_embeddings(ACTIVE_MODEL_ID):
                     return False
                 if store.count_embeddings(ACTIVE_MODEL_ID, unlabeled=True):
@@ -610,6 +653,7 @@ class LocalFolderRepository(LibraryRepository):
         self._scan_note = ""
         self._ai_wrote = False
         self._ai_changed = 0
+        self._ai_synced_changes = False
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
@@ -629,10 +673,15 @@ class LocalFolderRepository(LibraryRepository):
         profile = _open_profile()
         if profile is None:
             raise RuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
+        synced_changes = False
         try:
             with closing(profile), closing(request.store()) as store:
                 items, skipped = [], 0
                 if encode:
+                    synced = store.sync_folder(request.include_subfolders, check_cancel)
+                    synced_changes = bool(
+                        synced.get("added") or synced.get("changed") or synced.get("gone") or synced.get("restored")
+                    )
                     signatures = store.unreadable_signatures()
                     for row in store.photos_without_embeddings():
                         check_cancel()
@@ -664,10 +713,12 @@ class LocalFolderRepository(LibraryRepository):
                                          shared=self.share_learning)
                 if run.unreadable:
                     self._scan_note = f" 읽을 수 없는 사진 {skipped + run.unreadable:,}장은 제외했습니다."
+                self._ai_synced_changes = synced_changes
                 self._ai_wrote = run.wrote
                 self._ai_changed = run.changed
                 return run.tagged if encode else run.changed
         except (RuntimeError, ScanCancelled):
+            self._ai_synced_changes = synced_changes
             self._ai_wrote = run.wrote
             self._ai_changed = run.changed
             raise
@@ -681,8 +732,10 @@ class LocalFolderRepository(LibraryRepository):
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
+        self._ai_had_embeddings = False
         try:
             with closing(request.store()) as store:
+                self._ai_had_embeddings = store.count_embeddings(ACTIVE_MODEL_ID) > 0
                 store.set_ai_scored_state(-1, ACTIVE_MODEL_ID)
         except LocalFolderError as exc:
             raise RuntimeError("AI 태그를 다시 매기지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
@@ -699,15 +752,15 @@ class LocalFolderRepository(LibraryRepository):
         except LocalFolderError as exc:
             raise RuntimeError("AI 태그를 초기화하지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
 
-    def teach_labels(self, generation, identities, category, epoch=None, progress_callback=None):
+    def teach_labels(self, generation, identities, category, epoch=None, progress_callback=None, status_callback=None):
         return self.teach_tag(generation, identities, category, bool(category), epoch=epoch,
-                              progress_callback=progress_callback)
+                              progress_callback=progress_callback, status_callback=status_callback)
 
-    def teach_tag(self, generation, identities, tag, positive, epoch=None, progress_callback=None):
+    def teach_tag(self, generation, identities, tag, positive, epoch=None, progress_callback=None,
+                  status_callback=None):
         """As the gallery's: ``identities`` are row numbers of this folder's list."""
-        from contextlib import ExitStack
         from . import ai_pipeline
-        from .clip_classifier import classify_detailed, ensure_model, get_session, is_available, release_session, session_use
+        from .clip_classifier import release_session
         from .duplicates import ScanCancelled
 
         request = self._catalog_request(generation, epoch)
@@ -716,6 +769,11 @@ class LocalFolderRepository(LibraryRepository):
         clean = valid_tag(tag)
         if not clean and (tag or positive):
             return 0, 0
+
+        def check_cancel():
+            if self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None:
+                raise ScanCancelled("분류 가르치기를 중단했습니다.")
+
         profile = _open_profile()
         if profile is None:
             raise RuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
@@ -728,52 +786,29 @@ class LocalFolderRepository(LibraryRepository):
                 present = [row["rel_path"] for row in rows.values()
                            if row["present"] and not row["cloud"] and row["media_type"] == "photo"]
                 known = store.embeddings_for(present)
-                missing = [(rel, store.path_of(rel)) for rel in present if rel not in known and store.path_of(rel)]
-                total = len(present)
-                if progress_callback and total:
-                    progress_callback(0, total)
-                with ExitStack() as scope_guard:
-                    if missing:
-                        if not is_available():
-                            def stop_when_closing(_done, _total):
-                                if self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None:
-                                    raise ScanCancelled("분류 가르치기를 중단했습니다.")
-                            try:
-                                ensure_model(progress_callback=stop_when_closing)
-                            except ScanCancelled:
-                                raise
-                            except Exception as exc:
-                                raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 "
-                                                   "확인해 주세요.") from exc
-                        scope_guard.enter_context(session_use())
-                        session = get_session()
-                        if session is None:
-                            raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
-                        done = total - len(missing)
-                        for start in range(0, len(missing), 16):
-                            if self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None:
-                                raise ScanCancelled("분류 가르치기를 중단했습니다.")
-                            chunk = missing[start:start + 16]
-                            try:
-                                detailed = classify_detailed([path for _rel, path in chunk], batch_size=16, session=session)
-                            except Exception as exc:
-                                raise RuntimeError("사진을 읽지 못해 분류를 저장하지 못했습니다. 다시 시도해 주세요.") from exc
-                            store.save_embeddings([(rel, vector.tobytes(), confidence) for (rel, _path), (_tag, confidence, vector)
-                                                   in zip(chunk, detailed) if vector is not None])
-                            done += len(chunk)
-                            if progress_callback:
-                                progress_callback(min(done, total), total)
-                if progress_callback and total:
-                    progress_callback(total, total)
+                missing = []
+                for rel in present:
+                    if rel in known:
+                        continue
+                    path = store.path_of(rel)
+                    if path is not None and not cloud_only(path):
+                        missing.append((rel, path))
+                ai_pipeline.encode_missing_for_teach(
+                    store, missing, total=len(present), check_cancel=check_cancel,
+                    progress_callback=progress_callback, status_callback=status_callback,
+                )
+                check_cancel()
                 refreshed = store.embeddings_for(present) if present else {}
                 teachable = [rel for rel in present if rel in refreshed]
                 if not teachable:
                     return 0, 0
                 kind, scope, example_id = self._example_scope(request)
-                return ai_pipeline.teach(store, profile, kind=kind, scope=scope, example_id=example_id,
-                                         idents=teachable, tag=clean, positive=positive,
-                                         check_stop=lambda: self._catalog_request(generation, epoch) is None,
-                                         shared=self.share_learning)
+                return ai_pipeline.teach(
+                    store, profile, kind=kind, scope=scope, example_id=example_id,
+                    idents=teachable, tag=clean, positive=positive,
+                    check_stop=lambda: self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None,
+                    shared=self.share_learning,
+                )
         except (RuntimeError, ScanCancelled):
             raise
         except Exception as exc:
@@ -797,13 +832,13 @@ class LocalFolderRepository(LibraryRepository):
             rows = []
             for key in keys:
                 row = found.get(key)
-                path, kind = self._locate_row(store, row)
+                path, kind, _info = self._locate_row(store, row)
                 previous_path, previous_signature = displayed[key]
                 if kind != "ready" or str(path) != previous_path or previous_signature is None:
-                    raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
+                    raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로고침해 주세요.")
                 signature = file_signature(path)
                 if signature != previous_signature:
-                    raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                    raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
                 rows.append({"path": str(path), "filename": row["filename"], "rel_path": row["rel_path"],
                              "filesize": row["filesize"], "_delete_signature": signature, "_key": key})
             kept = 0
@@ -853,12 +888,12 @@ class LocalFolderRepository(LibraryRepository):
             previous_path, previous_signature = self._served[key]
         with closing(request.store()) as store:
             row = (self._rows_for_keys(store, [key], request) or {}).get(key)
-            path, kind = self._locate_row(store, row)
+            path, kind, _info = self._locate_row(store, row)
             if kind != "ready" or str(path) != previous_path or previous_signature is None:
-                raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로고침해 주세요.")
             signature = file_signature(path)
             if signature != previous_signature:
-                raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
             rel = row["rel_path"]
             members = next((members for members in store.duplicate_members().values() if rel in members), None)
             copies = set(store.duplicate_copy_rel_paths()) if members else set()
@@ -867,6 +902,8 @@ class LocalFolderRepository(LibraryRepository):
             keeper = store.path_of(members[0])
             if keeper is None or not keeper.is_file():
                 raise ManifestError("남길 사진 파일이 없어 이 사진을 보낼 수 없습니다.")
+            if cloud_only(keeper):
+                raise ManifestError("남길 사진이 클라우드에만 있어 비교할 수 없습니다. 탐색기에서 받은 뒤 다시 시도해 주세요.")
             keeper_signature = file_signature(keeper)
             if (os.path.normcase(os.path.realpath(keeper)) == os.path.normcase(os.path.realpath(path))
                     or (keeper_signature[1] and keeper_signature[:2] == signature[:2])):
@@ -875,7 +912,7 @@ class LocalFolderRepository(LibraryRepository):
                 raise ManifestError("남길 사진과 같은 사진으로 다시 확인되지 않아 보낼 수 없습니다. "
                                     "‘중복 아님’으로 표시하거나 목록에서 휴지통으로 보내세요.")
             if file_signature(path) != signature or file_signature(keeper) != keeper_signature:
-                raise ManifestError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
             keeper_row = store.row_by_rel(members[0])
             shown = {"alike": self._compared_local(path, row, signature),
                      "keeper": self._compared_local(keeper, keeper_row or {}, keeper_signature)}
@@ -994,6 +1031,8 @@ class LocalFolderController(LibraryController):
         if self._deletion_busy != busy:
             self._deletion_busy = busy
             self.changed.emit()
+            if not busy and self._auto_ai_wanted and not self._exclusive:
+                self._auto_ai_timer.start()
 
     def _track_thread(self, thread):
         self._aux_threads = [item for item in self._aux_threads if item.is_alive()]
@@ -1089,6 +1128,14 @@ class LocalFolderController(LibraryController):
     @Property(str, notify=stateChanged)
     def folderOrder(self):
         return self._folder_order()
+
+    @Property(str, notify=stateChanged)
+    def folderMediaType(self):
+        return self._media_type if self._media_type in _FOLDER_MEDIA_TYPES else "all"
+
+    @Property(bool, notify=stateChanged)
+    def busy(self):
+        return bool(self._exclusive or self._busy or self._deletion_busy)
 
     # -- the folder -------------------------------------------------------------------------
     def restore_preferences(self, last, recent, subfolders, share):
@@ -1196,12 +1243,13 @@ class LocalFolderController(LibraryController):
         """
         if self._closed or not isinstance(path, str) or not path:
             return False
-        if erase and self._root and os.path.normcase(path) == os.path.normcase(self._root):
+        norm = os.path.normcase(os.path.normpath(path))
+        if erase and self._root and norm == os.path.normcase(os.path.normpath(self._root)):
             self._status = "열려 있는 폴더의 기록은 지울 수 없습니다. 다른 폴더를 연 뒤 지워 주세요."
             self.changed.emit()
             return False
-        self._recent = [item for item in self._recent if os.path.normcase(item) != os.path.normcase(path)]
-        if self._last and os.path.normcase(self._last) == os.path.normcase(path):
+        self._recent = [item for item in self._recent if os.path.normcase(os.path.normpath(item)) != norm]
+        if self._last and os.path.normcase(os.path.normpath(self._last)) == norm:
             self._last = ""
         self.recentFoldersChanged.emit()
         if not erase:
@@ -1260,9 +1308,8 @@ class LocalFolderController(LibraryController):
         enabled = bool(enabled)
         if enabled == self._share_learning:
             return
-        if self.tagsLocked:
-            # A running classification or answer read the switch when it began.
-            self._status = "AI 작업이 끝난 뒤 학습 공유를 바꿀 수 있습니다."
+        if self.filesLocked or self._deletion_busy:
+            self._status = "진행 중인 작업이 끝난 뒤 학습 공유를 바꿀 수 있습니다."
             self.shareLearningChanged.emit()
             self.changed.emit()
             return
@@ -1270,6 +1317,7 @@ class LocalFolderController(LibraryController):
         self._repository.set_share_learning(enabled, self._generation)
         self.shareLearningChanged.emit()
         self._reload_ai_rules()
+        self.classifyNewPhotos()
 
     def checkXOverlap(self, output_dirs):
         """Whether the open folder and an X save folder (any account's: a path or a list) are one inside the other."""
@@ -1301,6 +1349,14 @@ class LocalFolderController(LibraryController):
         if self._closed or order not in FOLDER_ORDERS or order == self._folder_order():
             return
         self._order = order
+        self._refresh(reload_authors=False)
+
+    @Slot(str)
+    def setFolderMediaType(self, kind):
+        if self._closed or kind not in _FOLDER_MEDIA_TYPES or kind == self.folderMediaType:
+            return
+        self._media_type = kind
+        self.changed.emit()
         self._refresh(reload_authors=False)
 
     def _job_finished(self, action, selection, message):

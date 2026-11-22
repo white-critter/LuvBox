@@ -45,7 +45,7 @@ Frame {
                 }
                 BusyIndicator {
                     anchors.centerIn: parent
-                    running: !!details.item.preview_loading
+                    running: details.visible && details.hasItem && !!details.item.preview_loading
                         && (!details.Window.window
                             || (details.Window.window.visible && details.Window.window.visibility !== Window.Minimized))
                     visible: running
@@ -159,7 +159,7 @@ Frame {
         }
         ScrollView {
             id: bodyScroll
-            SmoothWheel { flickable: bodyScroll.contentItem }
+            SmoothWheel { flickable: bodyScroll.contentItem as Flickable }
             Layout.fillWidth: true
             Layout.preferredHeight: Math.min(120, savedBody.implicitHeight)
             visible: details.hasItem && !!details.item.body

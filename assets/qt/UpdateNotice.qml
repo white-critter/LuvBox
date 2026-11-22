@@ -12,6 +12,9 @@ Card {
     readonly property var updates: app && app.updates ? app.updates : null
     readonly property string phase: updates ? updates.state : "idle"
     readonly property bool saving: !!app && !!app.download && app.download.running
+    readonly property bool busyWork: saving || (!!app && (app.operationBusy
+        || (!!app.management && app.management.mutating)
+        || (!!app.localManagement && app.localManagement.mutating)))
     property bool notesOpen: false
     signal restartRequested()
 
@@ -75,7 +78,8 @@ Card {
                         if (!notice.updates)
                             return ""
                         if (notice.phase === "ready")
-                            return notice.saving ? "저장이 끝나면 다시 시작하세요." : "다시 시작하면 적용됩니다."
+                            return notice.saving ? "저장이 끝나면 다시 시작하세요."
+                                : (notice.busyWork ? "진행 중인 작업이 끝나면 다시 시작하세요." : "다시 시작하면 적용됩니다.")
                         if (notice.phase === "available" && !notice.updates.canInstall)
                             return "다운로드 페이지에서 LuvBox.exe를 받으세요."
                         if (notice.phase === "available")
@@ -130,7 +134,7 @@ Card {
             FlatButton {
                 objectName: "updateRestartButton"
                 visible: notice.phase === "ready"
-                enabled: !notice.saving
+                enabled: !notice.busyWork
                 tone: "soft"
                 font.bold: true
                 text: "지금 다시 시작"

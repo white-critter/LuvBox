@@ -119,7 +119,12 @@ class ManagementController(QObject):
             return
         self._context = context
         self._generation += 1
+        confirming = self._delete is not None
         self._delete = None
+        if confirming:
+            self._mutating = False
+        elif self._mutating:
+            self._stop.set()
         self._error = self._status = ""
         self.changed.emit()
 

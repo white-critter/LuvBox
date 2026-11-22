@@ -1,7 +1,10 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Dialogs
 import QtQuick.Layouts
+import QtQuick.Window
 
 // "폴더 정리": a folder on this PC looked at like the gallery. Its duplicates are
 // cleared with the gallery's duplicate view and the same Recycle Bin checks, and
@@ -12,9 +15,15 @@ Item {
     objectName: "localFolderView"
     property var app: null
     property int tileWidth: 168
+    property int densityChoice: 1
+    property int currentScreen: 0
+    property bool saveReviewOpen: false
     property Item popupParent: null
     property bool windowModalOpen: false
     property bool windowShown: true
+    signal densitySelected(int choice)
+    property bool duplicateNear: false
+    readonly property var hostWindow: view.Window.window
     readonly property var folder: app ? app.localFolder : null
     readonly property var manager: app ? app.localManagement : null
     readonly property bool opened: !!folder && folder.hasFolder
@@ -22,14 +31,16 @@ Item {
     readonly property bool modalOpen: folderPicker.visible || previewPopup.visible || tagPopup.visible
         || teachPopup.visible || aiManager.visible || deleteConfirmation.visible || alikeConfirmation.visible
         || clearConfirm.visible || forgetDialog.visible
-    readonly property bool menuOpen: aiMenu.visible || teachMenu.visible || orderMenu.visible || recentMenu.visible
+    readonly property bool listEngaged: [orderCombo, mediaTypeCombo, densityCombo, userTagCombo].some(
+        function(combo) { return combo.activeFocus || combo.popup.visible })
+    readonly property bool menuOpen: aiMenu.visible || teachMenu.visible || recentMenu.visible
+    readonly property bool screenActive: view.currentScreen === 3 && view.opened && !view.modalOpen && !view.windowModalOpen
+    readonly property bool letterKeysFree: view.screenActive && !searchField.activeFocus && !view.listEngaged && !view.menuOpen
     readonly property real thumbPixelRatio: Math.max(1, Screen.devicePixelRatio)
-    readonly property int thumbDecodeW: Math.min(384, Math.max(1, Math.round((tileWidth - 20) * thumbPixelRatio)))
-    readonly property int thumbDecodeH: Math.min(384, Math.max(1, Math.round((Math.round(tileWidth * 0.75) - 8) * thumbPixelRatio)))
+    readonly property int thumbDecodeW: Math.min(384, Math.max(1, Math.round((tileWidth - 28) * thumbPixelRatio)))
+    readonly property int thumbDecodeH: Math.min(384, Math.max(1, Math.round((Math.round(tileWidth * 0.75) - 16) * thumbPixelRatio)))
     property real focusContentY: 0
     property bool resumePreview: false
-    property string clickedKey: ""
-    property bool clickedWasChosen: false
     // The status line, as in the gallery: the folder's work and the Recycle Bin's results; the one
     // that changed last speaks, and a key refused just now says why.
     property string statusSource: "folder"
@@ -50,12 +61,37 @@ Item {
         Qt.callLater(updateFocus)
     }
     onDuplicateModeChanged: {
+        localDuplicateHelp.close()
         Qt.callLater(takeFocus)
         Qt.callLater(updateFocus)
     }
-    onTileWidthChanged: Qt.callLater(updateFocus)
+    onCurrentScreenChanged: {
+        if (currentScreen !== 3)
+            localDuplicateHelp.close()
+    }
+    onTileWidthChanged: {
+        if (localWheel)
+            localWheel.reset()
+        Qt.callLater(updateFocus)
+    }
+
+    function flashNotice(text) {
+        keyNotice = text
+        if (text && text.length > 0)
+            localNoticeTimer.restart()
+        else
+            localNoticeTimer.stop()
+    }
+
+    Timer {
+        id: localNoticeTimer
+        interval: 3500
+        onTriggered: view.keyNotice = ""
+    }
 
     function takeFocus() {
+        if (view.currentScreen !== 3 || view.modalOpen || view.windowModalOpen)
+            return
         if (opened && !duplicateMode)
             grid.forceActiveFocus()
         else
@@ -80,12 +116,14 @@ Item {
     function closeMenus() {
         aiMenu.close()
         teachMenu.close()
-        orderMenu.close()
         recentMenu.close()
+        localDuplicateHelp.close()
     }
 
     // The application is closing: nothing of this tab stays open.
     function closeAll() {
+        if (localWheel)
+            localWheel.reset()
         localPreviewMedia.release()
         closeMenus()
         forgetDialog.close()
@@ -116,14 +154,12 @@ Item {
             return
         const started = selection ? folder.teachSelection(category) : folder.teachSelected(category)
         if (started)
-            view.keyNotice = (category.length ? "#" + category : "AI 태그 모두 아님") + " 분류 저장 중…"
+            flashNotice(category.length ? "#" + category + " 분류 저장 중…" : "AI 태그 제외 내용을 저장하는 중…")
     }
 
-    // Keys of this tab, as the gallery's: Ctrl+F search, F star, B favorite filter, D duplicates,
-    // Space/Enter preview (or select in selectionMode), Delete Recycle Bin, Ctrl+A loaded, Esc step back, F5 refresh.
-    function handleKey(event) {
-        if (!folder || !opened || modalOpen || windowModalOpen || menuOpen || searchField.activeFocus
-                || userTagCombo.activeFocus || userTagCombo.popup.visible)
+    // Keys handled on the grid itself (Space/Enter/Esc); screen-wide shortcuts sit in Shortcut items below.
+    function handleGridKey(event) {
+        if (!folder || !opened || modalOpen || windowModalOpen || menuOpen || searchField.activeFocus)
             return false
         const ctrl = (event.modifiers & Qt.ControlModifier) !== 0
         const shift = (event.modifiers & Qt.ShiftModifier) !== 0
@@ -131,31 +167,6 @@ Item {
         const plain = !ctrl && !shift && !altMeta
         const key = folder.selectedKey || (grid.currentItem ? grid.currentItem.tileKey : "")
 
-        if (event.key === Qt.Key_F && ctrl && !shift && !altMeta) {
-            searchField.forceActiveFocus()
-            searchField.selectAll()
-            return true
-        }
-        if (event.key === Qt.Key_A && ctrl && !altMeta) {
-            folder.selectLoaded()
-            return true
-        }
-        if (event.key === Qt.Key_F && plain && !duplicateMode && key) {
-            keyNotice = folder.favoriteNotice(key)
-            return true
-        }
-        if (event.key === Qt.Key_B && plain) {
-            folder.setFavoriteOnly(!folder.filterFavoriteOnly)
-            return true
-        }
-        if (event.key === Qt.Key_D && plain) {
-            folder.setDuplicateOnly(!folder.filterDuplicateOnly)
-            return true
-        }
-        if (event.key === Qt.Key_F5 && plain && !folder.busy) {
-            folder.refreshFolder()
-            return true
-        }
         if ((event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
                 && plain && !duplicateMode && key) {
             if (folder.selectionMode)
@@ -164,29 +175,14 @@ Item {
                 previewPopup.open()
             return true
         }
-        if (event.key === Qt.Key_Delete && plain && manager) {
-            if (lockReason.length > 0) {
-                keyNotice = lockReason
-                return true
-            }
-            if (manager.mutating)
-                return true
-            if (folder.selectedCount > 0)
-                manager.prepareDelete(folder.selectedKeys)
-            else if (key) {
-                if (folder.selectedAlike)
-                    manager.prepareAlikeDelete(key)
-                else
-                    manager.prepareDelete([key])
-            }
-            return true
-        }
         if (event.key === Qt.Key_Escape && plain) {
-            if (folder.selectedCount > 0)
+            if (localDuplicateHelp.showing) {
+                localDuplicateHelp.close()
+            } else if (folder.selectedCount > 0) {
                 folder.clearSelection()
-            else if (folder.selectionMode)
+            } else if (folder.selectionMode) {
                 folder.setSelectionMode(false)
-            else {
+            } else {
                 grid.currentIndex = -1
                 folder.forgetOpened()
             }
@@ -195,7 +191,82 @@ Item {
         return false
     }
 
-    Keys.onPressed: event => { event.accepted = view.handleKey(event) }
+    Shortcut {
+        sequence: "Ctrl+F"
+        enabled: view.screenActive
+        onActivated: {
+            searchField.forceActiveFocus()
+            searchField.selectAll()
+        }
+    }
+    Shortcut {
+        sequence: "Ctrl+A"
+        enabled: view.screenActive && !view.listEngaged && !view.menuOpen && !searchField.activeFocus && !!view.folder
+        onActivated: view.folder.selectLoaded()
+    }
+    Shortcut {
+        sequence: "D"
+        enabled: view.letterKeysFree
+        onActivated: if (view.folder) view.folder.setDuplicateOnly(!view.folder.filterDuplicateOnly)
+    }
+    Shortcut {
+        sequence: "B"
+        enabled: view.letterKeysFree
+        onActivated: if (view.folder) view.folder.setFavoriteOnly(!view.folder.filterFavoriteOnly)
+    }
+    Shortcut {
+        sequence: "F"
+        enabled: view.letterKeysFree && !view.duplicateMode && !!view.folder
+            && (!!view.folder.selectedKey || grid.currentIndex >= 0)
+        onActivated: {
+            const key = view.folder.selectedKey || (grid.currentItem ? grid.currentItem.tileKey : "")
+            if (key)
+                view.flashNotice(view.folder.favoriteNotice(key))
+        }
+    }
+    Shortcut {
+        sequence: "Escape"
+        enabled: view.screenActive && !view.menuOpen && localDuplicateHelp.showing
+        onActivated: localDuplicateHelp.close()
+    }
+    Shortcut {
+        sequence: "Escape"
+        enabled: view.screenActive && !view.listEngaged && !view.menuOpen && !localDuplicateHelp.showing
+            && !searchField.activeFocus && !!view.folder
+            && (view.folder.selectedCount > 0 || view.folder.selectionMode)
+        onActivated: {
+            if (view.folder.selectedCount > 0)
+                view.folder.clearSelection()
+            else
+                view.folder.setSelectionMode(false)
+        }
+    }
+    Shortcut {
+        sequence: "Delete"
+        enabled: view.screenActive && !view.listEngaged && !view.menuOpen && !searchField.activeFocus
+            && !!view.folder && !!view.manager && (!view.app || !view.app.closing)
+            && (view.folder.selectedCount > 0 || (!view.duplicateMode && !view.folder.selectionMode && view.folder.selectedKey.length > 0))
+        onActivated: {
+            if (localWheel)
+                localWheel.reset()
+            if (view.lockReason.length > 0) {
+                view.flashNotice(view.lockReason)
+                return
+            }
+            if (view.manager.mutating)
+                return
+            if (view.folder.selectedCount > 0) {
+                view.manager.prepareDelete(view.folder.selectedKeys)
+            } else if (view.folder.selectedKey.length > 0 && !view.folder.selectedMissing) {
+                view.manager.prepareDelete([view.folder.selectedKey])
+            }
+        }
+    }
+    Shortcut {
+        sequence: "F5"
+        enabled: view.screenActive && !!view.folder && !view.folder.busy && (!view.app || !view.app.closing)
+        onActivated: view.folder.refreshFolder()
+    }
 
     FolderDialog {
         id: folderPicker
@@ -212,7 +283,7 @@ Item {
             objectName: "localFolderEmpty"
             anchors.centerIn: parent
             width: Math.min(parent.width - 48, 560)
-            height: emptyColumn.implicitHeight + Theme.cardPadding * 2
+            height: Math.min(emptyColumn.implicitHeight + Theme.cardPadding * 2, Math.max(220, parent.height - 24))
             glow: 0.12
             ColumnLayout {
                 id: emptyColumn
@@ -229,7 +300,7 @@ Item {
                 }
                 Label {
                     Layout.fillWidth: true
-                    text: "중복 사진 찾기와 AI 자동분류를 바로 쓸 수 있어요. 폴더 안에는 아무것도 만들지 않습니다."
+                    text: "중복 사진 찾기와 AI 자동분류를 바로 쓸 수 있어요. 원본 폴더 안에는 별도 파일을 만들지 않아요."
                     color: Theme.textMuted
                     wrapMode: Text.Wrap
                 }
@@ -255,34 +326,50 @@ Item {
                     color: Theme.textMuted
                     font.pixelSize: Theme.fontSmall
                 }
-                Repeater {
-                    model: view.folder ? view.folder.recentFolders.slice(0, 8) : []
-                    delegate: RowLayout {
-                        id: recentRow
-                        required property string modelData
-                        Layout.fillWidth: true
+                FocusScrollView {
+                    id: recentScroll
+                    visible: !!view.folder && view.folder.recentFolders.length > 0
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.preferredHeight: recentColumn.implicitHeight
+                    Layout.minimumHeight: Math.min(recentColumn.implicitHeight, 44)
+                    clip: true
+                    contentWidth: availableWidth
+                    ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                    ColumnLayout {
+                        id: recentColumn
+                        width: recentScroll.availableWidth
                         spacing: Theme.gapSmall
-                        FlatButton {
-                            objectName: "localFolderRecent"
-                            Layout.fillWidth: true
-                            tone: "ghost"
-                            compact: true
-                            focusPolicy: Qt.TabFocus
-                            text: recentRow.modelData
-                            onClicked: if (view.folder) view.folder.openFolder(recentRow.modelData)
-                        }
-                        // Off the list, and the folder's record too when asked (forgetDialog).
-                        FlatButton {
-                            objectName: "localFolderForget"
-                            text: "×"
-                            tone: "ghost"
-                            compact: true
-                            focusPolicy: Qt.TabFocus
-                            tip: "최근 폴더에서 빼기"
-                            Accessible.name: "최근 폴더에서 빼기"
-                            onClicked: {
-                                forgetDialog.path = recentRow.modelData
-                                forgetDialog.open()
+                        Repeater {
+                            model: view.folder ? view.folder.recentFolders.slice(0, 8) : []
+                            delegate: RowLayout {
+                                id: recentRow
+                                required property string modelData
+                                Layout.fillWidth: true
+                                spacing: Theme.gapSmall
+                                FlatButton {
+                                    objectName: "localFolderRecent"
+                                    Layout.fillWidth: true
+                                    tone: "ghost"
+                                    compact: true
+                                    focusPolicy: Qt.TabFocus
+                                    text: recentRow.modelData
+                                    onClicked: if (view.folder) view.folder.openFolder(recentRow.modelData)
+                                }
+                                // Off the list, and the folder's record too when asked (forgetDialog).
+                                FlatButton {
+                                    objectName: "localFolderForget"
+                                    text: "×"
+                                    tone: "ghost"
+                                    compact: true
+                                    focusPolicy: Qt.TabFocus
+                                    tip: "최근 폴더에서 빼기"
+                                    Accessible.name: "최근 폴더에서 빼기"
+                                    onClicked: {
+                                        forgetDialog.path = recentRow.modelData
+                                        forgetDialog.open()
+                                    }
+                                }
                             }
                         }
                     }
@@ -297,193 +384,35 @@ Item {
         spacing: Theme.gapSmall
         visible: view.opened
 
+        // Folder bar: opened path and folder-level switches, regular size matching Gallery chrome.
         RowLayout {
             Layout.fillWidth: true
             spacing: Theme.gapSmall
             Label {
+                id: folderPathLabel
                 objectName: "localFolderPath"
                 Layout.fillWidth: true
+                Layout.minimumWidth: 80
                 text: view.folder ? view.folder.folderPath : ""
                 elide: Text.ElideMiddle
                 color: Theme.text
                 font.bold: true
                 textFormat: Text.PlainText
+                HoverHandler { id: folderPathHover }
+                ToolTip.visible: folderPathHover.hovered && folderPathLabel.truncated
+                ToolTip.delay: 500
+                ToolTip.text: folderPathLabel.text
             }
-            FlatButton {
-                objectName: "localFolderChange"
-                text: "폴더 변경"
-                compact: true
-                focusPolicy: Qt.TabFocus
-                enabled: !!view.folder && !view.folder.busy
-                onClicked: folderPicker.open()
-            }
-            FlatButton {
-                id: recentButton
-                objectName: "localFolderRecentButton"
-                text: "최근 폴더"
-                compact: true
-                dropdown: true
-                dropdownOpen: recentMenu.visible
-                focusPolicy: Qt.TabFocus
-                enabled: !!view.folder && !view.folder.busy
-                onClicked: recentMenu.popup(recentButton, 0, recentButton.height + 4)
-            }
-            FlatButton {
+            FlatSwitch {
                 objectName: "localFolderSubfolders"
                 text: "하위 폴더 포함"
-                tone: "chip"
-                compact: true
-                checkable: true
                 focusPolicy: Qt.TabFocus
                 checked: !!view.folder && view.folder.includeSubfolders
                 enabled: !!view.folder && !view.folder.busy
-                onClicked: {
+                onToggled: {
                     if (view.folder)
                         view.folder.setIncludeSubfolders(checked)
                     checked = Qt.binding(function() { return !!view.folder && view.folder.includeSubfolders })
-                }
-            }
-            FlatField {
-                id: searchField
-                objectName: "localFolderSearch"
-                Layout.preferredWidth: 200
-                placeholderText: "파일명 검색 (Ctrl+F)"
-                rightPadding: searchClearButton.visible ? 28 : 14
-                onDisplayTextChanged: searchDelay.restart()
-                Keys.onEscapePressed: event => {
-                    searchDelay.stop()
-                    text = ""
-                    if (view.folder)
-                        view.folder.search("")
-                    view.takeFocus()
-                    event.accepted = true
-                }
-                FlatButton {
-                    id: searchClearButton
-                    anchors.right: parent.right
-                    anchors.rightMargin: 4
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: searchField.text.length > 0
-                    tone: "ghost"
-                    compact: true
-                    leftPadding: 6
-                    rightPadding: 6
-                    text: "×"
-                    Accessible.name: "검색어 지우기"
-                    focusPolicy: Qt.TabFocus
-                    onClicked: {
-                        searchDelay.stop()
-                        searchField.text = ""
-                        if (view.folder)
-                            view.folder.search("")
-                        view.takeFocus()
-                    }
-                }
-            }
-            FlatButton {
-                id: orderButton
-                objectName: "localFolderOrder"
-                compact: true
-                dropdown: true
-                dropdownOpen: orderMenu.visible
-                focusPolicy: Qt.TabFocus
-                enabled: !!view.folder && !view.duplicateMode
-                text: !view.folder ? "" : ({ "modified": "수정일순", "name": "이름순", "size": "크기순" })[view.folder.folderOrder] || "수정일순"
-                onClicked: orderMenu.popup(orderButton, 0, orderButton.height + 4)
-            }
-        }
-
-        WrapRow {
-            Layout.fillWidth: true
-            FlatButton {
-                objectName: "localFolderFavorites"
-                text: "★ 즐겨찾기"
-                tone: "chip"
-                compact: true
-                checkable: true
-                focusPolicy: Qt.TabFocus
-                checked: !!view.folder && view.folder.filterFavoriteOnly
-                onClicked: {
-                    if (view.folder)
-                        view.folder.setFavoriteOnly(checked)
-                    checked = Qt.binding(function() { return !!view.folder && view.folder.filterFavoriteOnly })
-                }
-            }
-            FlatButton {
-                objectName: "localFolderDuplicates"
-                text: "중복 사진" + (view.folder && view.folder.duplicateCount > 0 ? " " + view.folder.duplicateCount : "")
-                tone: "chip"
-                compact: true
-                checkable: true
-                focusPolicy: Qt.TabFocus
-                checked: view.duplicateMode
-                onClicked: {
-                    if (view.folder)
-                        view.folder.setDuplicateOnly(checked)
-                    checked = Qt.binding(function() { return view.duplicateMode })
-                }
-            }
-            FlatButton {
-                objectName: "localFolderScanDuplicates"
-                text: view.folder && view.folder.copiesLocked ? "중복 검사 중…" : "중복 검사"
-                compact: true
-                focusPolicy: Qt.TabFocus
-                enabled: !!view.folder && !view.folder.busy
-                tip: "같은 사진 찾기 · 크기·화질만 다른 사진까지 찾으려면 오른쪽 ‘비슷한 사진도 검사’를 켜세요"
-                onClicked: if (view.folder) view.folder.scanDuplicates(nearChip.checked)
-            }
-            FlatButton {
-                id: nearChip
-                objectName: "localFolderNear"
-                text: "비슷한 사진도 검사"
-                tone: "chip"
-                compact: true
-                checkable: true
-                focusPolicy: Qt.TabFocus
-                enabled: !!view.folder && !view.folder.busy
-            }
-            FlatButton {
-                id: aiButton
-                objectName: "localFolderAiMenuButton"
-                readonly property string applied: view.folder ? view.folder.filterAiCategory : ""
-                text: view.folder && view.folder.aiScanning ? "AI 분류 중…"
-                    : (applied.length ? "AI · #" + applied : "AI 분류")
-                tone: "chip"
-                compact: true
-                chosen: applied.length > 0
-                dropdown: true
-                dropdownOpen: aiMenu.visible
-                focusPolicy: Qt.TabFocus
-                onClicked: aiMenu.popup(aiButton, 0, aiButton.height + 4)
-            }
-            FlatCombo {
-                id: userTagCombo
-                objectName: "localFolderUserTag"
-                chip: true
-                chosen: !!view.folder && view.folder.filterUserTag.length > 0
-                implicitHeight: Theme.compactHeight
-                minimumPopupWidth: 200
-                typeAhead: true
-                focusPolicy: Qt.TabFocus
-                escapeFocus: grid
-                readonly property var tags: view.folder ? view.folder.userTags : []
-                model: ["내 태그 전체"].concat(tags.map(item => "#" + item.tag + " · " + Number(item.count || 0).toLocaleString(Qt.locale(), "f", 0)))
-                displayText: currentIndex > 0 && tags[currentIndex - 1] ? "#" + tags[currentIndex - 1].tag : "내 태그"
-                currentIndex: {
-                    if (!view.folder || !view.folder.filterUserTag)
-                        return 0
-                    const found = tags.findIndex(item => item.tag === view.folder.filterUserTag)
-                    return found >= 0 ? found + 1 : 0
-                }
-                onActivated: index => {
-                    if (view.folder)
-                        view.folder.setUserTag(index > 0 && tags[index - 1] ? tags[index - 1].tag : "")
-                    currentIndex = Qt.binding(function() {
-                        if (!view.folder || !view.folder.filterUserTag)
-                            return 0
-                        const found = tags.findIndex(item => item.tag === view.folder.filterUserTag)
-                        return found >= 0 ? found + 1 : 0
-                    })
                 }
             }
             FlatSwitch {
@@ -491,8 +420,7 @@ Item {
                 text: "AI 학습 공유"
                 focusPolicy: Qt.TabFocus
                 checked: !!view.folder && view.folder.shareLearning
-                // A running classification or answer read the switch when it began.
-                enabled: !!view.folder && !view.folder.tagsLocked
+                enabled: !!view.folder && !view.folder.filesLocked && !view.folder.busy
                 onToggled: {
                     if (view.folder)
                         view.folder.setShareLearning(checked)
@@ -503,43 +431,309 @@ Item {
                 ToolTip.text: "이 폴더에서 가르친 AI 태그를 갤러리와 함께 쓰는 AI 학습에 반영합니다"
             }
             FlatButton {
-                objectName: "localFolderFilterReset"
-                text: "× 필터 지우기"
-                tone: "ghost"
-                compact: true
+                id: recentButton
+                objectName: "localFolderRecentButton"
+                text: "최근 폴더"
+                dropdown: true
+                dropdownOpen: recentMenu.visible
                 focusPolicy: Qt.TabFocus
-                visible: !!view.folder && (view.folder.filterFavoriteOnly || view.folder.filterDuplicateOnly
-                    || view.folder.filterAiCategory.length > 0 || view.folder.filterUserTag.length > 0
-                    || searchField.text.length > 0)
-                onClicked: {
+                enabled: !!view.folder && !view.folder.busy
+                onClicked: recentMenu.popup(recentButton, 0, recentButton.height + 4)
+            }
+            FlatButton {
+                objectName: "localFolderChange"
+                text: "폴더 변경"
+                focusPolicy: Qt.TabFocus
+                enabled: !!view.folder && !view.folder.busy
+                onClicked: folderPicker.open()
+            }
+        }
+
+        // Row 1: Search, sort, media type, and thumbnail density — matching Gallery's toolbar.
+        RowLayout {
+            objectName: "localFolderSearchRow"
+            Layout.fillWidth: true
+            spacing: Theme.gapSmall
+            FlatField {
+                id: searchField
+                objectName: "localFolderSearch"
+                Layout.fillWidth: true
+                Layout.minimumWidth: 120
+                placeholderText: "파일명 검색"
+                Accessible.name: "파일명 검색"
+                selectByMouse: true
+                rightPadding: searchClearButton.visible ? 36 : 14
+                onTextEdited: {
+                    if (localWheel)
+                        localWheel.reset()
+                    searchDelay.restart()
+                }
+                onPreeditTextChanged: {
+                    if (activeFocus)
+                        searchDelay.restart()
+                }
+                onAccepted: {
+                    if (localWheel)
+                        localWheel.reset()
                     searchDelay.stop()
-                    searchField.text = ""
                     if (view.folder)
-                        view.folder.resetFilters()
+                        view.folder.search(displayText)
+                }
+                Keys.onEscapePressed: event => {
+                    if (text.length > 0) {
+                        if (localWheel)
+                            localWheel.reset()
+                        searchDelay.stop()
+                        text = ""
+                        if (view.folder)
+                            view.folder.search("")
+                        event.accepted = true
+                    } else {
+                        view.takeFocus()
+                        event.accepted = true
+                    }
+                }
+                ToolButton {
+                    id: searchClearButton
+                    anchors.right: parent.right
+                    anchors.rightMargin: 6
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: 24
+                    height: 24
+                    visible: searchField.text.length > 0
+                    focusPolicy: Qt.NoFocus
+                    Accessible.name: "검색어 지우기"
+                    HoverHandler { cursorShape: Qt.PointingHandCursor }
+                    contentItem: Text {
+                        text: "×"
+                        font.pixelSize: Theme.fontSection
+                        font.bold: true
+                        color: searchClearButton.hovered ? Theme.text : Theme.textMuted
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+                    background: Rectangle {
+                        radius: Theme.radiusCard
+                        color: searchClearButton.hovered ? Theme.raisedHover : "transparent"
+                    }
+                    onClicked: {
+                        if (localWheel)
+                            localWheel.reset()
+                        searchDelay.stop()
+                        searchField.text = ""
+                        if (view.folder)
+                            view.folder.search("")
+                        searchField.forceActiveFocus()
+                    }
+                }
+            }
+            FlatCombo {
+                id: orderCombo
+                objectName: "localFolderOrder"
+                label: "정렬"
+                model: ["수정일순", "이름순", "크기순"]
+                enabled: !!view.folder && !view.duplicateMode
+                implicitWidth: 152
+                focusPolicy: Qt.TabFocus
+                escapeFocus: grid
+                Accessible.name: "사진 정렬"
+                readonly property var orderKeys: ["modified", "name", "size"]
+                currentIndex: {
+                    const idx = view.folder ? orderKeys.indexOf(view.folder.folderOrder) : 0
+                    return idx >= 0 ? idx : 0
+                }
+                onActivated: index => {
+                    if (view.folder && orderKeys[index])
+                        view.folder.setFolderOrder(orderKeys[index])
+                    currentIndex = Qt.binding(function() {
+                        const idx = view.folder ? orderKeys.indexOf(view.folder.folderOrder) : 0
+                        return idx >= 0 ? idx : 0
+                    })
+                }
+            }
+            FlatCombo {
+                id: mediaTypeCombo
+                objectName: "localFolderMediaType"
+                label: "종류"
+                model: ["전체", "사진", "GIF"]
+                enabled: !!view.folder && !view.duplicateMode
+                implicitWidth: 116
+                focusPolicy: Qt.TabFocus
+                escapeFocus: grid
+                Accessible.name: "미디어 종류"
+                readonly property var mediaKeys: ["all", "photo", "animated_gif"]
+                currentIndex: {
+                    const idx = view.folder ? mediaKeys.indexOf(view.folder.folderMediaType) : 0
+                    return idx >= 0 ? idx : 0
+                }
+                onActivated: index => {
+                    if (view.folder && mediaKeys[index])
+                        view.folder.setFolderMediaType(mediaKeys[index])
+                    currentIndex = Qt.binding(function() {
+                        const idx = view.folder ? mediaKeys.indexOf(view.folder.folderMediaType) : 0
+                        return idx >= 0 ? idx : 0
+                    })
+                }
+            }
+            FlatCombo {
+                id: densityCombo
+                objectName: "localFolderDensity"
+                label: "크기"
+                model: ["작게", "보통", "크게"]
+                currentIndex: view.densityChoice
+                implicitWidth: 116
+                focusPolicy: Qt.TabFocus
+                escapeFocus: grid
+                Accessible.name: "사진 크기"
+                onActivated: index => {
+                    view.densitySelected(index)
+                    currentIndex = Qt.binding(function() { return view.densityChoice })
+                }
+            }
+        }
+
+        // Row 2: Quick filter chips on the left, preview/refresh/select on the right.
+        RowLayout {
+            objectName: "localFolderFilterRow"
+            Layout.fillWidth: true
+            spacing: Theme.gapSmall
+            WrapRow {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignTop
+                FlatButton {
+                    objectName: "localFolderFavorites"
+                    focusPolicy: Qt.TabFocus
+                    tone: "chip"
+                    width: implicitWidth
+                    checkable: true
+                    checked: !!view.folder && view.folder.filterFavoriteOnly
+                    text: checked ? "★ 즐겨찾기" : "☆ 즐겨찾기"
+                    Accessible.name: "즐겨찾기 필터"
+                    tip: checked ? "즐겨찾기 필터 해제 (B)" : "즐겨찾기한 사진만 보기 (B)"
+                    onClicked: {
+                        if (view.folder)
+                            view.folder.setFavoriteOnly(!view.folder.filterFavoriteOnly)
+                        checked = Qt.binding(function() { return !!view.folder && view.folder.filterFavoriteOnly })
+                    }
+                }
+                FlatButton {
+                    objectName: "localFolderDuplicates"
+                    focusPolicy: Qt.TabFocus
+                    tone: "chip"
+                    width: implicitWidth
+                    checkable: true
+                    checked: view.duplicateMode
+                    text: {
+                        const count = view.folder ? view.folder.duplicateCount : 0
+                        return count > 0 ? "중복 사진 " + count.toLocaleString() : "중복 사진"
+                    }
+                    Accessible.name: "중복 사진 필터"
+                    tip: checked ? "중복 사진 보기 끝내기 (D)" : "중복 사진 보기 및 정리 (D)"
+                    onClicked: {
+                        if (view.folder)
+                            view.folder.setDuplicateOnly(!view.duplicateMode)
+                        checked = Qt.binding(function() { return view.duplicateMode })
+                    }
+                }
+                FlatButton {
+                    id: aiButton
+                    objectName: "localFolderAiMenuButton"
+                    focusPolicy: Qt.TabFocus
+                    tone: "chip"
+                    width: implicitWidth
+                    readonly property string applied: view.folder ? view.folder.filterAiCategory : ""
+                    chosen: applied.length > 0
+                    dropdown: true
+                    dropdownOpen: aiMenu.visible
+                    text: view.folder && view.folder.aiScanning ? "AI 분류 중…"
+                        : (applied.length ? "AI 분류: " + applied : "AI 분류")
+                    Accessible.name: applied.length ? "AI 분류 " + applied + " 보는 중" : "AI 분류"
+                    tip: !aiMenu.visible ? "AI 분류 보기 · 실행" : ""
+                    onClicked: aiMenu.popup(aiButton, 0, aiButton.height + 4)
+                }
+                FlatCombo {
+                    id: userTagCombo
+                    objectName: "localFolderUserTag"
+                    chip: true
+                    chosen: !!view.folder && view.folder.filterUserTag.length > 0
+                    minimumPopupWidth: 200
+                    implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
+                    width: Math.min(200, Math.max(96, implicitContentWidth + leftPadding + rightPadding))
+                    height: implicitHeight
+                    typeAhead: true
+                    focusPolicy: Qt.TabFocus
+                    escapeFocus: grid
+                    Accessible.name: "내 태그 선택"
+                    readonly property var rawTags: view.folder ? view.folder.userTags : []
+                    readonly property string activeTag: view.folder ? view.folder.filterUserTag : ""
+                    readonly property var tags: activeTag.length > 0 && rawTags.findIndex(item => item.tag === activeTag) < 0
+                        ? rawTags.concat([{ tag: activeTag, count: 0 }]) : rawTags
+                    model: ["내 태그 전체"].concat(tags.map(item => "#" + item.tag + " · " + Number(item.count || 0).toLocaleString(Qt.locale(), "f", 0) + "개"))
+                    displayText: currentIndex > 0 && tags[currentIndex - 1] ? "#" + tags[currentIndex - 1].tag : "내 태그"
+                    currentIndex: {
+                        if (!view.folder || !view.folder.filterUserTag)
+                            return 0
+                        const found = tags.findIndex(item => item.tag === view.folder.filterUserTag)
+                        return found >= 0 ? found + 1 : 0
+                    }
+                    onActivated: index => {
+                        if (view.folder)
+                            view.folder.setUserTag(index > 0 && tags[index - 1] ? tags[index - 1].tag : "")
+                        currentIndex = Qt.binding(function() {
+                            if (!view.folder || !view.folder.filterUserTag)
+                                return 0
+                            const found = tags.findIndex(item => item.tag === view.folder.filterUserTag)
+                            return found >= 0 ? found + 1 : 0
+                        })
+                    }
+                }
+                FlatButton {
+                    objectName: "localFolderFilterReset"
+                    text: "× 필터 지우기"
+                    tone: "ghost"
+                    focusPolicy: Qt.TabFocus
+                    Accessible.name: "필터 초기화"
+                    visible: !!view.folder && (view.folder.filterSummary.length > 0 || searchField.text.length > 0
+                        || mediaTypeCombo.currentIndex > 0 || orderCombo.currentIndex > 0
+                        || view.folder.filterFavoriteOnly || view.folder.filterDuplicateOnly)
+                    onClicked: {
+                        searchDelay.stop()
+                        searchField.text = ""
+                        if (view.folder)
+                            view.folder.resetFilters()
+                    }
                 }
             }
             FlatButton {
-                objectName: "localFolderRefresh"
-                text: "새로고침"
-                compact: true
+                objectName: "localFolderOpenPreview"
                 focusPolicy: Qt.TabFocus
+                Layout.alignment: Qt.AlignTop
+                text: "미리보기"
+                visible: grid.currentIndex >= 0 && !view.duplicateMode
+                tip: "고른 사진을 크게 보기 (Enter)"
+                onClicked: previewPopup.open()
+            }
+            FlatButton {
+                objectName: "localFolderRefresh"
+                focusPolicy: Qt.TabFocus
+                Layout.alignment: Qt.AlignTop
+                tone: "quiet"
+                text: "새로고침"
                 enabled: !!view.folder && !view.folder.busy
-                tip: "폴더를 다시 읽어 새로 생기거나 바뀐 파일을 반영합니다 (F5)"
+                tip: "목록 다시 읽기 (F5)"
                 onClicked: if (view.folder) view.folder.refreshFolder()
             }
             FlatButton {
                 objectName: "localFolderSelectionToggle"
-                text: view.folder && view.folder.selectionMode ? "선택 끝내기" : "여러 개 선택"
-                tone: "chip"
-                compact: true
                 focusPolicy: Qt.TabFocus
-                checkable: true
-                checked: !!view.folder && view.folder.selectionMode
-                onClicked: {
-                    if (view.folder)
-                        view.folder.setSelectionMode(checked)
-                    checked = Qt.binding(function() { return !!view.folder && view.folder.selectionMode })
-                }
+                Layout.alignment: Qt.AlignTop
+                readonly property bool choosing: !!view.folder && view.folder.selectionMode
+                tone: choosing ? "chip" : "quiet"
+                chosen: choosing
+                text: choosing ? "선택 끝내기" : "여러 개 선택"
+                enabled: !!view.folder
+                tip: choosing ? "여러 개 선택 끝내기 (Esc)" : "여러 장을 골라 한 번에 정리하기"
+                onClicked: if (view.folder) view.folder.setSelectionMode(!view.folder.selectionMode)
             }
         }
 
@@ -556,7 +750,7 @@ Item {
                 anchors.margins: Theme.gapSmall
                 verticalAlignment: Text.AlignVCenter
                 text: "이 폴더는 X 사진 저장 폴더와 겹칩니다. 여기서 휴지통으로 옮긴 사진은 갤러리에 ‘파일 없음’으로 "
-                    + "보이고, 다음 저장에서 다시 받을 수 있습니다. X에서 받은 사진은 갤러리에서 정리하세요."
+                    + "남고, 다음 저장에서 다시 받을 수 있습니다. X에서 받은 사진은 갤러리에서 정리하세요."
                 color: Theme.notice
                 wrapMode: Text.Wrap
                 font.pixelSize: Theme.fontSmall
@@ -564,33 +758,71 @@ Item {
         }
 
         RowLayout {
+            id: localStatusLine
             Layout.fillWidth: true
+            Layout.minimumHeight: 28
             spacing: Theme.gapSmall
-            ProgressBar {
-                objectName: "localFolderProgress"
-                Layout.preferredWidth: 160
-                Layout.preferredHeight: 4
-                readonly property bool aiWork: !!view.folder && view.folder.aiProgressTotal > 0
-                readonly property bool duplicateWork: !!view.folder && view.folder.duplicateProgressTotal > 0
-                readonly property bool preparingAi: !!view.folder && view.folder.aiScanning && !aiWork
-                readonly property bool preparingDup: !!view.folder && view.folder.copiesLocked
-                    && (!duplicateWork || view.folder.duplicateProgressCurrent >= view.folder.duplicateProgressTotal)
-                visible: !!view.folder && view.folder.busy && (aiWork || duplicateWork || preparingAi || preparingDup)
-                indeterminate: view.windowShown && (preparingAi || preparingDup)
-                from: 0
-                to: aiWork ? view.folder.aiProgressTotal : (duplicateWork ? view.folder.duplicateProgressTotal : 1)
-                value: aiWork ? view.folder.aiProgressCurrent : (duplicateWork ? view.folder.duplicateProgressCurrent : 0)
+            readonly property bool loadFailed: !!view.folder && view.folder.folderModel.error.length > 0
+            readonly property bool isManagerError: view.keyNotice.length === 0 && view.statusSource === "manager"
+                && !!view.manager && view.manager.error.length > 0
+            Label {
+                text: !view.folder ? "0개" : Number(view.folder.folderModel.total).toLocaleString(Qt.locale(), "f", 0) + "개"
+                font.bold: true
+                color: Theme.text
+            }
+            Item {
+                implicitWidth: 20
+                implicitHeight: 20
+                visible: !!view.folder && (view.folder.folderModel.busy || view.folder.scanningFolder)
+                BusyIndicator {
+                    anchors.centerIn: parent
+                    running: view.windowShown && !!view.folder && (view.folder.folderModel.busy || view.folder.scanningFolder)
+                    implicitWidth: 20
+                    implicitHeight: 20
+                }
+            }
+            Label {
+                id: localActiveFilters
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                text: view.folder ? view.folder.filterSummary : ""
+                visible: text.length > 0
+                elide: Text.ElideRight
+                textFormat: Text.PlainText
+                color: Theme.textMuted
+                HoverHandler { id: localActiveFiltersHover }
+                ToolTip.text: text
+                ToolTip.delay: 500
+                ToolTip.visible: localActiveFiltersHover.hovered && truncated
+            }
+            Item { Layout.fillWidth: true; Layout.minimumWidth: 0; visible: !localActiveFilters.visible }
+            Label {
+                Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: Math.max(160, localStatusLine.width - 220)
+                text: view.folder ? view.folder.folderModel.error : ""
+                visible: localStatusLine.loadFailed
+                color: Theme.error
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
             }
             Label {
                 id: noticeText
                 objectName: "localFolderStatus"
                 Layout.fillWidth: true
+                Layout.minimumWidth: 0
+                Layout.maximumWidth: Math.max(160, localStatusLine.width * 0.62)
                 text: view.statusText
-                color: view.keyNotice.length === 0 && view.statusSource === "manager" && !!view.manager
-                    && view.manager.error.length > 0 ? Theme.error : Theme.textMuted
-                font.pixelSize: Theme.fontSmall
+                visible: !localStatusLine.loadFailed && text.length > 0
+                horizontalAlignment: Text.AlignRight
+                wrapMode: Text.WordWrap
+                maximumLineCount: 3
                 elide: Text.ElideRight
                 textFormat: Text.PlainText
+                readonly property bool showingFolderStatus: view.keyNotice.length === 0
+                    && (view.statusSource === "folder" || view.managerText.length === 0)
+                color: localStatusLine.isManagerError ? Theme.error
+                    : (showingFolderStatus ? Theme.notice : Theme.textMuted)
                 Connections {
                     target: view.folder
                     function onChanged() {
@@ -598,9 +830,10 @@ Item {
                         if (text === view.seenFolderStatus)
                             return
                         view.seenFolderStatus = text
-                        view.keyNotice = ""
-                        if (text.length > 0)
+                        if (text.length > 0) {
+                            view.flashNotice("")
                             view.statusSource = "folder"
+                        }
                     }
                 }
                 Connections {
@@ -610,48 +843,61 @@ Item {
                         if (text === view.seenManagerStatus)
                             return
                         view.seenManagerStatus = text
-                        view.keyNotice = ""
-                        if (text.length > 0)
+                        if (text.length > 0) {
+                            view.flashNotice("")
                             view.statusSource = "manager"
+                        }
                     }
                 }
             }
-            Label {
-                text: !view.folder ? "" : Number(view.folder.folderModel.total).toLocaleString(Qt.locale(), "f", 0) + "장"
-                color: Theme.textFaint
-                font.pixelSize: Theme.fontSmall
+            ProgressBar {
+                objectName: "localFolderProgress"
+                Layout.preferredWidth: 140
+                Layout.preferredHeight: 4
+                readonly property bool aiWork: !!view.folder && view.folder.aiProgressTotal > 0
+                readonly property bool duplicateWork: !!view.folder && view.folder.duplicateProgressTotal > 0
+                readonly property bool preparingAi: !!view.folder && view.folder.aiScanning && !aiWork && !duplicateWork
+                readonly property bool preparingDup: !!view.folder && view.folder.copiesLocked
+                    && (!duplicateWork || view.folder.duplicateProgressCurrent >= view.folder.duplicateProgressTotal)
+                visible: !!view.folder && view.folder.busy && (aiWork || duplicateWork || preparingAi || preparingDup)
+                indeterminate: view.windowShown && (preparingAi || preparingDup)
+                from: 0
+                to: aiWork ? view.folder.aiProgressTotal : (duplicateWork ? view.folder.duplicateProgressTotal : 1)
+                value: aiWork ? view.folder.aiProgressCurrent : (duplicateWork ? view.folder.duplicateProgressCurrent : 0)
+                Accessible.name: "작업 진행"
+            }
+            FlatButton {
+                objectName: "localFolderCancelDuplicate"
+                text: "검사 중단"
+                compact: true
+                focusPolicy: Qt.TabFocus
+                visible: !!view.folder && view.folder.copiesLocked
+                Accessible.name: "중복 검사 중단"
+                onClicked: if (view.folder) view.folder.cancelDuplicateScan()
             }
             FlatButton {
                 objectName: "localFolderCancel"
-                text: "중단"
+                text: view.folder && view.folder.aiScanning ? "분류 중단" : "중단"
                 compact: true
-                tone: "ghost"
                 focusPolicy: Qt.TabFocus
-                visible: !!view.folder && (view.folder.aiScanning || view.folder.copiesLocked)
-                onClicked: {
-                    if (!view.folder)
-                        return
-                    if (view.folder.aiScanning)
-                        view.folder.cancelAiScan()
-                    else
-                        view.folder.cancelDuplicateScan()
-                }
+                visible: !!view.folder && view.folder.aiCancellable
+                Accessible.name: "AI 분류 중단"
+                onClicked: if (view.folder) view.folder.cancelAiScan()
             }
         }
 
-        // The duplicate view's tools, as in the gallery: every copy picked at once, and the
-        // "중복 아님" marks taken back or forgotten.
+        // Duplicate tools: same layout and regular controls as Gallery's duplicateStrip.
         Card {
             objectName: "localFolderDuplicateTools"
             Layout.fillWidth: true
             visible: view.duplicateMode
-            implicitHeight: dupToolsLayout.implicitHeight + Theme.gap
+            implicitHeight: dupToolsLayout.implicitHeight + 2 * Theme.gap
             GridLayout {
                 id: dupToolsLayout
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
-                anchors.leftMargin: Theme.gap
+                anchors.leftMargin: Theme.gapLarge
                 anchors.rightMargin: Theme.gap
                 columns: width >= dupGuideRow.implicitWidth + dupButtonsRow.implicitWidth + columnSpacing ? 2 : 1
                 columnSpacing: Theme.gapLarge
@@ -671,6 +917,7 @@ Item {
                     }
                     HelpButton {
                         id: localDuplicateHelp
+                        objectName: "localDuplicateHelp"
                         title: "중복 사진 정리"
                         cardWidth: 440
                         content: [
@@ -703,40 +950,71 @@ Item {
                     }
                     Item { Layout.fillWidth: true }
                 }
-                RowLayout {
+                GridLayout {
                     id: dupButtonsRow
+                    columns: dupToolsLayout.width < 920 ? 3 : 5
+                    columnSpacing: Theme.gapSmall
+                    rowSpacing: Theme.gapSmall
                     Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                    spacing: Theme.gapSmall
+                    FlatButton {
+                        id: nearChip
+                        objectName: "localFolderNear"
+                        tone: "chip"
+                        focusPolicy: Qt.TabFocus
+                        enabled: !!view.folder && !view.folder.busy
+                        checkable: true
+                        checked: view.duplicateNear
+                        text: "비슷한 사진도 검사"
+                        Accessible.name: "크기나 화질만 다른 비슷한 사진도 찾기"
+                        tip: "크기·화질이 다른 같은 사진도 찾기"
+                        onClicked: {
+                            view.duplicateNear = !view.duplicateNear
+                            checked = Qt.binding(function() { return view.duplicateNear })
+                        }
+                    }
+                    FlatButton {
+                        objectName: "localFolderScanDuplicates"
+                        focusPolicy: Qt.TabFocus
+                        enabled: !!view.folder && !view.folder.busy
+                        text: "중복 검사"
+                        tip: view.duplicateNear ? "같은 사진과 비슷한 사진 찾기" : "완전히 같은 파일 찾기"
+                        onClicked: {
+                            if (view.folder && view.folder.scanDuplicates(view.duplicateNear))
+                                view.flashNotice("중복 검사 중…")
+                        }
+                    }
                     FlatButton {
                         objectName: "localFolderSelectDuplicates"
                         text: "사본 일괄 선택"
-                        compact: true
                         focusPolicy: Qt.TabFocus
                         enabled: !!view.folder && !view.folder.copiesLocked && view.folder.folderModel.count > 0
                         tip: view.folder && view.folder.copiesLocked ? view.folder.holdReason : "불러온 사본 선택"
-                        onClicked: view.folder.selectDuplicateCopies()
+                        onClicked: {
+                            if (!view.folder)
+                                return
+                            view.folder.selectDuplicateCopies()
+                            view.flashNotice(view.folder.status)
+                        }
                     }
                     FlatButton {
                         objectName: "localFolderUndoDistinct"
                         text: "중복 아님 되돌리기"
-                        compact: true
                         focusPolicy: Qt.TabFocus
                         visible: !!view.folder && view.folder.canUndoDistinct
                         enabled: !!view.folder && !view.folder.copiesLocked
                         tip: "마지막 ‘중복 아님’ 표시 취소"
                         Accessible.name: "중복 아님 표시 되돌리기"
-                        onClicked: view.folder.undoDistinct()
+                        onClicked: if (view.folder) view.folder.undoDistinct()
                     }
                     FlatButton {
                         objectName: "localFolderClearDistinct"
                         text: "중복 아님 " + (view.folder ? view.folder.distinctDuplicateCount.toLocaleString() : "0") + "개 초기화"
-                        compact: true
                         focusPolicy: Qt.TabFocus
                         visible: !!view.folder && view.folder.distinctDuplicateCount > 0
                         enabled: !!view.folder && !view.folder.copiesLocked
                         tip: "모든 ‘중복 아님’ 표시 취소"
                         Accessible.name: "중복 아님 표시 모두 초기화"
-                        onClicked: view.folder.clearDistinct()
+                        onClicked: if (view.folder) view.folder.clearDistinct()
                     }
                 }
             }
@@ -775,15 +1053,20 @@ Item {
                 highlightMoveDuration: 0
                 currentIndex: -1
                 boundsBehavior: Flickable.StopAtBounds
-                readonly property int columns: Math.max(1, Math.floor(width / (view.tileWidth + 12)))
-                cellWidth: Math.max(1, Math.floor(width / columns))
-                cellHeight: Math.round(view.tileWidth * 0.75) + 50
-                cacheBuffer: Math.max(400, Math.round(cellHeight * 3))
+                readonly property int columns: Math.max(1, Math.floor(width / Math.max(1, cellWidth)))
+                cellWidth: Math.max(1, Math.floor(width / Math.max(1, Math.floor(width / view.tileWidth))))
+                cellHeight: Math.round(view.tileWidth * 0.75) + 48
+                cacheBuffer: cellHeight
                 model: view.folder ? view.folder.folderModel : null
                 ScrollBar.vertical: ScrollBar {
                     policy: grid.contentHeight > grid.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                    onPressedChanged: if (pressed && localWheel) localWheel.reset()
                 }
-                SmoothWheel { flickable: grid; notchPixels: Math.max(120, Math.round(grid.cellHeight * 0.6)) }
+                SmoothWheel {
+                    id: localWheel
+                    flickable: grid
+                    notchPixels: Math.max(120, Math.round(grid.cellHeight * 0.6))
+                }
                 onContentYChanged: {
                     view.requestMore()
                     Qt.callLater(view.updateFocus)
@@ -792,13 +1075,36 @@ Item {
                     Qt.callLater(view.requestMore)
                     Qt.callLater(view.updateFocus)
                 }
-                onWidthChanged: Qt.callLater(view.updateFocus)
-                onHeightChanged: Qt.callLater(view.updateFocus)
-                onCellWidthChanged: Qt.callLater(view.updateFocus)
-                onCellHeightChanged: Qt.callLater(view.updateFocus)
-                onOriginYChanged: Qt.callLater(view.updateFocus)
+                onWidthChanged: {
+                    if (localWheel) localWheel.reset()
+                    Qt.callLater(view.updateFocus)
+                }
+                onHeightChanged: {
+                    if (localWheel) localWheel.reset()
+                    Qt.callLater(view.updateFocus)
+                }
+                onCellWidthChanged: {
+                    if (localWheel) localWheel.reset()
+                    Qt.callLater(view.updateFocus)
+                }
+                onCellHeightChanged: {
+                    if (localWheel) localWheel.reset()
+                    Qt.callLater(view.updateFocus)
+                }
+                onOriginYChanged: {
+                    if (localWheel) localWheel.reset()
+                    Qt.callLater(view.updateFocus)
+                }
                 onContentHeightChanged: Qt.callLater(view.updateFocus)
                 onVisibleChanged: if (visible) Qt.callLater(view.updateFocus)
+                Connections {
+                    target: view.folder ? view.folder.folderModel : null
+                    function onModelReset() {
+                        if (localWheel)
+                            localWheel.reset()
+                        Qt.callLater(view.updateFocus)
+                    }
+                }
                 onCurrentItemChanged: {
                     if (currentIndex >= 0 && view.folder && currentItem && currentItem.tileKey
                             && view.folder.selectedKey !== currentItem.tileKey) {
@@ -806,7 +1112,11 @@ Item {
                         positionViewAtIndex(currentIndex, GridView.Contain)
                     }
                 }
-                Keys.onPressed: event => { event.accepted = view.handleKey(event) }
+                Keys.onPressed: event => {
+                    if (localWheel)
+                        localWheel.reset()
+                    event.accepted = view.handleGridKey(event)
+                }
 
                 // Dragging draws a rectangle and picks the tiles it touches, as in the gallery
                 // (Ctrl or Shift held adds to what is picked).
@@ -848,6 +1158,8 @@ Item {
                         if (!view.folder)
                             return
                         if (active) {
+                            if (localWheel)
+                                localWheel.reset()
                             grid.forceActiveFocus()
                             const pressed = inView(centroid.scenePressPosition)
                             startX = Math.max(0, Math.min(grid.width, pressed.x))
@@ -922,12 +1234,12 @@ Item {
                         objectName: "localFolderTile"
                         readonly property string key: cell.key
                         anchors.fill: parent
-                        anchors.margins: 4
+                        anchors.margins: 6
                         radius: Theme.radiusCard
                         color: cell.chosen || grid.currentIndex === cell.index
-                            ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.raised : Theme.well)
-                        border.width: view.folder && view.folder.selectedKey === cell.key ? 2 : (cell.chosen ? 1 : 0)
-                        border.color: view.folder && view.folder.selectedKey === cell.key ? Theme.focus : Theme.accent
+                            ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.card : "transparent")
+                        border.width: cell.chosen || grid.currentIndex === cell.index ? 1 : 0
+                        border.color: cell.chosen ? Theme.accent : Theme.accentLine
                         Rectangle {
                             anchors.fill: thumbImage
                             radius: Theme.radiusControl
@@ -941,7 +1253,7 @@ Item {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.margins: 8
-                            height: parent.height - 50
+                            height: Math.round(view.tileWidth * 0.75) - 16
                             source: cell.activeTile && cell.thumbReady && !cell.thumbMissing ? cell.thumbUrl : ""
                             asynchronous: true
                             cache: false
@@ -949,48 +1261,28 @@ Item {
                             sourceSize.width: view.thumbDecodeW
                             sourceSize.height: view.thumbDecodeH
                         }
-                        Rectangle {
+                        TileMissingPlaceholder {
                             anchors.fill: thumbImage
-                            radius: Theme.radiusControl
-                            color: Theme.well
-                            border.width: 1
-                            border.color: Theme.line
-                            visible: cell.imageMissing
-                            Label {
-                                anchors.centerIn: parent
-                                width: parent.width - 12
-                                horizontalAlignment: Text.AlignHCenter
-                                wrapMode: Text.Wrap
-                                text: cell.thumbMissing ? "파일 없음" : "미리보기 없음"
-                                font.pixelSize: Theme.fontTiny
-                                color: Theme.textFaint
-                            }
+                            active: cell.imageMissing
+                            missingFile: cell.thumbMissing
+                            captionText: cell.caption
                         }
-                        Column {
+                        Label {
                             anchors.left: parent.left
                             anchors.right: parent.right
                             anchors.bottom: parent.bottom
-                            anchors.margins: 8
-                            Label {
-                                width: parent.width
-                                text: cell.caption
-                                elide: Text.ElideMiddle
-                                textFormat: Text.PlainText
-                                font.pixelSize: Theme.fontCaption
-                                color: Theme.textMuted
-                            }
-                            Label {
-                                width: parent.width
-                                text: cell.detail
-                                elide: Text.ElideRight
-                                font.pixelSize: Theme.fontTiny
-                                color: Theme.textFaint
-                            }
+                            anchors.margins: 10
+                            text: cell.caption
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            font.pixelSize: Theme.fontCaption
+                            color: Theme.textMuted
                         }
                         MouseArea {
                             id: tileMouse
                             anchors.fill: parent
                             hoverEnabled: true
+                            onPressed: if (localWheel) localWheel.reset()
                             acceptedButtons: Qt.LeftButton | Qt.RightButton
                             cursorShape: Qt.PointingHandCursor
                             onClicked: mouse => {
@@ -999,69 +1291,40 @@ Item {
                                     return
                                 if (mouse.button === Qt.RightButton) {
                                     grid.currentIndex = cell.index
+                                    teachMenu.singleOnly = false
                                     teachMenu.targetKey = cell.key
                                     teachMenu.popup()
                                     return
                                 }
-                                grid.currentIndex = cell.index
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     view.folder.selectRangeTo(cell.key)
-                                    return
-                                }
-                                if (view.folder.selectionMode || (mouse.modifiers & Qt.ControlModifier)) {
-                                    view.clickedKey = cell.key
-                                    view.clickedWasChosen = cell.chosen
+                                } else if (view.folder.selectionMode || (mouse.modifiers & Qt.ControlModifier)) {
                                     view.folder.toggleSelection(cell.key)
-                                    view.folder.setSelectionAnchor(cell.key)
                                 } else {
-                                    view.folder.selectItem(cell.key)
                                     view.folder.setSelectionAnchor(cell.key)
+                                    view.folder.selectItem(cell.key)
                                 }
+                                grid.currentIndex = cell.index
                             }
                             onDoubleClicked: mouse => {
-                                if (mouse.button !== Qt.LeftButton)
-                                    return
-                                if (view.folder && view.clickedKey === cell.key && cell.chosen !== view.clickedWasChosen)
-                                    view.folder.toggleSelection(cell.key)
-                                view.clickedKey = ""
-                                view.openPreview(cell.key)
-                            }
-                        }
-                        Rectangle {
-                            anchors.left: parent.left
-                            anchors.top: parent.top
-                            anchors.margins: 10
-                            z: 2
-                            width: 22
-                            height: 22
-                            radius: Theme.radiusSmall
-                            visible: !!view.folder && (view.folder.selectionMode || cell.chosen)
-                            color: cell.chosen ? Theme.accent : Theme.scrim
-                            border.width: cell.chosen ? 0 : 1
-                            border.color: Theme.textMuted
-                            Text {
-                                anchors.centerIn: parent
-                                visible: cell.chosen
-                                text: "✓"
-                                font.pixelSize: Theme.fontSmall
-                                font.bold: true
-                                color: "white"
+                                if (mouse.button === Qt.LeftButton && (!view.folder || !view.folder.selectionMode))
+                                    view.openPreview(cell.key)
                             }
                         }
                         Rectangle {
                             anchors.right: parent.right
                             anchors.top: parent.top
-                            anchors.margins: 10
+                            anchors.margins: 12
                             z: 3
-                            width: 26
-                            height: 26
+                            width: 28
+                            height: 28
                             radius: height / 2
                             color: cell.favorite ? Theme.accent : (favMouse.containsMouse ? Theme.lineStrong : Theme.scrim)
                             visible: cell.favorite || tileMouse.containsMouse || favMouse.containsMouse
                             Text {
                                 anchors.centerIn: parent
                                 text: "★"
-                                font.pixelSize: Theme.fontSmall
+                                font.pixelSize: Theme.fontBody
                                 color: cell.favorite || favMouse.containsMouse ? "white" : Theme.textMuted
                             }
                             MouseArea {
@@ -1077,6 +1340,24 @@ Item {
                                 }
                             }
                         }
+                        TileSelectionCheck {
+                            id: tileCheck
+                            objectName: "tileCheck"
+                            anchors.left: parent.left
+                            anchors.top: parent.top
+                            anchors.margins: 6
+                            z: 2
+                            visible: !!view.folder && view.folder.selectionMode
+                            enabled: visible && !cell.thumbMissing && !!view.folder && view.folder.canSelect(cell.key)
+                            checkedState: cell.chosen
+                            captionText: cell.caption
+                            onSelectionToggled: {
+                                grid.forceActiveFocus()
+                                grid.currentIndex = cell.index
+                                if (view.folder)
+                                    view.folder.toggleSelection(cell.key)
+                            }
+                        }
                     }
                 }
             }
@@ -1084,24 +1365,27 @@ Item {
             Label {
                 objectName: "localFolderEmptyList"
                 anchors.centerIn: parent
-                visible: !!view.folder && !view.duplicateMode && !view.folder.folderModel.busy && view.folder.folderModel.count === 0
+                width: Math.max(0, parent.width - 32)
+                horizontalAlignment: Text.AlignHCenter
+                wrapMode: Text.WordWrap
+                visible: !!view.folder && !view.duplicateMode && !view.folder.folderModel.busy
+                    && view.folder.folderModel.error.length === 0 && view.folder.folderModel.count === 0
                 text: {
                     if (view.folder && view.folder.scanningFolder)
                         return "폴더를 읽는 중…"
-                    if (view.folder && (view.folder.filterFavoriteOnly || view.folder.filterAiCategory.length > 0
-                            || view.folder.filterUserTag.length > 0 || searchField.text.length > 0))
-                        return "조건에 맞는 사진이 없습니다"
-                    return "이 폴더에 사진이 없습니다"
+                    if (view.folder && (view.folder.filterSummary.length > 0 || searchField.text.length > 0 || mediaTypeCombo.currentIndex > 0))
+                        return "조건에 맞는 사진이 없어요"
+                    return "이 폴더에 사진이 없어요"
                 }
                 color: Theme.textMuted
             }
         }
 
-        // Picked photos: what can be done with all of them at once.
+        // Picked photos: what can be done with all of them at once (same layout and order as Gallery).
         Card {
             objectName: "localFolderSelectionBar"
             Layout.fillWidth: true
-            visible: !!view.folder && (view.folder.selectionMode || (view.duplicateMode && view.folder.selectedCount > 0))
+            visible: !!view.folder && view.folder.selectionMode
             border.color: Theme.accentLine
             glow: 0.12
             implicitHeight: localSelectionLayout.implicitHeight + 2 * Theme.gapSmall
@@ -1112,7 +1396,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.leftMargin: Theme.gapLarge
                 anchors.rightMargin: Theme.gapSmall
-                columns: width >= 760 ? 2 : 1
+                columns: width >= 800 ? 2 : 1
                 columnSpacing: Theme.gap
                 rowSpacing: Theme.gapTiny
                 RowLayout {
@@ -1127,9 +1411,8 @@ Item {
                     }
                     FlatButton {
                         objectName: "localFolderSelectLoaded"
-                        text: "불러온 사진 모두"
+                        text: "불러온 항목 선택"
                         tone: "ghost"
-                        compact: true
                         focusPolicy: Qt.TabFocus
                         tip: "지금 불러온 사진을 모두 선택 (Ctrl+A)"
                         onClicked: if (view.folder) view.folder.selectLoaded()
@@ -1138,7 +1421,6 @@ Item {
                         objectName: "localFolderSelectionClear"
                         text: "선택 해제"
                         tone: "ghost"
-                        compact: true
                         focusPolicy: Qt.TabFocus
                         onClicked: if (view.folder) view.folder.clearSelection()
                     }
@@ -1147,28 +1429,25 @@ Item {
                     Layout.alignment: Qt.AlignRight
                     spacing: Theme.gapSmall
                     FlatButton {
+                        objectName: "localFolderTeachSelected"
+                        text: "분류 가르치기"
+                        focusPolicy: Qt.TabFocus
+                        enabled: !!view.folder && view.folder.selectedCount > 0 && !view.folder.tagsLocked && !view.folder.filesLocked
+                        tip: view.folder && view.folder.holdReason ? view.folder.holdReason : "AI 분류 지정 · 닮은 사진에도 적용"
+                        onClicked: teachPopup.open()
+                    }
+                    FlatButton {
                         objectName: "localFolderTagSelected"
                         text: "태그 추가"
-                        compact: true
                         focusPolicy: Qt.TabFocus
-                        enabled: !!view.folder && view.folder.selectedCount > 0 && !view.folder.tagsLocked
+                        enabled: !!view.folder && view.folder.selectedCount > 0 && !view.folder.tagsLocked && !view.folder.busy
                         tip: view.folder && view.folder.tagsLocked ? view.folder.holdReason : ""
                         onClicked: tagPopup.open()
                     }
                     FlatButton {
-                        objectName: "localFolderTeachSelected"
-                        text: "분류 가르치기"
-                        compact: true
-                        focusPolicy: Qt.TabFocus
-                        enabled: !!view.folder && view.folder.selectedCount > 0 && !view.folder.tagsLocked
-                        tip: view.folder && view.folder.tagsLocked ? view.folder.holdReason : ""
-                        onClicked: teachPopup.open()
-                    }
-                    FlatButton {
                         objectName: "localFolderRecycleSelected"
-                        text: "휴지통으로 이동"
+                        text: "휴지통으로"
                         tone: "danger"
-                        compact: true
                         focusPolicy: Qt.TabFocus
                         enabled: !!view.folder && !!view.manager && view.folder.selectedCount > 0 && view.lockReason.length === 0
                             && !view.manager.mutating
@@ -1192,11 +1471,16 @@ Item {
         Instantiator {
             model: view.folder ? view.folder.recentFolders.slice(0, 8) : []
             FlatMenuItem {
+                id: recentMenuItem
                 required property string modelData
                 text: modelData
                 checkable: true
                 checked: !!view.folder && view.folder.folderPath === modelData
-                onTriggered: if (view.folder) view.folder.openFolder(modelData)
+                onTriggered: {
+                    if (view.folder)
+                        view.folder.openFolder(recentMenuItem.modelData)
+                    checked = Qt.binding(function() { return !!view.folder && view.folder.folderPath === recentMenuItem.modelData })
+                }
             }
             onObjectAdded: (index, object) => recentMenu.insertItem(index, object)
             onObjectRemoved: (index, object) => recentMenu.removeItem(object)
@@ -1213,29 +1497,6 @@ Item {
     }
 
     FlatMenu {
-        id: orderMenu
-        objectName: "localFolderOrderMenu"
-        FlatMenuItem {
-            text: "수정일순"
-            checkable: true
-            checked: !!view.folder && view.folder.folderOrder === "modified"
-            onTriggered: if (view.folder) view.folder.setFolderOrder("modified")
-        }
-        FlatMenuItem {
-            text: "이름순"
-            checkable: true
-            checked: !!view.folder && view.folder.folderOrder === "name"
-            onTriggered: if (view.folder) view.folder.setFolderOrder("name")
-        }
-        FlatMenuItem {
-            text: "크기순"
-            checkable: true
-            checked: !!view.folder && view.folder.folderOrder === "size"
-            onTriggered: if (view.folder) view.folder.setFolderOrder("size")
-        }
-    }
-
-    FlatMenu {
         id: aiMenu
         objectName: "localFolderAiMenu"
         readonly property var counts: view.folder ? view.folder.aiCategoryCounts : []
@@ -1245,17 +1506,26 @@ Item {
             text: "모든 사진"
             checkable: true
             checked: aiMenu.applied.length === 0
-            onTriggered: if (view.folder) view.folder.setAiFilter("", "")
+            onTriggered: {
+                if (view.folder)
+                    view.folder.setAiFilter("", "")
+                checked = Qt.binding(function() { return aiMenu.applied.length === 0 })
+            }
         }
         Instantiator {
             model: aiMenu.counts
             FlatMenuItem {
+                id: localAiItem
                 required property var modelData
                 objectName: "localFolderAiCategory_" + (modelData.category || "")
-                text: "#" + (modelData.category || "") + "  ·  " + aiMenu.amount(modelData.count) + "장"
+                text: (modelData.category || "") + "  ·  " + aiMenu.amount(modelData.count) + "장"
                 checkable: true
                 checked: aiMenu.applied === modelData.category
-                onTriggered: if (view.folder) view.folder.setAiFilter(modelData.category, "")
+                onTriggered: {
+                    if (view.folder)
+                        view.folder.setAiFilter(localAiItem.modelData.category, "")
+                    checked = Qt.binding(function() { return aiMenu.applied === localAiItem.modelData.category })
+                }
             }
             onObjectAdded: (index, object) => aiMenu.insertItem(index + 1, object)
             onObjectRemoved: (index, object) => aiMenu.removeItem(object)
@@ -1275,8 +1545,8 @@ Item {
                     return
                 if (view.folder.aiScanning)
                     view.folder.cancelAiScan()
-                else
-                    view.folder.scanAiTags()
+                else if (view.folder.scanAiTags())
+                    view.flashNotice("AI 자동분류 중…")
             }
         }
         FlatMenuItem {
@@ -1290,6 +1560,14 @@ Item {
     FlatMenu {
         id: teachMenu
         property string targetKey: ""
+        property bool singleOnly: false
+        readonly property bool batchTarget: !singleOnly && !!view.folder && view.folder.selectionMode
+            && view.folder.selectedCount > 1 && view.folder.isSelected(targetKey)
+        FlatMenuItem {
+            visible: !view.folder || view.folder.aiCategories.length === 0
+            enabled: false
+            text: "켜져 있는 AI 태그가 없습니다"
+        }
         Instantiator {
             model: view.folder ? view.folder.aiCategories : []
             FlatMenuItem {
@@ -1297,15 +1575,15 @@ Item {
                 text: "#" + modelData
                 enabled: !!view.folder && !view.folder.tagsLocked
                 onTriggered: {
-                    if (!view.folder)
+                    if (!view.folder || view.folder.tagsLocked)
                         return
-                    if (view.folder.selectionMode && view.folder.selectedCount > 1 && view.folder.isSelected(teachMenu.targetKey))
+                    if (teachMenu.batchTarget)
                         view.teachCategory(modelData, true)
                     else
                         view.folder.teachOne(teachMenu.targetKey, modelData)
                 }
             }
-            onObjectAdded: (index, object) => teachMenu.insertItem(index, object)
+            onObjectAdded: (index, object) => teachMenu.insertItem(index + 1, object)
             onObjectRemoved: (index, object) => teachMenu.removeItem(object)
         }
         FlatMenuSeparator {}
@@ -1313,13 +1591,17 @@ Item {
             text: "AI 태그 모두 아님"
             enabled: !!view.folder && !view.folder.tagsLocked
             onTriggered: {
-                if (!view.folder)
+                if (!view.folder || view.folder.tagsLocked)
                     return
-                if (view.folder.selectionMode && view.folder.selectedCount > 1 && view.folder.isSelected(teachMenu.targetKey))
+                if (teachMenu.batchTarget)
                     view.teachCategory("", true)
                 else
                     view.folder.teachOne(teachMenu.targetKey, "")
             }
+        }
+        FlatMenuItem {
+            text: "AI 태그 관리…"
+            onTriggered: aiManager.open()
         }
     }
 
@@ -1337,6 +1619,7 @@ Item {
         parent: view.popupParent || Overlay.overlay
         title: "이 폴더의 AI 태그를 초기화할까요?"
         preferredWidth: 460
+        onOpened: localClearCancel.forceActiveFocus()
         contentItem: Label {
             text: "자동분류로 붙은 AI 태그만 지웁니다. 직접 추가한 태그와 사진 파일은 그대로 둡니다."
             wrapMode: Text.Wrap
@@ -1349,6 +1632,7 @@ Item {
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
             FlatButton {
+                id: localClearCancel
                 text: "취소"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
             }
@@ -1433,7 +1717,7 @@ Item {
         contentItem: ColumnLayout {
             spacing: 12
             Label {
-                text: "선택한 사진에 붙일 태그"
+                text: "선택한 사진에 태그 추가"
                 font.bold: true
                 font.pixelSize: Theme.fontSection
                 color: Theme.text
@@ -1443,7 +1727,7 @@ Item {
                 readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
                 Layout.fillWidth: true
                 maximumLength: 50
-                placeholderText: "태그 이름"
+                placeholderText: "태그 이름 입력"
                 onAccepted: addBatch.click()
             }
             RowLayout {
@@ -1477,10 +1761,17 @@ Item {
         modal: true
         focus: true
         anchors.centerIn: parent
-        width: 320
-        height: Math.min(380, parent ? Math.max(200, parent.height - 48) : 380)
+        width: 340
+        height: Math.min(420, parent ? Math.max(220, parent.height - 48) : 420)
         padding: 16
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        property string notice: ""
+        onOpened: {
+            localTeachNewTagField.text = ""
+            teachPopup.notice = ""
+            if (localTeachNewTagField.enabled)
+                localTeachNewTagField.forceActiveFocus()
+        }
         background: Card {
             topColor: Theme.dialogTop
             bottomColor: Theme.dialog
@@ -1491,10 +1782,61 @@ Item {
             anchors.fill: parent
             spacing: 10
             Label {
-                text: "선택한 사진에 이 AI 태그가 맞다고 알려 줍니다."
+                text: "선택한 사진에 이 AI 태그가 맞다고 알려 줍니다. 닮은 사진에도 적용됩니다."
                 color: Theme.text
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.gapSmall
+                FlatField {
+                    id: localTeachNewTagField
+                    objectName: "localFolderTeachNewField"
+                    readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
+                    Layout.fillWidth: true
+                    implicitHeight: Theme.compactHeight
+                    leftPadding: Theme.gap
+                    rightPadding: Theme.gap
+                    maximumLength: 50
+                    placeholderText: "새 AI 태그 만들어 바로 지정"
+                    font.pixelSize: Theme.fontSmall
+                    enabled: !!view.folder && !view.folder.tagsLocked && view.folder.shareLearning
+                    onTextChanged: teachPopup.notice = ""
+                    onAccepted: if (localTeachNewTagAdd.enabled) localTeachNewTagAdd.clicked()
+                }
+                FlatButton {
+                    id: localTeachNewTagAdd
+                    objectName: "localFolderTeachNewAdd"
+                    text: "추가·지정"
+                    compact: true
+                    enabled: !!view.folder && !view.folder.tagsLocked && view.folder.shareLearning
+                        && localTeachNewTagField.cleanTag.length > 0
+                    tip: view.folder && !view.folder.shareLearning
+                        ? "AI 학습 공유가 꺼져 있어 새 AI 태그를 만들 수 없습니다"
+                        : (view.folder && view.folder.tagsLocked ? view.folder.holdReason : "")
+                    onClicked: {
+                        const clean = localTeachNewTagField.cleanTag
+                        if (!clean || !view.folder || !view.folder.shareLearning)
+                            return
+                        if (view.folder.addAiTag(clean)) {
+                            view.teachCategory(clean, true)
+                            localTeachNewTagField.text = ""
+                            teachPopup.close()
+                        } else {
+                            teachPopup.notice = view.folder.status || "AI 태그를 추가하지 못했습니다."
+                        }
+                    }
+                }
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: teachPopup.notice.length > 0
+                text: teachPopup.notice
+                color: Theme.error
+                font.pixelSize: Theme.fontSmall
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
             }
             FocusScrollView {
                 id: teachScroll
@@ -1532,6 +1874,7 @@ Item {
             FlatButton {
                 Layout.fillWidth: true
                 text: "AI 태그 모두 아님"
+                tip: "보이는 AI 태그를 모두 빼고 AI 학습에 반영합니다"
                 enabled: !!view.folder && !view.folder.tagsLocked
                 onClicked: {
                     view.teachCategory("", true)
@@ -1541,29 +1884,35 @@ Item {
         }
     }
 
-    // The photo large, with what can be done to it here.
-    Popup {
+    // The photo large, matching Gallery's previewDialog.
+    FlatDialog {
         id: previewPopup
         objectName: "localFolderPreview"
         parent: view.popupParent || Overlay.overlay
-        modal: true
-        focus: true
-        anchors.centerIn: parent
-        width: parent ? Math.max(0, parent.width - 24) : 1060
-        height: parent ? Math.max(0, parent.height - 24) : 780
-        padding: 16
+        title: "미리보기"
+        light: 0.1
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
+        width: Math.max(0, parent ? parent.width - 24 : 1060)
+        height: Math.max(0, parent ? parent.height - 24 : 780)
+        x: parent ? Math.max(0, Math.round((parent.width - width) / 2)) : 0
+        y: parent ? Math.max(0, Math.round((parent.height - height) / 2)) : 0
+        padding: 16
+        leftPadding: 16
+        rightPadding: 16
+        topPadding: 16
+        bottomPadding: 16
         property string notice: ""
         property string noticeKey: ""
         property string _openedStatus: ""
         readonly property string openedKey: view.folder ? view.folder.selectedKey : ""
-        readonly property bool subOverlayOpen: deleteConfirmation.visible || alikeConfirmation.visible
-            || teachMenu.visible
+        readonly property bool shortcutActive: previewPopup.visible && !previewTagField.activeFocus
+            && !deleteConfirmation.visible && !alikeConfirmation.visible && !teachMenu.visible
+            && !aiManager.visible && !view.saveReviewOpen
         function toggleFavorite() {
             if (!view.folder || !view.folder.selectedKey)
                 return
             const note = view.folder.favoriteNotice(view.folder.selectedKey)
-            view.keyNotice = note
+            view.flashNotice(note)
             if (note && view.folder.status === note) {
                 notice = note
                 noticeKey = openedKey
@@ -1572,130 +1921,235 @@ Item {
                 noticeKey = ""
             }
         }
+        function resetScroll() {
+            if (localPreviewMetaScroll.contentItem)
+                localPreviewMetaScroll.contentItem.contentY = 0
+        }
         onOpenedKeyChanged: {
             notice = ""
             noticeKey = ""
+            _openedStatus = view.folder ? (view.folder.status || "") : ""
             previewTagField.text = ""
+            resetScroll()
         }
         onAboutToShow: {
             notice = ""
             noticeKey = ""
             _openedStatus = view.folder ? (view.folder.status || "") : ""
             previewTagField.text = ""
+            resetScroll()
+            if (localWheel)
+                localWheel.reset()
         }
         onClosed: {
             previewTagField.text = ""
             localPreviewMedia.release()
         }
-        background: Card {
-            topColor: Theme.dialogTop
-            bottomColor: Theme.dialog
-            border.color: Theme.lineStrong
-            glow: 0.12
-        }
-        onOpened: previewBody.forceActiveFocus()
         Shortcut {
             sequence: "Left"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && !!view.folder && view.folder.canPrevious
+            enabled: previewPopup.shortcutActive && !!view.folder && view.folder.canPrevious
             onActivated: view.folder.previousItem()
         }
         Shortcut {
             sequence: "Right"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && !!view.folder && view.folder.canNext
+            enabled: previewPopup.shortcutActive && !!view.folder && view.folder.canNext
             onActivated: view.folder.nextItem()
         }
         Shortcut {
             sequence: "F"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && !!view.folder && !!view.folder.selectedKey
+            enabled: previewPopup.shortcutActive && !!view.folder && !!view.folder.selectedKey
             onActivated: previewPopup.toggleFavorite()
         }
         Shortcut {
             sequence: "+"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && localPreviewMedia.canZoomIn
+            enabled: previewPopup.shortcutActive && localPreviewMedia.canZoomIn
             onActivated: localPreviewMedia.zoomIn()
         }
         Shortcut {
             sequence: "="
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && localPreviewMedia.canZoomIn
+            enabled: previewPopup.shortcutActive && localPreviewMedia.canZoomIn
             onActivated: localPreviewMedia.zoomIn()
         }
         Shortcut {
             sequence: "-"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && localPreviewMedia.canZoomOut
+            enabled: previewPopup.shortcutActive && localPreviewMedia.canZoomOut
             onActivated: localPreviewMedia.zoomOut()
         }
         Shortcut {
             sequence: "0"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && localPreviewMedia.ready
+            enabled: previewPopup.shortcutActive && localPreviewMedia.ready
             onActivated: localPreviewMedia.fit()
         }
         Shortcut {
             sequence: "1"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && localPreviewMedia.canActualSize
+            enabled: previewPopup.shortcutActive && localPreviewMedia.canActualSize
             onActivated: localPreviewMedia.actualSize()
         }
         Shortcut {
             sequence: "m"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && localPreviewMedia.mediaType === "video" && localPreviewMedia.videoSource && localPreviewMedia.ready
+            enabled: previewPopup.shortcutActive && localPreviewMedia.mediaType === "video"
+                && localPreviewMedia.videoSource && localPreviewMedia.ready
             onActivated: localPreviewMedia.muted = !localPreviewMedia.muted
         }
         Shortcut {
             sequence: "Shift+M"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && localPreviewMedia.mediaType === "video" && localPreviewMedia.videoSource && localPreviewMedia.ready
+            enabled: previewPopup.shortcutActive && localPreviewMedia.mediaType === "video"
+                && localPreviewMedia.videoSource && localPreviewMedia.ready
             onActivated: localPreviewMedia.muted = !localPreviewMedia.muted
         }
         Shortcut {
             sequence: "Delete"
-            enabled: previewPopup.visible && !previewPopup.subOverlayOpen && !previewTagField.activeFocus
-                && !!view.folder && !!view.folder.selectedKey && !!view.manager
+            enabled: previewPopup.shortcutActive && !!view.folder && !!view.folder.selectedKey && !!view.manager
             onActivated: {
                 if (view.lockReason.length > 0) {
                     previewPopup.notice = view.lockReason
                     previewPopup.noticeKey = previewPopup.openedKey
-                    view.keyNotice = view.lockReason
+                    view.flashNotice(view.lockReason)
                     return
                 }
                 if (view.manager.mutating || view.folder.selectedMissing)
                     return
+                previewPopup.noticeKey = previewPopup.openedKey
                 if (view.folder.selectedAlike)
                     view.manager.prepareAlikeDelete(view.folder.selectedKey)
                 else
                     view.manager.prepareDelete([view.folder.selectedKey])
             }
         }
-        ColumnLayout {
-            id: previewBody
-            anchors.fill: parent
-            spacing: Theme.gapSmall
-            focus: true
+        header: RowLayout {
+            spacing: 8
+            Label {
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.topMargin: 12
+                Layout.bottomMargin: 4
+                text: previewPopup.title
+                font.pixelSize: Theme.fontHeading
+                font.bold: true
+            }
+            FlatButton {
+                objectName: "localFolderPreviewMaximize"
+                Layout.rightMargin: 12
+                Layout.topMargin: 8
+                tone: "ghost"
+                readonly property bool isMax: !!view.hostWindow && (view.hostWindow.visibility === Window.Maximized
+                    || view.hostWindow.visibility === Window.FullScreen)
+                text: isMax ? "창 복원" : "창 최대화"
+                onClicked: {
+                    if (!view.hostWindow)
+                        return
+                    if (isMax)
+                        view.hostWindow.showNormal()
+                    else
+                        view.hostWindow.showMaximized()
+                }
+            }
+        }
+        footer: ColumnLayout {
+            width: parent ? parent.width : 0
+            spacing: 8
+            Label {
+                objectName: "localFolderPreviewNotice"
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                visible: previewPopup.notice.length > 0
+                text: previewPopup.notice
+                color: Theme.error
+                font.pixelSize: Theme.fontSmall
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+            }
             Flow {
+                visible: !!view.folder
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                spacing: 8
+                FlatButton {
+                    objectName: "localFolderPreviewOpen"
+                    text: "파일 열기"
+                    focusPolicy: Qt.TabFocus
+                    enabled: !!view.folder && !view.folder.selectedMissing
+                    onClicked: view.folder.openSelected()
+                }
+                FlatButton {
+                    objectName: "localFolderPreviewReveal"
+                    text: "폴더에서 보기"
+                    focusPolicy: Qt.TabFocus
+                    enabled: !!view.folder && !view.folder.selectedMissing
+                    onClicked: view.folder.revealSelected()
+                }
+                FlatButton {
+                    objectName: "localFolderPreviewRecycle"
+                    readonly property bool alike: !!view.folder && view.folder.selectedAlike
+                    text: alike ? "남김과 비교 후 휴지통으로" : "휴지통으로"
+                    tone: "danger"
+                    focusPolicy: Qt.TabFocus
+                    enabled: !!view.folder && !!view.manager && !view.folder.selectedMissing
+                        && view.lockReason.length === 0 && !view.manager.mutating
+                    tip: view.lockReason.length > 0 ? view.lockReason
+                        : (alike ? "크기·화질만 다른 ‘비슷함’ 사진입니다. 묶음에 남길 사진과 나란히 비교한 뒤 이 사진만 휴지통으로 보냅니다 (Delete)" : "")
+                    onClicked: {
+                        previewPopup.noticeKey = previewPopup.openedKey
+                        if (view.folder.selectedAlike)
+                            view.manager.prepareAlikeDelete(view.folder.selectedKey)
+                        else
+                            view.manager.prepareDelete([view.folder.selectedKey])
+                    }
+                }
+                FlatButton {
+                    objectName: "localFolderPreviewFavorite"
+                    text: view.folder && view.folder.selectedIsFavorite ? "★ 즐겨찾기 해제" : "☆ 즐겨찾기"
+                    tone: "chip"
+                    focusPolicy: Qt.TabFocus
+                    chosen: !!view.folder && view.folder.selectedIsFavorite
+                    tip: view.folder && view.folder.selectedIsFavorite ? "즐겨찾기 해제 (F)" : "즐겨찾기 추가 (F)"
+                    onClicked: previewPopup.toggleFavorite()
+                }
+            }
+            DialogButtons {
+                Layout.fillWidth: true
+                leftPadding: 16
+                rightPadding: 16
+                topPadding: 4
+                bottomPadding: 14
+                FlatButton {
+                    text: "닫기"
+                    DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                }
+                onRejected: previewPopup.close()
+            }
+        }
+        contentItem: ColumnLayout {
+            id: previewBody
+            spacing: 12
+            clip: true
+            Flow {
+                id: localPreviewTopControls
                 Layout.fillWidth: true
                 spacing: 8
                 FlatButton {
                     objectName: "localFolderPreviewPrevious"
-                    text: "‹ 이전"
+                    text: "이전"
                     focusPolicy: Qt.TabFocus
                     enabled: !!view.folder && view.folder.canPrevious
                     tip: "이전 사진 (←)"
-                    onClicked: view.folder.previousItem()
+                    onClicked: {
+                        previewTagField.text = ""
+                        view.folder.previousItem()
+                    }
                 }
                 FlatButton {
                     objectName: "localFolderPreviewNext"
-                    text: "다음 ›"
+                    text: "다음"
                     focusPolicy: Qt.TabFocus
                     enabled: !!view.folder && view.folder.canNext
                     tip: "다음 사진 (→)"
-                    onClicked: view.folder.nextItem()
+                    onClicked: {
+                        previewTagField.text = ""
+                        view.folder.nextItem()
+                    }
                 }
                 PreviewZoomControls { preview: localPreviewMedia }
             }
@@ -1704,7 +2158,7 @@ Item {
                 objectName: "localFolderPreviewImage"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                Layout.minimumHeight: 40
+                Layout.minimumHeight: 24
                 sourceUrl: previewPopup.visible && view.folder ? view.folder.selectedPreviewUrl : ""
                 mediaType: view.folder ? view.folder.selectedMediaType : "photo"
                 sourcePixelWidth: view.folder ? view.folder.selectedPixelWidth : 0
@@ -1713,222 +2167,201 @@ Item {
                 sourceRawHeight: view.folder ? view.folder.selectedRawHeight : 0
                 missingNote: view.folder ? view.folder.selectedMissingNote : ""
                 externalBusy: view.folder ? view.folder.selectionBusy : false
-                playing: previewPopup.visible && view.windowShown
+                playing: previewPopup.visible && view.windowShown && !view.saveReviewOpen
             }
-            Label {
-                objectName: "localFolderPreviewInfo"
+            FocusScrollView {
+                id: localPreviewMetaScroll
                 Layout.fillWidth: true
-                text: view.folder ? view.folder.selectedPublicInfo : ""
-                color: Theme.textMuted
-                font.pixelSize: Theme.fontSmall
-                elide: Text.ElideMiddle
-                textFormat: Text.PlainText
-            }
-            Flow {
-                Layout.fillWidth: true
-                spacing: Theme.gapSmall
-                Repeater {
-                    model: view.folder ? view.folder.selectedTags : []
-                    delegate: Rectangle {
-                        id: chip
-                        objectName: "localFolderTagChip"
-                        required property var modelData
-                        readonly property string tagName: modelData.tag || ""
-                        readonly property bool isConfirmed: modelData.source === "confirmed"
-                        readonly property bool isAi: modelData.source === "ai" || isConfirmed
-                        radius: Theme.radiusSmall
-                        border.width: 1
-                        border.color: isAi ? Theme.aiTagLine : Theme.userTagLine
-                        color: chipNameMouse.containsMouse ? (isAi ? Theme.aiTagHover : Theme.userTagHover)
-                            : (isAi ? Theme.aiTagFill : Theme.userTagFill)
-                        implicitWidth: chipRow.implicitWidth + 14
-                        implicitHeight: Theme.compactHeight
+                Layout.preferredHeight: Math.min(localPreviewMetaColumn.implicitHeight,
+                                                Math.max(36, previewBody.height - localPreviewTopControls.height - 48))
+                Layout.maximumHeight: Math.max(36, previewBody.height - localPreviewTopControls.height - 48)
+                clip: true
+                contentWidth: availableWidth
+                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                ScrollBar.vertical.policy: localPreviewMetaColumn.implicitHeight > height + 2
+                    ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+                ColumnLayout {
+                    id: localPreviewMetaColumn
+                    width: localPreviewMetaScroll.availableWidth
+                    spacing: 8
+                    Label {
+                        objectName: "localFolderPreviewInfo"
+                        Layout.fillWidth: true
+                        text: view.folder ? view.folder.selectedPublicInfo : ""
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontSmall
+                        elide: Text.ElideMiddle
+                        textFormat: Text.PlainText
+                    }
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 6
+                        visible: !!view.folder && (view.folder.selectedTags.length > 0 || !!view.folder.selectedKey)
+                        Repeater {
+                            model: view.folder ? view.folder.selectedTags : []
+                            delegate: Rectangle {
+                                id: chip
+                                objectName: "localFolderTagChip"
+                                required property var modelData
+                                readonly property string tagName: modelData.tag || ""
+                                readonly property bool isConfirmed: modelData.source === "confirmed"
+                                readonly property bool isAi: modelData.source === "ai" || isConfirmed
+                                radius: Theme.radiusSmall
+                                border.width: 1
+                                border.color: isAi ? Theme.aiTagLine : Theme.userTagLine
+                                color: chipNameMouse.containsMouse ? (isAi ? Theme.aiTagHover : Theme.userTagHover)
+                                    : (isAi ? Theme.aiTagFill : Theme.userTagFill)
+                                implicitWidth: chipRow.implicitWidth + 14
+                                implicitHeight: Theme.compactHeight
+                                RowLayout {
+                                    id: chipRow
+                                    anchors.centerIn: parent
+                                    spacing: 4
+                                    Label {
+                                        text: (chip.isAi ? "AI · #" : "#") + chip.tagName + (chip.isConfirmed ? " ✓" : "")
+                                        font.pixelSize: Theme.fontSmall
+                                        color: chip.isAi ? Theme.aiTagText : Theme.userTagText
+                                        ToolTip.visible: chipNameMouse.containsMouse
+                                        ToolTip.text: chip.isConfirmed ? "맞다고 알려 준 AI 태그 · 모아보기"
+                                            : (chip.isAi ? "AI가 붙인 태그 · 모아보기" : "이 태그만 보기")
+                                        MouseArea {
+                                            id: chipNameMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                if (!view.folder)
+                                                    return
+                                                if (chip.isAi)
+                                                    view.folder.setAiFilter(chip.tagName, "")
+                                                else
+                                                    view.folder.setUserTag(chip.tagName)
+                                                previewPopup.close()
+                                            }
+                                        }
+                                    }
+                                    Label {
+                                        objectName: "localFolderTagConfirm"
+                                        visible: chip.modelData.source === "ai"
+                                        text: "✓"
+                                        font.pixelSize: Theme.fontSmall
+                                        font.bold: true
+                                        leftPadding: 3
+                                        rightPadding: 1
+                                        color: confirmArea.containsMouse ? Theme.good : Theme.textMuted
+                                        ToolTip.visible: confirmArea.containsMouse
+                                        ToolTip.text: view.folder && !view.folder.shareLearning
+                                            ? "맞아요 · 학습 공유가 꺼져 있어 이 폴더에만 저장됩니다"
+                                            : "맞아요 · AI 학습에 반영"
+                                        MouseArea {
+                                            id: confirmArea
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            enabled: !!view.folder && !view.folder.tagsLocked
+                                            onClicked: {
+                                                if (view.folder && view.folder.teachTag(view.folder.selectedKey, chip.tagName, true)) {
+                                                    previewPopup.notice = ""
+                                                    previewPopup.noticeKey = previewPopup.openedKey
+                                                    view.flashNotice("#" + chip.tagName + " 분류를 배우는 중…")
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Label {
+                                        objectName: "localFolderTagRemove"
+                                        text: "×"
+                                        font.pixelSize: Theme.fontSmall
+                                        font.bold: true
+                                        leftPadding: 3
+                                        rightPadding: 3
+                                        color: removeArea.containsMouse ? Theme.error : Theme.textMuted
+                                        ToolTip.visible: removeArea.containsMouse
+                                        ToolTip.text: chip.isAi
+                                            ? (view.folder && !view.folder.shareLearning
+                                                ? "이 태그 아님 · 학습 공유가 꺼져 있어 이 폴더에만 저장됩니다"
+                                                : "이 태그 아님 · AI 학습에 반영")
+                                            : "태그 삭제"
+                                        MouseArea {
+                                            id: removeArea
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            enabled: !!view.folder && !view.folder.tagsLocked
+                                            onClicked: {
+                                                if (!view.folder)
+                                                    return
+                                                previewPopup.notice = ""
+                                                previewPopup.noticeKey = previewPopup.openedKey
+                                                view.folder.removeSelectedTag(chip.tagName)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         RowLayout {
-                            id: chipRow
-                            anchors.centerIn: parent
-                            spacing: 4
-                            Label {
-                                text: (chip.isAi ? "AI · #" : "#") + chip.tagName + (chip.isConfirmed ? " ✓" : "")
+                            spacing: Theme.gapSmall
+                            visible: !!view.folder && !!view.folder.selectedKey
+                            FlatField {
+                                id: previewTagField
+                                objectName: "localFolderPreviewTagField"
+                                readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
+                                implicitHeight: Theme.compactHeight
+                                Layout.preferredWidth: 132
+                                leftPadding: Theme.gap
+                                rightPadding: Theme.gap
+                                maximumLength: 50
+                                placeholderText: "새 태그"
                                 font.pixelSize: Theme.fontSmall
-                                color: chip.isAi ? Theme.aiTagText : Theme.userTagText
-                                ToolTip.visible: chipNameMouse.containsMouse
-                                ToolTip.text: chip.isConfirmed ? "맞다고 알려 준 AI 태그 · 모아보기"
-                                    : (chip.isAi ? "AI가 붙인 태그 · 모아보기" : "이 태그만 보기")
-                                MouseArea {
-                                    id: chipNameMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        if (!view.folder)
-                                            return
-                                        if (chip.isAi)
-                                            view.folder.setAiFilter(chip.tagName, "")
-                                        else
-                                            view.folder.setUserTag(chip.tagName)
-                                        previewPopup.close()
-                                    }
+                                enabled: !!view.folder && !view.folder.tagsLocked
+                                Keys.onEscapePressed: event => {
+                                    text = ""
+                                    focus = false
+                                    event.accepted = true
+                                }
+                                onAccepted: {
+                                    if (cleanTag.length > 0 && view.folder && !view.folder.tagsLocked
+                                            && view.folder.addSelectedTag(cleanTag))
+                                        text = ""
                                 }
                             }
-                            Label {
-                                objectName: "localFolderTagConfirm"
-                                visible: chip.modelData.source === "ai"
-                                text: "✓"
-                                font.pixelSize: Theme.fontSmall
-                                font.bold: true
-                                leftPadding: 3
-                                rightPadding: 1
-                                color: confirmArea.containsMouse ? Theme.good : Theme.textMuted
-                                ToolTip.visible: confirmArea.containsMouse
-                                ToolTip.text: "맞아요 · AI 학습에 반영"
-                                MouseArea {
-                                    id: confirmArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    enabled: !!view.folder && !view.folder.tagsLocked
-                                    onClicked: {
-                                        if (view.folder && view.folder.teachTag(view.folder.selectedKey, chip.tagName, true))
-                                            previewPopup.notice = "#" + chip.tagName + " 분류를 배우는 중…"
-                                    }
+                            FlatButton {
+                                objectName: "localFolderPreviewTagAdd"
+                                text: "+ 태그"
+                                compact: true
+                                focusPolicy: Qt.TabFocus
+                                enabled: previewTagField.cleanTag.length > 0 && !!view.folder && !view.folder.tagsLocked
+                                tip: view.folder && view.folder.tagsLocked ? view.folder.holdReason : ""
+                                onClicked: {
+                                    if (view.folder && !view.folder.tagsLocked
+                                            && view.folder.addSelectedTag(previewTagField.cleanTag))
+                                        previewTagField.text = ""
                                 }
                             }
-                            Label {
-                                objectName: "localFolderTagRemove"
-                                text: "×"
-                                font.pixelSize: Theme.fontSmall
-                                font.bold: true
-                                leftPadding: 3
-                                rightPadding: 3
-                                color: removeArea.containsMouse ? Theme.error : Theme.textMuted
-                                ToolTip.visible: removeArea.containsMouse
-                                ToolTip.text: chip.isAi ? "이 태그 아님 · AI 학습에 반영" : "태그 삭제"
-                                MouseArea {
-                                    id: removeArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    enabled: !!view.folder && !view.folder.tagsLocked
-                                    onClicked: if (view.folder) view.folder.removeSelectedTag(chip.tagName)
+                            FlatButton {
+                                id: previewAiButton
+                                objectName: "localFolderPreviewAi"
+                                text: "+ AI 태그"
+                                compact: true
+                                focusPolicy: Qt.TabFocus
+                                visible: !!view.folder && view.folder.selectedMediaType === "photo"
+                                enabled: !!view.folder && !view.folder.tagsLocked
+                                tip: view.folder && !view.folder.shareLearning
+                                    ? "AI 태그 지정 · 학습 공유가 꺼져 있어 이 폴더에만 저장됩니다"
+                                    : "AI 태그 지정 · 닮은 사진에도 적용"
+                                onClicked: {
+                                    if (!view.folder)
+                                        return
+                                    previewPopup.notice = ""
+                                    previewPopup.noticeKey = previewPopup.openedKey
+                                    teachMenu.singleOnly = true
+                                    teachMenu.targetKey = view.folder.selectedKey
+                                    teachMenu.popup(previewAiButton, 0, previewAiButton.height + 4)
                                 }
                             }
                         }
                     }
-                }
-                FlatField {
-                    id: previewTagField
-                    objectName: "localFolderPreviewTagField"
-                    readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
-                    implicitHeight: Theme.compactHeight
-                    width: 132
-                    maximumLength: 50
-                    placeholderText: "새 태그"
-                    font.pixelSize: Theme.fontSmall
-                    enabled: !!view.folder && !view.folder.tagsLocked
-                    Keys.onEscapePressed: event => {
-                        text = ""
-                        previewBody.forceActiveFocus()
-                        event.accepted = true
-                    }
-                    onAccepted: {
-                        if (cleanTag.length > 0 && view.folder && !view.folder.tagsLocked
-                                && view.folder.addSelectedTag(cleanTag))
-                            text = ""
-                    }
-                }
-                FlatButton {
-                    objectName: "localFolderPreviewTagAdd"
-                    text: "+ 태그"
-                    compact: true
-                    focusPolicy: Qt.TabFocus
-                    enabled: previewTagField.cleanTag.length > 0 && !!view.folder && !view.folder.tagsLocked
-                    tip: view.folder && view.folder.tagsLocked ? view.folder.holdReason : ""
-                    onClicked: {
-                        if (view.folder && !view.folder.tagsLocked
-                                && view.folder.addSelectedTag(previewTagField.cleanTag))
-                            previewTagField.text = ""
-                    }
-                }
-                FlatButton {
-                    id: previewAiButton
-                    objectName: "localFolderPreviewAi"
-                    text: "+ AI 태그"
-                    compact: true
-                    focusPolicy: Qt.TabFocus
-                    visible: !!view.folder && view.folder.selectedMediaType === "photo"
-                    enabled: !!view.folder && !view.folder.tagsLocked
-                    tip: "AI 태그 지정"
-                    onClicked: {
-                        if (!view.folder)
-                            return
-                        teachMenu.targetKey = view.folder.selectedKey
-                        teachMenu.popup(previewAiButton, 0, previewAiButton.height + 4)
-                    }
-                }
-            }
-            Label {
-                objectName: "localFolderPreviewNotice"
-                Layout.fillWidth: true
-                visible: previewPopup.notice.length > 0
-                text: previewPopup.notice
-                color: Theme.notice
-                font.pixelSize: Theme.fontSmall
-                textFormat: Text.PlainText
-                wrapMode: Text.Wrap
-            }
-            Flow {
-                Layout.fillWidth: true
-                spacing: Theme.gapSmall
-                FlatButton {
-                    objectName: "localFolderPreviewFavorite"
-                    text: view.folder && view.folder.selectedIsFavorite ? "★ 즐겨찾기 해제" : "☆ 즐겨찾기"
-                    tone: "chip"
-                    compact: true
-                    focusPolicy: Qt.TabFocus
-                    chosen: !!view.folder && view.folder.selectedIsFavorite
-                    tip: view.folder && view.folder.selectedIsFavorite ? "즐겨찾기 해제 (F)" : "즐겨찾기 추가 (F)"
-                    onClicked: previewPopup.toggleFavorite()
-                }
-                FlatButton {
-                    objectName: "localFolderPreviewReveal"
-                    text: "폴더에서 보기"
-                    compact: true
-                    focusPolicy: Qt.TabFocus
-                    enabled: !!view.folder && !view.folder.selectedMissing
-                    onClicked: view.folder.revealSelected()
-                }
-                FlatButton {
-                    objectName: "localFolderPreviewOpen"
-                    text: "기본 앱으로 열기"
-                    compact: true
-                    focusPolicy: Qt.TabFocus
-                    enabled: !!view.folder && !view.folder.selectedMissing
-                    onClicked: view.folder.openSelected()
-                }
-                FlatButton {
-                    objectName: "localFolderPreviewRecycle"
-                    readonly property bool alike: !!view.folder && view.folder.selectedAlike
-                    text: alike ? "남김과 비교 후 휴지통으로" : "휴지통으로"
-                    tone: "danger"
-                    compact: true
-                    focusPolicy: Qt.TabFocus
-                    enabled: !!view.folder && !!view.manager && !view.folder.selectedMissing
-                        && view.lockReason.length === 0 && !view.manager.mutating
-                    tip: view.lockReason.length > 0 ? view.lockReason
-                        : (alike ? "크기·화질만 다른 ‘비슷함’ 사진입니다. 남길 사진과 나란히 비교한 뒤 이 사진만 휴지통으로 보냅니다 (Delete)" : "")
-                    onClicked: {
-                        if (view.folder.selectedAlike)
-                            view.manager.prepareAlikeDelete(view.folder.selectedKey)
-                        else
-                            view.manager.prepareDelete([view.folder.selectedKey])
-                    }
-                }
-                FlatButton {
-                    text: "닫기"
-                    compact: true
-                    tone: "ghost"
-                    focusPolicy: Qt.TabFocus
-                    onClicked: previewPopup.close()
                 }
             }
         }
@@ -1975,10 +2408,14 @@ Item {
                 previewPopup.close()
             if (previewPopup.visible) {
                 const status = view.folder.status || ""
-                if (status.length > 0 && status !== previewPopup._openedStatus) {
+                if (status !== previewPopup._openedStatus) {
                     previewPopup._openedStatus = status
-                    previewPopup.notice = status
-                    previewPopup.noticeKey = previewPopup.openedKey
+                    if (status.length > 0 && previewPopup.noticeKey === previewPopup.openedKey
+                            && previewPopup.openedKey.length > 0
+                            && (status.indexOf("못했습니다") >= 0 || status.indexOf("없습니다") >= 0
+                                || status.indexOf("않습니다") >= 0 || status.indexOf("중단") >= 0
+                                || status.indexOf("끝난 뒤") >= 0))
+                        previewPopup.notice = status
                 }
             }
         }
@@ -2001,12 +2438,15 @@ Item {
             })
         }
         function onChanged() {
+            if (previewPopup.visible && view.manager && view.manager.error.length > 0
+                    && previewPopup.noticeKey.length > 0 && previewPopup.noticeKey === previewPopup.openedKey)
+                previewPopup.notice = view.manager.error
             if (!view.resumePreview || !view.manager || view.manager.mutating
                     || view.manager.deleteConfirmationPending)
                 return
             view.resumePreview = false
-            if (view.folder && view.opened && (!view.app || !view.app.closing) && !previewPopup.visible
-                    && (view.folder.selectionBusy || view.folder.selectedKey.length > 0))
+            if (view.currentScreen === 3 && view.folder && view.opened && (!view.app || !view.app.closing)
+                    && !previewPopup.visible && (view.folder.selectionBusy || view.folder.selectedKey.length > 0))
                 previewPopup.open()
         }
     }

@@ -254,6 +254,8 @@ FlatDialog {
                         implicitHeight: 36
                         checkable: true
                         text: checked ? "확장 설치·연결 도움말 ▾" : "확장 설치·연결 도움말 ▸"
+                        Keys.onReturnPressed: event => { toggle(); event.accepted = true }
+                        Keys.onEnterPressed: event => { toggle(); event.accepted = true }
                         HoverHandler {
                             cursorShape: Qt.PointingHandCursor
                         }
@@ -307,7 +309,7 @@ FlatDialog {
                     Label {
                         Layout.fillWidth: true
                         text: dialog.browserSetup && dialog.browserSetup.extensionKind === "firefox"
-                            ? "2. 아래 폴더에서 manifest.json을 선택하세요."
+                            ? "2. 아래 폴더에서 manifest.json 파일을 선택하세요."
                             : "2. ‘압축해제된 확장 프로그램 로드’에서 아래 폴더를 선택하세요."
                         textFormat: Text.PlainText
                         wrapMode: Text.Wrap
@@ -368,13 +370,25 @@ FlatDialog {
                 implicitHeight: 36
                 text: dialog.methodIndex === 1 ? "고급 연결 · 토큰 입력 ▾" : "고급 연결 · 토큰 입력 ▸"
                 enabled: !dialog.unavailable && !dialog.accounts.busy
+                Keys.onReturnPressed: event => {
+                    if (enabled) {
+                        click()
+                        event.accepted = true
+                    }
+                }
+                Keys.onEnterPressed: event => {
+                    if (enabled) {
+                        click()
+                        event.accepted = true
+                    }
+                }
                 HoverHandler {
-                    cursorShape: Qt.PointingHandCursor
+                    cursorShape: advancedMethodToggle.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
                 }
                 contentItem: Text {
                     text: advancedMethodToggle.text
                     font.pixelSize: Theme.fontBody
-                    color: Theme.text
+                    color: advancedMethodToggle.enabled ? Theme.text : Theme.textDisabled
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }

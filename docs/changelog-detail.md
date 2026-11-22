@@ -2,6 +2,30 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.12.1 — 2026-11-22
+
+1.12.0 배포 후 전체 프로그램·성능·UI/UX·안정성·리팩토링·사용자 문서 검수에서 발견된 문제점과 개선 사항을 반영했습니다.
+
+- **AI 분류·가르치기·공통 프로필 안정성 및 성능 (`luvbox/clip_classifier.py`, `luvbox/ai_pipeline.py`, `luvbox/ai_profile.py`, `luvbox/qt_library.py`, `luvbox/qt_local_folder.py`)**:
+  - `clip_classifier.py`에서 `_VERIFIED_LOCK`을 `_SESSION_LOCK`과 분리하고 `get_session()`이 `_SESSION_LOCK` 밖에서 `is_model_ready()`를 먼저 확인하도록 수정해, 실제 ONNX 모델 첫 로드 시 `get_session()` → `is_model_ready()`가 같은 비재진입 잠금을 다시 잡으며 발생하던 교착(deadlock)을 해결했습니다.
+  - 아직 특징(임베딩)이 없는 사진에 `분류 가르치기`(`teach_tag`)를 실행할 때 `ai_pipeline.encode_missing_for_teach()`로 대상 사진의 임베딩을 먼저 생성·저장한 뒤 학습하도록 보완하고, 진행 중 취소(`check_stop`/`ScanCancelled`)를 즉시 반영하도록 수정했습니다.
+  - `ai_pipeline.scan_and_classify()`에서 `rescore_all=False`일 때 우선 인코딩된 `encoded_first` 사진도 빠짐없이 채점하도록 수정하고, `rescore_all=True`이고 버전이 동일할 때 `rest` 묶음의 중복 재채점을 건너뛰도록 최적화했습니다.
+  - `qt_library.py`의 `sync_tag_examples`가 읽기 전용 `_ReadOnlyHistory`를 사용하고 `_refresh()` 시에도 카탈로그 `epoch` 기반 작업이 취소되지 않도록 보존하며, `LocalFolderRepository`에 `_profile_lock`을 도입해 공통 `AiProfileStore` 동시 접근을 직렬화했습니다.
+  - 미리보기에서 AI 태그를 `×`로 지울 때 UI 스레드의 동기 `selected()` 호출 없이 워커의 `remove_tag_detailed()` 결과로 피드백과 복원 여부를 판단하고, 직후 도착하는 `"select"` 응답이 상태 안내 문구를 덮어쓰지 않도록 `_preserve_status_serial`을 적용했습니다.
+- **저장소·히스토리·로컬 폴더 DB 성능 및 정합성 (`luvbox/storage.py`, `luvbox/history.py`, `luvbox/local_store.py`, `luvbox/qt_local_folder.py`, `luvbox/qt_app.py`)**:
+  - `storage.py`의 `_moved_snapshot_edits` / `_apply_moved_mark_edits`에서 갱신된 태그가 삭제 목록에 함께 들어가 지워지던 버그를 수정하고, `source`별 태그 삭제·레거시 `ai_feedback` 정리·`_reconcile_tag_feedback`·`_LOOKED_AT` 복원을 보완했습니다. 또한 병합 시 `_media_score`의 디스크 확인을 허용된 로컬 루트 내부 경로로 한정했습니다.
+  - `history.py`에서 중복 인덱스 `media_tags_source`를 제거하고, `replace_ai_tags`의 형제 사용자 태그 조회를 청크 단위 일괄 조회로 바꾸었으며, `_ranked_duplicates` CTE 구체화 및 `duplicate_page(count_total=False)`로 페이지네이션 반복 집계 비용을 줄였습니다.
+  - `local_store.py`에서 `path_of()` 상위 폴더 캐시(`_folder_cache`), `_numbers_of` / `set_photos_distinct` 청크 일괄 조회 및 쓰기 잠금 내부 읽기, `scan_duplicates` 후 갱신된 `(filesize, mtime_ns)` 저장을 적용하고, 폴더 정리에서 종류 필터가 걸려 있어도 중복 보기 진입 시 모든 미디어를 조회하도록 수정했습니다.
+  - `qt_app.py`에서 시작 시 설정 파일을 한 번만 읽도록(`load_with_status`) 통합하고, `_load_library()`의 `media_roots` SQLite 조회를 `_io_thread` 비동기 작업(`"overlap_roots"`)으로 분리했으며, 폴더 정리 휴지통 작업 중 설정 변경·저장 시작·종료를 상호 잠금으로 보호했습니다.
+- **백엔드·업데이터·실행기·확장 안정성 (`luvbox/qt_gallery.py`, `luvbox/qt_management.py`, `luvbox/qt_records.py`, `luvbox/qt_updater.py`, `luvbox/updater.py`, `luvbox/deletion.py`, `luvbox/local_deletion.py`, `luvbox/recovery.py`, `luvbox/duplicates.py`, `luvbox/preview.py`, `luvbox/recycling.py`, `luvbox/core.py`, `luvbox/scheduled.py`, `luvbox/single_instance.py`, `tools/launcher/Launcher.cs`, `assets/browser-extension/*`)**:
+  - `qt_gallery.py`의 `_notified` 집합 정리와 오래된 경로 요청 차단, `qt_management.py`와 `qt_records.py`의 `setLibrary` 세대 전환 시 뮤테이션·작업 상태 초기화, `qt_updater.py`의 런처 꼬리표 확인 캐시와 다운로드 취소 시 임시 파일 정리(`clear_downloads`)를 적용했습니다.
+  - `duplicates.py`에서 근사 중복 비교 전 확정 그룹을 먼저 커밋해 중간 취소 시에도 완전 일치 묶음을 보존하고, `preview.py`의 2단계 EXIF 방향 태그 탐색, `Launcher.cs`의 손상된 마커 폴더 재추출 및 시작 화면 고해상도 보간 해제, 브라우저 확장의 탭 닫힘 경쟁 상태 방어를 반영했습니다.
+- **QML UI/UX·접근성·공통 컴포넌트 리팩토링 및 사용자 문서 정리 (`assets/qt/*.qml`, `docs/browser-login.md`, `docs/사용안내.txt`, `CHANGELOG.md`, `README.md`)**:
+  - `TileSelectionCheck.qml`과 `TileMissingPlaceholder.qml`을 추출해 갤러리와 폴더 정리 타일의 중복 QML을 통합하고, 주요 QML 파일에 `pragma ComponentBehavior: Bound`와 `Text.PlainText`를 적용했습니다.
+  - `LocalFolderView.qml`에 미리보기 여백 클릭 닫기, 달력 바깥 클릭 닫기, 미리보기 열기 시 스크롤 초기화(`resetScroll`), 최근 폴더 항목·비교 배지·달력 칸 키보드 조작, 빈 화면 버튼 2줄 줄바꿈을 추가했습니다.
+  - `FlatCombo.qml`에서 `Ctrl+A` 등 단축키가 가로채지지 않도록 수정하고 팝업 폭을 창 너비 안으로 제한했으며, `ShortcutHelp.qml`·`StatisticsDialog.qml`·`DuplicateReview.qml`·`UnsavedReview.qml`의 키보드 스크롤과 포커스 자동 노출을 보강했습니다.
+  - `docs/browser-login.md`에서 클래스명·암호화 알고리즘·루프백 포트·테스트 명령 등 개발자 전용 설명을(`docs/security-review.md`에 보존한 뒤) 걷어내고 일반 사용자용 연결 안내로 재작성했습니다.
+
 ## 1.12.0 — 2026-11-21
 
 사용자 지정 AI 태그·공통 AI 프로필·SigLIP 2 전환(Phase 1), 내 PC 사진 폴더를 정리하는 ‘폴더 정리’ 탭(Phase 2), 그리고 전체 프로그램·성능·UI/UX·안정성·문구 검수 수정을 반영했습니다.

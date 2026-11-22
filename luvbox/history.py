@@ -611,7 +611,6 @@ class HistoryStore:
                     PRIMARY KEY(folder_mode, tweet_id, num, media_type, tag)
                 );
                 CREATE INDEX IF NOT EXISTS media_tags_lookup ON media_tags(tag);
-                CREATE INDEX IF NOT EXISTS media_tags_source ON media_tags(source);
                 CREATE INDEX IF NOT EXISTS media_tags_source_tag ON media_tags(source, tag);
                 CREATE TABLE IF NOT EXISTS ai_embeddings (
                     folder_mode TEXT NOT NULL, tweet_id TEXT NOT NULL, num INTEGER NOT NULL,
@@ -1230,7 +1229,16 @@ class HistoryStore:
                 " ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO UPDATE SET "
                 "label=excluded.label, updated_at=excluded.updated_at "
                 "WHERE excluded.updated_at > ai_tag_feedback.updated_at", (row["folder_mode"], *record))
+            self._db.execute(
+                "DELETE FROM ai_tag_feedback " + where +
+                " AND label<0 AND EXISTS (SELECT 1 FROM media_tags mt "
+                "WHERE mt.folder_mode=ai_tag_feedback.folder_mode AND mt.tweet_id=ai_tag_feedback.tweet_id "
+                "AND mt.num=ai_tag_feedback.num AND mt.media_type=ai_tag_feedback.media_type "
+                "AND mt.tag=ai_tag_feedback.tag AND mt.source='user')",
+                target,
+            )
             # As set_tag_feedback leaves it: "yes" shows the tag as confirmed, "not this" takes it away.
+            removed_ai = False
             for answer in self._db.execute(
                     "SELECT tag, label, updated_at FROM ai_tag_feedback " + where, target).fetchall():
                 if answer["label"] > 0:
@@ -1240,8 +1248,14 @@ class HistoryStore:
                         "DO UPDATE SET source=CASE WHEN media_tags.source='user' THEN 'user' ELSE 'confirmed' END",
                         (*target, answer["tag"], answer["updated_at"]))
                 else:
-                    self._db.execute("DELETE FROM media_tags " + where + " AND tag=? AND source IN ('ai','confirmed')",
-                                     (*target, answer["tag"]))
+                    cur = self._db.execute(
+                        "DELETE FROM media_tags " + where + " AND tag=? AND source IN ('ai','confirmed')",
+                        (*target, answer["tag"]))
+                    if cur.rowcount > 0:
+                        removed_ai = True
+            if removed_ai and self._db.execute(
+                    "SELECT 1 FROM media_tags " + where + " AND source='ai' LIMIT 1", target).fetchone() is None:
+                self._db.execute(_LOOKED_AT, (*target, stamp))
 
     @_safe
     def record_declined(self, folder_mode: str, metadata: dict, path: Path | str) -> None:
@@ -2756,16 +2770,44 @@ class HistoryStore:
             found.update((row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows)
         return found
 
+    def _clear_legacy_feedback(self, records, tag: str, *, refusals_only: bool) -> None:
+        if not records or not self._has_table("ai_feedback"):
+            return
+        from .clip_model import DEFAULT_CATEGORIES
+
+        in_defaults = tag in DEFAULT_CATEGORIES
+        if refusals_only:
+            if in_defaults:
+                self._db.executemany(
+                    "DELETE FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND category=''", records)
+            return
+        if in_defaults:
+            self._db.executemany(
+                "DELETE FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                "AND category IN (?,'')", [(*record, tag) for record in records])
+        else:
+            self._db.executemany(
+                "DELETE FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                "AND category=?", [(*record, tag) for record in records])
+
     def _forget_refusals(self, identities, tag: str) -> None:
         """A tag the person puts on a photo outweighs an earlier "not this" for the same tag."""
-        if not self._has_table("ai_tag_feedback"):
+        has_feedback = self._has_table("ai_tag_feedback")
+        has_legacy = self._has_table("ai_feedback")
+        if not has_feedback and not has_legacy:
             return
         records = []
         for ident in identities:
             records.extend(self._file_records(*tuple(ident)[:4]))
-        self._db.executemany(
-            "DELETE FROM ai_tag_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
-            "AND tag=? AND label<0", [(*record, tag) for record in records])
+        if not records:
+            return
+        if has_feedback:
+            self._db.executemany(
+                "DELETE FROM ai_tag_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                "AND tag=? AND label<0", [(*record, tag) for record in records])
+        if has_legacy:
+            self._clear_legacy_feedback(records, tag, refusals_only=True)
 
     @_safe
     def add_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str, source: str = "user") -> bool:
@@ -2825,10 +2867,11 @@ class HistoryStore:
         return len(rows)
 
     @_safe
-    def remove_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str) -> bool:
+    def remove_tag_detailed(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str) -> tuple[bool, bool]:
+        """Remove a tag and return ``(removed, confirmed_restored)`` without re-reading the photo."""
         tag = _normalize_tag(tag)
         if not tag:
-            return False
+            return False, False
         with self._db:
             own = (folder_mode, tweet_id, num, media_type)
             records = self._file_records(*own)
@@ -2846,11 +2889,12 @@ class HistoryStore:
                 # neither the next classification nor a merged snapshot puts it back, and the
                 # AI learns from it.
                 self._apply_tag_feedback(records, tag, -1, _now())
-                return True
+                return True, False
             if row is not None and row["source"] == "ai":
                 # The AI's own row of this tag goes with the typed one; the photo stays looked at.
                 self._keep_looked_at([own], tag)
             removed = False
+            confirmed_restored = False
             for record in records:
                 # A tag the person typed belongs to the file and goes from every record;
                 # another record's own AI label is that record's.
@@ -2870,7 +2914,13 @@ class HistoryStore:
                         "INSERT INTO media_tags(folder_mode, tweet_id, num, media_type, tag, source, created_at) "
                         "VALUES (?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type, tag) DO NOTHING",
                         (*record, tag, "confirmed", _now()))
-        return removed
+                    if record == own:
+                        confirmed_restored = True
+        return removed, confirmed_restored
+
+    @_safe
+    def remove_tag(self, folder_mode: str, tweet_id: str, num: int, media_type: str, tag: str) -> bool:
+        return self.remove_tag_detailed(folder_mode, tweet_id, num, media_type, tag)[0]
 
     def _apply_tag_feedback(self, records, tag: str, label: int, stamp: str) -> None:
         """Record one answer about ``tag`` on these records and show it (inside a transaction).
@@ -2879,6 +2929,7 @@ class HistoryStore:
         "Not this" removes the AI and confirmed label of that tag; a record left
         with no AI tag keeps the empty AI row, so it counts as looked at.
         """
+        self._clear_legacy_feedback(records, tag, refusals_only=False)
         for record in records:
             self._db.execute(
                 "INSERT INTO ai_tag_feedback(folder_mode, tweet_id, num, media_type, tag, label, updated_at) "
@@ -3312,6 +3363,15 @@ class HistoryStore:
                         "LIMIT 1", record).fetchone() is not None:
                     confirmed = True
                     break
+        elif self._has_table("ai_feedback"):
+            for record in self._file_records(folder_mode, tweet_id, num, media_type):
+                row = self._db.execute(
+                    "SELECT category FROM ai_feedback WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "ORDER BY updated_at DESC LIMIT 1", record).fetchone()
+                if row is not None:
+                    category = row["category"] or ""
+                    confirmed = True
+                    break
         if self._has_table("ai_embeddings"):
             with closing(self._db.execute(
                 f"SELECT confidence FROM ai_embeddings WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
@@ -3350,10 +3410,12 @@ class HistoryStore:
         return len(identities)
 
     @_safe
-    def refuse_ai_tags(self, identities: list[tuple]) -> int:
+    def refuse_ai_tags(self, identities: list[tuple], active_tags=None) -> int:
         """"None of these": "not this" for every AI tag the photos show now. Returns the answers stored."""
         if not identities or not self._has_table("ai_tag_feedback"):
             return 0
+        active = ({tag for tag in (_normalize_tag(item) for item in active_tags) if tag}
+                  if active_tags is not None else None)
         stamp = _now()
         answers = 0
         applied: set[tuple[tuple, str]] = set()
@@ -3369,7 +3431,8 @@ class HistoryStore:
                     for row in self._db.execute(
                             "SELECT tag FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
                             "AND source IN ('ai','confirmed') AND tag!=''", record).fetchall():
-                        shown.add(row["tag"])
+                        if active is None or row["tag"] in active:
+                            shown.add(row["tag"])
                 if not shown:
                     for record in file_records:
                         if record not in looked_set:
@@ -3385,7 +3448,10 @@ class HistoryStore:
                         applied.add((record, tag))
                     answers += len(pending)
             for record in looked_at:
-                self._db.execute(_LOOKED_AT, (*record, stamp))
+                if self._db.execute(
+                        "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                        "AND source='ai' AND tag!='' LIMIT 1", record).fetchone() is None:
+                    self._db.execute(_LOOKED_AT, (*record, stamp))
         return answers
 
     @_safe
@@ -3453,8 +3519,35 @@ class HistoryStore:
                 record_to_idents: dict[tuple, list[tuple]] = {}
                 all_records: list[tuple] = []
                 seen_records: set[tuple] = set()
+                chunk_paths: dict[tuple, str] = {}
+                for clause, params in _identity_chunks(chunk):
+                    for row in self._read_rows(
+                            "SELECT folder_mode, tweet_id, num, media_type, path FROM media "
+                            f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})", params):
+                        rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                        chunk_paths[rec] = row["path"] or ""
+                by_file: dict[tuple, list[tuple]] = {}
+                tweet_ids = sorted({ident[1] for ident in chunk if chunk_paths.get(ident)})
+                if tweet_ids:
+                    modes = sorted(_MODES)
+                    mode_marks = ",".join("?" for _ in modes)
+                    for start_t in range(0, len(tweet_ids), 400):
+                        batch_tids = tweet_ids[start_t:start_t + 400]
+                        tid_marks = ",".join("?" for _ in batch_tids)
+                        for row in self._read_rows(
+                                f"SELECT folder_mode, tweet_id, num, media_type, path FROM media "
+                                f"WHERE folder_mode IN ({mode_marks}) AND tweet_id IN ({tid_marks}) AND path!=''",
+                                (*modes, *batch_tids)):
+                            rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                            by_file.setdefault((row["tweet_id"], self._file_key(row["path"])), []).append(rec)
                 for ident in chunk:
-                    for rec in self._file_records(*ident):
+                    path = chunk_paths.get(ident, "")
+                    if not path:
+                        file_records = [ident]
+                    else:
+                        siblings = by_file.get((ident[1], self._file_key(path)), ())
+                        file_records = [ident] + [rec for rec in siblings if rec != ident]
+                    for rec in file_records:
                         record_to_idents.setdefault(rec, []).append(ident)
                         if rec not in seen_records:
                             seen_records.add(rec)
@@ -3469,8 +3562,9 @@ class HistoryStore:
                             "SELECT folder_mode, tweet_id, num, media_type, tag, source FROM media_tags "
                             f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})", params):
                         rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                        if row["source"] == "ai" and rec in wanted:
-                            current.setdefault(rec, set()).add(row["tag"])
+                        if row["source"] == "ai":
+                            if rec in wanted:
+                                current.setdefault(rec, set()).add(row["tag"])
                         elif row["tag"]:
                             for target_ident in record_to_idents.get(rec, ()):
                                 decided.setdefault(target_ident, set()).add(row["tag"])
@@ -4098,20 +4192,22 @@ class HistoryStore:
         """
         favorite = ("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark", "m") + ")"
                     if self._has_table("favorites") else "0")
-        order = f"{favorite} DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"
+        order = "base.is_fav DESC, base.filesize DESC, base.tweet_id DESC, base.num DESC"
         return (
-            "WITH ranked AS (SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id, "
-            f"ROW_NUMBER() OVER (PARTITION BY h.cluster_id ORDER BY {order}) AS cluster_rank, "
-            f"(h.file_hash!='' AND ROW_NUMBER() OVER (PARTITION BY h.cluster_id, h.file_hash ORDER BY {order})>1) "
-            "AS cluster_copy, "
-            "COUNT(*) OVER (PARTITION BY h.cluster_id) AS cluster_size "
+            "WITH base AS (SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id, "
+            f"h.filesize, h.file_hash, {favorite} AS is_fav "
             "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
-            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND " + _listed("m") + ") ")
+            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND " + _listed("m") + "), "
+            "ranked AS (SELECT base.folder_mode, base.tweet_id, base.num, base.media_type, base.cluster_id, "
+            f"ROW_NUMBER() OVER (PARTITION BY base.cluster_id ORDER BY {order}) AS cluster_rank, "
+            f"(base.file_hash!='' AND ROW_NUMBER() OVER (PARTITION BY base.cluster_id, base.file_hash ORDER BY {order})>1) "
+            "AS cluster_copy, "
+            "COUNT(*) OVER (PARTITION BY base.cluster_id) AS cluster_size FROM base) ")
 
     @_safe
     def duplicate_page(self, page=0, page_size=100, media_type="all", query="", *, period=None, author="",
                        hashtag="", favorite_only=False, user_tag="", ai_category="", ai_origin="",
-                       after=None) -> dict:
+                       after=None, count_total: bool = True) -> dict:
         """Duplicates in group order: each group together, the photo to keep first.
 
         Every row carries ``cluster_id``, ``cluster_rank`` (1 is the photo to
@@ -4122,7 +4218,8 @@ class HistoryStore:
         promote a copy to "keep".
         """
         if (isinstance(page, bool) or not isinstance(page, int) or page < 0 or
-                isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000):
+                isinstance(page_size, bool) or not isinstance(page_size, int) or not 1 <= page_size <= 1000 or
+                type(count_total) is not bool):
             raise HistoryError(_HISTORY_HELP)
         if after is not None and (
                 page != 0 or not isinstance(after, tuple) or len(after) != 2 or
@@ -4148,6 +4245,18 @@ class HistoryStore:
             row_condition += " AND (ranked.cluster_id>? OR (ranked.cluster_id=? AND ranked.cluster_rank>?))"
             row_params.extend((after[0], after[0], after[1]))
         hashtags_col = "tweets.hashtags" if self._has_column("tweets", "hashtags") else "'' AS hashtags"
+        if not count_total:
+            if page != 0:
+                raise HistoryError(_HISTORY_HELP)
+            rows = self._read_rows(
+                ranked + "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,"
+                + hashtags_col + ",ranked.cluster_id AS cluster_id,ranked.cluster_rank AS cluster_rank,"
+                "ranked.cluster_copy AS cluster_copy,ranked.cluster_size AS cluster_size " + source + row_condition +
+                " ORDER BY ranked.cluster_id, ranked.cluster_rank LIMIT ?",
+                (*row_params, page_size + 1))
+            has_more = len(rows) > page_size
+            return {"rows": rows[:page_size], "total": None, "has_more": has_more,
+                    "page": 0, "pages": 0, "page_size": page_size}
         with self._read_snapshot():
             total = self._db.execute(ranked + "SELECT COUNT(*) " + source + condition, params).fetchone()[0]
             pages = (total + page_size - 1) // page_size

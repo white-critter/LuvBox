@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import threading
 
-from .settings import SettingsDamaged, load_settings, settings_path
+from .settings import SettingsDamaged, load_settings, load_settings_with_status, settings_path
 from .file_mutex import file_mutex, replace_file
 
 
@@ -60,9 +60,16 @@ def default_settings() -> dict:
 class SettingsRepository:
     """Merge each preference update with the latest on-disk preferences."""
 
-    def load(self) -> dict:
+    last_damaged: bool | None = None
+
+    def load_with_status(self) -> tuple[dict, bool]:
         with _WRITE_LOCK:
-            return {**default_settings(), **load_settings()}
+            values, damaged = load_settings_with_status()
+            self.last_damaged = damaged
+            return {**default_settings(), **values}, damaged
+
+    def load(self) -> dict:
+        return self.load_with_status()[0]
 
     def update(self, changes: dict) -> dict:
         if not isinstance(changes, dict) or any(not isinstance(key, str) for key in changes):

@@ -14,6 +14,7 @@ import math
 import os
 import re
 from pathlib import Path
+import struct
 from typing import Sequence
 import warnings
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -80,17 +81,15 @@ def _dhash_from_stream(source, hash_size: int = 8) -> str:
     """Decode an open, size-checked binary stream and return its 16-hex dHash."""
     try:
         _prepare_decoders(False)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
-                if img.width * img.height > MAX_PIXELS:
-                    return ""
-                # Transpose a one-byte grayscale image instead of copying the
-                # full RGB/RGBA raster, and release both intermediates promptly.
-                with img.convert("L") as gray:
-                    ImageOps.exif_transpose(gray, in_place=True)
-                    with gray.resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR) as resized:
-                        pixels = resized.tobytes()
+        with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
+            if img.width * img.height > MAX_PIXELS:
+                return ""
+            # Transpose a one-byte grayscale image instead of copying the
+            # full RGB/RGBA raster, and release both intermediates promptly.
+            with img.convert("L") as gray:
+                ImageOps.exif_transpose(gray, in_place=True)
+                with gray.resize((hash_size + 1, hash_size), Image.Resampling.BILINEAR) as resized:
+                    pixels = resized.tobytes()
         diff = []
         for row in range(hash_size):
             start = row * (hash_size + 1)
@@ -103,7 +102,7 @@ def _dhash_from_stream(source, hash_size: int = 8) -> str:
             lum = sum(pixels) // len(pixels)
             decimal = sum(lum << (8 * i) for i in range(8))
         return f"{decimal:016x}"
-    except (OSError, ValueError, TypeError, SyntaxError, UnidentifiedImageError,
+    except (OSError, ValueError, TypeError, SyntaxError, EOFError, struct.error, UnidentifiedImageError,
             Image.DecompressionBombError, Image.DecompressionBombWarning):
         return ""
 
@@ -176,19 +175,17 @@ def pixel_vector(image_path: Path | str):
             if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
                 return None
             _prepare_decoders(False)
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", Image.DecompressionBombWarning)
-                with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
-                    if img.width * img.height > MAX_PIXELS:
-                        return None
-                    img.draft("RGB", (_VECTOR_SIDE * 4, _VECTOR_SIDE * 4))
-                    with img.convert("RGB") as color:
-                        ImageOps.exif_transpose(color, in_place=True)
-                        ratio = color.width / max(1, color.height)
-                        with color.resize((_VECTOR_SIDE, _VECTOR_SIDE), Image.Resampling.BILINEAR,
-                                          reducing_gap=2.0) as small:
-                            return np.asarray(small, dtype=np.int16), ratio
-    except (OSError, ValueError, TypeError, SyntaxError, UnidentifiedImageError,
+            with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
+                if img.width * img.height > MAX_PIXELS:
+                    return None
+                img.draft("RGB", (_VECTOR_SIDE * 4, _VECTOR_SIDE * 4))
+                with img.convert("RGB") as color:
+                    ImageOps.exif_transpose(color, in_place=True)
+                    ratio = color.width / max(1, color.height)
+                    with color.resize((_VECTOR_SIDE, _VECTOR_SIDE), Image.Resampling.BILINEAR,
+                                      reducing_gap=2.0) as small:
+                        return np.asarray(small, dtype=np.int16), ratio
+    except (OSError, ValueError, TypeError, SyntaxError, EOFError, struct.error, UnidentifiedImageError,
             Image.DecompressionBombError, Image.DecompressionBombWarning):
         return None
 
@@ -350,7 +347,22 @@ class _GreyCache:
         picture = self._pictures.get(key)
         if picture is not None:
             self._pictures.move_to_end(key)
-        return picture
+            return picture
+        if (isinstance(key, tuple) and len(key) == 2 and isinstance(key[1], tuple)
+                and len(key[1]) == 2):
+            name, (req_w, req_h) = key
+            shown = self._sizes.get(name)
+            for candidate_key, candidate in list(self._pictures.items()):
+                if (isinstance(candidate_key, tuple) and len(candidate_key) == 2
+                        and candidate_key[0] == name):
+                    cand_h, cand_w = candidate.shape[:2]
+                    if ((shown and (cand_w, cand_h) == shown)
+                            or (cand_w >= req_w and cand_h >= req_h
+                                and isinstance(candidate_key[1], tuple)
+                                and candidate_key[1][0] >= req_w and candidate_key[1][1] >= req_h)):
+                        self._pictures.move_to_end(candidate_key)
+                        return candidate
+        return None
 
     def put(self, key, picture) -> None:
         if key in self._pictures or picture.size > self._budget:
@@ -386,8 +398,6 @@ def same_in_detail(first: Path | str, second: Path | str, *, greys: _GreyCache |
 
     try:
         with ExitStack() as stack:
-            stack.enter_context(warnings.catch_warnings())
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
             _prepare_decoders(False)
             opened: dict = {}
 
@@ -442,7 +452,7 @@ def same_in_detail(first: Path | str, second: Path | str, *, greys: _GreyCache |
                 if all(picture.shape == shape for picture in pictures):
                     break                       # nothing was resized, so another filter changes nothing
             return False
-    except (OSError, ValueError, TypeError, SyntaxError, UnidentifiedImageError,
+    except (OSError, ValueError, TypeError, SyntaxError, EOFError, struct.error, UnidentifiedImageError,
             Image.DecompressionBombError, Image.DecompressionBombWarning):
         return False
 

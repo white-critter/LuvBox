@@ -107,14 +107,14 @@ def _receipt_data(path: Path) -> tuple[str, int]:
     return name, size
 
 
-_VOLUME_CACHE: dict[str, str] = {}
+_VOLUME_CACHE: dict[tuple[str, int], str] = {}
 _FAT_FILESYSTEMS = frozenset({"FAT", "FAT32", "EXFAT"})
 
 
-def _volume_filesystem(anchor: str) -> str:
+def _volume_filesystem(anchor: str, device: int = 0) -> str:
     if os.name != "nt" or not anchor:
         return ""
-    key = os.path.normcase(anchor)
+    key = (os.path.normcase(anchor), int(device))
     cached = _VOLUME_CACHE.get(key)
     if cached is not None:
         return cached
@@ -290,9 +290,9 @@ class _Sink:
             if not flags & 0x80:
                 raise RecyclingError("Windows 휴지통을 사용할 수 없어 건너뛰었습니다.")
             if not _same_path(_display_name(item, self.ole32), self.path):
-                raise RecyclingError("Windows에서 다른 파일을 선택해 작업을 취소했습니다.")
+                raise RecyclingError("파일 확인이 일치하지 않아 작업을 취소했습니다.")
             if file_signature(self.path) != self.signature:
-                raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로 고침해 주세요.")
+                raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로고침해 주세요.")
             return 0
         except Exception as exc:
             self.outcome.pre_error = str(exc) or "휴지통 이동 확인에 실패했습니다."
@@ -323,7 +323,7 @@ def _run_native(path: Path, signature) -> _Outcome:
         raise RecyclingError("이 저장 위치에서는 Windows 휴지통을 사용할 수 없어 건너뛰었습니다.")
     initialized = ole32.CoInitializeEx(None, 2)
     if initialized < 0:
-        raise RecyclingError("Windows 휴지통 연결을 시작하지 못했습니다.")
+        raise RecyclingError("Windows 휴지통을 열지 못했습니다.")
     operation, item = _PTR(), _PTR()
     outcome = _Outcome()
 
@@ -358,15 +358,15 @@ def recycle_file(path: Path | str, expected=None) -> str:
     path = Path(os.path.abspath(path))
     signature = file_signature(path)
     if expected is not None and signature != _signature(expected):
-        raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로 고침해 주세요.")
+        raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로고침해 주세요.")
     expected_hash = None
-    if _volume_filesystem(path.anchor) in _FAT_FILESYSTEMS:
+    if _volume_filesystem(path.anchor, signature[0]) in _FAT_FILESYSTEMS:
         try:
             expected_hash = _file_sha256(path)
         except OSError as exc:
             raise RecyclingError("파일을 확인하지 못했습니다. 파일 위치와 사용 중인 프로그램을 확인해 주세요.") from exc
         if file_signature(path) != signature:
-            raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로 고침해 주세요.")
+            raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로고침해 주세요.")
     outcome = None
     try:
         for delay in (0, 0.05, 0.1, 0.2):

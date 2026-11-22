@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -32,7 +34,7 @@ FlatDialog {
         return found.slice(0, 16)
     }
     title: "AI 태그 관리"
-    subtitle: "AI가 사진에 붙일 태그를 정합니다. 사진에서 ✓·×로 알려 준 것과 직접 붙인 태그로 배웁니다."
+    subtitle: "AI가 사진에 자동으로 붙일 태그를 정합니다. 예시 사진 1~4장은 닮은 사진을 찾아 주고, 5장부터는 특징을 배워 더 정확하게 분류합니다."
     preferredWidth: 620
     windowMargin: 48
     height: Math.min(implicitHeight, parent ? parent.height - 48 : implicitHeight)
@@ -59,14 +61,16 @@ FlatDialog {
             if (!dialog.visible || !dialog.library)
                 return
             const status = dialog.library.status || ""
-            if (status.length > 0 && status !== dialog._openedStatus) {
+            if (status !== dialog._openedStatus) {
                 dialog._openedStatus = status
-                dialog.feedbackText = status
+                if (status.length > 0)
+                    dialog.feedbackText = status
             }
         }
     }
 
     contentItem: ColumnLayout {
+        clip: true
         spacing: Theme.gap
 
         RowLayout {
@@ -129,7 +133,7 @@ FlatDialog {
             Layout.fillWidth: true
             Layout.fillHeight: true
             Layout.preferredHeight: Math.min(ruleColumn.implicitHeight, 340)
-            Layout.minimumHeight: Math.min(ruleColumn.implicitHeight, 120)
+            Layout.minimumHeight: Math.min(ruleColumn.implicitHeight, 48)
             clip: true
             contentWidth: availableWidth
             rightPadding: ScrollBar.vertical.policy === ScrollBar.AlwaysOn ? 14 : 0
@@ -244,7 +248,7 @@ FlatDialog {
                 ? dialog.library.holdReason
                 : (dialog.library && dialog.library.busy
                     ? (dialog.library.holdReason || "진행 중인 작업이 끝난 뒤 변경할 수 있습니다.")
-                    : "태그를 바꾼 뒤 ‘지금 다시 분류’를 누르면 저장해 둔 사진 정보로 바로 다시 매깁니다.")
+                    : "태그를 바꾼 뒤 ‘지금 다시 분류’를 누르면 저장해 둔 사진 정보로 바로 다시 분류합니다.")
             color: Theme.textMuted
             font.pixelSize: Theme.fontSmall
             wrapMode: Text.Wrap

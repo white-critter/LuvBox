@@ -51,6 +51,8 @@ class UpdateController(QObject):
         self._closing = False
         self._shutdown_complete = False
         self._lock = Lock()
+        self._cached_launcher = None
+        self._launcher_known = False
         self._swapping = False
         self._swept = False
         self._cancel = Event()
@@ -99,10 +101,23 @@ class UpdateController(QObject):
     def notes(self):
         return self._found["notes"] if self._found else ""
 
+    def _probe_launcher(self):
+        path = self._launcher()
+        with self._lock:
+            changed = (not self._launcher_known) or (self._cached_launcher != path)
+            self._cached_launcher = path
+            self._launcher_known = True
+        return path, changed
+
     @Property(bool, notify=changed)
     def canInstall(self):
         """This release can be fetched here: it has the files, and a launcher to replace is known."""
-        return bool(self._found and self._found["installable"] and self._launcher() is not None)
+        if not (self._found and self._found["installable"]):
+            return False
+        if not self._launcher_known:
+            self._probe_launcher()
+        with self._lock:
+            return self._cached_launcher is not None
 
     @Property(float, notify=changed)
     def progress(self):
@@ -206,9 +221,15 @@ class UpdateController(QObject):
     def install(self):
         """The click: read the latest release again, fetch its program, verify it and put it in the
         launcher's place."""
-        if self._closing or self._state not in {"available", "failed"} or not self.canInstall:
+        if self._closing or self._state not in {"available", "failed"} or not (self._found and self._found["installable"]):
             return
-        launcher = self._launcher()
+        with self._lock:
+            known = self._launcher_known
+            launcher = self._cached_launcher
+        if not known:
+            launcher, _ = self._probe_launcher()
+        if launcher is None:
+            return
         self._cancel.clear()
         self._error = ""
         self._progress = 0.0
@@ -269,6 +290,12 @@ class UpdateController(QObject):
                 return
             if kind == "sweep":
                 try:
+                    _path, changed = self._probe_launcher()
+                    if changed:
+                        self._delivered.emit(("launcher",))
+                except Exception:
+                    pass
+                try:
                     updater.clear_downloads(self._folder_path(), older_than=_LEFTOVER_AGE)
                 except Exception:
                     pass  # tidying is never worth a failure; the next install clears the folder anyway
@@ -279,6 +306,7 @@ class UpdateController(QObject):
                         install_queued = any(item[0] == "install" for item in self._jobs.queue)
                     if install_queued:
                         continue
+                    self._probe_launcher()
                     result = ("checked", *self._check())
                 else:
                     result = self._install(**details)
@@ -342,6 +370,7 @@ class UpdateController(QObject):
             return ("renewed", found, stamp, False, version)
         with self._lock:
             if self._closing or self._cancel.is_set():
+                updater.clear_downloads(folder)
                 raise updater.UpdateError("cancelled")
             self._swapping = True
         try:
@@ -357,6 +386,9 @@ class UpdateController(QObject):
         if self._closing:
             return
         kind = result[0]
+        if kind == "launcher":
+            self.changed.emit()
+            return
         if kind == "progress":
             if self._state == "downloading":
                 self._progress = max(self._progress, min(1.0, result[1]))

@@ -181,6 +181,7 @@ def scene():
         local.checkXOverlap(str(base / "X 저장"))
         wait(lambda: not shown("localFolderOverlap"), "notice gone")
         assert find("localFolderPath").property("text") == str(photos)
+        assert find("localFolderMediaType").property("visible") and find("localFolderDensity").property("visible")
         tile = shown("localFolderTile")[0]
         thumb = next(item for item in tile.childItems() if item.objectName() == "localFolderThumb")
         wait(lambda: thumb.property("paintedWidth") > 0, "thumbnail drawn")
@@ -190,6 +191,7 @@ def scene():
         click(tile, "tile", double=True)
         preview = find("localFolderPreview")
         wait(lambda: preview.property("visible") and local.selectedKey, "preview open")
+        assert find("localFolderPreviewMaximize").property("visible")
         assert window.property("modalOpen")
         preview_media = find("localFolderPreviewImage")
         wait(lambda: preview_media.property("ready"), "preview MediaPreview ready")
@@ -233,10 +235,12 @@ def scene():
         local.setSelectionMode(False)
 
         # --- Duplicates: found and shown as groups, with the gallery's tools.
+        click("localFolderDuplicates")
+        wait(lambda: shown("localFolderDuplicateTools"), "duplicate tools shown")
+        assert find("localDuplicateHelp").property("visible")
         assert find("localFolderNear").property("text") == "비슷한 사진도 검사"
         click("localFolderScanDuplicates")
         wait(lambda: not local.filesLocked and local.duplicateCount == 4, "duplicates found")
-        click("localFolderDuplicates")
         wait(lambda: shown("localDuplicateReview") and len(shown("duplicateGroup")) == 2, "duplicate view")
 
         def mark_first_group():

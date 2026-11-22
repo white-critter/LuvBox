@@ -73,14 +73,14 @@ def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: floa
             while True:
                 check_stop()
                 if time.monotonic() >= deadline:
-                    raise ConversionError("GIF 변환 시간이 너무 오래 걸려 중단했습니다. MP4 임시 파일은 보존했습니다.")
+                    raise ConversionError("GIF 변환 시간이 너무 오래 걸려 중단했습니다. 원본 동영상(MP4) 파일은 보존했습니다.")
                 if output is not None and max_bytes and output.stat().st_size > max_bytes:
-                    raise ConversionSizeLimit("변환된 GIF가 용량 제한을 초과했습니다. MP4 임시 파일은 보존했습니다.")
+                    raise ConversionSizeLimit("변환된 GIF가 용량 제한을 초과했습니다. 원본 동영상(MP4) 파일은 보존했습니다.")
                 if os.fstat(errors.fileno()).st_size > _DIAGNOSTIC_LIMIT_BYTES:
-                    raise ConversionError("GIF 변환 중 오류가 반복되어 중단했습니다. MP4 임시 파일은 보존했습니다.")
+                    raise ConversionError("GIF 변환 중 오류가 반복되어 중단했습니다. 원본 동영상(MP4) 파일은 보존했습니다.")
                 if process.poll() is not None:
                     if process.returncode:
-                        raise ConversionError("GIF로 변환하지 못했습니다. MP4 임시 파일은 보존했습니다. 다시 저장을 시작하면 재시도합니다.")
+                        raise ConversionError("GIF로 변환하지 못했습니다. 원본 동영상(MP4) 파일은 보존했습니다. 다시 저장을 시작하면 재시도합니다.")
                     errors.seek(0)
                     return errors.read(_DIAGNOSTIC_LIMIT_BYTES)
                 time.sleep(0.1)
@@ -121,11 +121,11 @@ def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | N
     check_stop()
     executable = ffmpeg_path()
     if executable is None:
-        raise ConversionError("GIF 변환 도구를 찾지 못했습니다. MP4 임시 파일은 보존했습니다. 실행 파일을 다시 받아 주세요.")
+        raise ConversionError("GIF 변환 도구를 찾지 못했습니다. 원본 동영상(MP4) 파일은 보존했습니다. 실행 파일을 다시 받아 주세요.")
     palette = output = None
     try:
         if not source.is_file():
-            raise ConversionError("GIF로 변환할 MP4 임시 파일을 찾지 못했습니다.")
+            raise ConversionError("GIF로 변환할 원본 동영상(MP4) 파일을 찾지 못했습니다.")
         fd, name = tempfile.mkstemp(prefix=".luvbox-gif-palette-", suffix=".bmp", dir=source.parent)
         os.close(fd)
         palette = Path(name)
@@ -158,19 +158,19 @@ def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | N
              check_stop=check_stop, deadline=deadline, output=output, max_bytes=max_bytes)
         check_stop()
         if max_bytes and output.stat().st_size > max_bytes:
-            raise ConversionSizeLimit("변환된 GIF가 용량 제한을 초과했습니다. MP4 임시 파일은 보존했습니다.")
+            raise ConversionSizeLimit("변환된 GIF가 용량 제한을 초과했습니다. 원본 동영상(MP4) 파일은 보존했습니다.")
         with output.open("rb") as stream:
             header = stream.read(10)
             stream.seek(-1, os.SEEK_END)
             trailer = stream.read(1)
         if (header[:6] not in {b"GIF87a", b"GIF89a"} or trailer != b";" or
                 not int.from_bytes(header[6:8], "little") or not int.from_bytes(header[8:10], "little")):
-            raise ConversionError("GIF 변환 결과를 확인하지 못했습니다. MP4 임시 파일은 보존했습니다.")
+            raise ConversionError("GIF 변환 결과를 확인하지 못했습니다. 원본 동영상(MP4) 파일은 보존했습니다.")
         completed = output
         output = None
         return completed
     except (OSError, subprocess.SubprocessError):
-        raise ConversionError("GIF로 변환하지 못했습니다. MP4 임시 파일은 보존했습니다. 저장 폴더와 디스크 여유 공간을 확인해 주세요.") from None
+        raise ConversionError("GIF로 변환하지 못했습니다. 원본 동영상(MP4) 파일은 보존했습니다. 저장 폴더와 디스크 여유 공간을 확인해 주세요.") from None
     finally:
         for temporary in (palette, output):
             if temporary is not None:

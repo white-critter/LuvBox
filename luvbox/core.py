@@ -70,7 +70,7 @@ _RECORD_ERROR = ("저장 기록을 읽거나 갱신하지 못했습니다. "
                  "저장 폴더의 권한과 다른 실행 중인 프로그램을 확인해 주세요.")
 _COMPATIBILITY_ERROR = ("프로그램 파일이 손상되어 저장을 시작하기 전에 멈췄습니다. "
                         "LuvBox.exe를 다시 받아 실행해 주세요.")
-_HISTORY_ERROR = "저장 이력을 기록하지 못했습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
+_HISTORY_ERROR = "저장 기록을 남기지 못했습니다. 저장 폴더의 쓰기 권한과 디스크 여유 공간을 확인해 주세요."
 _METADATA_ERROR = "출처 또는 작성자를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다."
 _SNAPSHOT_ERROR = "저장 폴더에 백업 기록을 남기지 못했습니다. 기록은 이 PC에 안전하게 저장됐으며 다음 저장 때 다시 반영합니다."
 _DATE_MOVE_ERROR = "저장 완료일 폴더로 옮기지 못했습니다. 기존 파일 위치와 중복 방지 기록은 보존했습니다."
@@ -327,7 +327,7 @@ def _normal_account(value: str) -> str:
             raise ValueError("X 프로필 주소 또는 @아이디를 입력해 주세요.")
         parts = parsed.path.strip("/").split("/")
         if len(parts) > 2 or (len(parts) == 2 and parts[1] != "likes"):
-            raise ValueError("트윗 주소 대신 본인 X 프로필 주소를 입력해 주세요.")
+            raise ValueError("게시물 주소 대신 본인 X 프로필 주소를 입력해 주세요.")
         account = parts[0]
     elif account.startswith("@"):
         account = account[1:]
@@ -613,7 +613,7 @@ def _retry_message(saved: int, found: int, unavailable: int, absent: int, limite
     if found:
         parts.append(f"제자리에 있던 파일 {found:,}개")
     if unavailable:
-        parts.append(f"볼 수 없는 트윗 {unavailable:,}개(삭제·비공개·제한)")
+        parts.append(f"볼 수 없는 게시물 {unavailable:,}개(삭제·비공개·제한)")
     if absent:
         parts.append(f"받지 못한 미디어 {absent:,}개")
     if limited:
@@ -1599,7 +1599,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             verify=verify_converted,
                         )
                     except OSError:
-                        guard.failure = "GIF 파일을 저장하지 못했습니다. 같은 이름의 파일이나 저장 폴더를 확인해 주세요. MP4 임시 파일은 보존했습니다."
+                        guard.failure = "GIF 파일을 저장하지 못했습니다. 같은 이름의 파일이나 저장 폴더를 확인해 주세요. 원본 동영상(MP4) 파일은 그대로 남겨 두었습니다."
                         raise exception.AbortExtraction(guard.failure) from None
                     self.pathfmt.part = False
                     self.pathfmt.temppath = self.pathfmt.realpath
@@ -1684,7 +1684,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     verify_unchanged()
                     _retry_sharing_lock(source.unlink, check_stop=check_stop, verify=verify_unchanged)
                     for marker, _ in markers:
-                        marker.unlink()
+                        try:
+                            marker.unlink(missing_ok=True)
+                        except OSError:
+                            pass
                     if decision == "skip":
                         raise ReviewSkip()
                     declined = ReviewNever()
@@ -1933,8 +1936,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             }
         scan_note = ""
         if targets:
-            scan_note = (f"선택한 미디어 {len(targets):,}개(트윗 {len(_retry_groups(normalized.targets)):,}개)를 다시 받습니다. "
-                         "좋아요 목록 대신 트윗마다 X 요청을 1번씩 보냅니다.")
+            scan_note = f"선택한 미디어 {len(targets):,}개(게시물 {len(_retry_groups(normalized.targets)):,}개)를 다시 받습니다."
         elif normalized.scan_mode == "quick":
             readiness = history.quick_scan_readiness(normalized.folder_mode, normalized.media_signature)
             if readiness == "ready" and review_unknown:
@@ -1996,10 +1998,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         continue
                     if tweet_id in visited_ids:
                         absent_files += len(left)
-                        notice = "트윗에서 이 미디어를 찾지 못했거나 받지 못했습니다."
+                        notice = "게시물에서 이 미디어를 찾지 못했거나 받지 못했습니다."
                     else:
                         unavailable_tweets += 1
-                        notice = "트윗을 볼 수 없어(삭제·비공개·제한) 다시 받지 못했습니다."
+                        notice = "게시물을 볼 수 없어(삭제·비공개·제한) 다시 받지 못했습니다."
                     for key in left:
                         identity = _key_identity(key)
                         note_unsaved(unsaved.FAILED, _REFUSED_RETRY_DETAIL if identity in retry_refused else notice,

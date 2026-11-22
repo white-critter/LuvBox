@@ -178,7 +178,9 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
 
     def finished():
         result["cancelled"] = result["total"] - processed
-        result["message"] = f"휴지통 이동 {result['recycled']:,}개 · 실패 {result['failed']:,}개"
+        result["message"] = f"휴지통 이동 {result['recycled']:,}개"
+        if result["failed"]:
+            result["message"] += f" · 실패 {result['failed']:,}개"
         if result["protected"]:
             result["message"] += f" · 그대로 둔 파일 {result['protected']:,}개"
         if result["cancelled"]:
@@ -244,7 +246,7 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 signature = file_signature(row["path"])
                 expected = row.get("_delete_signature")
                 if expected is not None and tuple(expected) != signature:
-                    raise RecyclingError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                    raise RecyclingError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
                 manifest.append((row, signature, ""))
             except (OSError, ValueError, TypeError) as exc:
                 message = (str(exc) if isinstance(exc, (RecyclingError, HistoryError, ProtectionError, _DeletionMessageError))
@@ -262,8 +264,11 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 if store.is_media_path(path):
                     size = row.get("filesize")
                     failed_signature = (0, 0, size if type(size) is int and size >= 0 else 0, 0)
-                    ident = store.begin_deletion(batch, row, keep_deleted, failed_signature)
-                    store.finish_deletion(ident, "failed", error)
+                    try:
+                        ident = store.begin_deletion(batch, row, keep_deleted, failed_signature)
+                        store.finish_deletion(ident, "failed", error)
+                    except HistoryError:
+                        pass
                 result["failed"] += 1
                 processed += 1
                 failures.append(f"{Path(path).name}: {error}")

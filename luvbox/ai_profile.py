@@ -380,8 +380,14 @@ class AiProfileStore:
 
     def remove_scope_examples(self, source_kind: str, source_scope: str) -> int:
         with self._write() as db:
+            tags = [row["tag"] for row in db.execute(
+                "SELECT DISTINCT tag FROM ai_examples WHERE source_kind=? AND source_scope=?",
+                (source_kind, source_scope))]
             removed = db.execute("DELETE FROM ai_examples WHERE source_kind=? AND source_scope=?",
                                  (source_kind, source_scope)).rowcount
+            if tags:
+                marks = ",".join("?" for _ in tags)
+                db.execute(f"DELETE FROM ai_tag_weights WHERE tag IN ({marks})", tags)
             if removed:
                 self._bump(db)
         return int(removed)
@@ -391,11 +397,11 @@ class AiProfileStore:
         """Move stored examples when a folder relocates, returning 0 without locking if none exist."""
         if old_scope == new_scope and old_prefix == new_prefix:
             return 0
-        with closing(self._db.execute(
+        if not self._read(
                 "SELECT 1 FROM ai_examples WHERE source_kind=? AND source_scope=? LIMIT 1",
-                (source_kind, old_scope))) as cur:
-            if cur.fetchone() is None:
-                return 0
+                (source_kind, old_scope),
+        ):
+            return 0
         moved = 0
         with self._write() as db:
             rows = db.execute(
@@ -452,8 +458,10 @@ class AiProfileStore:
                 "SELECT example_id, tag, label, model_id, embedding FROM ai_examples "
                 f"WHERE source_kind=? AND source_scope=? AND tag IN ({marks})",
                 (source_kind, source_scope, *sorted(wanted_tags)))}
+            changed_tags: set[str] = set()
             for key in current.keys() - desired.keys():
                 removed += db.execute("DELETE FROM ai_examples WHERE example_id=? AND tag=?", key).rowcount
+                changed_tags.add(key[1])
             for key, (example_id, kind, scope, tag, label, model_id, blob) in desired.items():
                 old = current.get(key)
                 if old is not None and old["label"] == label and old["model_id"] == model_id and bytes(old["embedding"]) == blob:
@@ -465,6 +473,10 @@ class AiProfileStore:
                     "model_id=excluded.model_id, embedding=excluded.embedding, updated_at=excluded.updated_at",
                     (example_id, kind, scope, tag, label, model_id, blob, now))
                 written += 1
+                changed_tags.add(tag)
+            if changed_tags:
+                marks = ",".join("?" for _ in changed_tags)
+                db.execute(f"DELETE FROM ai_tag_weights WHERE tag IN ({marks})", sorted(changed_tags))
             if written or removed:
                 self._bump(db)
         return written, removed

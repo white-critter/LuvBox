@@ -22,7 +22,6 @@ ApplicationWindow {
     property int saveRestoreHeight: 0
     property int fittedSaveNeed: 0
     property bool saveHeightHeld: false
-    property string fittedDetailName: ""
     property int appliedSaveHeight: 0
     readonly property bool savedDetailVisible: !!(app && app.download && app.download.detailsEnabled
         && app.download.currentSavedItem && app.download.currentSavedItem.filename)
@@ -127,6 +126,7 @@ ApplicationWindow {
         datePickerPopup.close()
         aiMenu.close()
         teachMenu.close()
+        duplicateHelp.close()
         if (localFolderLoader.item)
             localFolderLoader.item.closeMenus()
         if (app) {
@@ -258,10 +258,8 @@ ApplicationWindow {
     function fitSaveWindow() {
         if (!saveFitReady || currentScreen !== 0 || applyingSaveHeight || saveScroll.contentHeight < 40)
             return
-        const detailName = savedDetailVisible ? (app.download.currentSavedItem.filename || "") : ""
         if (!savedDetailVisible) {
             fittedSaveNeed = 0
-            fittedDetailName = ""
             saveHeightHeld = false
             if (saveHeightExpanded && saveRestoreHeight >= minimumHeight) {
                 // While maximized the grown height stays noted as grown: the window gets its own
@@ -282,7 +280,6 @@ ApplicationWindow {
         // A height the person set stays until the card goes away, whatever file comes next.
         if (saveHeightHeld)
             return
-        fittedDetailName = detailName
         const needed = saveNeededHeight()
         if (needed > height + 4 && needed > fittedSaveNeed + 4) {
             const next = Math.min(Math.max(needed, minimumHeight), saveGrowLimit())
@@ -513,8 +510,19 @@ ApplicationWindow {
             if (text === window.seenLibraryStatus)
                 return
             window.seenLibraryStatus = text
-            if (text.length > 0)
+            if (text.length > 0) {
                 window.statusSource = "library"
+                if (window.transientNotice.length > 0) {
+                    window.transientNotice = ""
+                    noticeTimer.stop()
+                }
+                if (previewDialog.visible && previewDialog.noticeKey === previewDialog.openedKey
+                        && previewDialog.openedKey.length > 0
+                        && (text.indexOf("못했습니다") >= 0 || text.indexOf("없습니다") >= 0
+                            || text.indexOf("않습니다") >= 0 || text.indexOf("중단") >= 0
+                            || text.indexOf("끝난 뒤") >= 0))
+                    previewDialog.notice = text
+            }
         }
     }
     Connections {
@@ -524,8 +532,13 @@ ApplicationWindow {
             if (text === window.seenManagementStatus)
                 return
             window.seenManagementStatus = text
-            if (text.length > 0)
+            if (text.length > 0) {
                 window.statusSource = "management"
+                if (window.transientNotice.length > 0) {
+                    window.transientNotice = ""
+                    noticeTimer.stop()
+                }
+            }
             // A move asked for in the preview and refused while that photo is open: say why there too.
             if (previewDialog.visible && window.app.management.error.length > 0
                     && previewDialog.noticeKey.length > 0 && previewDialog.noticeKey === previewDialog.openedKey)
@@ -571,8 +584,7 @@ ApplicationWindow {
             return
         const started = selection ? app.library.teachSelection(category) : app.library.teachSelected(category)
         if (started) {
-            const name = category.length ? "#" + category : "AI 태그 모두 아님"
-            flashNotice(name + " 분류 저장 중…")
+            flashNotice(category.length ? "#" + category + " 분류 저장 중…" : "AI 태그 제외 내용을 저장하는 중…")
         }
     }
 
@@ -608,8 +620,32 @@ ApplicationWindow {
         MouseArea {
             objectName: "titleBarDrag"
             anchors.fill: parent
-            onPressed: window.startSystemMove()
-            onDoubleClicked: window.toggleMaximized()
+            property real pressX: 0
+            property real pressY: 0
+            property bool dragStarted: false
+            onPressed: mouse => {
+                dragStarted = false
+                if (mouse.button === Qt.LeftButton) {
+                    pressX = mouse.x
+                    pressY = mouse.y
+                }
+            }
+            onPositionChanged: mouse => {
+                if (pressed && !dragStarted && (mouse.buttons & Qt.LeftButton)) {
+                    if (Math.abs(mouse.x - pressX) >= 4 || Math.abs(mouse.y - pressY) >= 4) {
+                        dragStarted = true
+                        window.startSystemMove()
+                    }
+                }
+            }
+            onReleased: dragStarted = false
+            onCanceled: dragStarted = false
+            onDoubleClicked: mouse => {
+                if (mouse.button === Qt.LeftButton) {
+                    dragStarted = false
+                    window.toggleMaximized()
+                }
+            }
         }
         // See-through, so the window's light passes behind it; only the line under it is drawn.
         background: Item {
@@ -1094,7 +1130,7 @@ ApplicationWindow {
                                 spacing: Theme.gap
                                 Label {
                                     Layout.fillWidth: true
-                                    text: !window.app ? "" : window.app.schedule.summary.indexOf("자동 저장") === 0
+                                    text: !window.app ? "" : window.app.schedule.summary.indexOf("자동 저장") >= 0
                                         ? window.app.schedule.summary : "자동 저장 · " + window.app.schedule.summary
                                     color: window.app && window.app.schedule.registered && !window.app.schedule.current
                                         ? Theme.notice : Theme.textMuted
@@ -1232,7 +1268,7 @@ ApplicationWindow {
                         objectName: "galleryOrderChoice"
                         visible: !!window.app
                         label: "정렬"
-                        model: ["최근 저장", "최신 게시물", "오래된 게시물", "좋아요 순"]
+                        model: ["최근 저장", "최신 게시물", "오래된 게시물", "좋아요순"]
                         enabled: !window.duplicateMode
                         implicitWidth: 172
                         focusPolicy: Qt.TabFocus
@@ -1266,7 +1302,7 @@ ApplicationWindow {
                         implicitWidth: 116
                         focusPolicy: Qt.TabFocus
                         escapeFocus: gallery
-                        Accessible.name: "미리보기 크기"
+                        Accessible.name: "사진 크기"
                         onActivated: {
                             window.setDensity(currentIndex)
                             if (window.app)
@@ -1541,7 +1577,7 @@ ApplicationWindow {
                         }
                         // Which date, from when and until when stay in one group, so the
                         // range does not split across lines.
-                        Row {
+                        Flow {
                             id: dateRange
                             visible: filterToggle.checked
                             spacing: 6
@@ -1783,10 +1819,10 @@ ApplicationWindow {
                     }
                     FlatButton {
                         objectName: "cancelAiScanButton"
-                        text: "분류 중단"
+                        text: window.app && window.app.library.aiScanning ? "분류 중단" : "중단"
                         compact: true
                         focusPolicy: Qt.TabFocus
-                        visible: window.app && window.app.library.aiScanning
+                        visible: window.app && window.app.library.aiCancellable
                         Accessible.name: "AI 분류 중단"
                         onClicked: if (window.app) window.app.library.cancelAiScan()
                     }
@@ -2256,61 +2292,12 @@ ApplicationWindow {
                                 cache: false
                                 fillMode: Image.PreserveAspectFit
                             }
-                            Rectangle {
+                            TileMissingPlaceholder {
                                 objectName: "galleryTileMissingPlaceholder"
                                 anchors.fill: photo
-                                radius: Theme.radiusControl
-                                color: Theme.well
-                                border.width: 1
-                                border.color: Theme.line
-                                visible: tile.imageMissing
-                                Column {
-                                    anchors.centerIn: parent
-                                    spacing: 6
-                                    Loader {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        width: 32
-                                        height: 26
-                                        active: tile.imageMissing
-                                        sourceComponent: Canvas {
-                                            width: 32
-                                            height: 26
-                                            onPaint: {
-                                                const ctx = getContext("2d")
-                                                ctx.reset()
-                                                ctx.strokeStyle = Theme.textFaint
-                                                ctx.lineWidth = 1.6
-                                                ctx.lineJoin = "round"
-                                                ctx.lineCap = "round"
-                                                ctx.strokeRect(2, 2, 28, 22)
-                                                ctx.beginPath()
-                                                ctx.arc(10, 9.5, 2.2, 0, Math.PI * 2)
-                                                ctx.stroke()
-                                                ctx.beginPath()
-                                                ctx.moveTo(5, 21)
-                                                ctx.lineTo(13, 13)
-                                                ctx.lineTo(18, 18)
-                                                ctx.lineTo(23, 14)
-                                                ctx.lineTo(27, 21)
-                                                ctx.stroke()
-                                                ctx.strokeStyle = Theme.accent
-                                                ctx.lineWidth = 1.8
-                                                ctx.beginPath()
-                                                ctx.moveTo(4, 4)
-                                                ctx.lineTo(28, 22)
-                                                ctx.stroke()
-                                            }
-                                        }
-                                    }
-                                    Label {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        text: tile.caption.indexOf("클라우드") >= 0 ? "클라우드"
-                                            : tile.caption.indexOf("파일 없음") >= 0 ? "파일 없음" : "미리보기 없음"
-                                        font.pixelSize: Theme.fontTiny
-                                        color: Theme.textFaint
-                                        textFormat: Text.PlainText
-                                    }
-                                }
+                                active: tile.imageMissing
+                                missingFile: tile.thumbMissing
+                                captionText: tile.caption
                             }
                             Label {
                                 anchors.left: parent.left
@@ -2334,6 +2321,7 @@ ApplicationWindow {
                                     gallery.forceActiveFocus()
                                     if (mouse.button === Qt.RightButton) {
                                         gallery.currentIndex = tile.index
+                                        teachMenu.singleOnly = false
                                         teachMenu.targetKey = tile.key
                                         teachMenu.popup()
                                         return
@@ -2387,42 +2375,18 @@ ApplicationWindow {
                                     }
                                 }
                             }
-                            CheckBox {
+                            TileSelectionCheck {
                                 id: tileCheck
                                 objectName: "galleryItemSelection"
                                 anchors.left: parent.left
                                 anchors.top: parent.top
                                 anchors.margins: 6
                                 z: 2
-                                padding: 6
-                                visible: window.app && window.app.library.selectionMode
-                                enabled: window.app && window.app.library.canSelect(tile.key)
-                                checked: tile.batchSelected
-                                Accessible.name: "사진 선택: " + tile.caption
-                                HoverHandler { cursorShape: tileCheck.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor }
-                                indicator: Rectangle {
-                                    implicitWidth: 22
-                                    implicitHeight: 22
-                                    x: tileCheck.leftPadding
-                                    y: tileCheck.topPadding
-                                    radius: Theme.radiusSmall
-                                    color: tileCheck.checked ? Theme.accent : Theme.scrim
-                                    border.width: tileCheck.visualFocus ? 2 : (tileCheck.checked ? 0 : 1)
-                                    border.color: tileCheck.visualFocus ? Theme.focus
-                                        : (tileCheck.enabled ? Theme.textMuted : Theme.textDisabled)
-                                    Text {
-                                        anchors.centerIn: parent
-                                        visible: tileCheck.checked
-                                        text: "✓"
-                                        font.pixelSize: Theme.fontBody
-                                        font.bold: true
-                                        color: "white"
-                                    }
-                                }
-                                onClicked: {
-                                    window.app.library.toggleSelection(tile.key)
-                                    checked = Qt.binding(function() { return tile.batchSelected })
-                                }
+                                visible: !!window.app && window.app.library.selectionMode
+                                enabled: visible && !tile.thumbMissing && !!window.app && window.app.library.canSelect(tile.key)
+                                checkedState: tile.batchSelected
+                                captionText: tile.caption
+                                onSelectionToggled: if (window.app) window.app.library.toggleSelection(tile.key)
                             }
                         }
                         Accessible.role: Accessible.ListItem
@@ -2566,9 +2530,17 @@ ApplicationWindow {
                     LocalFolderView {
                         app: window.app
                         tileWidth: window.tileWidth
+                        densityChoice: window.densityChoice
+                        currentScreen: window.currentScreen
+                        saveReviewOpen: saveReviewDialog.visible
                         popupParent: popupHost
                         windowModalOpen: window.modalOpen
                         windowShown: window.windowShown
+                        onDensitySelected: choice => {
+                            window.setDensity(choice)
+                            if (window.app)
+                                window.app.setPreference("gallery_density", window.densityChoice)
+                        }
                     }
                 }
             }
@@ -2748,9 +2720,11 @@ ApplicationWindow {
         focus: true
         // A modal popup blocks shortcuts owned by the window underneath it.
         // Keep navigation in this popup's scope, including toolbar focus.
+        readonly property bool shortcutActive: previewDialog.visible && !previewDialog.textInputFocused
+            && !saveReviewDialog.visible && !teachMenu.visible && !aiTagManagerDialog.visible
         Shortcut {
             sequence: "Left"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && window.app && window.app.library.canPrevious
+            enabled: previewDialog.shortcutActive && window.app && window.app.library.canPrevious
             onActivated: {
                 inlineTagField.text = ""
                 window.app.library.previousItem()
@@ -2758,7 +2732,7 @@ ApplicationWindow {
         }
         Shortcut {
             sequence: "Right"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && window.app && window.app.library.canNext
+            enabled: previewDialog.shortcutActive && window.app && window.app.library.canNext
             onActivated: {
                 inlineTagField.text = ""
                 window.app.library.nextItem()
@@ -2766,50 +2740,49 @@ ApplicationWindow {
         }
         Shortcut {
             sequence: "F"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && !!window.app
-                && !!window.app.library.selectedKey
+            enabled: previewDialog.shortcutActive && !!window.app && !!window.app.library.selectedKey
             onActivated: previewDialog.toggleFavorite()
         }
         Shortcut {
             sequence: "+"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.canZoomIn
+            enabled: previewDialog.shortcutActive && selectedMedia.canZoomIn
             onActivated: selectedMedia.zoomIn()
         }
         Shortcut {
             sequence: "="
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.canZoomIn
+            enabled: previewDialog.shortcutActive && selectedMedia.canZoomIn
             onActivated: selectedMedia.zoomIn()
         }
         Shortcut {
             sequence: "-"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.canZoomOut
+            enabled: previewDialog.shortcutActive && selectedMedia.canZoomOut
             onActivated: selectedMedia.zoomOut()
         }
         Shortcut {
             sequence: "0"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.ready
+            enabled: previewDialog.shortcutActive && selectedMedia.ready
             onActivated: selectedMedia.fit()
         }
         Shortcut {
             sequence: "1"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.canActualSize
+            enabled: previewDialog.shortcutActive && selectedMedia.canActualSize
             onActivated: selectedMedia.actualSize()
         }
         Shortcut {
             sequence: "m"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.mediaType === "video"
+            enabled: previewDialog.shortcutActive && selectedMedia.mediaType === "video"
                 && selectedMedia.videoSource && selectedMedia.ready
             onActivated: selectedMedia.muted = !selectedMedia.muted
         }
         Shortcut {
             sequence: "Shift+M"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && selectedMedia.mediaType === "video"
+            enabled: previewDialog.shortcutActive && selectedMedia.mediaType === "video"
                 && selectedMedia.videoSource && selectedMedia.ready
             onActivated: selectedMedia.muted = !selectedMedia.muted
         }
         Shortcut {
             sequence: "Delete"
-            enabled: previewDialog.visible && !previewDialog.textInputFocused && !!window.app && !!window.app.library.selectedKey
+            enabled: previewDialog.shortcutActive && !!window.app && !!window.app.library.selectedKey
             onActivated: {
                 if (window.app.library.filesLocked) {
                     previewDialog.notice = window.app.library.holdReason
@@ -3156,8 +3129,11 @@ ApplicationWindow {
                                             enabled: !window.app || !window.app.library.tagsLocked
                                             onClicked: {
                                                 if (window.app && window.app.library.teachTag(window.app.library.selectedKey,
-                                                                                              modelData.tag, true))
+                                                                                              modelData.tag, true)) {
+                                                    previewDialog.notice = ""
+                                                    previewDialog.noticeKey = previewDialog.openedKey
                                                     window.flashNotice("#" + modelData.tag + " 분류를 배우는 중…")
+                                                }
                                             }
                                         }
                                     }
@@ -3178,6 +3154,8 @@ ApplicationWindow {
                                             hoverEnabled: true
                                             enabled: !window.app || !window.app.library.tagsLocked
                                             onClicked: {
+                                                previewDialog.notice = ""
+                                                previewDialog.noticeKey = previewDialog.openedKey
                                                 window.app.library.removeSelectedTag(modelData.tag)
                                             }
                                         }
@@ -3203,13 +3181,15 @@ ApplicationWindow {
                                 maximumLength: 50
                                 placeholderText: "새 태그"
                                 font.pixelSize: Theme.fontSmall
+                                enabled: !window.app || !window.app.library.tagsLocked
                                 Keys.onEscapePressed: event => {
                                     text = ""
                                     focus = false
                                     event.accepted = true
                                 }
                                 onAccepted: {
-                                    if (cleanTag.length > 0 && window.app.library.addSelectedTag(cleanTag))
+                                    if ((!window.app || !window.app.library.tagsLocked)
+                                            && cleanTag.length > 0 && window.app.library.addSelectedTag(cleanTag))
                                         text = ""
                                 }
                             }
@@ -3226,6 +3206,7 @@ ApplicationWindow {
                             }
                             // An AI tag the AI did not give: the person names it, and photos like this one follow.
                             FlatButton {
+                                id: previewAiCorrect
                                 objectName: "previewAiCorrect"
                                 text: "+ AI 태그"
                                 compact: true
@@ -3236,6 +3217,9 @@ ApplicationWindow {
                                 onClicked: {
                                     if (!window.app)
                                         return
+                                    previewDialog.notice = ""
+                                    previewDialog.noticeKey = previewDialog.openedKey
+                                    teachMenu.singleOnly = true
                                     teachMenu.targetKey = window.app.library.selectedKey
                                     teachMenu.popup(previewAiCorrect, 0, previewAiCorrect.height + 4)
                                 }
@@ -3719,9 +3703,11 @@ ApplicationWindow {
         }
         onAiCategorySelected: category => {
             window.currentScreen = 1
-            if (window.app)
+            if (window.app) {
                 window.app.library.setAiFilter(category, "")
-            window.flashNotice("AI 분류 " + category + " 모아보기를 적용했습니다.")
+                if (window.app.library.filterAiCategory === category)
+                    window.flashNotice("AI 분류 " + category + " 모아보기를 적용했습니다.")
+            }
         }
         onUserTagSelected: tag => {
             window.currentScreen = 1
@@ -3745,9 +3731,15 @@ ApplicationWindow {
         focus: true
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         anchors.centerIn: parent
-        width: 320
-        height: Math.min(380, parent ? Math.max(200, parent.height - 48) : 380)
+        width: 340
+        height: Math.min(420, parent ? Math.max(220, parent.height - 48) : 420)
         padding: 16
+        property string notice: ""
+        onOpened: {
+            teachNewTagField.text = ""
+            teachPopup.notice = ""
+            teachNewTagField.forceActiveFocus()
+        }
         background: Card {
             topColor: Theme.dialogTop
             bottomColor: Theme.dialog
@@ -3762,6 +3754,53 @@ ApplicationWindow {
                 color: Theme.text
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: Theme.gapSmall
+                FlatField {
+                    id: teachNewTagField
+                    objectName: "teachNewTagField"
+                    readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
+                    Layout.fillWidth: true
+                    implicitHeight: Theme.compactHeight
+                    leftPadding: Theme.gap
+                    rightPadding: Theme.gap
+                    maximumLength: 50
+                    placeholderText: "새 AI 태그 만들어 바로 지정"
+                    font.pixelSize: Theme.fontSmall
+                    enabled: !!window.app && !window.app.library.tagsLocked
+                    onTextChanged: teachPopup.notice = ""
+                    onAccepted: if (teachNewTagAdd.enabled) teachNewTagAdd.clicked()
+                }
+                FlatButton {
+                    id: teachNewTagAdd
+                    objectName: "teachNewTagAdd"
+                    text: "추가·지정"
+                    compact: true
+                    enabled: !!window.app && !window.app.library.tagsLocked && teachNewTagField.cleanTag.length > 0
+                    onClicked: {
+                        const clean = teachNewTagField.cleanTag
+                        if (!clean || !window.app)
+                            return
+                        if (window.app.library.addAiTag(clean)) {
+                            window.teachCategory(clean, true)
+                            teachNewTagField.text = ""
+                            teachPopup.close()
+                        } else {
+                            teachPopup.notice = window.app.library.status || "AI 태그를 추가하지 못했습니다."
+                        }
+                    }
+                }
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: teachPopup.notice.length > 0
+                text: teachPopup.notice
+                color: Theme.error
+                font.pixelSize: Theme.fontSmall
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
             }
             FocusScrollView {
                 id: teachScroll
@@ -3821,17 +3860,26 @@ ApplicationWindow {
             text: "모든 사진"
             checkable: true
             checked: aiMenu.applied.length === 0
-            onTriggered: if (window.app) window.app.library.setAiFilter("", "")
+            onTriggered: {
+                if (window.app)
+                    window.app.library.setAiFilter("", "")
+                checked = Qt.binding(function() { return aiMenu.applied.length === 0 })
+            }
         }
         Instantiator {
             model: aiMenu.counts
             FlatMenuItem {
+                id: galleryAiItem
                 required property var modelData
                 objectName: "galleryAiCategory_" + (modelData.category || "")
                 text: (modelData.category || "") + "  ·  " + aiMenu.amount(modelData.count) + "장"
                 checkable: true
                 checked: aiMenu.applied === modelData.category
-                onTriggered: if (window.app) window.app.library.setAiFilter(modelData.category, "")
+                onTriggered: {
+                    if (window.app)
+                        window.app.library.setAiFilter(galleryAiItem.modelData.category, "")
+                    checked = Qt.binding(function() { return aiMenu.applied === galleryAiItem.modelData.category })
+                }
             }
             onObjectAdded: (index, object) => aiMenu.insertItem(index + 1, object)
             onObjectRemoved: (index, object) => aiMenu.removeItem(object)
@@ -3865,7 +3913,16 @@ ApplicationWindow {
 
     FlatMenu {
         id: teachMenu
+        objectName: "galleryTeachMenu"
         property string targetKey: ""
+        property bool singleOnly: false
+        readonly property bool batchTarget: !singleOnly && !!window.app && window.app.library.selectionMode
+            && window.app.library.selectedCount > 1 && window.app.library.isSelected(targetKey)
+        FlatMenuItem {
+            visible: !window.app || window.app.library.aiCategories.length === 0
+            enabled: false
+            text: "켜져 있는 AI 태그가 없습니다"
+        }
         Instantiator {
             model: window.app ? window.app.library.aiCategories : []
             FlatMenuItem {
@@ -3875,14 +3932,13 @@ ApplicationWindow {
                 onTriggered: {
                     if (!window.app || window.app.library.tagsLocked)
                         return
-                    if (window.app.library.selectionMode && window.app.library.selectedCount > 1
-                            && window.app.library.isSelected(teachMenu.targetKey))
+                    if (teachMenu.batchTarget)
                         window.teachCategory(modelData, true)
                     else
                         window.app.library.teachOne(teachMenu.targetKey, modelData)
                 }
             }
-            onObjectAdded: (index, object) => teachMenu.insertItem(index, object)
+            onObjectAdded: (index, object) => teachMenu.insertItem(index + 1, object)
             onObjectRemoved: (index, object) => teachMenu.removeItem(object)
         }
         FlatMenuSeparator {}
@@ -3892,12 +3948,15 @@ ApplicationWindow {
             onTriggered: {
                 if (!window.app || window.app.library.tagsLocked)
                     return
-                if (window.app.library.selectionMode && window.app.library.selectedCount > 1
-                        && window.app.library.isSelected(teachMenu.targetKey))
+                if (teachMenu.batchTarget)
                     window.teachCategory("", true)
                 else
                     window.app.library.teachOne(teachMenu.targetKey, "")
             }
+        }
+        FlatMenuItem {
+            text: "AI 태그 관리…"
+            onTriggered: aiTagManagerDialog.open()
         }
     }
 
@@ -3937,7 +3996,8 @@ ApplicationWindow {
                 maximumLength: 50
                 placeholderText: "태그 이름 입력"
                 onAccepted: {
-                    if (cleanTag.length > 0 && window.app.library.addTagToSelection(cleanTag) > 0) {
+                    if (cleanTag.length > 0 && window.app && !window.app.library.tagsLocked
+                            && window.app.library.addTagToSelection(cleanTag) > 0) {
                         text = ""
                         tagBatchPopup.close()
                     }

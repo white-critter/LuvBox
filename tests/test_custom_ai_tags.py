@@ -372,6 +372,57 @@ class OwnTagTests(LibraryCase):
             self.assertEqual(dict(profile.example_counts()), before_counts)
             self.assertEqual(store.ai_tags_of("flat", "902", 1, "photo"), [])
 
+    def test_classify_promotes_neighbor_with_zero_initial_background_once_rest_encoded(self):
+        from luvbox import ai_pipeline
+        from luvbox.ai_profile import example_id_for_x, output_key
+
+        with self.profile() as profile:
+            profile.add_tag("고양이")
+        with closing(self.store()) as store, self.profile() as profile:
+            cat_idents = [("flat", str(t), 1, "photo") for t in range(101, 107)]
+            store.save_embeddings([(ident[0], ident[1], ident[2], ident[3],
+                                    self.vectors[f"writer_{ident[1]}_1.png"].tobytes(), 0.9)
+                                   for ident in cat_idents])
+            scope = output_key(self.paths.output_dir)
+            example_id = lambda ident: example_id_for_x(self.paths.output_dir, ACCOUNT, *ident)
+            ai_pipeline.sync_examples(store, profile, "x", scope, example_id)
+            ai_pipeline.train_dirty(store, profile)
+            self.assertEqual(next(r for r in profile.active_tags() if r["tag"] == "고양이")["regime"], "neighbor")
+        self.repo.scan_ai_tags(1)
+        with self.profile() as profile:
+            self.assertEqual(next(r for r in profile.active_tags() if r["tag"] == "고양이")["regime"], "linear")
+
+    def test_refuse_all_on_unclassified_photo_records_negative_feedback_and_never_retags(self):
+        from luvbox import ai_pipeline
+        from luvbox.ai_profile import example_id_for_x, output_key
+
+        self.add_photos("cat", [601], spread=0.05)
+        with self.profile() as profile:
+            profile.add_tag("고양이")
+        self.repo.scan_ai_tags(1)
+        with closing(self.store()) as store, self.profile() as profile:
+            ident = ("flat", "601", 1, "photo")
+            store.replace_ai_tags([(*ident, [])])
+            scope = output_key(self.paths.output_dir)
+            example_id = lambda xident: example_id_for_x(self.paths.output_dir, ACCOUNT, *xident)
+            ai_pipeline.teach(store, profile, kind="x", scope=scope, example_id=example_id,
+                              idents=[ident], tag="", positive=False)
+            self.assertEqual(store.ai_tags_of(*ident), [])
+            self.assertEqual(store.tag_feedback([ident])[ident]["고양이"], -1)
+
+    def test_overview_ai_counts_exclude_disabled_and_include_user_tags(self):
+        with self.profile() as profile:
+            profile.add_tag("고양이")
+            profile.set_tag_enabled("동물", False)
+            profile.set_tag_enabled("인물", True)
+        with closing(self.store()) as store:
+            store.replace_ai_tags([("flat", "201", 1, "photo", ["동물", "인물"])])
+        overview = self.repo.overview(1)
+        categories = {item["category"]: item["count"] for item in overview["ai_categories"]}
+        self.assertNotIn("동물", categories)
+        self.assertEqual(categories["고양이"], 6)
+        self.assertEqual(categories["인물"], 1)
+
 
 class MigrationTests(LibraryCase):
     """A catalog of 1.11.9: CLIP features, single-label teaching, AI tags from CLIP."""
@@ -576,6 +627,34 @@ class MergeAndRebuildTests(unittest.TestCase):
             feedback = store.tag_feedback([p1, p2])
             self.assertEqual(feedback[p1], {"고양이": -1})
             self.assertEqual(feedback[p2], {"인물": -1})
+
+    def test_legacy_ai_feedback_does_not_resurrect_after_tag_add_or_feedback_and_rebuild_clears_scored_state(self):
+        from luvbox.recovery import rebuild_history
+
+        with closing(self.catalog("legacy_clean")) as store:
+            p1 = ("flat", "1", 1, "photo")
+            p2 = ("flat", "2", 1, "photo")
+            for name in ("1.jpg", "2.jpg"):
+                (self.root / "legacy_clean" / name).write_bytes(b"img")
+            store.record_media("flat", {"tweet_id": "1", "num": 1, "type": "photo", "author": {"name": "a"}},
+                               self.root / "legacy_clean" / "1.jpg")
+            store.record_media("flat", {"tweet_id": "2", "num": 1, "type": "photo", "author": {"name": "a"}},
+                               self.root / "legacy_clean" / "2.jpg")
+            store._db.execute("INSERT INTO ai_feedback VALUES ('flat','1',1,'photo','','2026-11-01')")
+            store._db.execute("INSERT INTO ai_feedback VALUES ('flat','2',1,'photo','동물','2026-11-01')")
+            store._db.commit()
+            store.add_tag("flat", "1", 1, "photo", "인물")
+            store.remove_tag("flat", "1", 1, "photo", "인물")
+            store.set_tag_feedback([p2], "동물", False)
+            store.set_ai_scored_state(7, ACTIVE_MODEL_ID)
+        built = self.root / "legacy_clean_rebuilt"
+        built.mkdir()
+        rebuild_history(self.root / "legacy_clean" / ".luvbox-history.sqlite3", built / ".luvbox-history.sqlite3")
+        with closing(HistoryStore(built)) as rebuilt:
+            fb = rebuilt.tag_feedback()
+            self.assertNotIn("인물", fb.get(("flat", "1", 1, "photo"), {}))
+            self.assertEqual(fb[("flat", "2", 1, "photo")]["동물"], -1)
+            self.assertEqual(rebuilt.ai_scored_state(), ("", ""))
 
 
 if __name__ == "__main__":

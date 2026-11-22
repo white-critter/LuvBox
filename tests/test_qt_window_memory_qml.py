@@ -663,6 +663,19 @@ class WindowMemorySceneTests(unittest.TestCase):
         self.assertEqual(notes["screen"], "right")
         self.assertEqual(notes["grown"], notes["area"][3] - 48)
 
+    def test_titlebar_double_click_toggles_maximize_and_restore(self):
+        environment = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software",
+                           PYTHONIOENCODING="utf-8")
+        try:
+            run = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--titlebar"], cwd=ROOT,
+                                 env=environment, capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=120)
+        except subprocess.TimeoutExpired as error:
+            self.fail("titlebar scene timed out: " + str(error.stdout or "") + str(error.stderr or ""))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        report = json.loads(run.stdout.strip().splitlines()[-1])
+        self.assertEqual(report, {"ok": True, "maximized": True, "restored": True}, report)
+
 
 def _screen(name, x, y, width, height):
     return {"name": name, "x": x, "y": y, "width": width, "height": height, "logicalDpi": 96,
@@ -678,11 +691,83 @@ SCREENS = {
 }
 
 
+def titlebar_double_click():
+    from contextlib import ExitStack
+    import time
+    from unittest.mock import patch
+
+    from PySide6.QtCore import QObject, QPointF, Qt, qInstallMessageHandler
+    from PySide6.QtGui import QWindow
+    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtQuickControls2 import QQuickStyle
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import delete
+
+    sys.path.insert(0, str(ROOT))
+    from luvbox.qt_app import ApplicationController
+    from luvbox.qt_wheel import WheelInputFilter
+
+    QQuickStyle.setStyle("Basic")
+    application = QApplication([])
+    messages = []
+    previous = qInstallMessageHandler(lambda _kind, _context, message: messages.append(message))
+
+    def wait(predicate, what, timeout=15):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            application.processEvents()
+            if predicate():
+                return
+            time.sleep(.003)
+        raise AssertionError("The titlebar scene did not reach: " + what)
+
+    with ExitStack() as resources:
+        folder = Path(resources.enter_context(tempfile.TemporaryDirectory(prefix="luvbox-titlebar-qml-")))
+        resources.enter_context(patch.dict(os.environ, {"LOCALAPPDATA": str(folder)}))
+        resources.enter_context(patch("luvbox.qt_schedule.task_status", return_value={"registered": False}))
+        controller = ApplicationController()
+        wheel_filter = WheelInputFilter()
+        engine = QQmlApplicationEngine()
+        engine.addImageProvider("thumbs", controller.library.provider)
+        engine.setInitialProperties({"appController": controller, "galleryModel": controller.library.model,
+                                     "wheelInputFilter": wheel_filter})
+        engine.load(ROOT / "assets/qt/MainWindow.qml")
+        assert engine.rootObjects(), messages
+        window = engine.rootObjects()[0]
+        wait(lambda: window.isVisible() and window.visibility() == QWindow.Visibility.Windowed, "windowed start")
+        drag = window.findChild(QObject, "titleBarDrag")
+        assert drag is not None
+        point = drag.mapToScene(QPointF(drag.width() * 0.58, drag.height() / 2)).toPoint()
+        QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+        application.processEvents()
+        QTest.mouseDClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+        wait(lambda: window.visibility() == QWindow.Visibility.Maximized, "maximized on titlebar double click")
+        maximized = window.visibility() == QWindow.Visibility.Maximized
+        point = drag.mapToScene(QPointF(drag.width() * 0.58, drag.height() / 2)).toPoint()
+        QTest.mouseDClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point)
+        wait(lambda: window.visibility() == QWindow.Visibility.Windowed, "restored on titlebar double click")
+        restored = window.visibility() == QWindow.Visibility.Windowed
+        controller.requestClose()
+        wait(lambda: controller.shutdownReady, "shutdown")
+        window.close()
+        wheel_filter.close()
+        delete(engine)
+        delete(controller)
+        warnings = [message for message in messages if any(
+            mark in message for mark in (".qml", "QQml", "ReferenceError", "TypeError", "Binding loop"))]
+        assert not warnings, warnings
+    qInstallMessageHandler(previous)
+    return {"ok": True, "maximized": maximized, "restored": restored}
+
+
 if __name__ == "__main__":
     if "--scene" in sys.argv:
         layout = sys.argv[sys.argv.index("--scene") + 1] if len(sys.argv) > sys.argv.index("--scene") + 1 else "one"
         print(json.dumps(scene(layout if layout in ("one", "two", "card") else "one"), ensure_ascii=False))
     elif "--launch" in sys.argv:
         print(json.dumps(launched(sys.argv[sys.argv.index("--launch") + 1]), ensure_ascii=False))
+    elif "--titlebar" in sys.argv:
+        print(json.dumps(titlebar_double_click(), ensure_ascii=False))
     else:
         unittest.main()

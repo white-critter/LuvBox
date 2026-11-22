@@ -387,7 +387,7 @@ namespace LuvBox
             using (FileStream gate = AcquireGate())
             {
                 // Another launcher may have finished while this one waited.
-                if (Ready())
+                if (gate == null || Ready())
                     return;
                 RemoveLeftovers();
                 using (FileStream source = OpenSelf())
@@ -1136,17 +1136,58 @@ namespace LuvBox
         {
             timer.Stop();
             if (canvas != null)
+            {
                 canvas.Dispose();
+                canvas = null;
+            }
             if (memory != IntPtr.Zero)
             {
                 Native.SelectObject(memory, previous);
                 Native.DeleteDC(memory);
+                memory = IntPtr.Zero;
             }
             if (surface != IntPtr.Zero)
+            {
                 Native.DeleteObject(surface);
+                surface = IntPtr.Zero;
+            }
             if (screen != IntPtr.Zero)
+            {
                 Native.ReleaseDC(IntPtr.Zero, screen);
+                screen = IntPtr.Zero;
+            }
             base.OnFormClosed(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                timer.Stop();
+                timer.Dispose();
+                if (card != null)
+                    card.Dispose();
+                if (glow != null)
+                    glow.Dispose();
+                if (mark != null)
+                    mark.Dispose();
+                if (canvas != null)
+                {
+                    canvas.Dispose();
+                    canvas = null;
+                }
+                if (statusFont != null)
+                    statusFont.Dispose();
+                if (versionFont != null)
+                    versionFont.Dispose();
+                fonts.Dispose();
+            }
+            if (fontMemory != IntPtr.Zero)
+            {
+                Marshal.FreeCoTaskMem(fontMemory);
+                fontMemory = IntPtr.Zero;
+            }
+            base.Dispose(disposing);
         }
 
         void Work()

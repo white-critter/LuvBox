@@ -205,7 +205,7 @@ class LibraryRepositoryTests(unittest.TestCase):
         with closing(HistoryStore.for_storage(self.paths)) as store:
             store._db.execute("UPDATE media SET path=? WHERE tweet_id='100'", (str(replacement),))
             store._db.commit()
-        with self.assertRaisesRegex(ValueError, "새로 고침"):
+        with self.assertRaisesRegex(ValueError, "새로고침"):
             self.repository.deletion_manifest(["g1_flat_100_1_photo"])
 
     def test_scrolling_keeps_its_place_when_a_newer_file_is_saved(self):

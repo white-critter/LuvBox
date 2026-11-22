@@ -19,6 +19,7 @@ from contextlib import closing
 from datetime import datetime
 from itertools import groupby
 from pathlib import Path
+import uuid
 
 from .file_mutex import replace_file
 
@@ -94,9 +95,11 @@ class _Pages:
                 raise RecoveryError("not a SQLite database")
             size = int.from_bytes(header[16:18], "big")
             self.size = 65536 if size == 1 else size
-            if self.size < 512:
+            if self.size < 512 or (self.size & (self.size - 1)) != 0:
                 raise RecoveryError("not a SQLite database")
             self.usable = self.size - header[20]
+            if self.usable < 480:
+                raise RecoveryError("not a SQLite database")
             if int.from_bytes(header[56:60], "big") not in (0, 1):
                 raise RecoveryError("only UTF-8 databases are supported")
             self._file.seek(0, os.SEEK_END)
@@ -128,13 +131,19 @@ class _Pages:
     def payload(self, page: bytes, offset: int, size: int) -> bytes:
         """A table-leaf cell's payload, following overflow pages."""
         usable = self.usable
+        if size < 0 or offset < 0 or offset >= usable:
+            raise ValueError("invalid cell payload")
         local_max = usable - 35
         if size <= local_max:
+            if offset + size > usable:
+                raise ValueError("invalid cell payload")
             return page[offset:offset + size]
         minimum = (usable - 12) * 32 // 255 - 23
         local = minimum + (size - minimum) % (usable - 4)
         if local > local_max:
             local = minimum
+        if offset + local + 4 > usable:
+            raise ValueError("invalid cell payload")
         parts = [page[offset:offset + local]]
         remaining = size - local
         following = int.from_bytes(page[offset + local:offset + local + 4], "big")
@@ -172,8 +181,15 @@ class _Pages:
                 continue
             for index in range(cells):
                 try:
-                    offset = int.from_bytes(page[header + 2 * index:header + 2 * index + 2], "big")
+                    ptr_end = header + 2 * index + 2
+                    if ptr_end > self.usable:
+                        break
+                    offset = int.from_bytes(page[header + 2 * index:ptr_end], "big")
+                    if offset < header + 2 * cells or offset >= self.usable:
+                        continue
                     if kind == 0x05:
+                        if offset + 4 > self.usable:
+                            continue
                         pending.append(int.from_bytes(page[offset:offset + 4], "big"))
                         continue
                     size, offset = _varint(page, offset)
@@ -347,6 +363,8 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
                 _feedback_to_tag_feedback(connection, connection.execute(
                     "SELECT folder_mode, tweet_id, num, media_type, category, updated_at FROM ai_feedback").fetchall())
                 connection.execute("UPDATE media_tags SET source='ai' WHERE tag='' AND source='confirmed'")
+                connection.execute(
+                    "DELETE FROM catalog_meta WHERE key IN ('ai_scored_rules_version','ai_scored_model_id')")
                 counts["ai_tag_feedback"] = connection.execute('SELECT COUNT(*) FROM "ai_tag_feedback"').fetchone()[0]
                 if fallback_media_count is not None and counts["media"] != fallback_media_count:
                     # The fallback is the only readable source. Its rows must
@@ -355,6 +373,7 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
                     # empty/partial replacement for the preserved catalog.
                     raise RecoveryError("백업의 저장 기록을 온전히 복원하지 못했습니다. 원본 기록은 보존했습니다.")
             connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            connection.execute("PRAGMA journal_mode=DELETE")
         finally:
             connection.close()
         if _integrity(built) != "ok":
@@ -412,7 +431,8 @@ def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
     folder = _catalog_backups(account, record_dir)
     folder.mkdir(parents=True, exist_ok=True)
     day = datetime.now().strftime("%Y%m%d")
-    target, temporary = folder / f"history-{day}.sqlite3", folder / f".history-{day}.partial"
+    target = folder / f"history-{day}.sqlite3"
+    temporary = folder / f".history-{day}-{uuid.uuid4().hex[:8]}.partial"
     temporary.unlink(missing_ok=True)
     start = time.monotonic()
     stall_deadline = start + 5
@@ -436,6 +456,7 @@ def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
         with (closing(sqlite3.connect(live.as_uri() + "?mode=ro", uri=True, timeout=5)) as source,
               closing(sqlite3.connect(temporary)) as copy):
             source.backup(copy, pages=256, progress=progress, sleep=0.05)
+            copy.execute("PRAGMA journal_mode=DELETE")
             healthy = copy.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         if not healthy:
             return None
@@ -495,9 +516,17 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
         # must not block the backup-only rebuild that worked before.
         result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir),
                                  skip_unreadable=name != HISTORY_NAME)
+        for suffix in ("-wal", "-shm"):
+            try:
+                (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
+            except OSError:
+                pass
         replace_file(rebuilt, record_dir / HISTORY_NAME)
         for suffix in ("-wal", "-shm"):
-            (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
+            try:
+                (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
+            except OSError:
+                pass
     finally:
         rebuilt.unlink(missing_ok=True)
         shutil.rmtree(work, ignore_errors=True)

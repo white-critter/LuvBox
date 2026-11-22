@@ -71,6 +71,7 @@ MAX_DOWNLOAD = 120 * 1024 * 1024
 INPUT_SIZE = 224
 
 _SESSION_LOCK = threading.Lock()
+_VERIFIED_LOCK = threading.Lock()
 _DOWNLOAD_LOCK = threading.Lock()
 _SESSION = None
 _SESSION_USERS = 0
@@ -133,7 +134,7 @@ def is_model_ready(path: Path | None = None) -> bool:
             if not stat.S_ISREG(st.st_mode) or st.st_size != MODEL_SIZE:
                 return False
             sig = (os.path.normcase(str(target.resolve())), int(st.st_size), int(st.st_mtime_ns))
-            with _SESSION_LOCK:
+            with _VERIFIED_LOCK:
                 if _VERIFIED_MODEL_SIG == sig:
                     return True
             h = hashlib.sha256()
@@ -144,7 +145,7 @@ def is_model_ready(path: Path | None = None) -> bool:
                     return False
                 h.update(chunk)
             if total_read == MODEL_SIZE and h.hexdigest().lower() == MODEL_SHA256.lower():
-                with _SESSION_LOCK:
+                with _VERIFIED_LOCK:
                     _VERIFIED_MODEL_SIG = sig
                 return True
         return False
@@ -254,8 +255,13 @@ def get_session(model_path: Path | None = None):
             return _SESSION
         if not _ONNXRUNTIME_AVAILABLE:
             return None
-        target = model_path or resolve_model_path()
-        if not is_model_ready(target):
+    target = model_path or resolve_model_path()
+    if not is_model_ready(target):
+        return None
+    with _SESSION_LOCK:
+        if _SESSION is not None and model_path is None:
+            return _SESSION
+        if not _ONNXRUNTIME_AVAILABLE:
             return None
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1

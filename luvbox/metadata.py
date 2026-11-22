@@ -55,12 +55,12 @@ _AUTHOR_ENTRY_ROLES = {
     "comment-id": ("ItemList:Comment", "author_id", "X user ID: {0} (https://x.com/i/user/{0})"),
 }
 _MESSAGES = {
-    "embedded": "파일 안에 원본 트윗 주소를 기록했습니다.",
-    "failed": "원본 트윗 주소를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다.",
-    "unsupported": "이 파일 형식은 원본 트윗 주소 기록을 지원하지 않습니다.",
+    "embedded": "파일 안에 원본 게시물 주소를 기록했습니다.",
+    "failed": "원본 게시물 주소를 기록하지 못했습니다. 미디어 원본은 그대로 보존했습니다.",
+    "unsupported": "이 파일 형식은 원본 게시물 주소 기록을 지원하지 않습니다.",
 }
 _FAILURE_MESSAGES = {
-    "invalid": "파일 정보나 트윗 주소가 올바르지 않습니다.",
+    "invalid": "파일 정보나 게시물 주소가 올바르지 않습니다.",
     "unavailable": "출처 기록 도구를 찾지 못했습니다. 프로그램 파일을 다시 확인해 주세요.",
     "missing": "파일이 사라졌거나 현재 위치에서 읽을 수 없습니다.",
     "permission": "파일이나 폴더에 접근할 권한이 없습니다. 권한과 읽기 전용 설정을 확인해 주세요.",

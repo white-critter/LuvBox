@@ -209,7 +209,7 @@ class RetryWorkerTests(unittest.TestCase):
         self.assertEqual((final["status"], final["saved"], final["recovered"], final["unavailable_tweets"]),
                          ("finished", 2, 2, 1))
         self.assertEqual(final["scan_mode"], "retry")
-        self.assertIn("볼 수 없는 트윗 1개", final["message"])
+        self.assertIn("볼 수 없는 게시물 1개", final["message"])
         self.assertFalse([event for event in events if event.get("level") in {"error", "warning"}])
         notice = next(event for event in events if event["type"] == "log" and "status/200" in event["message"])
         self.assertIn("볼 수 없어", notice["message"])

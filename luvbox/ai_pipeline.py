@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 import threading
+import time
 
 from .clip_model import ACTIVE_MODEL_ID, embedding_bytes
 
@@ -82,6 +83,7 @@ def train_dirty(store, profile, tags=None) -> list[str]:
                 background = profile.other_examples(tag, ACTIVE_MODEL_ID, limit=wanted // 4)
                 background += store.background_embeddings(tag, wanted - len(background), ACTIVE_MODEL_ID)
                 if tag in promote_set and not negatives and not background:
+                    short.append(tag)
                     continue
                 if len(background) < wanted:
                     short.append(tag)
@@ -107,15 +109,22 @@ def scoring_models(profile):
     """The switched-on tags as ``tag_learner`` models, with the examples the ones that compare need."""
     from . import tag_learner
 
+    dirty_set = set(profile.dirty_tags(ACTIVE_MODEL_ID))
     models = []
     for rule in profile.scoring_rules(ACTIVE_MODEL_ID):
         weight = rule.get("weight")
-        if weight is None and not rule["built_in"]:
+        if weight is not None and weight.get("regime") == "linear" and rule["tag"] in dirty_set:
+            weight = None
+            rule = {**rule, "weight": None}
+        if weight is None:
             positives, negatives = profile.training_data_for_tag(rule["tag"], ACTIVE_MODEL_ID)
-            if not positives:
+            if positives:
+                regime = "neighbor"
+                rule = {**rule, "weight": {"regime": "neighbor"}}
+            elif not rule["built_in"]:
                 continue        # a tag of the person's own waits for its first example
-            regime = "neighbor"
-            rule = {**rule, "weight": {"regime": "neighbor"}}
+            else:
+                regime = "zeroshot"
         else:
             regime = (weight or {}).get("regime", "zeroshot")
             positives, negatives = profile.training_data_for_tag(
@@ -126,8 +135,7 @@ def scoring_models(profile):
     return [model for model in models if model.usable]
 
 
-def score_rows(store, rows, models) -> tuple[int, int]:
-    """Give stored features their AI tags. Returns ``(photos changed, photos tagged among them)``."""
+def _predict_rows(store, rows, models) -> list[tuple[object, list[str]]]:
     import numpy as np
 
     from . import tag_learner
@@ -144,11 +152,86 @@ def score_rows(store, rows, models) -> tuple[int, int]:
         idents.append(store.row_identity(row))
         vectors.append(np.frombuffer(bytes(blob), dtype=np.float32))
     if not vectors:
-        return 0, 0
+        return []
     matrix = np.ascontiguousarray(np.stack(vectors))
     zero_shot = zero_shot_probabilities(matrix) if any(model.anchor is not None for model in models) else None
     found = tag_learner.score_embeddings_matrix(matrix, models, zero_shot)
-    return store.store_ai_tags([(ident, [tag for tag, _score in tags]) for ident, tags in zip(idents, found)])
+    return [(ident, [tag for tag, _score in tags]) for ident, tags in zip(idents, found)]
+
+
+def score_rows(store, rows, models) -> tuple[int, int]:
+    """Give stored features their AI tags. Returns ``(photos changed, photos tagged among them)``."""
+    predictions = _predict_rows(store, rows, models)
+    if not predictions:
+        return 0, 0
+    return store.store_ai_tags(predictions)
+
+
+def make_download_notifier(status_callback=None, check_cancel=lambda: None):
+    """Return a rate-limited model download progress callback."""
+    last_notice = [-1.0]
+
+    def on_download(dl_bytes, tot_bytes):
+        # "분류 중단" and closing the window end the download too.
+        check_cancel()
+        if status_callback and tot_bytes:
+            now = time.monotonic()
+            if dl_bytes < tot_bytes and last_notice[0] >= 0 and now - last_notice[0] < 0.25:
+                return
+            last_notice[0] = now
+            status_callback(f"AI 분류 모델 내려받는 중… ({dl_bytes / (1024 * 1024):.1f} / "
+                            f"{tot_bytes / (1024 * 1024):.1f} MB)")
+
+    return on_download
+
+
+def encode_missing_for_teach(store, missing, *, total: int | None = None,
+                             check_cancel=lambda: None, progress_callback=None,
+                             status_callback=None) -> None:
+    """Encode ``missing`` ``(ident, path)`` items for interactive teaching."""
+    from .clip_classifier import (
+        classify_detailed, ensure_model, get_session, is_available, session_use,
+    )
+    from .duplicates import ScanCancelled
+
+    count = len(missing) if total is None else total
+    if progress_callback and count:
+        progress_callback(0, count)
+    if missing:
+        if not is_available():
+            try:
+                ensure_model(progress_callback=make_download_notifier(status_callback, check_cancel))
+            except ScanCancelled:
+                raise
+            except Exception as exc:
+                raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 "
+                                   "확인해 주세요.") from exc
+        with session_use():
+            session = get_session()
+            if session is None:
+                raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
+            done = max(0, count - len(missing))
+            for start in range(0, len(missing), ENCODE_BATCH):
+                check_cancel()
+                chunk = missing[start:start + ENCODE_BATCH]
+                try:
+                    detailed = classify_detailed([path for _ident, path in chunk], batch_size=ENCODE_BATCH,
+                                                 session=session)
+                except Exception as exc:
+                    raise RuntimeError("사진을 읽지 못해 분류를 저장하지 못했습니다. 다시 시도해 주세요.") from exc
+                encoded = [
+                    (ident, vector.tobytes(), confidence)
+                    for (ident, _path), (_tag, confidence, vector) in zip(chunk, detailed)
+                    if vector is not None
+                ]
+                if encoded:
+                    store.save_features(encoded)
+                    store.forget_unreadable([ident for ident, _blob, _conf in encoded])
+                done += len(chunk)
+                if progress_callback and count:
+                    progress_callback(min(done, count), count)
+    if progress_callback and count:
+        progress_callback(count, count)
 
 
 class Run:
@@ -195,47 +278,52 @@ def classify(store, profile, *, kind, scope, example_id, items, skipped=0, check
     rest = [item for item in items if item[0] not in taught]
     unreadable_reader = getattr(store, "unreadable_signatures", None)
     known_unreadable = set(unreadable_reader()) if (items and callable(unreadable_reader)) else None
-    grand = len(items) + skipped + (stored if stale else unlabeled)
+    grand = len(items) + skipped + ((stored + len(items)) if (stale and stored > 0) else (unlabeled + len(first)))
     done = skipped
-    if progress:
-        progress(done, max(grand, 1))
-    state = {"session": None}
+    state = {"session": None, "helpers": None}
 
     with ExitStack() as session_guard:
-        def encode(chunk_items, models=None):
-            nonlocal done
-            if not chunk_items:
-                return
+        def prepare_session():
+            if state["session"] is not None:
+                return state["helpers"]
             from .clip_classifier import (
                 classify_detailed, encode_skip_signature, ensure_model, get_session, is_available, session_use,
             )
 
-            if state["session"] is None:
-                if not is_available():
-                    if not download:
-                        raise RuntimeError("AI 분류 모델이 이 PC에 없습니다.")
-                    try:
-                        def on_dl(dl_bytes, tot_bytes):
-                            # "분류 중단" and closing the window end the download too.
-                            check_cancel()
-                            if status and tot_bytes:
-                                status(f"AI 분류 모델 내려받는 중… ({dl_bytes / (1024 * 1024):.1f} / "
-                                       f"{tot_bytes / (1024 * 1024):.1f} MB)")
-                        ensure_model(progress_callback=on_dl)
-                    except ScanCancelled:
-                        raise
-                    except Exception as exc:
-                        raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 "
-                                           "확인해 주세요.") from exc
-                session_guard.enter_context(session_use())
+            if not is_available():
+                if not download:
+                    raise RuntimeError("AI 분류 모델이 이 PC에 없습니다.")
                 try:
-                    state["session"] = get_session()
+                    ensure_model(progress_callback=make_download_notifier(status, check_cancel))
                 except ScanCancelled:
                     raise
                 except Exception as exc:
-                    raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.") from exc
-                if state["session"] is None:
-                    raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
+                    raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 "
+                                       "확인해 주세요.") from exc
+            session_guard.enter_context(session_use())
+            try:
+                state["session"] = get_session()
+            except ScanCancelled:
+                raise
+            except Exception as exc:
+                raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.") from exc
+            if state["session"] is None:
+                raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
+            state["helpers"] = (classify_detailed, encode_skip_signature)
+            return state["helpers"]
+
+        if items:
+            prepare_session()
+        if progress:
+            progress(done, max(grand, 1))
+
+        encoded_first = []
+
+        def encode(chunk_items, models=None, collect=None):
+            nonlocal done
+            if not chunk_items:
+                return
+            classify_detailed, encode_skip_signature = prepare_session()
             for start in range(0, len(chunk_items), ENCODE_BATCH):
                 check_cancel()
                 chunk = chunk_items[start:start + ENCODE_BATCH]
@@ -257,9 +345,11 @@ def classify(store, profile, *, kind, scope, example_id, items, skipped=0, check
                             run.unreadable += 1
                 if features:
                     store.save_features(features)
+                    rows = [store.feature_row(ident, blob) for ident, blob, _c in features]
+                    if collect is not None:
+                        collect.extend(rows)
                     if models is not None:
-                        changed, tagged = score_rows(
-                            store, [store.feature_row(ident, blob) for ident, blob, _c in features], models)
+                        changed, tagged = score_rows(store, rows, models)
                         run.changed += changed
                         run.tagged += tagged
                         run.wrote = run.wrote or bool(changed)
@@ -279,7 +369,7 @@ def classify(store, profile, *, kind, scope, example_id, items, skipped=0, check
                 if progress:
                     progress(min(done, grand), max(grand, 1))
 
-        encode(first)
+        encode(first, collect=encoded_first)
         check_cancel()
         if status and (first or stale):
             status("비슷한 사진에 분류를 맞추는 중…")
@@ -309,15 +399,21 @@ def classify(store, profile, *, kind, scope, example_id, items, skipped=0, check
         rescore_all = ((stored > 0 and (stale or version != version_start))
                        or version != version_models
                        or (not rest_scored and bool(rest)))
+        if not rescore_all and encoded_first:
+            changed, tagged = score_rows(store, encoded_first, models)
+            run.changed += changed
+            run.tagged += tagged
+            run.wrote = run.wrote or bool(changed)
         remaining = store.count_embeddings(ACTIVE_MODEL_ID, unlabeled=not rescore_all)
         grand = max(grand, done + remaining)
         scored_rest_ids = ({ident for ident, _path in rest}
-                           if (rest_scored and rest and rescore_all and version != version_models) else None)
+                           if (rest_scored and rest and rescore_all) else None)
         for chunk in store.iter_embeddings(ACTIVE_MODEL_ID, 512, unlabeled=not rescore_all):
             check_cancel()
             if scored_rest_ids:
                 fresh_rows = [row for row in chunk if store.row_identity(row) not in scored_rest_ids]
-                recheck_rows = [row for row in chunk if store.row_identity(row) in scored_rest_ids]
+                recheck_rows = ([row for row in chunk if store.row_identity(row) in scored_rest_ids]
+                                if version != version_models else ())
                 if fresh_rows:
                     changed, tagged = score_rows(store, fresh_rows, models)
                     run.changed += changed
@@ -352,35 +448,59 @@ def teach(store, profile, *, kind, scope, example_id, idents, tag, positive, che
     from .ai_profile import valid_tag
 
     clean = valid_tag(tag)
+    active_tags = set(profile.active_tag_names())
+    own_set = set(idents)
+    def _own_rows():
+        own_blobs = store.embeddings_for(list(own_set), ACTIVE_MODEL_ID)
+        rows = []
+        for ident, value in own_blobs.items():
+            blob = value[0] if isinstance(value, tuple) else value
+            rows.append(store.feature_row(ident, blob))
+        return rows
+
     if clean:
         if shared and positive and clean not in profile.known_tag_names():
             profile.add_tag(clean)     # a "yes" for a tag that is not an AI tag yet makes it one
         taught = store.set_tag_feedback(idents, clean, positive)
     else:
-        store.refuse_ai_tags(idents)
+        own_rows = _own_rows()
+        predicted = _predict_rows(store, own_rows, scoring_models(profile)) if own_rows else []
+        before = store.tag_feedback(idents)
+        try:
+            store.refuse_ai_tags(idents, active_tags=active_tags)
+        except TypeError:
+            store.refuse_ai_tags(idents)
+        after = store.tag_feedback(idents)
+        for ident, pred_tags in predicted:
+            fb = after.get(ident) or {}
+            if fb != (before.get(ident) or {}):
+                continue
+            for ptag in pred_tags:
+                if ptag in active_tags and fb.get(ptag) != -1:
+                    store.set_tag_feedback([ident], ptag, False)
         taught = len(idents)
     if shared:
         sync_examples(store, profile, kind, scope, example_id)
         train_dirty(store, profile)
     version = profile.rules_version()
     models = scoring_models(profile)
-    own_set = set(idents)
     if not shared:
-        own_blobs = store.embeddings_for(list(own_set), ACTIVE_MODEL_ID)
-        own_rows = []
-        for ident, value in own_blobs.items():
-            blob = value[0] if isinstance(value, tuple) else value
-            own_rows.append(store.feature_row(ident, blob))
-        score_rows(store, own_rows, models)
+        if clean:
+            score_rows(store, _own_rows(), models)
         return taught, 0
+    from .duplicates import ScanCancelled
+
     propagated = 0
     for chunk in store.iter_embeddings(ACTIVE_MODEL_ID, 512):
         if check_stop():
-            return taught, propagated
+            raise ScanCancelled("분류 가르치기를 중단했습니다.")
         own, others = [], []
         for row in chunk:
             (own if store.row_identity(row) in own_set else others).append(row)
-        score_rows(store, own, models)
+        if clean:
+            score_rows(store, own, models)
         propagated += score_rows(store, others, models)[0]
+    if check_stop():
+        raise ScanCancelled("분류 가르치기를 중단했습니다.")
     store.set_ai_scored_state(version, ACTIVE_MODEL_ID)
     return taught, propagated

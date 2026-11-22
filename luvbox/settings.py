@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import time
 
 
 _APPDATA_LOCK = threading.RLock()
@@ -133,20 +134,36 @@ _UNREADABLE_HELP = "기존 설정을 읽지 못해 변경을 저장하지 않았
 def load_settings(*, strict: bool = False) -> dict:
     # A failed migration must not be mistaken for absent preferences.
     path = settings_path()
+    text = None
+    for attempt in range(10):
+        try:
+            # utf-8-sig: a file saved again by an editor that adds a byte-order mark still reads.
+            text = path.read_text(encoding="utf-8-sig")
+            break
+        except FileNotFoundError:
+            return {}
+        except PermissionError:
+            if attempt + 1 < 10:
+                time.sleep(0.02)
+                continue
+            if strict:
+                raise AppDataError(_UNREADABLE_HELP) from None
+            return {}
+        except UnicodeError:
+            if strict:
+                raise SettingsDamaged(_UNREADABLE_HELP) from None
+            return {}
+        except OSError:
+            # Locked or not permitted right now: it may be fine, so a change waits instead.
+            if strict:
+                raise AppDataError(_UNREADABLE_HELP) from None
+            return {}
     try:
-        # utf-8-sig: a file saved again by an editor that adds a byte-order mark still reads.
-        value = json.loads(path.read_text(encoding="utf-8-sig"))
-    except FileNotFoundError:
-        return {}
+        value = json.loads(text)
     except ValueError:
         # Not UTF-8 or not JSON: the file is there but holds no settings (SettingsRepository keeps it).
         if strict:
             raise SettingsDamaged(_UNREADABLE_HELP) from None
-        return {}
-    except OSError:
-        # Locked or not permitted right now: it may be fine, so a change waits instead.
-        if strict:
-            raise AppDataError(_UNREADABLE_HELP) from None
         return {}
     if isinstance(value, dict):
         return value
@@ -155,12 +172,16 @@ def load_settings(*, strict: bool = False) -> dict:
     return {}
 
 
+def load_settings_with_status() -> tuple[dict, bool]:
+    """Read settings once, returning ``(values, damaged)``."""
+    try:
+        return load_settings(strict=True), False
+    except SettingsDamaged:
+        return {}, True
+    except AppDataError:
+        return {}, False
+
+
 def settings_damaged() -> bool:
     """The settings file exists but cannot be read as settings (not merely locked, missing or moving)."""
-    try:
-        load_settings(strict=True)
-    except SettingsDamaged:
-        return True
-    except AppDataError:
-        return False
-    return False
+    return load_settings_with_status()[1]

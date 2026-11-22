@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 
@@ -155,6 +156,7 @@ Button {
     }
     contentItem: Text {
         text: control.text
+        textFormat: Text.PlainText
         font: control.font
         color: {
             if (!control.enabled)

@@ -1,5 +1,6 @@
 """Product Qt shell over the existing downloader, accounts and local library."""
 
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import os
@@ -78,6 +79,8 @@ class ApplicationController(QObject):
         super().__init__(parent)
         self._settings = SettingsRepository()
         self._preferences = self._settings.load()
+        last_damaged = getattr(self._settings, "last_damaged", None)
+        settings_broken = last_damaged if type(last_damaged) is bool else settings.settings_damaged()
         defaults = default_settings()
         for name, choices in _CHOICES.items():
             value = self._preferences.get(name)
@@ -112,10 +115,12 @@ class ApplicationController(QObject):
         self._preferences["record_locations"] = locations
         self._committed_preferences = dict(self._preferences)
         self._message = ""
-        self._error = _SETTINGS_RESET if settings.settings_damaged() else ""
+        self._error = _SETTINGS_RESET if settings_broken else ""
         self._preparing = False
         self._repairing = False
         self._repair_target = None
+        self._overlap_generation = 0
+        self._local_refresh_pending = False
         self._settings_revision = 0
         self._settings_failure_revision = 0
         self._pending_settings = {}
@@ -163,6 +168,7 @@ class ApplicationController(QObject):
         self._local_management.changed.connect(self._state_changed)
         self._local_management.libraryChanged.connect(self._local_library_changed)
         self._local_folder.overlapChanged.connect(self._state_changed)
+        self._local_folder.stateChanged.connect(self._flush_local_refresh)
         # An AI tag added, switched or taught in one tab is the other tab's too (one shared profile).
         self._library.aiProfileChanged.connect(self._local_folder.reloadAiProfile)
         self._local_folder.aiProfileChanged.connect(self._library.reloadAiProfile)
@@ -265,7 +271,8 @@ class ApplicationController(QObject):
         Closing ends every part first. Only then, as the last thing this
         process does, is the launcher started again (see `launch`).
         """
-        if self._closing or self._download.running or self._updates.state != "ready":
+        if (self._closing or self.operationBusy or self._local_management.mutating
+                or self._updates.state != "ready"):
             return False
         self._updates.confirm_restart()
         return True
@@ -427,8 +434,11 @@ class ApplicationController(QObject):
         management_locked = locked or self._accounts.busy or self._schedule.mutating
         if self._management.locked != management_locked and not self._closing:
             self._management.setLocked(management_locked)
-        # A folder inside the X save folder waits for a running save before files go to the Recycle Bin.
-        local_locked = self._local_folder.overlapsXLibrary and self._download.running
+        # A folder inside the X save folder waits for save/prep/repair/gallery deletion before moving files.
+        local_locked = self._local_folder.overlapsXLibrary and (
+            self._download.running or self._preparing or self._repairing or self._management.mutating
+            or self._pending_download is not None or self._pending_start is not None or self._save_after_settings
+        )
         if self._local_management.locked != local_locked and not self._closing:
             self._local_management.setLocked(local_locked)
         self.changed.emit()
@@ -495,7 +505,12 @@ class ApplicationController(QObject):
             self._pending_download = None
             if success and not self._closing:
                 options = pending_download[1]
-                if self._download.start(options):
+                if self._local_folder.overlapsXLibrary and self._local_management.mutating:
+                    self._record_manual_outcome({
+                        "status": "error",
+                        "message": "겹치는 폴더 정리 작업이 끝난 뒤 다시 시작해 주세요.",
+                    })
+                elif self._download.start(options):
                     # A damaged catalog is reported for this save's records,
                     # even if the folder or account changes afterwards.
                     self._repair_target = (options.account, options.output_dir, options.separate_accounts)
@@ -612,6 +627,25 @@ class ApplicationController(QObject):
         saved = [folder for folder in (locations.values() if isinstance(locations, dict) else ())
                  if isinstance(folder, str)]
         self._local_folder.checkXOverlap([self._output, *saved])
+        self._overlap_generation += 1
+        self._commands.put(("overlap_roots", (
+            self._overlap_generation, self._account, account, self._output,
+            self._preferences["separate_accounts"], dict(locations) if isinstance(locations, dict) else {},
+        )))
+
+    def _refresh_overlapping_local(self):
+        if self._local_folder.overlapsXLibrary and self._local_folder.hasFolder:
+            if self._local_folder.busy:
+                self._local_refresh_pending = True
+            else:
+                self._local_refresh_pending = False
+                self._local_folder.refreshFolder()
+
+    def _flush_local_refresh(self):
+        if (self._local_refresh_pending and not self._closing and not self._local_folder.busy
+                and self._local_folder.overlapsXLibrary and self._local_folder.hasFolder):
+            self._local_refresh_pending = False
+            self._local_folder.refreshFolder()
 
     @Slot(bool)
     def galleryVisible(self, visible):
@@ -650,6 +684,7 @@ class ApplicationController(QObject):
         if type(saved) is not int or saved <= 0:
             return
         self._library.classifyNewPhotos()           # what the run left, when the model is here
+        self._refresh_overlapping_local()
         if self._gallery_visible:
             # Not reloaded under the person's eyes: the refresh button offers the new photos.
             self._gallery_dirty = True
@@ -676,11 +711,16 @@ class ApplicationController(QObject):
         refresh_records = getattr(getattr(self, "_records", None), "refresh", None)
         if callable(refresh_records):
             refresh_records()
+        refresh_local = getattr(self, "_refresh_overlapping_local", None)
         if keys is not None and (not keys or (callable(remove) and remove(keys))):
+            if callable(refresh_local):
+                refresh_local()
             self.changed.emit()
             return
         self._gallery_dirty = False
         self._library.refresh()
+        if callable(refresh_local):
+            refresh_local()
         self.changed.emit()
 
     def _local_library_changed(self):
@@ -690,6 +730,7 @@ class ApplicationController(QObject):
             self._local_folder.refresh()
         if self._local_folder.overlapsXLibrary:
             # The same files are in the X save folder: the gallery lists them until it reads again.
+            self._records.refresh()
             self._gallery_dirty = True
             if self._gallery_visible:
                 self.refreshGallery()
@@ -903,6 +944,34 @@ class ApplicationController(QObject):
                     if not path.is_dir():
                         raise ValueError("폴더가 아직 없습니다. 먼저 사진을 저장해 주세요.")
                     result = QUrl.fromLocalFile(str(path))
+                elif kind == "overlap_roots":
+                    overlap_gen, active_raw, active_account, active_output, separate, locations = payload
+                    from .qt_library import _ReadOnlyHistory
+                    from .storage import resolve_storage
+
+                    extra_roots = []
+                    targets = []
+                    if active_raw and active_output:
+                        targets.append((active_account or active_raw, active_output))
+                    if isinstance(locations, dict):
+                        for loc_account, loc_dir in locations.items():
+                            if (isinstance(loc_account, str) and loc_account
+                                    and isinstance(loc_dir, str) and loc_dir):
+                                pair = (loc_account, loc_dir)
+                                if pair not in targets:
+                                    targets.append(pair)
+                    for target_account, target_dir in targets:
+                        try:
+                            paths = resolve_storage(target_dir, target_account, separate)
+                            if (paths.record_dir / ".luvbox-history.sqlite3").is_file():
+                                with closing(_ReadOnlyHistory(paths)) as store:
+                                    for root in store.media_roots:
+                                        text_root = str(root)
+                                        if text_root and text_root not in extra_roots:
+                                            extra_roots.append(text_root)
+                        except Exception:
+                            pass
+                    result = {"generation": overlap_gen, "roots": extra_roots}
                 else:
                     continue
                 self._completed.emit(kind, True, result)
@@ -972,15 +1041,20 @@ class ApplicationController(QObject):
             locations = self._preferences.get("record_locations", {})
             locations = dict(locations) if isinstance(locations, dict) else {}
             locations[options.account] = options.output_dir
+            previous_account, previous_output = self._account, self._output
             self._account, self._output = options.account, options.output_dir
-            revision = self._persist({"account": options.account, "output_dir": options.output_dir,
-                                      "record_locations": locations})
+            revision = self._persist(
+                {"account": options.account, "output_dir": options.output_dir, "record_locations": locations},
+                rollback={"_account": ("account", previous_account), "_output": ("output_dir", previous_output)},
+            )
             self._message = self._error = ""
             self._pending_download = (revision, options)
             self._load_library()
             if value.get("migrated"):
                 self._library.refresh()
                 self._records.refresh()
+                self._library.reloadAiProfile()
+                self._local_folder.reloadAiProfile()
         elif kind == "repair":
             self._repairing = False
             self._download.markRepaired()
@@ -993,6 +1067,9 @@ class ApplicationController(QObject):
             if warnings:
                 self._message += " " + " ".join(warnings)
             self._library.refresh()
+            self._records.refresh()
+            self._library.reloadAiProfile()
+            self._library.classifyNewPhotos()
         elif kind == "review":
             if (self._download.running and not self._download.stopping
                     and value.get("job_id") == self._download.jobId):
@@ -1002,6 +1079,14 @@ class ApplicationController(QObject):
         elif kind == "open":
             if not QDesktopServices.openUrl(value):
                 self._error = "폴더를 열지 못했습니다."
+        elif kind == "overlap_roots":
+            if value.get("generation") == self._overlap_generation:
+                locations = self._preferences.get("record_locations", {})
+                saved = [folder for folder in (locations.values() if isinstance(locations, dict) else ())
+                         if isinstance(folder, str)]
+                self._local_folder.checkXOverlap([self._output, *saved, *value.get("roots", ())])
+                return
+            return
         self._state_changed()
 
     def _download_event(self, event):
@@ -1024,6 +1109,7 @@ class ApplicationController(QObject):
             self._records.refresh()
             if self._download.savedCount and not self._closing:
                 self._library.classifyNewPhotos()       # what this save brought, when the model is here
+                self._refresh_overlapping_local()
             if not self._gallery_visible and not self._closing:
                 self.refreshGallery()
 
@@ -1229,7 +1315,7 @@ def _start_controller(message_box, *, startup_probe=None):
             raise
         launcher.signal_ready()
         prompt = (f"{exc}\n\n"
-                  "기존 LuvBox 데이터를 유지하고 이전 XlikeSaver 폴더를 옆으로 치운 뒤 계속할까요?\n"
+                  "기존 LuvBox 데이터를 유지하고 이전 XlikeSaver 폴더를 별도 이름으로 옮겨 둔 뒤 계속할까요?\n"
                   "(직접 두 폴더를 확인한 뒤 결정하려면 '아니오'를 누르세요.)")
         if message_box.question(
                 None, "LuvBox", prompt,

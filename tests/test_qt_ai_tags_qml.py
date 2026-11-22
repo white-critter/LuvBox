@@ -232,6 +232,12 @@ def scene():
         with closing(HistoryStore.for_storage(paths, create_media=False)) as store:
             assert store.tag_feedback([("flat", "103", 1, "photo")]) == {("flat", "103", 1, "photo"): {"인물": -1}}
         assert loaded() == [], ("a tag edit loaded the AI libraries", loaded())
+        click("previewAiCorrect")
+        teach_menu = find("galleryTeachMenu")
+        wait(lambda: teach_menu.property("visible"), "preview + AI tag menu")
+        assert teach_menu.property("singleOnly") is True
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        wait(lambda: not teach_menu.property("visible"), "preview teach menu closed")
         assert QMetaObject.invokeMethod(preview, "close")
         wait(lambda: not preview.property("visible"), "preview closed")
 

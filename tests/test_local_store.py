@@ -486,6 +486,24 @@ class DuplicateTests(FolderCase):
         self.assertEqual(self.s.duplicate_count(), 4)
         self.assertEqual(self.s.duplicate_members(), {1: ["a.jpg", "b.jpg", "c.jpg", "d.jpg"]})
 
+    def test_pruning_keeps_distinct_undo_when_sibling_goes_and_ai_cleared_persists(self):
+        self.s.save_clusters([["a.jpg", "b.jpg", "c.jpg"]], "exact")
+        mark = self.s.set_photos_distinct(["c.jpg"])
+        self.assertIsNotNone(mark)
+        self.s.mark_gone(["b.jpg"])
+        self.assertEqual(self.s.duplicate_count(), 0)
+        self.assertEqual(self.s.duplicate_members(), {})
+        self.assertTrue(self.s.undo_photos_distinct(mark))
+        self.assertEqual(self.s.duplicate_count(), 2)
+        self.assertEqual(self.s.duplicate_members(), {1: ["a.jpg", "c.jpg"]})
+
+        self.s.replace_ai_tags([("a.jpg", ["인물"])])
+        self.assertFalse(self.s.ai_cleared())
+        self.assertEqual(self.s.clear_ai_tags(), 1)
+        self.assertTrue(self.s.ai_cleared())
+        self.s.set_ai_scored_state(1, "siglip2_base_224")
+        self.assertFalse(self.s.ai_cleared())
+
 
 class LightImportTests(unittest.TestCase):
     def test_listing_a_folder_loads_no_ai_library(self):

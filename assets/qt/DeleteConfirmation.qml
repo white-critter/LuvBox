@@ -38,7 +38,7 @@ FlatDialog {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            SmoothWheel { flickable: summaryScroll.contentItem }
+            SmoothWheel { flickable: summaryScroll.contentItem as Flickable }
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
             ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
             Label {

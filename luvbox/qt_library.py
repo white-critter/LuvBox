@@ -10,6 +10,8 @@ import re
 import sqlite3
 import subprocess
 from threading import Condition, Event, Thread
+import inspect
+import time
 import webbrowser
 
 from PySide6.QtCore import QAbstractListModel, QModelIndex, QObject, Property, Qt, QTimer, QUrl, Signal, Slot
@@ -213,6 +215,9 @@ class LibraryRepository:
         self._known_total = 0
         self._scan_note = ""
         self._ai_wrote = False
+        self._ai_changed = 0
+        self._ai_had_embeddings = False
+        self._dup_synced_changes = False
         self._duplicate_cancel = Event()
         self._ai_cancel = Event()
         self.provider = None
@@ -281,12 +286,16 @@ class LibraryRepository:
                 after = self._cursor if offset and offset == self._cursor_offset else None
                 if grouped:
                     # Each group together, the photo to keep first. The chosen sort order and media type do not apply.
+                    dup_kwargs = ({"count_total": False}
+                                  if (after is not None and type(store).duplicate_page is HistoryStore.duplicate_page)
+                                  else {})
                     page = store.duplicate_page(0 if after is not None else offset // limit, limit,
                                                 media_type, request.query,
                                                 period=period, author=request.author, hashtag=request.hashtag,
                                                 favorite_only=request.favorite_only, user_tag=request.user_tag,
                                                 ai_category=getattr(request, "ai_category", ""),
-                                                ai_origin=getattr(request, "ai_origin", ""), after=after)
+                                                ai_origin=getattr(request, "ai_origin", ""), after=after,
+                                                **dup_kwargs)
                 else:
                     page_kwargs = {"count_total": False} if (after is not None and type(store).record_page is HistoryStore.record_page) else {}
                     page = store.record_page(0 if after is not None else offset // limit, limit,
@@ -359,10 +368,10 @@ class LibraryRepository:
                         self._cursor = ((int(last["cluster_id"]), int(last["cluster_rank"]))
                                         if grouped else page_cursor(last, request.order))
                         self._cursor_offset = offset + len(rows)
-                    if not grouped and after is None:
+                    if after is None:
                         self._known_total = int(page.get("total") or 0)
                     known_total = self._known_total
-                if grouped or page.get("total") is not None:
+                if page.get("total") is not None:
                     total = int(page["total"])
                 elif not page.get("has_more"):
                     total = offset + len(rows)
@@ -448,7 +457,15 @@ class LibraryRepository:
             with closing(_ReadOnlyHistory(request.location())) as store:
                 ov = store.overview(verify_files=False, top=10, include_missing=False)
                 st = ov.get("stats", {})
-                ai_stats = store.ai_tag_stats() if hasattr(store, "ai_tag_stats") else {}
+                names = list(CATEGORY_NAMES)
+                profile = _open_profile()
+                if profile is not None:
+                    with closing(profile):
+                        names = profile.active_tag_names()
+                ai_counts = store.ai_tag_counts(names) if hasattr(store, "ai_tag_counts") else {}
+                ai_list = [{"category": name, "count": int(ai_counts[name])}
+                           for name in names if ai_counts.get(name, 0) > 0]
+                ai_list.sort(key=lambda item: (-item["count"], item["category"]))
                 user_tag_list = store.user_tags(limit=15) if hasattr(store, "user_tags") else []
                 dup_count = store.duplicate_counts() if hasattr(store, "duplicate_counts") else 0
                 return {
@@ -464,7 +481,7 @@ class LibraryRepository:
                     "authors": [{"author": str(row.get("author") or ""), "files": int(row.get("files") or 0)}
                                 for row in st.get("authors", [])],
                     "monthly": [{"month": m[0], "count": m[1]} for m in st.get("months", {}).get("posted", [])],
-                    "ai_categories": [{"category": k, "count": v} for k, v in ai_stats.items()],
+                    "ai_categories": ai_list,
                     "user_tags": user_tag_list,
                 }
         except FileNotFoundError:
@@ -649,21 +666,29 @@ class LibraryRepository:
         except Exception:
             return 0
 
-    def remove_tag(self, key, generation, tag):
+    def remove_tag_detailed(self, key, generation, tag):
         request = self.current(generation)
         if request is None:
-            return False
+            return False, False
         match = _KEY.fullmatch(key) if isinstance(key, str) else None
         if match is None or int(match[1]) != request.generation:
-            return False
+            return False, False
         try:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
-                removed = store.remove_tag(match[2], match[3], int(match[4]), match[5], tag)
+                remover = getattr(store, "remove_tag_detailed", None)
+                if callable(remover):
+                    removed, confirmed_restored = remover(match[2], match[3], int(match[4]), match[5], tag)
+                else:
+                    removed = bool(store.remove_tag(match[2], match[3], int(match[4]), match[5], tag))
+                    confirmed_restored = False
                 if removed:
                     self._teach_profile(store, request, tag)
-                return removed
+                return removed, confirmed_restored
         except Exception:
-            return False
+            return False, False
+
+    def remove_tag(self, key, generation, tag):
+        return self.remove_tag_detailed(key, generation, tag)[0]
 
     @staticmethod
     def _teach_profile(store, request, tag):
@@ -959,8 +984,10 @@ class LibraryRepository:
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
+        self._ai_had_embeddings = False
         try:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+                self._ai_had_embeddings = store.count_embeddings(ACTIVE_MODEL_ID) > 0
                 store.set_ai_scored_state(-1, ACTIVE_MODEL_ID)      # everything, not only what is new
         except Exception as exc:
             raise RuntimeError("AI 태그를 다시 매기지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
@@ -979,12 +1006,13 @@ class LibraryRepository:
                 "AI 태그를 초기화하지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요."
             ) from exc
 
-    def teach_labels(self, generation, identities, category, epoch=None, progress_callback=None):
+    def teach_labels(self, generation, identities, category, epoch=None, progress_callback=None, status_callback=None):
         """The single-label teaching of earlier versions: "yes" for one tag, or "" for none of the shown ones."""
         return self.teach_tag(generation, identities, category, bool(category), epoch=epoch,
-                              progress_callback=progress_callback)
+                              progress_callback=progress_callback, status_callback=status_callback)
 
-    def teach_tag(self, generation, identities, tag, positive, epoch=None, progress_callback=None):
+    def teach_tag(self, generation, identities, tag, positive, epoch=None, progress_callback=None,
+                  status_callback=None):
         """Remember "yes, this" or "not this" about one AI tag on these photos, learn from it, and spread it.
 
         ``tag=""`` with ``positive=False`` turns down every AI tag the photos
@@ -997,13 +1025,17 @@ class LibraryRepository:
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0, 0
-        from contextlib import ExitStack
         from . import ai_pipeline
-        from .clip_classifier import classify_detailed, ensure_model, get_session, is_available, release_session, session_use
+        from .clip_classifier import release_session
         from .duplicates import ScanCancelled
         clean = valid_tag(tag)
         if not clean and (tag or positive):
             return 0, 0
+
+        def check_cancel():
+            if self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None:
+                raise ScanCancelled("분류 가르치기를 중단했습니다.")
+
         profile = _open_profile()
         if profile is None:
             raise RuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
@@ -1030,56 +1062,21 @@ class LibraryRepository:
                     path = self._path(store, by_ident[ident])
                     if path is not None and path.is_file():
                         missing.append((ident, path))
-                total = len(present)
-                if progress_callback and total:
-                    progress_callback(0, total)
-                with ExitStack() as scope_guard:
-                    if missing:
-                        if not is_available():
-                            def stop_when_closing(_done, _total):
-                                # Closing the window or leaving the library stops a long model fetch.
-                                if self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None:
-                                    raise ScanCancelled("분류 가르치기를 중단했습니다.")
-                            try:
-                                ensure_model(progress_callback=stop_when_closing)
-                            except ScanCancelled:
-                                raise
-                            except Exception as exc:
-                                raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 "
-                                                   "확인해 주세요.") from exc
-                        scope_guard.enter_context(session_use())
-                        session = get_session()
-                        if session is None:
-                            raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
-                        done = total - len(missing)
-                        for start in range(0, len(missing), 16):
-                            if self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None:
-                                raise ScanCancelled("분류 가르치기를 중단했습니다.")
-                            chunk = missing[start:start + 16]
-                            try:
-                                detailed = classify_detailed([path for _ident, path in chunk], batch_size=16, session=session)
-                            except Exception as exc:
-                                raise RuntimeError("사진을 읽지 못해 분류를 저장하지 못했습니다. 다시 시도해 주세요.") from exc
-                            encoded = []
-                            for (ident, _path), (_tag, confidence, vector) in zip(chunk, detailed):
-                                if vector is not None:
-                                    encoded.append((*ident, vector.tobytes(), confidence))
-                            if encoded:
-                                store.save_embeddings(encoded, ACTIVE_MODEL_ID)
-                                store.forget_unreadable([item[:4] for item in encoded])
-                            done += len(chunk)
-                            if progress_callback:
-                                progress_callback(min(done, total), total)
-                if progress_callback and total:
-                    progress_callback(total, total)
+                ai_pipeline.encode_missing_for_teach(
+                    store, missing, total=len(present), check_cancel=check_cancel,
+                    progress_callback=progress_callback, status_callback=status_callback,
+                )
+                check_cancel()
                 refreshed = store.embeddings_for(present, ACTIVE_MODEL_ID) if present else {}
                 teachable = [ident for ident in present if ident in refreshed]
                 if not teachable:
                     return 0, 0
                 kind, scope, example_id = _x_scope(request)
-                return ai_pipeline.teach(store, profile, kind=kind, scope=scope, example_id=example_id,
-                                         idents=teachable, tag=clean, positive=positive,
-                                         check_stop=lambda: self._catalog_request(generation, epoch) is None)
+                return ai_pipeline.teach(
+                    store, profile, kind=kind, scope=scope, example_id=example_id,
+                    idents=teachable, tag=clean, positive=positive,
+                    check_stop=lambda: self._ai_cancel.is_set() or self._catalog_request(generation, epoch) is None,
+                )
         except (RuntimeError, ScanCancelled):
             raise
         except Exception as exc:
@@ -1089,9 +1086,9 @@ class LibraryRepository:
         finally:
             release_session()
 
-    def sync_tag_examples(self, generation, tags) -> bool:
+    def sync_tag_examples(self, generation, tags, epoch=None) -> bool:
         """After a tag edit: bring this library's examples of these AI tags up to date in the profile."""
-        request = self.current(generation)
+        request = self._catalog_request(generation, epoch) if epoch is not None else self.current(generation)
         names = [valid_tag(tag) for tag in tags if valid_tag(tag)]
         if request is None or not names:
             return False
@@ -1099,7 +1096,7 @@ class LibraryRepository:
         if profile is None:
             return False
         try:
-            with closing(profile), closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
+            with closing(profile), closing(_ReadOnlyHistory(request.location())) as store:
                 known = set(profile.known_tag_names())
                 names = [tag for tag in names if tag in known]
                 return _sync_examples(store, profile, request, names) if names else False
@@ -1266,10 +1263,10 @@ class LibraryRepository:
                 path = self._path(store, row) if row is not None else None
                 previous_path, previous_signature = displayed[key]
                 if path is None or str(path) != previous_path or previous_signature is None:
-                    raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
+                    raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로고침해 주세요.")
                 signature = file_signature(path)
                 if signature != previous_signature:
-                    raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                    raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
                 rows.append(dict(row, _delete_signature=signature, _key=key))
             if request.duplicate_only:
                 rows, kept = self._copies_only(store, rows)
@@ -1341,10 +1338,10 @@ class LibraryRepository:
             row = self._row(store, key, request)
             path = self._path(store, row) if row is not None else None
             if path is None or str(path) != previous_path or previous_signature is None:
-                raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("선택한 파일을 확인하지 못했습니다. 목록을 새로고침해 주세요.")
             signature = file_signature(path)
             if signature != previous_signature:
-                raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
             identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
             groups = store.duplicate_members() if hasattr(store, "duplicate_members") else {}
             members = next((members for members in groups.values()
@@ -1367,7 +1364,7 @@ class LibraryRepository:
                 raise ManifestError("남길 사진과 같은 사진으로 다시 확인되지 않아 보낼 수 없습니다. "
                                  "‘중복 아님’으로 표시하거나 갤러리에서 휴지통으로 보내세요.")
             if file_signature(path) != signature or file_signature(keeper) != keeper_signature:
-                raise ManifestError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                raise ManifestError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
             favorites = store.favorite_identities_among([identity, members[0]["identity"]])
             shown = {"alike": self._compared(path, row, signature, identity in favorites),
                      "keeper": self._compared(keeper, keeper_row, keeper_signature,
@@ -1646,6 +1643,7 @@ class LibraryController(QObject):
         self._dup_total = 0
         self._teach_request = None
         self._skipped_teach = 0
+        self._preserve_status_serial = 0
         self._ai_counts = []
         self._ai_tag_names = []          # switched-on AI tags, in list order (the shared profile)
         self._ai_known_names = set()     # every AI tag that is not deleted, on or off
@@ -1933,6 +1931,10 @@ class LibraryController(QObject):
     def aiScanning(self):
         return self._ai_scanning
 
+    @Property(bool, notify=changed)
+    def aiCancellable(self):
+        return self._exclusive in ("ai", "teach")
+
     @Property(int, notify=aiScanProgress)
     def aiProgressCurrent(self):
         return self._ai_current
@@ -1993,7 +1995,7 @@ class LibraryController(QObject):
         if self._author:
             parts.append("작성자 @" + self._author)
         if self._hashtag:
-            parts.append("태그 " + (self._hashtag if self._hashtag.startswith("#") else "#" + self._hashtag))
+            parts.append("해시태그 " + (self._hashtag if self._hashtag.startswith("#") else "#" + self._hashtag))
         if self._user_tag:
             parts.append("내 태그 #" + self._user_tag)
         if self._ai_category:
@@ -2190,6 +2192,7 @@ class LibraryController(QObject):
         self._navigation = None
         self._selection_anchor = ""
         self._band_base = None
+        self._preserve_status_serial = 0
         self.clearSelection()
         self._duplicate_return = return_state
         self._busy = bool(self._duplicate_return and self._duplicate_return[0])
@@ -2202,7 +2205,7 @@ class LibraryController(QObject):
             self._status = status
         with self._condition:
             self._pending = deque(item for item in self._pending if item[0] in _EXCLUSIVE_ACTIONS)
-            self._interactive.clear()
+            self._interactive = deque(item for item in self._interactive if item[0] == "sync_tag_examples")
             self._condition.notify_all()
         request = self._make_request()
         if request is None:
@@ -2360,7 +2363,7 @@ class LibraryController(QObject):
         # The screen shows one list per AI tag. Estimated and taught photos
         # are no longer split; the second argument stays for older callers.
         origin = ""
-        if category not in self._ai_known_names:
+        if category not in self._ai_tag_names:
             category = ""
         if category == self._ai_category and origin == self._ai_origin:
             return
@@ -2380,7 +2383,7 @@ class LibraryController(QObject):
             return "예시 1장 이상 필요" + no
         if regime == "linear" or pos >= 5:
             return ("기본 + " if rule.get("built_in") else "") + f"예시 {pos:,}장 · 학습됨" + no
-        return ("기본 + " if rule.get("built_in") else "") + f"예시 {pos:,}장 · 닮은 사진 찾기" + no
+        return ("기본 + " if rule.get("built_in") else "") + f"예시 {pos:,}장 · 닮은 사진 찾기 (5장부터 학습)" + no
 
     @Slot()
     def reloadAiProfile(self):
@@ -2428,8 +2431,10 @@ class LibraryController(QObject):
             self.setAiFilter("", "")
         if announce and (names_changed or rules_changed):
             self.aiProfileChanged.emit()
-        if not announce and names_changed and self._selected:
+        if names_changed and self._selected:
             self._reselect()
+        if not announce and (names_changed or rules_changed):
+            self.classifyNewPhotos()
         if names_changed:
             # The menu's counts follow the tag list.
             self._ai_counts_loaded = False
@@ -2471,9 +2476,12 @@ class LibraryController(QObject):
                                    f"AI 태그에 #{clean} 추가 완료 · ‘지금 다시 분류’로 사진에 반영합니다.")
         if added is None:
             return False
-        # Photos the person already tagged this way are its first examples.
-        self._repository.sync_tag_examples(self._generation, [clean])
-        self._reload_ai_rules()
+        # Photos the person already tagged this way are its first examples (synced off the UI thread).
+        if self._account and self._output_dir:
+            epoch = self._repository.catalog_epoch() if hasattr(self._repository, "catalog_epoch") else None
+            with self._condition:
+                self._interactive.append(("sync_tag_examples", self._generation, self._selection_serial, clean, epoch))
+                self._condition.notify_all()
         return True
 
     @Slot(str, result=bool)
@@ -2528,6 +2536,7 @@ class LibraryController(QObject):
             self.changed.emit()
             return False
         idents = []
+        taught_keys = []
         skipped = 0
         seen = set()
         for key in keys:
@@ -2541,11 +2550,12 @@ class LibraryController(QObject):
                 continue
             seen.add(ident)
             idents.append(ident)
+            taught_keys.append(key)
         if not idents:
             self._status = "가르칠 사진이 없습니다. 영상과 GIF는 이 분류에 넣지 않습니다." if skipped else "가르칠 사진을 선택해 주세요."
             self.changed.emit()
             return False
-        self._teach_request = (tag, bool(positive), idents)
+        self._teach_request = (tag, bool(positive), idents, taught_keys)
         self._skipped_teach = skipped
         return self._begin_exclusive("teach", "teach", "분류를 저장하는 중…")
 
@@ -2728,7 +2738,7 @@ class LibraryController(QObject):
     def _look_for_new_photos(self):
         if self._closed or not self._auto_classify or not self._auto_ai_wanted:
             return
-        if self._exclusive or not (self._account and self._output_dir):
+        if self._exclusive or getattr(self, "_deletion_busy", False) or not (self._account and self._output_dir):
             return                      # asked again when the running job ends
         with self._condition:
             if not any(item[0] == "auto_ai_check" for item in self._pending):
@@ -2743,9 +2753,9 @@ class LibraryController(QObject):
 
     @Slot()
     def cancelAiScan(self):
-        if self._exclusive == "ai" and hasattr(self._repository, "_ai_cancel"):
+        if self._exclusive in ("ai", "teach") and hasattr(self._repository, "_ai_cancel"):
             self._repository._ai_cancel.set()
-            self._status = "AI 자동분류 중단 중…"
+            self._status = "분류 가르치기 중단 중…" if self._exclusive == "teach" else "AI 자동분류 중단 중…"
             self.changed.emit()
 
     @Slot(result=bool)
@@ -2969,20 +2979,46 @@ class LibraryController(QObject):
             (t.get("tag") == clean and t.get("source") == "user") if isinstance(t, dict) else str(t) == clean
             for t in self._selected.get("tags", [])
         )
-        ok = self._repository.remove_tag(self.selectedKey, self._generation, clean)
+        was_ai = any(
+            isinstance(t, dict) and t.get("tag") == clean and t.get("source") in ("ai", "confirmed")
+            for t in self._selected.get("tags", [])
+        )
+        remover = getattr(self._repository, "remove_tag_detailed", None)
+        if callable(remover):
+            ok, confirmed_restored = remover(self.selectedKey, self._generation, clean)
+        else:
+            ok = bool(self._repository.remove_tag(self.selectedKey, self._generation, clean))
+            confirmed_restored = False
         if ok:
             tags = [t for t in self._selected.get("tags", []) if (t.get("tag") if isinstance(t, dict) else str(t)) != clean]
+            if confirmed_restored:
+                tags.append({"tag": clean, "source": "confirmed"})
+                ai_tags = [item for item in self._selected.get("ai_tags", [])
+                           if isinstance(item, dict) and item.get("tag") != clean]
+                ai_tags.append({"tag": clean, "confirmed": True})
+                self._selected["ai_tags"] = ai_tags
+            else:
+                self._selected["ai_tags"] = [item for item in self._selected.get("ai_tags", [])
+                                             if isinstance(item, dict) and item.get("tag") != clean]
             self._selected["tags"] = tags
-            self._selected["ai_tags"] = [item for item in self._selected.get("ai_tags", [])
-                                         if isinstance(item, dict) and item.get("tag") != clean]
             if had_user_tag:
                 self._upsert_cached_user_tag(clean, delta=-1)
             self._user_tags_loaded = False
             if clean in self._ai_known_names:
                 self._reload_ai_rules()
-            leaves = clean in (self._user_tag, self._ai_category)
+            leaves = (clean == self._user_tag and had_user_tag) or (clean == self._ai_category and not confirmed_restored)
+            if not was_ai:
+                status_text = self._status
+            elif getattr(self, "_share_learning", True) is False:
+                status_text = f"#{clean} 태그를 빼고 이 폴더에만 반영했습니다."
+            else:
+                status_text = f"#{clean} 태그를 빼고 AI 학습에 반영했습니다."
             if not (leaves and self.removeDeleted([self.selectedKey])):
-                self._settle(self._status, reload=leaves)
+                self._settle(status_text, reload=leaves)
+            elif was_ai:
+                if self._busy:
+                    self._preserve_status_serial = self._selection_serial
+                self._settle(status_text, reload=False)
         return ok
 
     @Slot(bool)
@@ -3254,6 +3290,7 @@ class LibraryController(QObject):
             return
         self._selection_serial += 1
         self._selection_key = key
+        self._preserve_status_serial = 0
         # Drop the open file before the catalog read. Keeping it made the video
         # player stay in PlayingState after the next item was a photo or GIF.
         self._selected = {}
@@ -3375,6 +3412,13 @@ class LibraryController(QObject):
             elif action == "ai_counts":
                 reader = getattr(self._repository, "ai_counts", None)
                 selection = reader(generation) if callable(reader) else []
+            elif action == "sync_tag_examples":
+                reader = getattr(self._repository, "sync_tag_examples", None)
+                if callable(reader):
+                    kwargs = {"epoch": epoch} if "epoch" in inspect.signature(reader).parameters else {}
+                    selection = bool(reader(generation, [key], **kwargs))
+                else:
+                    selection = False
             elif action == "scan_duplicates":
                 def on_progress(cur, tot):
                     message = ("사진 비교·중복 묶음 정리 중…" if cur == tot else
@@ -3434,12 +3478,18 @@ class LibraryController(QObject):
                         seen = progress_state["tot"]
                         note = getattr(self._repository, "_scan_note", "")
                         if action == "reclassify":
-                            message = (f"AI 태그를 다시 매겼습니다: 사진 {count:,}장의 AI 태그가 바뀌었습니다."
-                                       if count else "AI 태그를 다시 매겼습니다. 바뀐 사진은 없습니다.")
+                            if count:
+                                message = f"AI 태그를 다시 매겼습니다: 사진 {count:,}장의 AI 태그가 바뀌었습니다."
+                            elif not getattr(self._repository, "_ai_had_embeddings", True):
+                                message = ("AI 태그를 다시 매겼습니다. 아직 분석된 사진이 없다면 "
+                                           "먼저 ‘AI 자동분류 실행’을 눌러 주세요.")
+                            else:
+                                message = "AI 태그를 다시 매겼습니다. 바뀐 사진은 없습니다."
                             note = ""
                         elif action == "auto_ai_tags":
                             # Nothing new is the usual case; it is not worth a line.
-                            message = (f"새로 저장한 사진을 AI로 분류했습니다: {seen:,}장을 확인했고, "
+                            noun = "새 사진을" if getattr(self, "_root", "") else "새로 저장한 사진을"
+                            message = (f"{noun} AI로 분류했습니다: {seen:,}장을 확인했고, "
                                        f"{count:,}장에 태그를 적용했습니다." if count else "")
                             note = note if count else ""
                         elif count:
@@ -3447,7 +3497,7 @@ class LibraryController(QObject):
                         elif seen:
                             message = f"AI 자동분류 완료: {seen:,}장을 확인했습니다. 새로 붙인 태그는 없습니다."
                         else:
-                            message = "새로 분류할 사진이 없거나 분류가 완료되었습니다."
+                            message = "새로 분류할 사진이 없습니다."
                         if note:
                             message += note
                 except RuntimeError as exc:
@@ -3459,20 +3509,32 @@ class LibraryController(QObject):
                     if not request_teach:
                         selection, message = None, "가르칠 분류를 다시 선택해 주세요."
                     else:
-                        category, positive, idents = request_teach
+                        category, positive, idents = request_teach[:3]
+
+                        progress_state = {"cur": 0, "tot": 0}
 
                         def on_teach_progress(cur, tot):
+                            progress_state["cur"] = cur
+                            progress_state["tot"] = tot
                             self._emit(
                                 generation, serial, "ai_scan_progress", (cur, tot),
                                 f"분류를 저장하는 중… ({cur:,} / {tot:,})", epoch,
+                            )
+
+                        def on_teach_status(msg):
+                            self._emit(
+                                generation, serial, "ai_scan_progress",
+                                (progress_state["cur"], progress_state["tot"]), msg, epoch,
                             )
 
                         teach = getattr(self._repository, "teach_tag", None)
                         if hasattr(self._repository, "_teach_skipped_media"):
                             self._repository._teach_skipped_media = 0
                         if callable(teach):
+                            extra = ({"status_callback": on_teach_status}
+                                     if "status_callback" in inspect.signature(teach).parameters else {})
                             taught, propagated = teach(generation, idents, category, positive, epoch=epoch,
-                                                       progress_callback=on_teach_progress)
+                                                       progress_callback=on_teach_progress, **extra)
                         else:
                             taught, propagated = self._repository.teach_labels(
                                 generation, idents, category if positive else "", epoch=epoch,
@@ -3545,6 +3607,8 @@ class LibraryController(QObject):
                 selection = {"error": _STATISTICS_ERROR}
             elif action == "ai_counts":
                 selection = []
+            elif action == "sync_tag_examples":
+                selection = False
             elif action == "reselect":
                 selection = None
             else:
@@ -3623,7 +3687,9 @@ class LibraryController(QObject):
         epoch = result[5] if len(result) > 5 else None
         if self._closed:
             return
-        catalog_job = action in _EXCLUSIVE_ACTIONS or action in {"scan_progress", "ai_scan_progress"}
+        catalog_job = action in _EXCLUSIVE_ACTIONS or action in {"scan_progress", "ai_scan_progress"} or (
+            action == "sync_tag_examples" and epoch is not None
+        )
         if catalog_job:
             if not self._same_catalog(epoch):
                 if action in _EXCLUSIVE_ACTIONS:
@@ -3683,7 +3749,7 @@ class LibraryController(QObject):
         if action == "auto_ai_check":
             if not selection or not self._auto_classify:
                 self._auto_ai_wanted = False
-            elif not self._exclusive:
+            elif not self._exclusive and not getattr(self, "_deletion_busy", False):
                 self._auto_ai_wanted = False
                 self._begin_exclusive("ai", "auto_ai_tags", None)
             return                      # busy: asked again when the running job ends
@@ -3691,19 +3757,33 @@ class LibraryController(QObject):
             self._release_exclusive()
             self._reload_ai_rules()
             wrote = bool(getattr(self._repository, "_ai_wrote", False))
+            synced = bool(getattr(self._repository, "_ai_synced_changes", False))
             if hasattr(self._repository, "_ai_wrote"):
                 self._repository._ai_wrote = False
+            if hasattr(self._repository, "_ai_synced_changes"):
+                self._repository._ai_synced_changes = False
             if selection is None:
-                if wrote:
+                if wrote or synced:
                     self._user_tags_loaded = False
-                    self._settle(message, reload=bool(self._ai_category))
+                    if synced:
+                        self._counts_loaded = False
+                    self._settle(message, reload=synced or bool(self._ai_category))
                 else:
                     self._status = message
                     self.changed.emit()
                 return
             if message:
                 self._user_tags_loaded = False
-                self._settle(message, reload=bool(self._ai_category))
+                if synced:
+                    self._counts_loaded = False
+                self._settle(message, reload=synced or bool(self._ai_category))
+            elif (wrote or synced) and selection is not None:
+                if self._status.startswith(_AI_PROGRESS):
+                    self._status = ""
+                self._user_tags_loaded = False
+                if synced:
+                    self._counts_loaded = False
+                self._settle(self._status, reload=synced or bool(self._ai_category))
             else:
                 # Nothing to report; do not leave the run's own progress line standing.
                 if self._status.startswith(_AI_PROGRESS):
@@ -3728,7 +3808,12 @@ class LibraryController(QObject):
                 self._ai_counts = counts
                 self.aiCountsChanged.emit()
             return
+        if action == "sync_tag_examples":
+            if selection:
+                self._reload_ai_rules()
+            return
         if action == "teach":
+            request_teach = self._teach_request
             self._teach_request = None
             self._release_exclusive()
             self._reload_ai_rules()
@@ -3736,9 +3821,44 @@ class LibraryController(QObject):
                 self._status = message
                 self.changed.emit()
                 return
-            self._settle(message, reload=bool(self._ai_category))
+            if request_teach and len(request_teach) >= 4:
+                taught_tag, taught_positive, taught_idents, taught_keys = request_teach[:4]
+            else:
+                taught_tag, taught_positive, taught_idents = request_teach or ("", True, [])
+                taught_keys = [self.selectedKey] if len(taught_idents) == 1 and self.selectedKey else []
+            taught_count, propagated = (
+                selection if isinstance(selection, tuple) and len(selection) == 2 else (0, 0)
+            )
+            single_key = taught_keys[0] if len(taught_keys) == 1 else ""
+            kept_by_user = bool(
+                single_key
+                and self._ai_category
+                and self._selected.get("key") == single_key
+                and any(
+                    isinstance(t, dict) and t.get("tag") == self._ai_category and t.get("source") == "user"
+                    for t in self._selected.get("tags", [])
+                )
+            )
+            if not self._ai_category or taught_count <= 0:
+                reload = False
+            elif taught_positive and propagated == 0:
+                reload = False
+            elif not taught_positive and propagated == 0 and taught_tag and taught_tag != self._ai_category:
+                reload = False
+            elif (not taught_positive and propagated == 0
+                  and (not taught_tag or taught_tag == self._ai_category)
+                  and len(taught_idents) == 1 and single_key
+                  and self._selected.get("key") == single_key and not kept_by_user
+                  and self.removeDeleted([single_key])):
+                reload = False
+            else:
+                reload = True
+            self._settle(message, reload=reload)
             return
         if action == "scan_duplicates":
+            dup_synced = bool(getattr(self._repository, "_dup_synced_changes", False))
+            if hasattr(self._repository, "_dup_synced_changes"):
+                self._repository._dup_synced_changes = False
             self._release_exclusive()
             if not isinstance(selection, int):
                 self._status = message
@@ -3748,24 +3868,31 @@ class LibraryController(QObject):
             self._duplicate_count_stamp += 1
             self._duplicate_counts_loaded = True
             self.duplicateCountChanged.emit()
-            self._settle(message, reload=self._duplicate_only)
+            self._settle(message, reload=self._duplicate_only or dup_synced)
             return
         if action in ("scan_ai_tags", "reclassify"):
             self._release_exclusive()
             self._reload_ai_rules()     # what the tags learned, for the AI tag manager
             wrote = bool(getattr(self._repository, "_ai_wrote", False))
+            synced = bool(getattr(self._repository, "_ai_synced_changes", False))
             if hasattr(self._repository, "_ai_wrote"):
                 self._repository._ai_wrote = False
+            if hasattr(self._repository, "_ai_synced_changes"):
+                self._repository._ai_synced_changes = False
             if selection is None:
-                if wrote:
+                if wrote or synced:
                     self._user_tags_loaded = False
-                    self._settle(message, reload=bool(self._ai_category))
+                    if synced:
+                        self._counts_loaded = False
+                    self._settle(message, reload=synced or bool(self._ai_category))
                 else:
                     self._status = message
                     self.changed.emit()
                 return
             self._user_tags_loaded = False
-            self._settle(message, reload=bool(self._ai_category))
+            if synced:
+                self._counts_loaded = False
+            self._settle(message, reload=synced or bool(self._ai_category))
             return
         if action == "clear_ai_tags":
             self._release_exclusive()
@@ -3809,7 +3936,12 @@ class LibraryController(QObject):
             self._selected = selection or {}
         self._busy = False
         # Browsing while a scan runs must not replace the scan's progress line.
-        if not (self._exclusive and action in {"select", "open", "reveal", "source"} and not message):
+        if action == "select":
+            preserve = (serial == self._preserve_status_serial)
+            self._preserve_status_serial = 0
+        else:
+            preserve = False
+        if not (action in {"select", "open", "reveal", "source"} and not message and (self._exclusive or preserve)):
             self._status = message
         self.changed.emit()
 

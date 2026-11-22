@@ -219,6 +219,35 @@ class MovedFolderTests(unittest.TestCase):
         with self.store(other) as store:
             self.assertEqual([row["tweet_id"] for row in store.records()], ["2000"])
 
+    def test_adopt_moved_folder_ignores_ai_guesses_keeps_user_source_and_newer_feedback(self):
+        self.library()
+        with self.store(self.output) as store:
+            store.add_tag("flat", "1001", 1, "photo", "고양이")
+            store.set_tag_feedback([("flat", "1002", 1, "photo")], "인물", True)
+            store._db.execute(
+                "UPDATE ai_tag_feedback SET updated_at='2099-01-01T00:00:00' WHERE tweet_id='1002' AND tag='인물'"
+            )
+            store._db.commit()
+        moved = self.move()
+        with self.store(moved) as store:
+            store.replace_ai_tags([("flat", "1003", 1, "photo", ["동물"])])
+            store._db.execute(
+                "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                "VALUES ('flat','1001',1,'photo','고양이','confirmed','2099-01-01') "
+                "ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO UPDATE SET source='confirmed'"
+            )
+            store.set_tag_feedback([("flat", "1002", 1, "photo")], "인물", False)
+            store._db.execute(
+                "UPDATE ai_tag_feedback SET updated_at='2020-01-01T00:00:00' WHERE tweet_id='1002' AND tag='인물'"
+            )
+            store._db.commit()
+        self.assertIn("options", self.chosen(moved, {"relocate"}))
+        with self.store(moved) as store:
+            self.assertEqual(store.ai_tags_of("flat", "1003", 1, "photo"), [])
+            tags_1001 = store.item_tags("flat", "1001", 1, "photo")
+            self.assertEqual([t["source"] for t in tags_1001 if t["tag"] == "고양이"], ["user"])
+            self.assertEqual(store.tag_feedback([("flat", "1002", 1, "photo")])[("flat", "1002", 1, "photo")]["인물"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

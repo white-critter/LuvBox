@@ -119,6 +119,8 @@ class InstanceGuard(QObject):
         end = time.monotonic() + deadline
         while time.monotonic() < end:
             if self._ask_to_show():
+                self._windows.kernel.CloseHandle(self._mutex)
+                self._mutex = None
                 return False
             if self._take(250):
                 return True

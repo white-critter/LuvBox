@@ -80,7 +80,7 @@ def plan_extension_launch(browser, running, folder):
     if browser is None:
         return {"status": "지원하는 브라우저를 찾지 못했습니다. Chrome·Edge·Firefox 설치 상태를 확인해 주세요."}
     if browser.name.lower() == "firefox.exe":
-        return {"status": "Firefox에서 ‘임시 부가 기능 로드’를 누른 뒤 표시된 폴더의 manifest.json을 선택하세요. "
+        return {"status": "Firefox에서 ‘임시 부가 기능 로드’를 누른 뒤 표시된 폴더의 manifest.json 파일을 선택하세요. "
                 "임시 확장은 Firefox를 다시 시작하면 제거됩니다."}
     return {"status": "확장은 자동으로 설치되지 않습니다. 확장 관리에서 개발자 모드를 켜고 한 번만 직접 불러와 주세요. "
             "폴더 창이 ‘문서’에서 열려도 그 폴더를 선택하지 마세요. 복사된 경로를 주소창에 붙여 넣어 "
@@ -115,7 +115,7 @@ class BrowserSetupController(QObject):
             self._thread.start()
         except RuntimeError:
             self._thread = None
-            self._error = "설정 도우미를 시작하지 못했습니다. LuvBox를 다시 열어 주세요."
+            self._error = "브라우저 연결 준비를 시작하지 못했습니다. LuvBox를 다시 열어 주세요."
         else:
             self._start("discover")
 
@@ -298,7 +298,7 @@ class BrowserSetupController(QObject):
             return {"status": plan["status"], "path": str(folder), "clipboard": str(folder),
                     "reveal": str(folder)}
         if operation == "prepare":
-            return {"status": "Firefox에서는 이 폴더의 manifest.json을 선택하세요." if kind == "firefox" else
+            return {"status": "Firefox에서는 이 폴더의 manifest.json 파일을 선택하세요." if kind == "firefox" else
                               "아래에 표시된 폴더만 선택하세요. ‘문서’ 폴더를 고르면 확장이 불러와지지 않습니다.",
                     "path": str(folder)}
         if operation == "copy":

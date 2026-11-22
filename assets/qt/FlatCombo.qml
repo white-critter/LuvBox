@@ -1,5 +1,7 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Window
 
 ComboBox {
     id: control
@@ -32,7 +34,7 @@ ComboBox {
     // A closed list must keep its choice when the pointer wheel passes over it.
     wheelEnabled: false
     // Measures the widest choice, so the list fits its labels and no more.
-    implicitContentWidthPolicy: ComboBox.WidestText
+    implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
     HoverHandler {
         cursorShape: control.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
     }
@@ -75,13 +77,13 @@ ComboBox {
         const letter = event.text
         if (letter.length !== 1 || letter <= " " || letter === "\u007f")
             return
-        // Taken here, so the list's own one-letter search never applies a row of a closed list.
-        event.accepted = true
         // Ctrl, Alt or Meta alone make a shortcut, not a letter (Ctrl with Alt is AltGr, which
         // types "@" on some keyboards).
         const held = event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier)
         if (held && held !== (Qt.ControlModifier | Qt.AltModifier))
             return
+        // Taken here, so the list's own one-letter search never applies a row of a closed list.
+        event.accepted = true
         const now = Date.now()
         const fresh = now - control.typedAt > 1000
         control.typedAt = now
@@ -136,6 +138,7 @@ ComboBox {
             visible: control.label.length > 0
             anchors.verticalCenter: parent.verticalCenter
             text: control.label
+            textFormat: Text.PlainText
             font: control.font
             color: control.enabled ? Theme.textFaint : Theme.textDisabled
         }
@@ -146,6 +149,7 @@ ComboBox {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: control.displayText
+            textFormat: Text.PlainText
             font: control.font
             color: {
                 if (!control.enabled)
@@ -198,6 +202,7 @@ ComboBox {
         }
         contentItem: Text {
             text: row.text
+            textFormat: Text.PlainText
             font: row.font
             color: control.currentIndex === row.index ? Theme.accentText : Theme.text
             verticalAlignment: Text.AlignVCenter
@@ -211,7 +216,8 @@ ComboBox {
 
     popup: Popup {
         y: control.height + 6
-        width: Math.max(control.width, control.minimumPopupWidth, control.implicitContentWidth + 32)
+        width: Math.min(control.Window.window ? Math.max(160, control.Window.window.width - 16) : 640,
+            Math.max(control.width, control.minimumPopupWidth, control.implicitContentWidth + 32))
         // Stay inside the window, e.g. for a combo at its right edge.
         margins: 8
         padding: 4

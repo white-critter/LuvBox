@@ -32,6 +32,7 @@ MenuItem {
             anchors.rightMargin: item.hint.length ? 12 : 0
             anchors.verticalCenter: parent.verticalCenter
             text: item.text
+            textFormat: Text.PlainText
             font: item.font
             color: !item.enabled ? Theme.textDisabled : (item.checked ? Theme.accentText : Theme.text)
             elide: Text.ElideRight
@@ -41,6 +42,7 @@ MenuItem {
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: item.hint
+            textFormat: Text.PlainText
             font.pixelSize: Theme.fontCaption
             color: item.enabled ? Theme.textFaint : Theme.textDisabled
         }

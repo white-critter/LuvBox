@@ -476,7 +476,7 @@ def run_saved(*, full: bool = False) -> int:
     except AppDataError as exc:
         # Nothing can be logged without the data folder; say why right away
         # instead of ending in an unhandled error.
-        return cannot_start(f"{exc}\n\n앱을 열어 데이터 폴더를 정리해 주세요.")
+        return cannot_start(f"{exc}\n\n앱을 열어 LuvBox 기록 폴더를 정리해 주세요.")
     try:
         directory.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(_KOREA).strftime("%Y%m%d-%H%M%S")
@@ -531,7 +531,7 @@ def run_saved(*, full: bool = False) -> int:
         try:
             if log_failed:
                 raise OSError("log write failed")
-            settings = load_settings()
+            settings = load_settings(strict=True)
             outcome.update(account=settings.get("account", "") if isinstance(settings.get("account"), str) else "",
                            output_dir=settings.get("output_dir", "") if isinstance(settings.get("output_dir"), str) else "")
             options = _options_from_settings(settings, full)

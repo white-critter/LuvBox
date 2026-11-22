@@ -26,13 +26,15 @@ import os
 from pathlib import Path
 
 from .local_store import LocalFolderError, LocalFolderStore
+from .protection import ProtectionError
 from .recycling import RecyclingError, file_signature, recycle_file
+from .storage import OutputGuard
 from .thumbcache import cloud_only
 
 
 def run_local_deletion(root, rows, stop, emit) -> dict:
     """Move the confirmed files of the folder ``root``. ``emit`` gets progress and the result."""
-    from .deletion import kept_alike, kept_copy
+    from .deletion import _NEAR_ONLY, kept_alike, kept_copy
 
     candidates = []
     seen = set()
@@ -44,17 +46,29 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
             candidates.append(dict(row))
     result = dict(total=len(candidates), recycled=0, failed=0, cancelled=0, protected=0, paths=[], message="")
     processed = 0
+    near_kept = False
     failures = []
     protected_reasons = []
+    if not candidates or stop.is_set():
+        result["cancelled"] = len(candidates)
+        result["message"] = "휴지통 이동 0개"
+        if result["cancelled"]:
+            result["message"] += f" · 처리하지 않은 파일 {result['cancelled']:,}개"
+        emit(dict(result, type="done", processed=0))
+        return result
+    guard = OutputGuard(root)
     try:
-        store = LocalFolderStore(root)
-    except LocalFolderError as exc:
+        guard.acquire()
+    except ProtectionError as exc:
+        guard.close()
         result["failed"] = len(candidates)
         result["message"] = str(exc)
         emit(dict(result, type="done", processed=0))
         return result
+    store = None
     gone = []
     try:
+        store = LocalFolderStore(root)
         for row in candidates:
             if stop.is_set():
                 break
@@ -68,7 +82,7 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
                 signature = file_signature(path)
                 expected = row.get("_delete_signature")
                 if not isinstance(expected, (list, tuple)) or tuple(expected) != signature:
-                    raise RecyclingError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로 고침해 주세요.")
+                    raise RecyclingError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
                 if "_alike_keeper" in row:
                     if (len(candidates) != 1 or "_copy_keepers" in row
                             or not kept_alike(store, path, signature, row.get("_alike_keeper"),
@@ -82,6 +96,7 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
                 elif "_copy_keepers" in row and not kept_copy(store, path, signature, row.get("_copy_keepers")):
                     reason = f"{name}: 같은 파일이 남지 않아 그대로 두었습니다."
                     result["protected"] += 1
+                    near_kept = near_kept or row.get("_copy_rule") == "near"
                     processed += 1
                     protected_reasons.append(reason)
                     emit(dict(result, type="progress", processed=processed, message=reason))
@@ -111,17 +126,30 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
                 store.mark_gone([rel for rel in gone if isinstance(rel, str)])
             except LocalFolderError:
                 pass              # the next reading of the folder finds them gone
+    except LocalFolderError as exc:
+        result["failed"] = len(candidates) - result["recycled"] - result["protected"]
+        result["message"] = str(exc)
+        emit(dict(result, type="done", processed=processed))
+        return result
     finally:
-        store.close()
+        if store is not None:
+            store.close()
+        guard.close()
     result["cancelled"] = result["total"] - processed
     if len(candidates) == 1 and result["protected"] == 1 and protected_reasons and not failures:
         result["message"] = protected_reasons[0]
+        if near_kept:
+            result["message"] += "\n" + _NEAR_ONLY
     else:
-        result["message"] = f"휴지통 이동 {result['recycled']:,}개 · 실패 {result['failed']:,}개"
+        result["message"] = f"휴지통 이동 {result['recycled']:,}개"
+        if result["failed"]:
+            result["message"] += f" · 실패 {result['failed']:,}개"
         if result["protected"]:
             result["message"] += f" · 그대로 둔 파일 {result['protected']:,}개"
         if result["cancelled"]:
             result["message"] += f" · 처리하지 않은 파일 {result['cancelled']:,}개"
+        if result["protected"] and near_kept:
+            result["message"] += "\n" + _NEAR_ONLY
         notes = [*failures, *protected_reasons]
         if notes:
             result["message"] += "\n" + "\n".join(notes[:3]) + (f"\n외 {len(notes) - 3:,}개" if len(notes) > 3 else "")

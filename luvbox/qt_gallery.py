@@ -167,6 +167,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             if self._closed:
                 return
             self._wanted = set(wanted)
+            self._notified = {key: stamp for key, stamp in self._notified.items() if key in self._wanted}
             generation = self._registry_generation
             self._target_size = (width, height)
             self._failures = {item for item in self._failures
@@ -227,9 +228,9 @@ class SafeThumbnailProvider(QQuickImageProvider):
         if not scheduled:
             return self._decode_for_request(key, path, width, height, size)
         with self._lock:
-            if self._closed:
+            if self._closed or self._registry.get(key) != path:
                 return self._output(QImage(), size)
-            priority = 0 if key in self._wanted else 1_000_000
+            priority = 0 if (self._wanted is not None and key in self._wanted) else 1_000_000
             if (key, width, height) not in self._inflight:
                 self._enqueue_locked(key, width, height, priority)
             self._start_workers_locked()
@@ -718,6 +719,9 @@ class GalleryModel(QAbstractListModel):
                     detail = row.get("detail", "")
                     if isinstance(detail, str) and detail:
                         entry["detail"] = detail[:80]
+                    media_type = row.get("media_type", "")
+                    if media_type in ("photo", "video", "animated_gif"):
+                        entry["media_type"] = media_type
                     cleaned.append(entry)
                 result = generation, offset, total, cleaned, ""
             except Exception:

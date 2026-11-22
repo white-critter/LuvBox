@@ -178,6 +178,7 @@ class LocalFolderStore:
     def __init__(self, root, *, path: Path | None = None):
         self.root = check_root(root)
         self._tx_lock = threading.RLock()
+        self._folder_cache: dict | None = None
         try:
             self.path = Path(path) if path is not None else store_path(self.root)
             top = app_directory()
@@ -304,6 +305,12 @@ class LocalFolderStore:
         rows = self._read("SELECT value FROM local_meta WHERE key=?", (key,))
         return rows[0]["value"] if rows else default
 
+    def _meta_with(self, db, key, default=""):
+        if db is None:
+            return self.meta(key, default)
+        row = db.execute("SELECT value FROM local_meta WHERE key=?", (key,)).fetchone()
+        return row[0] if row is not None else default
+
     def set_meta(self, key, value):
         with self._write() as db:
             db.execute("INSERT OR REPLACE INTO local_meta(key, value) VALUES (?,?)", (key, str(value)))
@@ -314,13 +321,34 @@ class LocalFolderStore:
         if not isinstance(rel_path, str) or not rel_path or rel_path.startswith(("/", "\\")) or ".." in rel_path.split("/"):
             return None
         path = self.root.joinpath(*rel_path.split("/"))
-        try:
-            for part in (path, *path.parents):
-                if part == self.root:
-                    break
-                if _linked(part):
+        cache = getattr(self, "_folder_cache", None)
+        if cache is None:
+            try:
+                for part in (path, *path.parents):
+                    if part == self.root:
+                        break
+                    if _linked(part):
+                        return None
+                if not path.resolve().is_relative_to(self.root):
                     return None
-            if not path.resolve().is_relative_to(self.root):
+            except (OSError, ValueError):
+                return None
+            return path
+        try:
+            parent = path.parent
+            safe_parent = cache.get(parent)
+            if safe_parent is None:
+                safe_parent = True
+                for part in (parent, *parent.parents):
+                    if part == self.root:
+                        break
+                    if _linked(part):
+                        safe_parent = False
+                        break
+                if safe_parent and not parent.resolve().is_relative_to(self.root):
+                    safe_parent = False
+                cache[parent] = safe_parent
+            if not safe_parent or _linked(path) or not path.resolve().is_relative_to(self.root):
                 return None
         except (OSError, ValueError):
             return None
@@ -389,12 +417,14 @@ class LocalFolderStore:
 
     @staticmethod
     def _prune_singleton_clusters(db) -> None:
-        """Clear positive cluster_id when fewer than two present files remain in that group."""
+        """Clear positive cluster_id when fewer than two present files remain and no distinct twin holds -cid."""
         db.execute(
             "UPDATE local_files SET cluster_id=0 WHERE present=1 AND cluster_id>0 "
             "AND cluster_id IN ("
             "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
-            "GROUP BY cluster_id HAVING COUNT(*) < 2)"
+            "GROUP BY cluster_id HAVING COUNT(*) < 2) "
+            "AND NOT EXISTS (SELECT 1 FROM local_files AS neg "
+            "WHERE neg.present=1 AND neg.cluster_id = -local_files.cluster_id)"
         )
 
     def sync_folder(self, include_subfolders: bool = True, check_cancel=None) -> dict:
@@ -510,7 +540,11 @@ class LocalFolderStore:
                            "AND t.source IN ('ai','confirmed','user'))")
             params.append(tag)
         if duplicate_only:
-            clauses.append("f.cluster_id>0")
+            clauses.append(
+                "f.cluster_id>0 AND f.cluster_id IN ("
+                "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
+                "GROUP BY cluster_id HAVING COUNT(*) >= 2)"
+            )
         return " WHERE " + " AND ".join(clauses), params
 
     def records(self, offset=0, limit=200, *, order="modified", **filters) -> tuple[int, list[dict]]:
@@ -540,7 +574,7 @@ class LocalFolderStore:
         shown = f"SELECT f.rel_path FROM local_files f{where}"
         count_rows, rows = self._read_snapshot([
             (f"SELECT COUNT(*) AS n FROM ({shown})", params),
-            (f"SELECT * FROM ({ranked}) AS g WHERE g.rel_path IN ({shown}) "
+            (f"SELECT * FROM ({ranked}) AS g WHERE g.cluster_size >= 2 AND g.rel_path IN ({shown}) "
              "ORDER BY g.cluster_id ASC, g.cluster_rank ASC LIMIT ? OFFSET ?", (*params, int(limit), int(offset))),
         ])
         total = count_rows[0]["n"]
@@ -552,8 +586,11 @@ class LocalFolderStore:
     def duplicate_members(self) -> dict[int, list[str]]:
         """``{group: [rel_path, ...]}``, the photo kept first."""
         groups: dict[int, list[str]] = {}
-        for row in self._read("SELECT rel_path, cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
-                              "ORDER BY cluster_id, favorite DESC, filesize DESC, rel_path"):
+        for row in self._read(
+                "SELECT rel_path, cluster_id FROM local_files WHERE present=1 AND cluster_id IN ("
+                "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
+                "GROUP BY cluster_id HAVING COUNT(*) >= 2) "
+                "ORDER BY cluster_id, favorite DESC, filesize DESC, rel_path"):
             groups.setdefault(int(row["cluster_id"]), []).append(row["rel_path"])
         return groups
 
@@ -632,30 +669,36 @@ class LocalFolderStore:
                 db.execute("DELETE FROM local_ai_feedback WHERE rel_path=? AND tag=? AND label<0", (rel, clean))
         return len(rels)
 
-    def remove_tag(self, rel_path, tag) -> str:
-        """Take a tag away; returns the source it had ('' when there was none).
-
-        An AI tag taken away is a "not this" for that tag, remembered and learned
-        from. A tag the person typed simply goes (it may have been a typo).
-        """
+    def remove_tag_result(self, rel_path, tag) -> tuple[str, bool]:
+        """Take a tag away; returns ``(source, confirmed_restored)``."""
         clean = normalize_tag(tag)
         if not clean:
-            return ""
+            return "", False
+        confirmed_restored = False
         with self._write() as db:
             row = db.execute("SELECT source FROM local_tags WHERE rel_path=? AND tag=?", (rel_path, clean)).fetchone()
             if row is None:
-                return ""
+                return "", False
             source = row["source"]
             if source in ("ai", "confirmed"):
                 self._apply_feedback(db, [rel_path], clean, -1, _now())
-                return source
+                return source, False
             db.execute("DELETE FROM local_tags WHERE rel_path=? AND tag=?", (rel_path, clean))
             taught = db.execute("SELECT label FROM local_ai_feedback WHERE rel_path=? AND tag=?",
                                 (rel_path, clean)).fetchone()
             if taught is not None and taught["label"] > 0:
                 db.execute("INSERT INTO local_tags(rel_path, tag, source, created_at) VALUES (?,?,'confirmed',?) "
                            "ON CONFLICT DO NOTHING", (rel_path, clean, _now()))
-        return source
+                confirmed_restored = True
+        return source, confirmed_restored
+
+    def remove_tag(self, rel_path, tag) -> str:
+        """Take a tag away; returns the source it had ('' when there was none).
+
+        An AI tag taken away is a "not this" for that tag, remembered and learned
+        from. A tag the person typed simply goes (it may have been a typo).
+        """
+        return self.remove_tag_result(rel_path, tag)[0]
 
     @staticmethod
     def _apply_feedback(db, rels, tag, label, stamp):
@@ -682,12 +725,15 @@ class LocalFolderStore:
             return 0
         with self._write() as db:
             self._apply_feedback(db, rels, clean, 1 if positive else -1, _now())
+            db.execute("DELETE FROM local_meta WHERE key='ai_cleared'")
         return len(rels)
 
-    def refuse_ai_tags(self, rel_paths) -> int:
+    def refuse_ai_tags(self, rel_paths, active_tags=None) -> int:
         rels = [rel for rel in rel_paths if isinstance(rel, str)]
         if not rels:
             return 0
+        active = ({tag for tag in (normalize_tag(item) for item in active_tags) if tag}
+                  if active_tags is not None else None)
         stamp = _now()
         seen_rels = set()
         with self._write() as db:
@@ -696,13 +742,15 @@ class LocalFolderStore:
                     continue
                 seen_rels.add(rel)
                 shown = sorted({row["tag"] for row in db.execute(
-                    "SELECT tag FROM local_tags WHERE rel_path=? AND source IN ('ai','confirmed') AND tag!=''", (rel,))})
+                    "SELECT tag FROM local_tags WHERE rel_path=? AND source IN ('ai','confirmed') AND tag!=''", (rel,))
+                    if active is None or row["tag"] in active})
                 if shown:
                     for tag in shown:
                         self._apply_feedback(db, [rel], tag, -1, stamp)
                 else:
                     db.execute("INSERT INTO local_tags(rel_path, tag, source, created_at) VALUES (?,'','ai',?) "
                                "ON CONFLICT(rel_path, tag) DO UPDATE SET source='ai'", (rel, stamp))
+            db.execute("DELETE FROM local_meta WHERE key='ai_cleared'")
         return len(rels)
 
     def tag_feedback(self, rel_paths=None) -> dict[str, dict[str, int]]:
@@ -726,7 +774,11 @@ class LocalFolderStore:
             count = db.execute("SELECT COUNT(*) FROM local_tags WHERE source='ai' AND tag!=''").fetchone()[0]
             db.execute("DELETE FROM local_tags WHERE source='ai'")
             db.execute("DELETE FROM local_meta WHERE key IN ('ai_scored_rules_version','ai_scored_model_id')")
+            db.execute("INSERT OR REPLACE INTO local_meta(key, value) VALUES ('ai_cleared', '1')")
         return int(count)
+
+    def ai_cleared(self) -> bool:
+        return self.meta("ai_cleared") == "1"
 
     def ai_tag_counts(self, tags) -> dict[str, int]:
         names = [tag for tag in dict.fromkeys(normalize_tag(tag) for tag in tags) if tag and len(tag) <= TAG_LIMIT]
@@ -858,6 +910,8 @@ class LocalFolderStore:
                                    (rel, tag, stamp))
                     changed += 1
                     tagged += final != {""}
+                if any(final != {""} for _rel, final in updates):
+                    db.execute("DELETE FROM local_meta WHERE key='ai_cleared'")
         return changed, tagged
 
     def store_ai_tags(self, pairs) -> tuple[int, int]:
@@ -942,6 +996,7 @@ class LocalFolderStore:
                        (str(int(rules_version)),))
             db.execute("INSERT OR REPLACE INTO local_meta(key, value) VALUES ('ai_scored_model_id', ?)",
                        (str(model_id),))
+            db.execute("DELETE FROM local_meta WHERE key='ai_cleared'")
 
     # -- duplicates -------------------------------------------------------------------------
     def photos_to_hash(self) -> list[dict]:
@@ -950,25 +1005,41 @@ class LocalFolderStore:
                           "AND cloud=0 AND media_type='photo' AND file_signature='' AND (file_hash='' OR dhash='')")
 
     def save_hashes(self, rows) -> int:
-        """rows are (rel_path, file_hash, dhash, file_signature)."""
-        if not rows:
+        """rows are (rel_path, file_hash, dhash, file_signature[, filesize, mtime_ns])."""
+        items = list(rows)
+        if not items:
             return 0
+        plain, sized = [], []
+        for row in items:
+            if len(row) >= 6:
+                rel, file_hash, dhash, signature, filesize, mtime_ns = row[:6]
+                sized.append((file_hash, dhash, signature, int(filesize), int(mtime_ns), rel))
+            else:
+                rel, file_hash, dhash, signature = row[:4]
+                plain.append((file_hash, dhash, signature, rel))
         with self._write() as db:
-            db.executemany("UPDATE local_files SET file_hash=?, dhash=?, file_signature=? WHERE rel_path=?",
-                           [(file_hash, dhash, signature, rel) for rel, file_hash, dhash, signature in rows])
-        return len(rows)
+            if plain:
+                db.executemany("UPDATE local_files SET file_hash=?, dhash=?, file_signature=? WHERE rel_path=?",
+                               plain)
+            if sized:
+                db.executemany(
+                    "UPDATE local_files SET file_hash=?, dhash=?, file_signature=?, filesize=?, mtime_ns=? "
+                    "WHERE rel_path=?",
+                    sized,
+                )
+        return len(items)
 
     def hashed_photos(self) -> list[dict]:
-        return self._read("SELECT rowid AS rowid, rel_path, filesize, file_hash, dhash, favorite FROM local_files "
-                          "WHERE present=1 AND cloud=0 AND media_type='photo' AND file_hash!=''")
+        return self._read("SELECT rowid AS rowid, rel_path, filesize, file_hash, dhash, file_signature, favorite "
+                          "FROM local_files WHERE present=1 AND cloud=0 AND media_type='photo' AND file_hash!=''")
 
     def duplicate_rule(self) -> str:
         value = self.meta("duplicate_rule")
         return value if value in ("exact", "near") else ""
 
-    def _distinct_sets(self) -> list[frozenset]:
+    def _distinct_sets(self, db=None) -> list[frozenset]:
         try:
-            stored = json.loads(self.meta("duplicate_distinct", "[]"))
+            stored = json.loads(self._meta_with(db, "duplicate_distinct", "[]"))
         except (TypeError, ValueError):
             return []
         sets = []
@@ -978,9 +1049,9 @@ class LocalFolderStore:
                 sets.append(members)
         return sets
 
-    def _photo_marks(self) -> list[tuple[frozenset, frozenset]]:
+    def _photo_marks(self, db=None) -> list[tuple[frozenset, frozenset]]:
         try:
-            stored = json.loads(self.meta("duplicate_distinct_photos", "[]"))
+            stored = json.loads(self._meta_with(db, "duplicate_distinct_photos", "[]"))
         except (TypeError, ValueError):
             return []
         marks = []
@@ -1048,10 +1119,11 @@ class LocalFolderStore:
                        (rule if rule in ("exact", "near") else "exact",))
         return grouped
 
-    def _group_members(self, number) -> list[str]:
-        return [row["rel_path"] for row in self._read(
-            "SELECT rel_path FROM local_files WHERE cluster_id=? AND present=1 ORDER BY favorite DESC, filesize DESC, "
-            "rel_path", (number,))]
+    def _group_members(self, number, db=None) -> list[str]:
+        sql = ("SELECT rel_path FROM local_files WHERE cluster_id=? AND present=1 "
+               "ORDER BY favorite DESC, filesize DESC, rel_path")
+        rows = db.execute(sql, (number,)).fetchall() if db is not None else self._read(sql, (number,))
+        return [row["rel_path"] for row in rows]
 
     def _regroup_numbers(self, db, numbers, sets) -> None:
         from .duplicates import split_distinct
@@ -1096,54 +1168,70 @@ class LocalFolderStore:
         return len(self._distinct_sets()) + len(self._photo_marks())
 
     def duplicate_count(self) -> int:
-        return int(self._read("SELECT COUNT(*) AS n FROM local_files WHERE cluster_id>0 AND present=1")[0]["n"])
+        return int(self._read(
+            "SELECT COUNT(*) AS n FROM local_files WHERE present=1 AND cluster_id IN ("
+            "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
+            "GROUP BY cluster_id HAVING COUNT(*) >= 2)")[0]["n"])
 
     def set_group_distinct(self, rel_path) -> list | None:
-        rows = self._read("SELECT cluster_id FROM local_files WHERE rel_path=?", (rel_path,))
-        if not rows or rows[0]["cluster_id"] <= 0:
-            return None
-        number = rows[0]["cluster_id"]
-        members = self._group_members(number)
-        if len(members) < 2:
-            return None
-        sets = self._distinct_sets()
-        if frozenset(members) not in sets:
-            sets.append(frozenset(members))
         with self._write() as db:
+            row = db.execute("SELECT cluster_id FROM local_files WHERE rel_path=?", (rel_path,)).fetchone()
+            if row is None or row["cluster_id"] <= 0:
+                return None
+            number = row["cluster_id"]
+            members = self._group_members(number, db)
+            if len(members) < 2:
+                return None
+            sets = self._distinct_sets(db)
+            if frozenset(members) not in sets:
+                sets.append(frozenset(members))
             self._store_marks(db, sets=sets)
-            self._regroup_numbers(db, [number], self._distinct_with(sets, self._photo_marks()))
-        return sorted(members)
+            self._regroup_numbers(db, [number], self._distinct_with(sets, self._photo_marks(db)))
+            return sorted(members)
 
     def set_photos_distinct(self, rel_paths) -> dict | None:
-        chosen = {rel for rel in rel_paths if isinstance(rel, str)}
-        numbers = set()
-        for rel in chosen:
-            rows = self._read("SELECT cluster_id FROM local_files WHERE rel_path=?", (rel,))
-            if not rows or rows[0]["cluster_id"] <= 0:
-                return None
-            numbers.add(rows[0]["cluster_id"])
-        if len(numbers) != 1:
+        chosen = sorted({rel for rel in rel_paths if isinstance(rel, str)})
+        if not chosen:
             return None
-        number = numbers.pop()
-        members = self._group_members(number)
-        photos = [member for member in members if member in chosen]
-        if len(photos) != len(chosen) or len(photos) >= len(members):
-            return None
-        marks = self._photo_marks()
-        mark = (frozenset(photos), frozenset(members))
-        if mark not in marks:
-            marks.append(mark)
         with self._write() as db:
+            numbers = set()
+            found = 0
+            for start in range(0, len(chosen), 500):
+                batch = chosen[start:start + 500]
+                marks_sql = ",".join("?" for _ in batch)
+                rows = db.execute(f"SELECT cluster_id FROM local_files WHERE rel_path IN ({marks_sql})", batch).fetchall()
+                found += len(rows)
+                for row in rows:
+                    if row["cluster_id"] <= 0:
+                        return None
+                    numbers.add(row["cluster_id"])
+            if found != len(chosen) or len(numbers) != 1:
+                return None
+            number = numbers.pop()
+            members = self._group_members(number, db)
+            chosen_set = set(chosen)
+            photos = [member for member in members if member in chosen_set]
+            if len(photos) != len(chosen_set) or len(photos) >= len(members):
+                return None
+            marks = self._photo_marks(db)
+            mark = (frozenset(photos), frozenset(members))
+            if mark not in marks:
+                marks.append(mark)
             self._store_marks(db, marks=marks)
-            self._regroup_numbers(db, [number], self._distinct_with(self._distinct_sets(), marks))
-        return {"photos": sorted(photos), "group": sorted(members)}
+            self._regroup_numbers(db, [number], self._distinct_with(self._distinct_sets(db), marks))
+            return {"photos": sorted(photos), "group": sorted(members)}
 
     def _numbers_of(self, db, members) -> set[int]:
+        items = [member for member in members if isinstance(member, str)]
+        if not items:
+            return set()
         numbers = set()
-        for member in members:
-            row = db.execute("SELECT cluster_id FROM local_files WHERE rel_path=?", (member,)).fetchone()
-            if row and row[0]:
-                numbers.add(abs(row[0]))
+        for start in range(0, len(items), 500):
+            batch = items[start:start + 500]
+            marks_sql = ",".join("?" for _ in batch)
+            for row in db.execute(f"SELECT cluster_id FROM local_files WHERE rel_path IN ({marks_sql})", batch):
+                if row[0]:
+                    numbers.add(abs(row[0]))
         return numbers
 
     def undo_photos_distinct(self, mark) -> bool:
@@ -1151,13 +1239,13 @@ class LocalFolderStore:
             target = (frozenset(mark["photos"]), frozenset(mark["group"]))
         except (TypeError, KeyError):
             return False
-        marks = self._photo_marks()
-        if target not in marks:
-            return False
-        marks.remove(target)
         with self._write() as db:
+            marks = self._photo_marks(db)
+            if target not in marks:
+                return False
+            marks.remove(target)
             self._store_marks(db, marks=marks)
-            effective = self._distinct_with(self._distinct_sets(), marks)
+            effective = self._distinct_with(self._distinct_sets(db), marks)
             numbers = self._numbers_of(db, target[1])
             if numbers:
                 self._regroup_numbers(db, numbers, effective)
@@ -1165,23 +1253,23 @@ class LocalFolderStore:
 
     def undo_group_distinct(self, members) -> bool:
         target = frozenset(item for item in members or () if isinstance(item, str))
-        sets = self._distinct_sets()
-        if target not in sets:
-            return False
-        sets.remove(target)
         with self._write() as db:
+            sets = self._distinct_sets(db)
+            if target not in sets:
+                return False
+            sets.remove(target)
             self._store_marks(db, sets=sets)
-            effective = self._distinct_with(sets, self._photo_marks())
+            effective = self._distinct_with(sets, self._photo_marks(db))
             numbers = self._numbers_of(db, target)
             if numbers:
                 self._regroup_numbers(db, numbers, effective)
         return True
 
     def clear_distinct(self) -> int:
-        sets = self._distinct_sets()
-        marks = self._photo_marks()
-        count = len(sets) + len(marks)
         with self._write() as db:
+            sets = self._distinct_sets(db)
+            marks = self._photo_marks(db)
+            count = len(sets) + len(marks)
             groups = list(sets) + [group for _photos, group in marks]
             components: list[set[int]] = []
             for group in groups:

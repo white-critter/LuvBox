@@ -235,6 +235,20 @@ class LearnedTests(ProfileTestCase):
         self.assertTrue(store.delete_tag_weight("인물"))
         self.assertIn("인물", json.loads(store.summary())["tags"][1])
 
+    def test_sync_scope_and_remove_scope_examples_invalidate_stale_linear_weights(self):
+        store = self.open()
+        store.add_tag("고양이")
+        weights = bytes(range(256)) * 12
+        store.sync_scope("x", "lib/a", ["고양이"], [("x:1", "고양이", 1, ACTIVE_MODEL_ID, FEATURE)])
+        self.assertTrue(store.save_tag_weight("고양이", ACTIVE_MODEL_ID, "linear", weights, -1.0, 0.7, 5, 0))
+        store.sync_scope("x", "lib/a", ["고양이"], [])
+        self.assertNotIn("고양이", store.load_tag_weights())
+
+        store.sync_scope("x", "lib/a", ["고양이"], [("x:2", "고양이", 1, ACTIVE_MODEL_ID, FEATURE)])
+        self.assertTrue(store.save_tag_weight("고양이", ACTIVE_MODEL_ID, "linear", weights, -1.0, 0.7, 5, 0))
+        self.assertEqual(store.remove_scope_examples("x", "lib/a"), 1)
+        self.assertNotIn("고양이", store.load_tag_weights())
+
 
 @unittest.skipUnless(os.name == "nt", "Windows junctions")
 class LinkTests(ProfileTestCase):

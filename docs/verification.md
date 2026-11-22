@@ -10,6 +10,19 @@
 
 배포 검증은 `LuvBox.exe`의 체크섬과 꼬리표, 소스·라이선스 ZIP의 내용과 개인정보 제외를 확인합니다. 공개 뒤 올린 `LuvBox.exe`를 다시 받아 해시를 대조하고 한글·공백 경로에서, 격리한 `LOCALAPPDATA`로 실행합니다. 세부 로그와 화면은 `.test-output/`에 보관하며 배포 소스에 넣지 않습니다.
 
+## 2026-11-22 1.12.1 프로그램 검수
+
+- **계기·범위**: 1.12.0 배포 뒤 전체 프로그램 검수(성능 개선, 어색하거나 불편한 UI/UX 개선, 문제점·오류·오작동 수정, 안정성 검토 및 개선, 리팩토링, 프로그램 내외 문구·문서의 일반 사용자 친화적 수정 및 시스템·개발자 내용 비노출)입니다.
+- **고친 것·성능·UI/UX·문구**:
+  - AI 분류·가르치기·프로필(`clip_classifier.py`, `ai_pipeline.py`, `ai_profile.py`, `qt_library.py`, `qt_local_folder.py`): `_VERIFIED_LOCK`과 `_SESSION_LOCK`을 분리해 실제 ONNX 모델 첫 로드 시 `get_session()` → `is_model_ready()` 재진입 교착을 해결하고, 아직 특징이 없는 사진에 `분류 가르치기`를 실행할 때 `encode_missing_for_teach()`로 특징을 먼저 생성·저장하도록 보완했습니다. `classify()`에서 `rescore_all=False`일 때 우선 인코딩된 `encoded_first` 사진도 채점하고 `rescore_all=True`일 때 중복 재채점을 건너뛰며, `teach()` 취소 확인, `sync_tag_examples` 읽기 전용 연결 및 카탈로그 `epoch` 보존, `LocalFolderRepository` `_profile_lock` 직렬화, `remove_tag_detailed` / `remove_tag_result` 기반 비동기 태그 삭제와 `_preserve_status_serial` 안내 유지를 반영했습니다.
+  - 저장소·히스토리·폴더 정리·앱 제어(`storage.py`, `history.py`, `local_store.py`, `qt_local_folder.py`, `qt_app.py`, `settings.py`, `app_settings.py`): `_moved_snapshot_edits` / `_apply_moved_mark_edits`에서 갱신된 태그 삭제 누락 방지·`source`별 삭제·레거시 `ai_feedback` 정리·`_reconcile_tag_feedback`·`_LOOKED_AT` 복원, 병합 시 허용 루트 내 디스크 확인 제한, `media_tags_source` 중복 인덱스 제거, `replace_ai_tags` 형제 태그 청크 일괄 조회, `_ranked_duplicates` CTE 구체화 및 `duplicate_page(count_total=False)`, `local_store` 상위 폴더 캐시·쓰기 잠금 내부 일괄 조회·해시 저장 시 파일 크기/수정 시각 갱신, 폴더 정리 중복 보기 시 전체 미디어 종류 조회, 시작 설정 1회 읽기(`load_with_status` + `last_damaged`), `media_roots` 비동기 조회(`"overlap_roots"`), 폴더 정리 휴지통 작업 중 상호 잠금을 적용했습니다.
+  - 백엔드·업데이터·실행기·확장(`qt_gallery.py`, `qt_management.py`, `qt_records.py`, `qt_updater.py`, `updater.py`, `deletion.py`, `local_deletion.py`, `recovery.py`, `duplicates.py`, `preview.py`, `recycling.py`, `core.py`, `scheduled.py`, `single_instance.py`, `Launcher.cs`, `assets/browser-extension/*`): `_notified` 정리, `setLibrary` 세대 전환 시 뮤테이션·작업 상태 초기화, 런처 꼬리표 캐시 및 업데이트 취소 시 임시 다운로드 정리, 근사 중복 비교 전 확정 묶음 중간 저장, 2단계 EXIF 방향 태그 탐색, 손상 마커 폴더 재추출 및 시작 화면 고해상도 보간 해제, 확장 탭 닫힘 경쟁 상태 방어를 반영했습니다.
+  - QML 화면·리팩토링·문서(`TileSelectionCheck.qml`, `TileMissingPlaceholder.qml`, `MainWindow.qml`, `LocalFolderView.qml`, `AiTagManagerDialog.qml`, `FlatCombo.qml`, `FlatButton.qml`, `FlatMenuItem.qml`, `FlatSwitch.qml`, `UpdateNotice.qml`, `MediaPreview.qml`, `SavedDetails.qml`, `FocusScrollView.qml`, `DeleteConfirmation.qml`, `ShortcutHelp.qml`, `StatisticsDialog.qml`, `DuplicateReview.qml`, `UnsavedReview.qml`, `AlikeConfirmation.qml`, `RunHistoryDialog.qml`, `ConnectionDialog.qml`, `SchedulePanel.qml`, `docs/browser-login.md`, `docs/사용안내.txt`, `CHANGELOG.md`, `README.md`): 타일 선택·누락 표시 공통 컴포넌트 추출, `pragma ComponentBehavior: Bound` 및 `Text.PlainText` 적용, 폴더 정리 미리보기 여백 클릭 닫기·달력 바깥 클릭 닫기·미리보기 스크롤 초기화·키보드 조작·빈 화면 버튼 줄바꿈, `FlatCombo` 보조키 단축키 통과 및 팝업 폭 제한, `ShortcutHelp`·`StatisticsDialog`·목록 화면 키보드 스크롤/포커스 자동 노출을 적용하고, `docs/browser-login.md`의 기술·암호화·테스트 세부 내용을 `docs/security-review.md`로 옮긴 뒤 일반 사용자 안내로 재작성했습니다.
+- **새 검사**: `tests/test_regression_1121.py` 8개 모두 통과 및 `qt_qml_lint.py --summary --qmllint --diff=HEAD` 0건 확인.
+- **전체 실행**: `.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py" -v` — **2,011개 중 2,003개 통과·8개 생략(1,008.474초), 실패·오류 0**.
+- **소스 점검**: `pip check`, `tools/check_build_inputs.py`, `tools/package_release.py --check-guides`, `tools/release_key.py --check`, 격리된 `LOCALAPPDATA`·`QML_DISK_CACHE_PATH` 환경의 `entry.py --self-test`와 `entry.py --download-smoke`가 모두 종료 코드 0(`"ok": true`, `"version": "1.12.1"`, `"qml_errors": []`)으로 통과했습니다.
+- 실제 X 로그인·다운로드 및 Windows 작업 스케줄러의 실제 예약 실행은 검사 범위에서 제외했습니다.
+
 ## 2026-11-21 1.12.0 사용자 지정 AI 태그·폴더 정리 및 프로그램 검수
 
 - **계기·범위**: SigLIP 2 기반 사용자 지정 AI 태그·공통 AI 프로필(Phase 1)과 내 PC 폴더를 정리하는 ‘폴더 정리’ 탭(Phase 2) 구현 뒤 전체 프로그램 검수(성능 개선, 어색하거나 불편한 UI/UX 개선, 문제점·오류·오작동 수정, 안정성 개선, 리팩토링, 앱 내외 문구·문서의 일반 사용자 친화적 수정)입니다.

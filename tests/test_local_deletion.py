@@ -204,5 +204,31 @@ class AlikeTests(DeletionCase):
         self.assertEqual((result["recycled"], result["protected"]), (0, 1))
 
 
+class GuardAndNearGuidanceTests(DeletionCase):
+    def test_overlapping_output_guard_blocks_deletion_and_near_rule_adds_guidance(self):
+        from luvbox.deletion import _NEAR_ONLY
+        from luvbox.storage import OutputGuard
+
+        original = picture(self.folder / "keep.jpg")
+        shutil.copyfile(original, self.folder / "near_copy.jpg")
+        other = picture(self.folder / "other.jpg", (5, 20, 200))
+        with LocalFolderStore(self.folder) as store:
+            store.sync_folder(True)
+
+        guard = OutputGuard(self.folder)
+        guard.acquire()
+        try:
+            result, _events = self.run_rows([self.row("other.jpg")])
+        finally:
+            guard.close()
+        self.assertEqual((result["recycled"], result["failed"]), (0, 1))
+        self.assertTrue(other.exists())
+
+        near_row = self.row("near_copy.jpg", _copy_keepers=[str(other)], _copy_rule="near", _copy_near=True)
+        result, _events = self.run_rows([near_row])
+        self.assertEqual((result["recycled"], result["protected"]), (0, 1))
+        self.assertIn(_NEAR_ONLY, result["message"])
+
+
 if __name__ == "__main__":
     unittest.main()

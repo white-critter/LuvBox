@@ -330,19 +330,21 @@ class RecordsController(QObject):
         context = (account, output_dir, bool(separate_accounts))
         if context == self._context or self._closing:
             return
-        self._generation += 1
-        self._context = context
+        with self._condition:
+            self._generation += 1
+            self._context = context
         self._counts = {reason: 0 for reason in unsaved.REASONS}
         self._missing_count = 0
         self._empty_unsaved()
         self._unsaved_total = self._unsaved_pages = self._unsaved_page = 0
         self._run_rows, self._run_tokens = [], {}
         self._run_total = self._run_page = self._run_pages = 0
+        self._run_busy = self._unsaved_busy = self._retry_busy = False
         self._unsaved_status = self._unsaved_error = self._run_error = self._run_note = ""
         self._retryable_total = None
         self._retryable_limit = None
-        self._retry_busy = False
         self.refresh()
+        self.changed.emit()
 
     def setVideoLimit(self, megabytes):
         """The current size limit decides which size-limited media a retry could now store."""
@@ -406,7 +408,8 @@ class RecordsController(QObject):
             if (path.is_symlink() or path.parent.resolve() != root or path.suffix != ".log"
                     or not path.name.startswith("scheduled-") or not path.is_file()):
                 raise OSError
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+            if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+                raise OSError
         except (OSError, ValueError):
             self._run_error = "상세 기록 파일을 열지 못했습니다."
             self.changed.emit()
@@ -639,12 +642,13 @@ class RecordsController(QObject):
         if self._closing or self._retry_busy:
             return
         self._retry_busy = True
-        self._enqueue("retry_keys", self._unsaved_view, replace=True)
+        self._enqueue("retry_keys", (self._unsaved_view, self._limit_mb), replace=True)
 
-    def _can_retry(self, row):
+    def _can_retry(self, row, limit_mb=None):
+        limit = self._limit_mb if limit_mb is None else limit_mb
         # A size-limited file only fits after the limit was raised since it was skipped.
-        return (row["reason"] != unsaved.SIZE or self._limit_mb == 0
-                or (row["limit_mb"] > 0 and self._limit_mb > row["limit_mb"]))
+        return (row["reason"] != unsaved.SIZE or limit == 0
+                or (row["limit_mb"] > 0 and limit > row["limit_mb"]))
 
     def _rebuild_unsaved(self):
         self._unsaved_rows = [self._unsaved_row(token, row) for token, row in self._unsaved_tokens.items()]
@@ -773,7 +777,8 @@ class RecordsController(QObject):
                     self._missing_snapshot = None
                     result = {"excluded": self._exclude_missing(account, output_dir, separate, payload)}
                 else:
-                    keys = self._retry_keys(account, output_dir, separate, payload)
+                    view, limit_mb = payload if isinstance(payload, tuple) else (payload, 0)
+                    keys = self._retry_keys(account, output_dir, separate, view, limit_mb)
                     result = {"keys": keys}
                 error = ""
             except (ProtectionError, HistoryError) as exc:
@@ -941,7 +946,7 @@ class RecordsController(QObject):
             unsaved.remove(account, output_dir, items=items, kinds=(unsaved.EXCLUDED,) if items is None else None)
         return released
 
-    def _retry_keys(self, account, output_dir, separate, view):
+    def _retry_keys(self, account, output_dir, separate, view, limit_mb=0):
         if view in ("excluded", "missing"):
             paths = self._storage(account, output_dir, separate)
             if paths is None or not (paths.record_dir / ".luvbox-history.sqlite3").is_file():
@@ -954,7 +959,7 @@ class RecordsController(QObject):
         while len(keys) < RETRY_LIMIT:
             found = unsaved.page(account, output_dir, _KINDS[view], page, 200)
             for row in found["rows"]:
-                if self._can_retry(row):
+                if self._can_retry(row, limit_mb):
                     keys.append(archive_key(row["tweet_id"], row["num"], row["media_type"]))
             page += 1
             if page >= found["pages"]:

@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -126,6 +127,7 @@ Item {
                         enabled: !!review.library && !review.library.copiesLocked && !review.settling
                         tip: "선택한 사진만 묶음에서 빼기"
                         Accessible.name: "묶음 " + card.number + " " + text
+                        onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                         onClicked: review.library.markPhotosDistinct(card.chosenKeys)
                     }
                     FlatButton {
@@ -138,6 +140,7 @@ Item {
                         enabled: !!review.library && !review.library.copiesLocked && !review.settling && card.items.length > 0
                         tip: "묶음 전체를 중복에서 빼기"
                         Accessible.name: "묶음 " + card.number + " 중복 아님"
+                        onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                         onClicked: review.library.markGroupDistinct(card.items[0].key)
                     }
                     FlatButton {
@@ -148,6 +151,7 @@ Item {
                         enabled: card.copies.length > 0 && !!review.library && !review.library.copiesLocked && !review.settling
                         tip: card.copies.length === 0 ? "완전히 같은 사본이 없습니다. 각 사진의 ‘비교’로 확인하세요" : ""
                         Accessible.name: "묶음 " + card.number + " " + text
+                        onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                         onClicked: {
                             if (card.copiesSelected)
                                 review.library.removeFromSelection(card.copies)
@@ -193,6 +197,7 @@ Item {
                             // Picked without a mouse too: a screen reader toggles or presses the tile.
                             Accessible.onToggleAction: tileMouse.pick()
                             Accessible.onPressAction: tileMouse.pick()
+                            onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                             Keys.onSpacePressed: event => {
                                 tileMouse.pick()
                                 event.accepted = true
@@ -333,7 +338,8 @@ Item {
                                             && review.library.isSelected(key) !== review.clickedWasChosen)
                                         pick()
                                     review.clickedKey = ""
-                                    review.previewRequested(key)
+                                    if (!review.settling)
+                                        review.previewRequested(key)
                                 }
                             }
                             // The pointer on the badge of a similar photo. The tile's mouse area takes the hover
@@ -370,6 +376,7 @@ Item {
                                 Accessible.name: "묶음 " + card.number + " 비슷한 사진 " + tile.modelData.caption
                                     + " 남길 사진과 비교 후 휴지통으로"
                                 Accessible.onPressAction: compareMouse.open()
+                                onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
                                 Keys.onSpacePressed: event => {
                                     compareMouse.open()
                                     event.accepted = true

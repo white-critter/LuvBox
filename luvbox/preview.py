@@ -54,35 +54,41 @@ class _BoundedRasterReader:
         return self._stream.closed
 
 
-def _png_exif_orientation(path: Path) -> int:
+def _png_exif_orientation(source, length: int | None = None) -> int:
     """Read a possibly late eXIf chunk without inflating PNG image data."""
-    with path.open("rb") as stream:
-        if stream.read(8) != b"\x89PNG\r\n\x1a\n":
-            raise ValueError("invalid PNG header")
-        length = path.stat().st_size
-        if length > 256 * 1024 * 1024:
-            raise ValueError("PNG metadata scan limit")
-        for _ in range(4096):
-            header = stream.read(8)
-            if len(header) != 8:
-                raise ValueError("short PNG chunk")
-            size, kind = struct.unpack(">I4s", header)
-            if size > length - stream.tell() - 4:
-                raise ValueError("invalid PNG chunk size")
-            if kind == b"eXIf":
-                if not 0 < size <= 1024 * 1024:
-                    raise ValueError("PNG EXIF limit")
-                payload = stream.read(size)
-                checksum = stream.read(4)
-                if len(checksum) != 4 or struct.unpack(">I", checksum)[0] != zlib.crc32(kind + payload):
-                    raise ValueError("invalid PNG EXIF checksum")
-                metadata = Image.Exif()
-                metadata.load(payload)
-                return metadata.get(274, 1)
-            stream.seek(size + 4, 1)
-            if kind == b"IEND":
-                return 1
-        raise ValueError("PNG chunk count limit")
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        with path.open("rb") as stream:
+            return _png_exif_orientation(stream, path.stat().st_size)
+    stream = source
+    stream.seek(0)
+    if stream.read(8) != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("invalid PNG header")
+    if length is None:
+        length = os.fstat(stream.fileno()).st_size
+    if length > 256 * 1024 * 1024:
+        raise ValueError("PNG metadata scan limit")
+    for _ in range(4096):
+        header = stream.read(8)
+        if len(header) != 8:
+            raise ValueError("short PNG chunk")
+        size, kind = struct.unpack(">I4s", header)
+        if size > length - stream.tell() - 4:
+            raise ValueError("invalid PNG chunk size")
+        if kind == b"eXIf":
+            if not 0 < size <= 1024 * 1024:
+                raise ValueError("PNG EXIF limit")
+            payload = stream.read(size)
+            checksum = stream.read(4)
+            if len(checksum) != 4 or struct.unpack(">I", checksum)[0] != zlib.crc32(kind + payload):
+                raise ValueError("invalid PNG EXIF checksum")
+            metadata = Image.Exif()
+            metadata.load(payload)
+            return metadata.get(274, 1)
+        stream.seek(size + 4, 1)
+        if kind == b"IEND":
+            return 1
+    raise ValueError("PNG chunk count limit")
 
 
 def photo_info(path: Path, max_pixels: int = 16_000_000) -> dict[str, int]:
@@ -99,12 +105,12 @@ def photo_info(path: Path, max_pixels: int = 16_000_000) -> dict[str, int]:
         return {}
     try:
         _prepare_decoders(False)
-        with path.open("rb") as source, warnings.catch_warnings():
+        with path.open("rb") as source:
             # WebP retains compressed bytes even for a header query. Check
             # the opened file and also bound reads if it grows afterwards.
-            if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
+            file_size = os.fstat(source.fileno()).st_size
+            if file_size > MAX_RASTER_BYTES:
                 return {}
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(_BoundedRasterReader(source), formats=("JPEG", "PNG", "WEBP")) as image:
                 width, height = image.size
                 if (not 0 < width <= 16384 or not 0 < height <= 16384 or
@@ -113,7 +119,7 @@ def photo_info(path: Path, max_pixels: int = 16_000_000) -> dict[str, int]:
                 if image.format == "PNG":
                     # PngImageFile.getexif() calls load() when EXIF follows
                     # IDAT. Skip image chunks explicitly to stay header-only.
-                    orientation = _png_exif_orientation(path)
+                    orientation = _png_exif_orientation(source, file_size)
                 else:
                     orientation = image.getexif().get(274, 1)
                 oriented = (height, width) if orientation in (5, 6, 7, 8) else (width, height)
@@ -164,6 +170,7 @@ def _prepare_decoders(video: bool) -> None:
     Keep the full allowlist so a supported image with a renamed extension can
     still be identified from its contents.
     """
+    warnings.filterwarnings("error", category=Image.DecompressionBombWarning)
     if video:
         from PIL import BmpImagePlugin
     else:
@@ -253,15 +260,13 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
         else:
             return Thumbnail(None, "미리보기를 지원하지 않는 파일입니다.")
         _prepare_decoders(kind == ".mp4")
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            # Inspect only our supported raster formats. A renamed EPS file
-            # must never dispatch to Pillow's external Ghostscript renderer.
-            raster = source if kind == ".mp4" else _BoundedRasterReader(source)
-            with Image.open(raster, formats=("BMP",) if kind == ".mp4" else PHOTO_FORMATS) as original:
-                if original.width * original.height > MAX_PIXELS:
-                    return Thumbnail(None, "큰 이미지입니다. 파일 열기로 확인해 주세요.")
-                image = oriented_thumbnail(original, size)
+        # Inspect only our supported raster formats. A renamed EPS file
+        # must never dispatch to Pillow's external Ghostscript renderer.
+        raster = source if kind == ".mp4" else _BoundedRasterReader(source)
+        with Image.open(raster, formats=("BMP",) if kind == ".mp4" else PHOTO_FORMATS) as original:
+            if original.width * original.height > MAX_PIXELS:
+                return Thumbnail(None, "큰 이미지입니다. 파일 열기로 확인해 주세요.")
+            image = oriented_thumbnail(original, size)
         return Thumbnail(image, note)
     except (OSError, ValueError, SyntaxError, TypeError, EOFError, struct.error,
             UnidentifiedImageError, Image.DecompressionBombError,

@@ -214,7 +214,13 @@ class DownloadService:
                     terminated_at = None
                     heartbeat_at = time.monotonic()
                     while True:
-                        partial = self._read_lines(job_id, partial + stream.read(_READ_BYTES))
+                        drained = 0
+                        while drained < 1024 * 1024:
+                            chunk = stream.read(_READ_BYTES)
+                            if not chunk:
+                                break
+                            partial = self._read_lines(job_id, partial + chunk)
+                            drained += len(chunk)
                         if process.poll() is not None:
                             # Drain the worker's final flush in bounded chunks;
                             # retain bytes until a complete UTF-8 JSON line.
@@ -249,7 +255,8 @@ class DownloadService:
                                 self._control.heartbeat()
                             except OSError:
                                 pass
-                        time.sleep(.1)
+                        if drained == 0:
+                            time.sleep(.1)
                 process.wait()
         except ValueError as error:
             with self._lock:
@@ -268,12 +275,12 @@ class DownloadService:
             if process is not None:
                 self._finish_process(process)
             self._control.detach()
+            self._emit(job_id, {"type": "process_exit", "code": return_code,
+                                "forced": forced, "stop_requested": self._stop.is_set()})
             with self._lock:
                 self._process = None
                 self._running = False
                 self._review_id = None
-            self._emit(job_id, {"type": "process_exit", "code": return_code,
-                                "forced": forced, "stop_requested": self._stop.is_set()})
 
     @staticmethod
     def _finish_process(process):

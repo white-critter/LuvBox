@@ -30,7 +30,7 @@
   const failureText = code => ({
     login_required: "이 브라우저 프로필에서 X에 로그인하거나 추가 인증을 마친 뒤 ‘계정 다시 확인’을 누르세요.",
     account_changed: "확인 중 X 계정이 바뀌었습니다. 연결할 계정으로 전환한 뒤 ‘계정 다시 확인’을 누르세요.",
-    account_error: "X 계정을 읽지 못했습니다. X 페이지가 정상적으로 열리는지 확인한 뒤 ‘계정 다시 확인’을 누르세요.",
+    account_error: "X 계정을 확인하지 못했습니다. X 페이지가 정상적으로 열리는지 확인한 뒤 ‘계정 다시 확인’을 누르세요.",
     tab_closed: "확인용 X 탭이 닫혀 계정을 확인하지 못했습니다. ‘계정 다시 확인’을 누르세요.",
     expired: "연결 시간이 지났습니다. LuvBox에서 연결을 다시 시작해 주세요.",
     app_gone: "LuvBox 앱이 이 연결을 더 이상 기다리지 않습니다. 이 탭을 닫고 앱에서 연결을 다시 시작해 주세요."
@@ -158,7 +158,7 @@
       connect.hidden = true;
       close.hidden = false;
       ready = false;
-      show("done", "계정 정보를 전달했습니다. LuvBox 앱으로 돌아가 ‘이 계정 연결 승인’을 눌러야 저장됩니다(3분 안에). 이 탭은 닫아도 됩니다.");
+      show("done", "계정 정보를 전달했습니다. LuvBox 앱으로 돌아가 3분 안에 ‘이 계정 연결 승인’을 눌러야 저장됩니다. 이 탭은 닫아도 됩니다.");
     } catch {
       if (finished) return;
       resetConnect();

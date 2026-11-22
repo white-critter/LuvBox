@@ -98,7 +98,7 @@ ColumnLayout {
             Accessible.name: "자동 저장 실행 시각"
             enabled: panel.schedule && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running
             onTextEdited: panel.timeEdited = true
-            onAccepted: if (scheduleSaveButton.enabled) scheduleSaveButton.clicked()
+            onAccepted: if (scheduleSaveButton.enabled) scheduleSaveButton.click()
         }
         FlatButton {
             id: scheduleSaveButton
@@ -158,9 +158,15 @@ ColumnLayout {
         color: Theme.error
     }
     RowLayout {
+        Layout.fillWidth: true
         visible: !!(panel.schedule && panel.schedule.busy)
         BusyIndicator { running: parent.visible; implicitWidth: 24; implicitHeight: 24 }
-        Label { text: panel.schedule ? panel.schedule.status : ""; textFormat: Text.PlainText }
+        Label {
+            Layout.fillWidth: true
+            text: panel.schedule ? panel.schedule.status : ""
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+        }
     }
     Label {
         objectName: "scheduleMessage"

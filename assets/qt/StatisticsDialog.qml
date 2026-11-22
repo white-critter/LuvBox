@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -56,18 +57,42 @@ FlatDialog {
         property string value: ""
         property color valueColor: Theme.text
         property int valueSize: Theme.fontHeading
+        property int maxLines: 1
         property bool actionable: false
-        readonly property bool pointed: cardHover.containsMouse && actionable
+        readonly property bool pointed: (cardHover.containsMouse || card.activeFocus) && actionable
         signal activated()
         Layout.fillWidth: true
         Layout.preferredHeight: 72
+        activeFocusOnTab: actionable
         // A card that leads somewhere carries a little of the red light.
         topColor: pointed ? Theme.accentSoftHover : Theme.cardTop
         bottomColor: pointed ? Theme.accentSoft : Theme.card
         glow: actionable ? 0.14 : 0
-        border.color: actionable ? (cardHover.containsMouse ? Theme.accent : Theme.accentLine) : Theme.line
+        border.width: card.activeFocus ? 2 : 1
+        border.color: card.activeFocus ? Theme.focus
+            : (actionable ? (cardHover.containsMouse ? Theme.accent : Theme.accentLine) : Theme.line)
         Accessible.role: actionable ? Accessible.Button : Accessible.StaticText
         Accessible.name: caption + " " + value
+        Accessible.onPressAction: if (card.actionable) card.activated()
+        onActiveFocusChanged: if (activeFocus) statsFlick.revealItem(card)
+        Keys.onSpacePressed: event => {
+            if (card.actionable) {
+                card.activated()
+                event.accepted = true
+            }
+        }
+        Keys.onReturnPressed: event => {
+            if (card.actionable) {
+                card.activated()
+                event.accepted = true
+            }
+        }
+        Keys.onEnterPressed: event => {
+            if (card.actionable) {
+                card.activated()
+                event.accepted = true
+            }
+        }
         MouseArea {
             id: cardHover
             anchors.fill: parent
@@ -93,6 +118,8 @@ FlatDialog {
                 font.pixelSize: card.valueSize
                 font.bold: card.valueSize >= 16
                 color: card.valueColor
+                wrapMode: card.maxLines > 1 ? Text.Wrap : Text.NoWrap
+                maximumLineCount: card.maxLines
                 elide: Text.ElideRight
                 textFormat: Text.PlainText
             }
@@ -105,6 +132,17 @@ FlatDialog {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         contentWidth: width
+        function revealItem(item) {
+            if (!item || !needsScroll)
+                return
+            const pos = item.mapToItem(statsColumn, 0, 0)
+            const top = pos.y - 8
+            const bottom = pos.y + item.height + 8
+            if (top < contentY)
+                contentY = Math.max(0, top)
+            else if (bottom > contentY + height)
+                contentY = Math.min(Math.max(0, contentHeight - height), bottom - height)
+        }
         // The two lists share whatever height is left, so the page only scrolls
         // when the window is too small for their minimum.
         readonly property bool stacked: width < 640
@@ -152,6 +190,7 @@ FlatDialog {
                     objectName: "statsKindsCard"
                     caption: "미디어 구성"
                     valueSize: Theme.fontCaption
+                    maxLines: 2
                     valueColor: Theme.aiTagText
                     value: dialog.loaded
                         ? "사진 " + dialog.amount(dialog.stats.photo) + " · 영상 " + dialog.amount(dialog.stats.video)
@@ -250,6 +289,12 @@ FlatDialog {
                                         tone: "ghost"
                                         compact: true
                                         Accessible.name: "@" + (authorRow.modelData.author || "") + " 모아보기"
+                                        onActiveFocusChanged: {
+                                            if (activeFocus) {
+                                                authorList.positionViewAtIndex(authorRow.index, ListView.Contain)
+                                                statsFlick.revealItem(authorList)
+                                            }
+                                        }
                                         onClicked: {
                                             if (authorRow.modelData && authorRow.modelData.author) {
                                                 dialog.authorSelected(authorRow.modelData.author)
@@ -283,7 +328,7 @@ FlatDialog {
                         spacing: 8
 
                         Label {
-                            text: "월별 저장 추이 (게시일 기준)"
+                            text: "월별 추이 (게시일 기준)"
                             font.pixelSize: Theme.fontBody
                             font.bold: true
                             color: Theme.text
@@ -422,6 +467,7 @@ FlatDialog {
                                     required property var modelData
                                     compact: true
                                     text: (modelData.category || "") + " " + dialog.amount(modelData.count)
+                                    onActiveFocusChanged: if (activeFocus) statsFlick.revealItem(this)
                                     onClicked: {
                                         if (modelData && modelData.category) {
                                             dialog.aiCategorySelected(modelData.category)
@@ -456,6 +502,7 @@ FlatDialog {
                                     required property var modelData
                                     compact: true
                                     text: "#" + (modelData.tag || "") + " " + dialog.amount(modelData.count)
+                                    onActiveFocusChanged: if (activeFocus) statsFlick.revealItem(this)
                                     onClicked: {
                                         if (modelData && modelData.tag) {
                                             dialog.userTagSelected(modelData.tag)

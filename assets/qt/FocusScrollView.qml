@@ -10,7 +10,7 @@ ScrollView {
     function revealFocus() {
         const host = control.Window.window
         const item = host ? host.activeFocusItem : null
-        const flick = control.contentItem
+        const flick = control.contentItem as Flickable
         if (!control.visible || !item || !flick || flick.contentY === undefined)
             return
         let ancestor = item
@@ -35,5 +35,5 @@ ScrollView {
     }
     onHeightChanged: Qt.callLater(revealFocus)
 
-    SmoothWheel { flickable: control.contentItem }
+    SmoothWheel { flickable: control.contentItem as Flickable }
 }

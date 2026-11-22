@@ -124,6 +124,7 @@ async function inspectAccount(pairing, consentTabId) {
     const deadline = Date.now() + 25000;
     let profile;
     while (Date.now() < deadline && Date.now() < pairing.expires) {
+      if (Number.isInteger(consentTabId) && pairings.get(consentTabId) !== pairing) throw failure("expired");
       try {
         let current;
         try { current = await api.tabs.get(tab.id); } catch { throw failure("tab_closed"); }
@@ -141,6 +142,8 @@ async function inspectAccount(pairing, consentTabId) {
       }
       await wait(250);
     }
+    if (Number.isInteger(consentTabId) && pairings.get(consentTabId) !== pairing) throw failure("expired");
+    if (!profile?.ready && Date.now() >= pairing.expires) throw failure("expired");
     if (!profile?.ready) throw new Error();
     const after = await sessionCookies(storeId);
     if (start.auth_token !== after.auth_token || start.user_id !== after.user_id) throw failure("account_changed");
@@ -174,7 +177,12 @@ async function dispatch(message, sender) {
     setTimeout(() => { if (pairings.get(tabId) === pairing) pairings.delete(tabId); }, 180000);
     // Consent belongs to an extension-owned page. A localhost page must never
     // be able to call DOM .click() or overlay the credential approval buttons.
-    await api.tabs.update(tabId, {url: api.runtime.getURL("connect.html")});
+    try {
+      await api.tabs.update(tabId, {url: api.runtime.getURL("connect.html")});
+    } catch (error) {
+      pairings.delete(tabId);
+      throw error;
+    }
     await reportProgress(pairing, "extension_ready");
     return {ok: true};
   }
@@ -192,7 +200,7 @@ async function dispatch(message, sender) {
       return result;
     } catch (error) {
       let code = errorCode(error);
-      if (code === "app_gone") pairings.delete(tabId);
+      if (code === "app_gone" || code === "expired") pairings.delete(tabId);
       else if (await reportProgress(pairing, progressStage(code)) === "gone") {
         pairings.delete(tabId);
         code = "app_gone";
@@ -228,9 +236,12 @@ async function dispatch(message, sender) {
       pairings.delete(tabId);
       return {ok: true};
     } catch (error) {
-      const code = errorCode(error);
-      if (code === "app_gone") pairings.delete(tabId);
-      else await reportProgress(pairing, progressStage(code));
+      let code = errorCode(error);
+      if (code === "app_gone" || code === "expired") pairings.delete(tabId);
+      else if (await reportProgress(pairing, progressStage(code)) === "gone") {
+        pairings.delete(tabId);
+        code = "app_gone";
+      }
       throw failure(code);
     } finally {
       // Every submission requires a new account check, including a failed one.

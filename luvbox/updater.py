@@ -343,7 +343,7 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
             raise UpdateError("download") from None
         with response:
             announced = response.headers.get("Content-Length", "")
-            total = int(announced) if announced.isdigit() else size
+            total = int(announced) if announced.isascii() and announced.isdigit() else size
             if total and not _PROGRAM_MINIMUM <= total <= _PROGRAM_LIMIT:
                 raise UpdateError("unexpected")
             try:

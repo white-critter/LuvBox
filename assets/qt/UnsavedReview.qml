@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -328,6 +329,7 @@ Item {
                         // Picked without a mouse too: a screen reader toggles or presses the tile.
                         Accessible.onToggleAction: review.records.toggleUnsavedSelected(cell.token)
                         Accessible.onPressAction: review.records.toggleUnsavedSelected(cell.token)
+                        onActiveFocusChanged: if (activeFocus) grid.positionViewAtIndex(cell.index, GridView.Contain)
                         Keys.onSpacePressed: event => {
                             if (review.records)
                                 review.records.toggleUnsavedSelected(cell.token)
