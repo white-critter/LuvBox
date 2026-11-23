@@ -48,6 +48,7 @@ _CLOUD_ATTRIBUTES = 0x00400000 | 0x00040000 | 0x00001000      # recall on access
 # so only the first are links (as recycling._linked decides before a file is moved).
 _NAME_SURROGATE = 0x20000000
 _ERROR = "폴더 정보를 읽거나 저장하지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요."
+_FOLDER_READ_ERROR = "폴더를 끝까지 읽지 못했습니다. 폴더의 연결과 읽기 권한을 확인한 뒤 새로고침해 주세요."
 _WRITE_LOCK = threading.RLock()
 _LABEL_CHUNK = 400
 
@@ -384,36 +385,41 @@ class LocalFolderStore:
             folder = stack.pop()
             try:
                 with os.scandir(folder) as entries:
-                    listed = list(entries)
-            except OSError:
-                continue
-            for entry in listed:
-                try:
-                    if entry.is_symlink() or entry.is_junction():
-                        continue
-                    if entry.is_dir(follow_symlinks=False):
-                        if not include_subfolders or entry.name.lower() in SKIPPED_FOLDERS:
-                            continue
-                        path = Path(entry.path)
-                        info = entry.stat(follow_symlinks=False)
-                        if _is_link(info):
-                            continue
-                        if own is not None and os.path.normcase(str(path)) == os.path.normcase(str(own)):
-                            continue              # the app's own data: thumbnails, records, models
-                        stack.append(path)
-                        continue
-                    kind = media_type_for(entry.name)
-                    if not kind or not entry.is_file(follow_symlinks=False):
-                        continue
-                    info = entry.stat(follow_symlinks=False)
-                    if _is_link(info):
-                        continue                  # a link of another kind
-                    cloud = bool(getattr(info, "st_file_attributes", 0) & _CLOUD_ATTRIBUTES)
-                    rel = Path(entry.path).relative_to(self.root).as_posix()
-                    found[rel] = (int(info.st_size), int(info.st_mtime_ns), cloud, kind, entry.name)
-                except (OSError, ValueError):
-                    continue
+                    for index, entry in enumerate(entries, 1):
+                        if check_cancel and index % 128 == 0:
+                            check_cancel()
+                        try:
+                            if entry.is_symlink() or entry.is_junction():
+                                continue
+                            if entry.is_dir(follow_symlinks=False):
+                                if not include_subfolders or entry.name.lower() in SKIPPED_FOLDERS:
+                                    continue
+                                path = Path(entry.path)
+                                if _is_link(entry.stat(follow_symlinks=False)) or path == own:
+                                    continue
+                                stack.append(path)
+                                continue
+                            kind = media_type_for(entry.name)
+                            if not kind or not entry.is_file(follow_symlinks=False):
+                                continue
+                            info = entry.stat(follow_symlinks=False)
+                            if _is_link(info):
+                                continue
+                            cloud = bool(getattr(info, "st_file_attributes", 0) & _CLOUD_ATTRIBUTES)
+                            rel = Path(entry.path).relative_to(self.root).as_posix()
+                            found[rel] = (int(info.st_size), int(info.st_mtime_ns), cloud, kind, entry.name)
+                        except FileNotFoundError:
+                            continue                    # entry disappeared during the scan
+            except OSError as exc:
+                # An incomplete scan cannot establish which files were removed.
+                raise LocalFolderError(_FOLDER_READ_ERROR) from exc
         return found
+
+    @staticmethod
+    def _invalidate_file_analysis(db, rel: str) -> None:
+        db.execute("DELETE FROM local_ai_embeddings WHERE rel_path=?", (rel,))
+        db.execute("DELETE FROM local_unreadable WHERE rel_path=?", (rel,))
+        db.execute("DELETE FROM local_tags WHERE rel_path=? AND source='ai'", (rel,))
 
     @staticmethod
     def _prune_singleton_clusters(db) -> None:
@@ -433,6 +439,8 @@ class LocalFolderStore:
         Returns counts: found, added, changed, gone, restored.
         """
         found = self.walk(include_subfolders, check_cancel)
+        if check_cancel:
+            check_cancel()
         known = {row["rel_path"]: row for row in self._read(
             "SELECT rel_path, filesize, mtime_ns, present, cloud FROM local_files")}
         # Windows sees IMG_01.jpg and img_01.jpg as one file: a listed file missing only because its
@@ -471,9 +479,7 @@ class LocalFolderStore:
                         "UPDATE local_files SET filesize=?, mtime_ns=?, cloud=?, present=1, file_hash='', dhash='', "
                         "file_signature='', cluster_id=0, updated_at=? WHERE rel_path=?",
                         (size, mtime, int(cloud), now, rel))
-                    db.execute("DELETE FROM local_ai_embeddings WHERE rel_path=?", (rel,))
-                    db.execute("DELETE FROM local_unreadable WHERE rel_path=?", (rel,))
-                    db.execute("DELETE FROM local_tags WHERE rel_path=? AND source='ai'", (rel,))
+                    self._invalidate_file_analysis(db, rel)
                     changed += 1
                 elif not old["present"] or bool(old["cloud"]) != cloud:
                     db.execute("UPDATE local_files SET present=1, cloud=?, updated_at=? WHERE rel_path=?",
@@ -1006,28 +1012,35 @@ class LocalFolderStore:
 
     def save_hashes(self, rows) -> int:
         """rows are (rel_path, file_hash, dhash, file_signature[, filesize, mtime_ns])."""
-        items = list(rows)
-        if not items:
-            return 0
         plain, sized = [], []
-        for row in items:
+        for row in rows:
+            rel, file_hash, dhash, signature = row[:4]
             if len(row) >= 6:
-                rel, file_hash, dhash, signature, filesize, mtime_ns = row[:6]
-                sized.append((file_hash, dhash, signature, int(filesize), int(mtime_ns), rel))
+                sized.append((file_hash, dhash, signature, int(row[4]), int(row[5]), rel))
             else:
-                rel, file_hash, dhash, signature = row[:4]
                 plain.append((file_hash, dhash, signature, rel))
+        if not (plain or sized):
+            return 0
+        stamp = _now()
         with self._write() as db:
             if plain:
                 db.executemany("UPDATE local_files SET file_hash=?, dhash=?, file_signature=? WHERE rel_path=?",
                                plain)
+            changed = False
+            for file_hash, _dhash, _signature, size, mtime, rel in sized:
+                updated = db.execute(
+                    "UPDATE local_files SET filesize=?, mtime_ns=?, cluster_id=0, updated_at=? "
+                    "WHERE rel_path=? AND (filesize<>? OR mtime_ns<>? OR (file_hash<>'' AND file_hash<>?))",
+                    (size, mtime, stamp, rel, size, mtime, file_hash))
+                if updated.rowcount:
+                    changed = True
+                    self._invalidate_file_analysis(db, rel)
+            if changed:
+                self._prune_singleton_clusters(db)
             if sized:
-                db.executemany(
-                    "UPDATE local_files SET file_hash=?, dhash=?, file_signature=?, filesize=?, mtime_ns=? "
-                    "WHERE rel_path=?",
-                    sized,
-                )
-        return len(items)
+                db.executemany("UPDATE local_files SET file_hash=?, dhash=?, file_signature=?, filesize=?, mtime_ns=? "
+                               "WHERE rel_path=?", sized)
+        return len(plain) + len(sized)
 
     def hashed_photos(self) -> list[dict]:
         return self._read("SELECT rowid AS rowid, rel_path, filesize, file_hash, dhash, file_signature, favorite "

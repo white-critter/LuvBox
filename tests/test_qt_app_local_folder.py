@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -138,9 +139,9 @@ class SharedTests(AppCase):
         local = controller.localFolder
         local.openFolder(str(self.folder))
         self.opened(local)
-        self.assertTrue(local.overlapsXLibrary)
+        self.wait(lambda: local.overlapsXLibrary, "the folders overlap")
         controller.setOutputFolder(str(self.base / "elsewhere"))
-        self.wait(lambda: not local.overlapsXLibrary, "no overlap any more")
+        self.wait(lambda: not local.may_overlap_x_library, "no overlap any more")
 
     def test_a_folder_inside_another_accounts_save_folder_overlaps_too(self):
         """The overlap notice looks at every account's save folder, not only the open account's."""
@@ -149,7 +150,48 @@ class SharedTests(AppCase):
         local = self.start().localFolder
         local.openFolder(str(self.folder))
         self.opened(local)
-        self.assertTrue(local.overlapsXLibrary)
+        self.wait(lambda: local.overlapsXLibrary, "another account's folder overlaps")
+
+    def test_slow_x_path_resolution_keeps_the_window_responsive_and_interlocks_deletion(self):
+        self.write_settings({})
+        controller = self.start()
+        local = controller.localFolder
+        local.openFolder(str(self.folder))
+        self.opened(local)
+        alias = self.base / "slow-x-save-alias"
+        started = threading.Event()
+        finish = threading.Event()
+        resolve = Path.resolve
+
+        def slow_resolve(path, *args, **kwargs):
+            if path == alias:
+                started.set()
+                finish.wait(2)
+                return self.base  # As if this X path points at the folder's parent.
+            return resolve(path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", slow_resolve):
+            try:
+                begin = time.monotonic()
+                local.checkXOverlap(str(alias))
+                self.assertLess(time.monotonic() - begin, 0.5)
+                self.assertTrue(started.wait(1))
+                self.assertFalse(local.overlapsXLibrary)
+                controller._preparing = True
+                controller._state_changed()
+                self.assertTrue(controller.localManagement.locked)
+                local.checkXOverlap(str(self.base / "elsewhere"))
+                self.wait(lambda: not controller.localManagement.locked, "a newer nonoverlapping path was checked")
+            finally:
+                finish.set()
+            self.wait(lambda: not any(thread.is_alive() for thread in local._aux_threads), "old path checks finished")
+            self.app.processEvents()
+            self.assertFalse(local.overlapsXLibrary or controller.localManagement.locked)
+            local.checkXOverlap(str(alias))
+            self.wait(lambda: local.overlapsXLibrary and controller.localManagement.locked, "the X alias overlaps")
+        controller._preparing = False
+        controller._state_changed()
+        self.assertFalse(controller.localManagement.locked)
 
     def test_recycling_in_a_folder_inside_the_x_save_folder_has_the_gallery_read_again(self):
         self.write_settings({"output_dir": str(self.base)})

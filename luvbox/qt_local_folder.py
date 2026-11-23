@@ -476,7 +476,11 @@ class LocalFolderRepository(LibraryRepository):
                         continue
                     if not file_hash:
                         continue
-                    hashed.append((row["rel_path"], file_hash, dhash or "", ":".join(map(str, before))))
+                    values = (row["rel_path"], file_hash, dhash or "", ":".join(map(str, before)))
+                    if before[2:] != (row["filesize"], row["mtime_ns"]):
+                        values += before[2:]
+                        self._dup_synced_changes = True
+                    hashed.append(values)
                     if len(hashed) >= 64:
                         store.save_hashes(hashed)
                         hashed.clear()
@@ -515,6 +519,7 @@ class LocalFolderRepository(LibraryRepository):
                             continue
                         filesize = after[2]
                         stale_updates.append((row["rel_path"], file_hash, dhash or "", sig_str, after[2], after[3]))
+                        self._dup_synced_changes = True
                         if len(stale_updates) >= 64:
                             store.save_hashes(stale_updates)
                             stale_updates.clear()
@@ -529,7 +534,7 @@ class LocalFolderRepository(LibraryRepository):
                 if progress_callback:
                     progress_callback(total + 1, total + 1)
                 return grouped
-        except ScanCancelled:
+        except (ScanCancelled, LocalFolderError):
             raise
         except Exception as exc:
             raise RuntimeError("중복 검사를 끝내지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
@@ -998,6 +1003,7 @@ class LocalFolderController(LibraryController):
     """The gallery's controller over a folder of this PC."""
 
     folderChanged = Signal()
+    folderOpeningChanged = Signal()
     recentFoldersChanged = Signal()
     shareLearningChanged = Signal()
     overlapChanged = Signal()
@@ -1007,6 +1013,8 @@ class LocalFolderController(LibraryController):
     # LibraryController.changed gives PySide6 a meta-object that crashes QML on the first read.
     # So `changed` is relayed here.
     stateChanged = Signal()
+    _folderChecked = Signal(int, object, str)
+    _overlapChecked = Signal(int, bool)
     image_provider = "localthumbs"
     lazy_workers = True                 # made at every start; its threads start with the first folder
 
@@ -1014,15 +1022,22 @@ class LocalFolderController(LibraryController):
         super().__init__(parent)
         self.changed.connect(self.stateChanged)
         self.overlapChanged.connect(self.stateChanged)
+        self._folderChecked.connect(self._finish_open_folder)
+        self._overlapChecked.connect(self._finish_overlap_check)
         self._order = "modified"
         self._root = ""
         self._include_subfolders = True
         self._recent = []
         self._share_learning = True
         self._overlaps = False
-        self._x_folders = []
+        self._checking_overlap = False
+        self._overlap_request = 0
+        self._overlap_inputs = None
+        self._x_folders = ()
         self._folder_error = ""
         self._last = ""
+        self._opening_path = None
+        self._folder_request = 0
         self._deletion_busy = False
         self._aux_threads = []
 
@@ -1101,6 +1116,10 @@ class LocalFolderController(LibraryController):
     def hasFolder(self):
         return bool(self._root)
 
+    @Property(bool, notify=folderOpeningChanged)
+    def openingFolder(self):
+        return self._opening_path is not None
+
     @Property("QVariantList", notify=recentFoldersChanged)
     def recentFolders(self):
         return list(self._recent)
@@ -1116,6 +1135,15 @@ class LocalFolderController(LibraryController):
     @Property(bool, notify=overlapChanged)
     def overlapsXLibrary(self):
         return self._overlaps
+
+    @Property(bool, notify=overlapChanged)
+    def checkingXOverlap(self):
+        return self._checking_overlap
+
+    @property
+    def may_overlap_x_library(self):
+        """While paths are checked, protect the files as if the folders overlap."""
+        return self._overlaps or self._checking_overlap
 
     @Property(bool, notify=stateChanged)
     def scanningFolder(self):
@@ -1151,47 +1179,69 @@ class LocalFolderController(LibraryController):
 
     @Slot(result=bool)
     def openLastFolder(self):
-        """The tab is shown for the first time: the folder opened last, if there is one and none is open.
-
-        The folder is looked at on a thread of its own: on a network drive that sleeps, or one
-        that is gone, a look can take many seconds, and the window must not wait for it. True
-        when the look started; the folder opens (or the reason it cannot) when it ends.
-        """
-        if self._root or not self._last or self._closed:
+        """When the tab first opens, request the last folder if none is open."""
+        if self._root or not self._last or self._closed or self.openingFolder:
             return False
         last, self._last = self._last, ""          # asked once; a folder gone since says so once
-        generation, serial = self._generation, self._selection_serial
-
-        def look():
-            root, message = None, ""
-            try:
-                root = str(check_root(last))
-            except LocalFolderError as exc:
-                message = str(exc)
-            except Exception:
-                message = "지난번에 연 폴더를 열지 못했습니다. ‘폴더 선택’으로 다시 골라 주세요."
-            self._emit(generation, serial, "last_folder", root, message, None)
-
-        thread = threading.Thread(target=look, name="qt-local-folder-last", daemon=True)
-        self._track_thread(thread)
-        thread.start()
-        return True
+        return self._request_open_folder(last)
 
     @Slot(str, result=bool)
     def openFolder(self, path):
-        """Open a folder (a path, or a ``file:`` URL from the folder dialog) and read what is in it."""
+        """Start opening a path (or a file URL) without waiting for the drive to respond."""
         if self._closed:
             return False
         if self._deletion_busy or self._exclusive:
             self._refuse_folder("진행 중인 작업이 끝난 뒤 다른 폴더를 열 수 있습니다.")
             return False
+        self._last = ""
         text = QUrl(path).toLocalFile() if isinstance(path, str) and path.startswith("file:") else path
-        try:
-            root = check_root(text)
-        except LocalFolderError as exc:
-            self._refuse_folder(str(exc))
+        return self._request_open_folder(text)
+
+    def _request_open_folder(self, path):
+        text = str(path) if isinstance(path, (str, Path)) else ""
+        if self._opening_path == text:
             return False
-        return self._open_root(str(root))
+        self._folder_request += 1
+        request = self._folder_request
+        self._opening_path = text
+        self.folderOpeningChanged.emit()
+
+        def look():
+            root, message = None, ""
+            try:
+                root = str(check_root(text))
+            except LocalFolderError as exc:
+                message = str(exc)
+            except Exception:
+                message = "폴더를 열지 못했습니다. 위치를 확인해 주세요."
+            try:
+                self._folderChecked.emit(request, root, message)
+            except RuntimeError:
+                pass  # The window may have closed while the drive was unavailable.
+
+        thread = threading.Thread(target=look, name="qt-local-folder-open", daemon=True)
+        self._track_thread(thread)
+        thread.start()
+        return True
+
+    @Slot(int, object, str)
+    def _finish_open_folder(self, request, root, message):
+        if self._closed or request != self._folder_request or not self.openingFolder:
+            return
+        if root is not None:
+            try:
+                self._open_root(root)
+            finally:
+                if request == self._folder_request:
+                    self._cancel_folder_open()
+        else:
+            self._cancel_folder_open()
+            self._refuse_folder(message)
+
+    def _cancel_folder_open(self):
+        if self.openingFolder:
+            self._opening_path = None
+            self.folderOpeningChanged.emit()
 
     def _refuse_folder(self, message):
         self._folder_error = message
@@ -1249,6 +1299,8 @@ class LocalFolderController(LibraryController):
             self.changed.emit()
             return False
         self._recent = [item for item in self._recent if os.path.normcase(os.path.normpath(item)) != norm]
+        if self.openingFolder and os.path.normcase(os.path.normpath(self._opening_path)) == norm:
+            self._cancel_folder_open()
         if self._last and os.path.normcase(os.path.normpath(self._last)) == norm:
             self._last = ""
         self.recentFoldersChanged.emit()
@@ -1277,11 +1329,13 @@ class LocalFolderController(LibraryController):
 
     @Slot()
     def closeFolder(self):
-        if not self._root or self._closed or self._exclusive or self._deletion_busy:
+        if self._closed or self._exclusive or self._deletion_busy:
+            return
+        self._cancel_folder_open()
+        if not self._root:
             return
         self._root = ""
-        self._overlaps = False
-        self.overlapChanged.emit()
+        self._check_overlap()
         self.setLibrary("", "", False)
         self.folderChanged.emit()
 
@@ -1322,26 +1376,52 @@ class LocalFolderController(LibraryController):
     def checkXOverlap(self, output_dirs):
         """Whether the open folder and an X save folder (any account's: a path or a list) are one inside the other."""
         folders = [output_dirs] if isinstance(output_dirs, (str, Path)) else list(output_dirs or ())
-        self._x_folders = [str(folder) for folder in folders if isinstance(folder, (str, Path)) and str(folder)]
+        self._x_folders = tuple(dict.fromkeys(str(folder) for folder in folders
+                                             if isinstance(folder, (str, Path)) and str(folder)))
         self._check_overlap()
 
     def _check_overlap(self):
-        overlaps = False
-        if self._root:
-            try:
-                mine = Path(self._root).resolve()
-            except (OSError, ValueError):
-                mine = None
-            for folder in self._x_folders if mine is not None else ():
+        inputs = (self._root, self._x_folders)
+        same_inputs = inputs == self._overlap_inputs
+        if self._closed or (same_inputs and self._checking_overlap):
+            return
+        self._overlap_inputs = inputs
+        self._overlap_request += 1
+        request = self._overlap_request
+        root, folders = inputs
+        if not root or not folders:
+            self._set_overlap(False, False)
+            return
+        self._set_overlap(True, same_inputs and self._overlaps)
+
+        def check():
+            mine = Path(root)  # check_root already resolved the selected folder.
+            overlaps = False
+            for folder in folders:
                 try:
                     theirs = Path(folder).expanduser().resolve()
-                except (OSError, ValueError):
+                except (OSError, ValueError, RuntimeError):
                     continue
-                if mine == theirs or mine.is_relative_to(theirs) or theirs.is_relative_to(mine):
+                if mine.is_relative_to(theirs) or theirs.is_relative_to(mine):
                     overlaps = True
                     break
-        if overlaps != self._overlaps:
-            self._overlaps = overlaps
+            try:
+                self._overlapChecked.emit(request, overlaps)
+            except RuntimeError:
+                pass  # The window may have closed while the drive was unavailable.
+
+        thread = threading.Thread(target=check, name="qt-local-folder-overlap", daemon=True)
+        self._track_thread(thread)
+        thread.start()
+
+    @Slot(int, bool)
+    def _finish_overlap_check(self, request, overlaps):
+        if not self._closed and request == self._overlap_request:
+            self._set_overlap(False, overlaps)
+
+    def _set_overlap(self, checking, overlaps):
+        if (checking, overlaps) != (self._checking_overlap, self._overlaps):
+            self._checking_overlap, self._overlaps = checking, overlaps
             self.overlapChanged.emit()
 
     @Slot(str)
@@ -1368,14 +1448,6 @@ class LocalFolderController(LibraryController):
             self._reload_ai_rules()
             self.changed.emit()
             self.folderForgotten.emit(path)
-            return True
-        if action == "last_folder":
-            if self._root or self._closed:
-                return True                     # a folder was opened meanwhile
-            if selection:
-                self._open_root(selection)
-            else:
-                self._refuse_folder(message)
             return True
         if action != "sync_folder":
             return False

@@ -102,6 +102,14 @@ def scene(*, measure=False, qml_root=None, screenshot_dir=None):
             window.setWidth(width)
             window.setHeight(height)
             QTest.qWait(100)
+            if not measure:
+                mark = find("titleBrandMark")
+                assert mark.property("paintedWidth") >= 36
+                assert mark.property("sourceSize").width() >= round(36 * window.devicePixelRatio())
+                mark_bounds = bounds(mark)
+                assert mark_bounds[0] + mark_bounds[2] <= bounds(find("navSave"))[0]
+                settings_bounds = bounds(find("settingsButton"))
+                assert settings_bounds[0] + settings_bounds[2] <= bounds(find("windowMinimizeButton"))[0]
             label = next(item for item in visual_items(window.contentItem())
                          if item.property("visible") and item.property("text") == error_text)
             refresh = next(item for item in visual_items(window.contentItem())

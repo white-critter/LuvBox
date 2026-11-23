@@ -89,6 +89,7 @@ SOURCE_FILES = (
     "assets/browser-extension/firefox/icons/icon-16.png", "assets/browser-extension/firefox/icons/icon-32.png",
     "assets/browser-extension/firefox/icons/icon-48.png", "assets/browser-extension/firefox/icons/icon-128.png",
     "docs/browser-login.md", "docs/windows-handoff.md",
+    "docs/images/gallery.png", "docs/images/preview.png", "docs/images/duplicates.png",
 )
 DEPENDENCIES = (
     "gallery_dl", "pillow", "requests", "urllib3", "certifi", "charset-normalizer", "idna",

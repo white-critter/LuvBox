@@ -141,6 +141,27 @@ class RootTests(FolderCase):
 
 
 class ScanTests(FolderCase):
+    def test_unreadable_subfolder_does_not_remove_its_photos_or_duplicate_group(self):
+        subfolder = self.folder / "sub"
+        picture(subfolder / "one.jpg")
+        picture(subfolder / "two.jpg")
+        store = self.store()
+        store.sync_folder(True)
+        store.save_clusters([["sub/one.jpg", "sub/two.jpg"]], "exact")
+        picture(self.folder / "added.jpg")
+        scandir = os.scandir
+
+        def open_directory(folder):
+            if Path(folder) == subfolder:
+                raise PermissionError("cannot read this subfolder")
+            return scandir(folder)
+
+        with patch("luvbox.local_store.os.scandir", side_effect=open_directory):
+            with self.assertRaises(LocalFolderError):
+                store.sync_folder(True)
+        self.assertEqual(self.listed(store), ["sub/one.jpg", "sub/two.jpg"])
+        self.assertEqual(store.duplicate_count(), 2)
+
     def test_photos_and_gifs_are_listed_from_every_subfolder_unless_asked_otherwise(self):
         picture(self.folder / "a.jpg")
         picture(self.folder / "b.PNG")
@@ -308,6 +329,30 @@ class ScanTests(FolderCase):
         self.assertEqual(set(store.embeddings_for(["a.jpg", "b.jpg"])), {"a.jpg"})
         self.assertEqual([t["tag"] for t in store.ai_tags_of("b.jpg")], [])
         self.assertEqual([t["tag"] for t in store.item_tags("b.jpg")], ["여행"])   # typed tags stay
+
+    def test_hashing_a_changed_file_invalidates_only_its_old_analysis(self):
+        a = picture(self.folder / "a.jpg")
+        b = picture(self.folder / "b.jpg")
+        store = self.store()
+        store.sync_folder(True)
+        store.save_embeddings([("a.jpg", bytes(3072), 0.5), ("b.jpg", bytes(3072), 0.5)])
+        store.replace_ai_tags([("a.jpg", ["인물"]), ("b.jpg", ["인물"])])
+        store.add_tag(["b.jpg"], "여행")
+        store.remember_unreadable([("b.jpg", b.stat().st_size, b.stat().st_mtime_ns)])
+        store.save_clusters([["a.jpg", "b.jpg"]], "exact")
+
+        picture(b, size=(120, 120))
+        os.utime(b, ns=(10**18, 10**18))
+        a_stat, b_stat = a.stat(), b.stat()
+        store.save_hashes([("a.jpg", "old", "", "sig_a", a_stat.st_size, a_stat.st_mtime_ns),
+                           ("b.jpg", "new", "", "sig_b", b_stat.st_size, b_stat.st_mtime_ns)])
+
+        self.assertEqual(set(store.embeddings_for(["a.jpg", "b.jpg"])), {"a.jpg"})
+        self.assertEqual([t["tag"] for t in store.item_tags("b.jpg")], ["여행"])
+        self.assertEqual(store.unreadable_signatures(), {})
+        self.assertEqual(store.duplicate_count(), 0)
+        self.assertEqual(store.sync_folder(True)["changed"], 0)
+        self.assertEqual(store.row_by_rel("b.jpg")["file_hash"], "new")
 
     def test_a_file_renamed_only_in_case_keeps_its_star_tags_answers_and_marks(self):
         """Windows sees IMG_01.jpg and img_01.jpg as one file: renaming only the case is no new file."""

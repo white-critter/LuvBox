@@ -55,10 +55,27 @@ class ChecksumFileTakenDownTests(unittest.TestCase):
                     self.assertEqual(self.kind(), kind)
 
     def test_a_missing_program_after_its_checksum_is_still_a_download_failure(self):
-        # Only the checksum file, read first, tells that the release itself is no longer published.
+        # Only a missing checksum file tells that the release itself is no longer published.
         self.server.publish("1.9.0")
         del self.server.files["/download/v1.9.0/LuvBox.exe"]
         self.assertEqual(self.kind(), "download")
+
+    def test_a_release_removed_between_requests_is_rechecked_as_withdrawn(self):
+        self.server.publish("1.9.0")
+        checksum_path = "/download/v1.9.0/SHA256-1.9.0.txt"
+        program_path = "/download/v1.9.0/LuvBox.exe"
+        open_asset = updater._open
+
+        def remove_before_program(source, url, accept, timeout):
+            if url.endswith(program_path):
+                self.server.files.clear()
+            return open_asset(source, url, accept, timeout)
+
+        with patch.object(updater, "_open", side_effect=remove_before_program):
+            self.assertEqual(self.kind(), "gone")
+        self.assertEqual([path for path, _headers in self.server.requests],
+                         [checksum_path, program_path, checksum_path])
+        self.assertFalse(list((self.folder / "updates").iterdir()))
 
 
 class _ControllerCase(unittest.TestCase):

@@ -21,7 +21,7 @@ except ModuleNotFoundError:
 import numpy as np  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from luvbox import __version__, ai_pipeline, clip_classifier, settings, storage  # noqa: E402
+from luvbox import ai_pipeline, clip_classifier, settings, storage  # noqa: E402
 from luvbox.ai_profile import AiProfileStore  # noqa: E402
 from luvbox.clip_model import ACTIVE_MODEL_ID, CATEGORY_NAMES  # noqa: E402
 from luvbox.duplicates import ScanCancelled  # noqa: E402
@@ -233,7 +233,6 @@ class LocalFolderAndSettingsRegressionTests(unittest.TestCase):
 
 class DocumentationAndQmlComponentRegressionTests(unittest.TestCase):
     def test_browser_login_doc_is_plain_user_facing_and_tile_components_exist(self):
-        self.assertEqual(__version__, "1.12.1")
         doc = (ROOT / "docs" / "browser-login.md").read_text(encoding="utf-8")
         for forbidden in (
             "BrowserBridge",

@@ -3697,7 +3697,7 @@ class LibraryController(QObject):
                     self._status = message or _CATALOG_MOVED
                     self.changed.emit()
                 return
-        elif action not in {"forget_folder", "last_folder"} and generation != self._generation:
+        elif action != "forget_folder" and generation != self._generation:
             return
         if self._job_finished(action, selection, message):
             return

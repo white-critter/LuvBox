@@ -615,6 +615,18 @@ def split_distinct(members: Sequence, distinct: Sequence) -> list[list]:
     for number, group in enumerate(distinct):
         for member in group:
             marks.setdefault(member, set()).add(number)
+    memberships = [marks.get(member) for member in members]
+    if not all(memberships):
+        # One unmarked member connects the entire group.
+        return [members]
+    common = set(memberships[0])
+    for membership in memberships[1:]:
+        common.intersection_update(membership)
+        if not common:
+            break
+    else:
+        return []                         # every pair shares at least one mark
+
     parent = list(range(len(members)))
 
     def find(index: int) -> int:
@@ -623,11 +635,9 @@ def split_distinct(members: Sequence, distinct: Sequence) -> list[list]:
             index = parent[index]
         return index
 
-    for first in range(len(members)):
-        mine = marks.get(members[first])
+    for first, mine in enumerate(memberships):
         for second in range(first + 1, len(members)):
-            theirs = marks.get(members[second])
-            if mine and theirs and not mine.isdisjoint(theirs):
+            if not mine.isdisjoint(memberships[second]):
                 continue
             left, right = find(first), find(second)
             if left != right:

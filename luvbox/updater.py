@@ -46,6 +46,7 @@ _DESCRIPTION_LIMIT = 1024 * 1024
 _CHECKSUM_LIMIT = 64 * 1024
 _PROGRAM_MINIMUM = 1024 * 1024
 _PROGRAM_LIMIT = 2 * 1024 * 1024 * 1024
+_ASSET_GONE = {404, 410}
 _NOTE_LINES = 8
 _NOTE_LENGTH = 220
 
@@ -235,6 +236,16 @@ def _read_limited(response, limit: int) -> bytes:
     return data
 
 
+def _asset_is_gone(source: Source, url: str, timeout: float) -> bool:
+    try:
+        with _open(source, url, "application/octet-stream", timeout):
+            return False
+    except _Refused as error:
+        return error.status in _ASSET_GONE
+    except (OSError, ValueError, UpdateError):
+        return False
+
+
 def check(current: str, source: Source = GITHUB, *, timeout: float = 15) -> dict:
     """Describe the newest release relative to `current`.
 
@@ -307,15 +318,15 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
         raise UpdateError("unexpected")
     folder = Path(folder)
     stopped = cancelled or (lambda: False)
+    checksum_url = source.asset(version, checksum_asset(version))
     try:
-        with _open(source, source.asset(version, checksum_asset(version)), "application/octet-stream",
-                   timeout) as response:
+        with _open(source, checksum_url, "application/octet-stream", timeout) as response:
             listing = _read_limited(response, _CHECKSUM_LIMIT).decode("utf-8", errors="replace")
     except UpdateError:
         raise
     except _Refused as error:
         # Every published release has this file: without it, the release is no longer there.
-        raise UpdateError("gone" if error.status in (404, 410) else "download") from None
+        raise UpdateError("gone" if error.status in _ASSET_GONE else "download") from None
     except (OSError, ValueError):
         raise UpdateError("download") from None
     rows = parse_checksums(listing)
@@ -339,6 +350,12 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
             response = _open(source, source.asset(version, EXE_ASSET), "application/octet-stream", timeout)
         except UpdateError:
             raise
+        except _Refused as error:
+            # The release can be removed after we read its signed checksum.
+            # A missing program alone may just be an unavailable asset.
+            if error.status in _ASSET_GONE and _asset_is_gone(source, checksum_url, timeout):
+                raise UpdateError("gone") from None
+            raise UpdateError("download") from None
         except (OSError, ValueError):
             raise UpdateError("download") from None
         with response:

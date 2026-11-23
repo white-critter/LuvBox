@@ -26,6 +26,8 @@ Item {
     readonly property var hostWindow: view.Window.window
     readonly property var folder: app ? app.localFolder : null
     readonly property var manager: app ? app.localManagement : null
+    readonly property string folderPath: folder ? folder.folderPath : ""
+    readonly property bool checkingFolder: !!folder && folder.openingFolder
     readonly property bool opened: !!folder && folder.hasFolder
     readonly property bool duplicateMode: !!folder && folder.filterDuplicateOnly
     readonly property bool modalOpen: folderPicker.visible || previewPopup.visible || tagPopup.visible
@@ -48,9 +50,12 @@ Item {
     property string seenManagerStatus: ""
     property string keyNotice: ""
     readonly property string managerText: manager ? (manager.error || manager.status) : ""
-    readonly property string statusText: keyNotice.length > 0 ? keyNotice
+    readonly property string statusText: checkingFolder ? "폴더를 확인하는 중…" : keyNotice.length > 0 ? keyNotice
         : (statusSource === "manager" && managerText.length > 0 ? managerText : (folder ? folder.status : ""))
-    readonly property string lockReason: !!manager && manager.locked ? "저장 중에는 X 저장 폴더와 겹치는 이 폴더의 사진을 휴지통으로 옮기지 않습니다. 저장이 끝난 뒤 다시 시도해 주세요."
+    readonly property string lockReason: !!manager && manager.locked
+        ? (folder && folder.checkingXOverlap && !folder.overlapsXLibrary
+            ? "X 저장 폴더와 겹치는지 확인하는 중입니다. 확인이 끝난 뒤 다시 시도해 주세요."
+            : "저장 중에는 X 저장 폴더와 겹치는 이 폴더의 사진을 휴지통으로 옮기지 않습니다. 저장이 끝난 뒤 다시 시도해 주세요.")
         : (!!folder && folder.filesLocked ? folder.holdReason : "")
 
     // Made when the tab is first shown: the folder opened last opens again then.
@@ -59,6 +64,11 @@ Item {
     onOpenedChanged: {
         Qt.callLater(takeFocus)
         Qt.callLater(updateFocus)
+    }
+    onFolderPathChanged: {
+        searchDelay.stop()
+        searchField.text = ""
+        view.seenFolderStatus = ""
     }
     onDuplicateModeChanged: {
         localDuplicateHelp.close()
@@ -315,9 +325,9 @@ Item {
                 Label {
                     objectName: "localFolderError"
                     Layout.fillWidth: true
-                    visible: !!view.folder && view.folder.folderError.length > 0
-                    text: view.folder ? view.folder.folderError : ""
-                    color: Theme.error
+                    visible: text.length > 0
+                    text: view.checkingFolder ? "폴더를 확인하는 중…" : view.folder ? view.folder.folderError : ""
+                    color: view.checkingFolder ? Theme.notice : Theme.error
                     wrapMode: Text.Wrap
                 }
                 Label {
@@ -763,6 +773,8 @@ Item {
             Layout.minimumHeight: 28
             spacing: Theme.gapSmall
             readonly property bool loadFailed: !!view.folder && view.folder.folderModel.error.length > 0
+            readonly property bool working: !!view.folder && (view.checkingFolder || view.folder.folderModel.busy
+                || view.folder.scanningFolder)
             readonly property bool isManagerError: view.keyNotice.length === 0 && view.statusSource === "manager"
                 && !!view.manager && view.manager.error.length > 0
             Label {
@@ -773,10 +785,10 @@ Item {
             Item {
                 implicitWidth: 20
                 implicitHeight: 20
-                visible: !!view.folder && (view.folder.folderModel.busy || view.folder.scanningFolder)
+                visible: localStatusLine.working
                 BusyIndicator {
                     anchors.centerIn: parent
-                    running: view.windowShown && !!view.folder && (view.folder.folderModel.busy || view.folder.scanningFolder)
+                    running: view.windowShown && localStatusLine.working
                     implicitWidth: 20
                     implicitHeight: 20
                 }
@@ -2386,13 +2398,6 @@ Item {
     }
     Connections {
         target: view.folder
-        function onFolderChanged() {
-            if (searchField.text.length > 0) {
-                searchDelay.stop()
-                searchField.text = ""
-            }
-            view.seenFolderStatus = ""
-        }
         function onChanged() {
             if (!view.folder)
                 return

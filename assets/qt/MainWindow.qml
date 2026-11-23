@@ -661,12 +661,16 @@ ApplicationWindow {
             anchors.fill: parent
             anchors.leftMargin: Theme.pageMargin
             anchors.rightMargin: 144
-            spacing: Theme.gapSmall
+            spacing: window.width <= 760 ? Theme.gapTiny : Theme.gapSmall
             Image {
+                id: titleBrandMark
+                objectName: "titleBrandMark"
+                readonly property int markSize: 38
+                readonly property int decodeSize: Math.ceil(markSize * Math.max(1, window.Screen.devicePixelRatio))
                 source: "../icons/luvbox.png"
-                Layout.preferredWidth: 26
-                Layout.preferredHeight: 26
-                sourceSize: Qt.size(26, 26)
+                Layout.preferredWidth: markSize
+                Layout.preferredHeight: markSize
+                sourceSize: Qt.size(decodeSize, decodeSize)
                 fillMode: Image.PreserveAspectFit
                 // The heart keeps a little of its own light, as on the startup screen.
                 Glow {

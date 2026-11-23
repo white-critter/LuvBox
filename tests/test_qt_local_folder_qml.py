@@ -34,6 +34,7 @@ def scene():
     faulthandler.dump_traceback_later(80, exit=True)
     from contextlib import ExitStack
     import shutil
+    import threading
     from unittest.mock import patch
 
     from PIL import Image
@@ -46,6 +47,7 @@ def scene():
     from shiboken6 import delete
 
     sys.path.insert(0, str(ROOT))
+    from luvbox.local_store import check_root
     from luvbox.qt_app import ApplicationController
     from luvbox.qt_wheel import WheelInputFilter
 
@@ -179,9 +181,36 @@ def scene():
         notice = next(item for item in shown("localFolderOverlap")[0].childItems() if item.property("text"))
         assert "다시 받을 수 있습니다" in notice.property("text"), notice.property("text")
         local.checkXOverlap(str(base / "X 저장"))
-        wait(lambda: not shown("localFolderOverlap"), "notice gone")
+        wait(lambda: not local.checkingXOverlap and not shown("localFolderOverlap"), "notice gone")
         assert find("localFolderPath").property("text") == str(photos)
         assert find("localFolderMediaType").property("visible") and find("localFolderDensity").property("visible")
+        search = find("localFolderSearch")
+        QTest.keyClick(window, Qt.Key.Key_F, Qt.KeyboardModifier.ControlModifier)
+        for key in (Qt.Key.Key_P, Qt.Key.Key_H, Qt.Key.Key_O, Qt.Key.Key_T, Qt.Key.Key_O, Qt.Key.Key_0):
+            QTest.keyClick(window, key)
+        wait(lambda: local.model.count == 2 and not local.model.busy, "file name filter applied")
+        click("localFolderSubfolders")
+        wait(lambda: not local.includeSubfolders and not local.busy and not local.model.busy, "subfolders excluded")
+        assert search.property("text") == "photo0" and local.model.count == 2
+        finish_folder_check = threading.Event()
+
+        def check_unavailable_folder(path):
+            finish_folder_check.wait(5)
+            return check_root(path)
+
+        with patch("luvbox.qt_local_folder.check_root", side_effect=check_unavailable_folder):
+            try:
+                assert local.openFolder(str(base / "없는 폴더"))
+                wait(lambda: "폴더를 확인하는 중" in find("localFolderStatus").property("text"), "opening progress")
+                assert search.property("text") == "photo0" and local.model.count == 2
+            finally:
+                finish_folder_check.set()
+            wait(lambda: local.folderError, "missing folder reported")
+        assert search.property("text") == "photo0" and local.model.count == 2
+        search.forceActiveFocus()
+        QTest.keyClick(window, Qt.Key.Key_Escape)
+        wait(lambda: search.property("text") == "" and local.model.count == 6, "file name filter cleared")
+        wait(lambda: len(shown("localFolderTile")) == 6, "all tiles drawn again")
         tile = shown("localFolderTile")[0]
         thumb = next(item for item in tile.childItems() if item.objectName() == "localFolderThumb")
         wait(lambda: thumb.property("paintedWidth") > 0, "thumbnail drawn")
@@ -286,6 +315,7 @@ def scene():
         wait(lambda: local.selectedCount > 0, "photos picked")
         # The folder lies inside the X save folder and a save is running: the app holds the Recycle Bin.
         local.checkXOverlap(str(base))
+        wait(lambda: local.overlapsXLibrary, "overlap checked")
         controller.download._running = True
         controller._state_changed()
         settle(40)

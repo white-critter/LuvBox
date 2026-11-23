@@ -40,12 +40,11 @@ def heart(center_x, center_y, scale):
 def draw() -> Image.Image:
     image = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
     canvas = ImageDraw.Draw(image)
-    margin = SIZE * 0.06
+    margin = SIZE * 0.05
     canvas.rounded_rectangle((margin, margin, SIZE - margin, SIZE - margin), radius=SIZE * 0.24, fill=BACKGROUND)
-    # A fine red outline; the empty center and generous padding match the
-    # reference. Round caps keep the notch and bottom soft at small sizes.
-    radius = SIZE * 0.0125
-    points = heart(SIZE / 2, SIZE / 2, SIZE * 0.0175)
+    # The outline needs enough weight to survive a 16-pixel tray or toolbar icon.
+    radius = SIZE * 0.035
+    points = heart(SIZE / 2, SIZE / 2, SIZE * 0.0325)
     canvas.line(points, fill=HEART, width=round(radius * 2), joint="curve")
     for x, y in points:
         canvas.ellipse((x - radius, y - radius, x + radius, y + radius), fill=HEART)

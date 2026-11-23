@@ -4,6 +4,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -149,16 +150,21 @@ class BuildInputTests(unittest.TestCase):
         recipes = ("tools/ffmpeg/build.py", "tools/ffmpeg/configure-flags.json")
         license_name = "assets/fonts/Pretendard/OFL.txt"
         names = (*recipes, license_name)
+        # This temporary repository uses the settings supplied below. On Windows,
+        # restoring os.environ in another test can drop empty inherited Git values.
+        environment = {name: value for name, value in os.environ.items() if name != "GIT_CONFIG_COUNT"}
         for autocrlf in ("false", "true"):
             with self.subTest(autocrlf=autocrlf):
                 for name in names:
                     self.write(name, b"first line\nsecond line\n")
                 command = ["git", "-c", "core.autocrlf=" + autocrlf, "-C", str(self.root)]
-                subprocess.run([*command, "init", "--quiet"], check=True, capture_output=True)
-                subprocess.run([*command, "add", "--", ".gitattributes", *names], check=True, capture_output=True)
+                subprocess.run([*command, "init", "--quiet"], check=True, capture_output=True, env=environment)
+                subprocess.run([*command, "add", "--", ".gitattributes", *names], check=True,
+                               capture_output=True, env=environment)
                 for name in names:
                     (self.root / name).unlink()
-                subprocess.run([*command, "checkout-index", "--all", "--force"], check=True, capture_output=True)
+                subprocess.run([*command, "checkout-index", "--all", "--force"], check=True,
+                               capture_output=True, env=environment)
                 for name in recipes:
                     self.assertEqual((self.root / name).read_bytes(), b"first line\r\nsecond line\r\n")
                 self.assertEqual((self.root / license_name).read_bytes(), b"first line\nsecond line\n")

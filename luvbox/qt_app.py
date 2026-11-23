@@ -367,7 +367,7 @@ class ApplicationController(QObject):
                     or self._pending_download is not None or self._save_after_settings
                     or self._accounts.busy or self._download.running
                     or self._schedule.mutating or self._management.mutating
-                    or (self._local_folder.overlapsXLibrary and self._local_management.mutating))
+                    or (self._local_folder.may_overlap_x_library and self._local_management.mutating))
 
     @Property(bool, notify=changed)
     def busy(self):
@@ -401,7 +401,7 @@ class ApplicationController(QObject):
             return self._schedule.status
         if self._management.mutating:
             return self._management.status
-        if self._local_folder.overlapsXLibrary and self._local_management.mutating:
+        if self._local_folder.may_overlap_x_library and self._local_management.mutating:
             return self._local_management.status or "겹치는 폴더 정리 작업이 끝날 때까지 기다립니다"
         return self._message or self._download.status
 
@@ -422,7 +422,7 @@ class ApplicationController(QObject):
         return self._gallery_dirty
 
     def _state_changed(self):
-        local_delete_overlap = self._local_folder.overlapsXLibrary and self._local_management.mutating
+        local_delete_overlap = self._local_folder.may_overlap_x_library and self._local_management.mutating
         locked = (self._closing or self._preparing or self._repairing or self._pending_start is not None
                   or bool(self._pending_settings) or self._download.running or local_delete_overlap)
         account_locked = locked or self._schedule.mutating or self._management.mutating
@@ -435,7 +435,7 @@ class ApplicationController(QObject):
         if self._management.locked != management_locked and not self._closing:
             self._management.setLocked(management_locked)
         # A folder inside the X save folder waits for save/prep/repair/gallery deletion before moving files.
-        local_locked = self._local_folder.overlapsXLibrary and (
+        local_locked = self._local_folder.may_overlap_x_library and (
             self._download.running or self._preparing or self._repairing or self._management.mutating
             or self._pending_download is not None or self._pending_start is not None or self._save_after_settings
         )
@@ -505,7 +505,7 @@ class ApplicationController(QObject):
             self._pending_download = None
             if success and not self._closing:
                 options = pending_download[1]
-                if self._local_folder.overlapsXLibrary and self._local_management.mutating:
+                if self._local_folder.may_overlap_x_library and self._local_management.mutating:
                     self._record_manual_outcome({
                         "status": "error",
                         "message": "겹치는 폴더 정리 작업이 끝난 뒤 다시 시작해 주세요.",
@@ -634,7 +634,7 @@ class ApplicationController(QObject):
         )))
 
     def _refresh_overlapping_local(self):
-        if self._local_folder.overlapsXLibrary and self._local_folder.hasFolder:
+        if self._local_folder.may_overlap_x_library and self._local_folder.hasFolder:
             if self._local_folder.busy:
                 self._local_refresh_pending = True
             else:
@@ -643,9 +643,10 @@ class ApplicationController(QObject):
 
     def _flush_local_refresh(self):
         if (self._local_refresh_pending and not self._closing and not self._local_folder.busy
-                and self._local_folder.overlapsXLibrary and self._local_folder.hasFolder):
+                and not self._local_folder.openingFolder):
             self._local_refresh_pending = False
-            self._local_folder.refreshFolder()
+            if self._local_folder.may_overlap_x_library and self._local_folder.hasFolder:
+                self._local_folder.refreshFolder()
 
     @Slot(bool)
     def galleryVisible(self, visible):
@@ -728,7 +729,7 @@ class ApplicationController(QObject):
         keys = self._local_management.takeRecycledKeys()
         if keys is None or (keys and not self._local_folder.removeDeleted(keys)):
             self._local_folder.refresh()
-        if self._local_folder.overlapsXLibrary:
+        if self._local_folder.may_overlap_x_library:
             # The same files are in the X save folder: the gallery lists them until it reads again.
             self._records.refresh()
             self._gallery_dirty = True
@@ -1424,7 +1425,7 @@ def launch(*, startup_probe=None):
     engine.addImageProvider(PREVIEW_PROVIDER, controller._records.preview_provider())
     engine.setInitialProperties({"galleryModel": controller._library.model,
                                  "wheelInputFilter": wheel_input, "appController": controller,
-                                 "uiFontFamily": family})
+                                 "uiFontFamily": family, "visible": False})
     engine.load(_ROOT / "assets/qt/MainWindow.qml")
     if not engine.rootObjects():
         controller.shutdownFinished.connect(application.quit)
@@ -1441,6 +1442,7 @@ def launch(*, startup_probe=None):
             instance.release()
         return 1
     window = engine.rootObjects()[0]
+    window.setIcon(application.windowIcon())
     from .window_frame import WindowFrame
     frame = WindowFrame(window)  # noqa: F841  (kept for the window's lifetime: it follows activation and maximizing)
     from .qt_tray import TrayController
@@ -1458,12 +1460,14 @@ def launch(*, startup_probe=None):
     first_frame = _FirstFrame(window)
     program = launcher.launcher_path() if startup_probe is None else None
     if program is not None:
-        # "Pin to taskbar" must pin the launcher, not this version's folder.
+        # Give Explorer the launcher icon and pin target before it sees the window.
         handle = int(window.winId())
         launcher.mark_window(handle, program)
         controller.shutdownFinished.connect(lambda: launcher.mark_window(handle, None))
     controller.shutdownFinished.connect(window.close)
     _place_window(application, window, {} if startup_probe is not None else controller.window_geometry())
+    if not window.isVisible():
+        window.show()
     if startup_probe is not None:
         startup_probe.attach(application, controller, window)
     elif getattr(sys, "frozen", False):

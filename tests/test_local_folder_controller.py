@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -82,7 +83,7 @@ class FolderControllerCase(unittest.TestCase):
         model = self.controller.model
 
         def quiet():
-            return not self.controller.scanningFolder and not self.controller.filesLocked and not model.busy
+            return not self.controller.openingFolder and not self.controller.filesLocked and not model.busy
 
         # Quiet twice, a moment apart: a finished folder read reloads the list right after.
         for _ in range(2):
@@ -127,7 +128,8 @@ class OpeningTests(FolderControllerCase):
         self.addCleanup(self.close)
         own = self.base / "appdata" / "LuvBox"
         own.mkdir(parents=True, exist_ok=True)
-        self.assertFalse(self.controller.openFolder(str(own)))
+        self.assertTrue(self.controller.openFolder(str(own)))
+        self.wait(lambda: self.controller.folderError, "the app's folder is refused")
         self.assertTrue(self.controller.folderError)
         self.assertFalse(self.controller.hasFolder)
         self.assertTrue(self.controller.openFolder(QUrl.fromLocalFile(str(self.folder)).toString()))
@@ -202,6 +204,41 @@ class OpeningTests(FolderControllerCase):
         self.wait(lambda: self.controller.folderError, "said why")
         self.assertFalse(self.controller.hasFolder)
 
+    def test_a_slow_recent_folder_does_not_block_opening_a_different_folder(self):
+        from luvbox import qt_local_folder
+
+        self.open()
+        slow_folder = self.base / "slow"
+        slow_folder.mkdir()
+        next_folder = self.base / "next"
+        picture(next_folder / "x.jpg")
+        checking = threading.Event()
+        release = threading.Event()
+        real = qt_local_folder.check_root
+
+        def validate(path):
+            if path == str(slow_folder):
+                checking.set()
+                release.wait(1.5)
+            return real(path)
+
+        with patch("luvbox.qt_local_folder.check_root", side_effect=validate):
+            try:
+                started = time.monotonic()
+                self.assertTrue(self.controller.openFolder(str(slow_folder)))
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertTrue(checking.wait(1))
+                self.assertTrue(self.controller.openingFolder)
+                self.assertEqual(self.controller.folderPath, str(self.folder))
+                self.assertTrue(self.controller.openFolder(str(next_folder)))
+                self.settle()
+                self.assertEqual(self.controller.folderPath, str(next_folder))
+            finally:
+                release.set()
+            self.wait(lambda: not any(worker.is_alive() for worker in self.controller._aux_threads), "folder checks done")
+            self.app.processEvents()
+        self.assertEqual(self.controller.folderPath, str(next_folder))
+
     def test_a_recent_folder_can_be_taken_off_the_list_with_or_without_its_record(self):
         """The record (tags, stars, "not duplicates", features) goes only when asked, never the open folder's."""
         from luvbox import local_store
@@ -256,8 +293,10 @@ class OpeningTests(FolderControllerCase):
     def test_overlap_with_the_x_save_folder(self):
         self.open()
         self.controller.checkXOverlap(str(self.base))
+        self.wait(lambda: not self.controller.checkingXOverlap, "overlap checked")
         self.assertTrue(self.controller.overlapsXLibrary)
         self.controller.checkXOverlap(str(self.base / "elsewhere"))
+        self.wait(lambda: not self.controller.checkingXOverlap, "new overlap checked")
         self.assertFalse(self.controller.overlapsXLibrary)
 
 
@@ -279,6 +318,28 @@ class DuplicateTests(FolderControllerCase):
         stand_in = patch("luvbox.local_deletion.recycle_file", side_effect=recycle)
         stand_in.start()
         self.addCleanup(stand_in.stop)
+
+    def test_first_duplicate_scan_uses_size_of_the_file_it_hashed(self):
+        other = self.folder / "other.png"
+        keep = self.folder / "keep.jpg"
+        self.open()
+        self.assertNotEqual(other.stat().st_size, keep.stat().st_size)
+        photos_to_hash = LocalFolderStore.photos_to_hash
+
+        def change_after_listing(store):
+            rows = photos_to_hash(store)
+            shutil.copyfile(keep, other)
+            return rows
+
+        with patch.object(LocalFolderStore, "photos_to_hash", change_after_listing):
+            self.assertTrue(self.controller.scanDuplicates(False))
+            self.wait(lambda: not self.controller.filesLocked, "scan")
+        with closing(LocalFolderStore(self.folder)) as store:
+            self.assertEqual(store.duplicate_count(), 3)
+            self.assertEqual(store.row_by_rel("other.png")["filesize"], keep.stat().st_size)
+        self.settle()
+        details = {row["caption"]: row["detail"] for row in self.controller.model._rows}
+        self.assertEqual(details["other.png"], details["keep.jpg"])
 
     def test_copies_are_found_chosen_and_recycled_and_one_file_stays(self):
         self.open()

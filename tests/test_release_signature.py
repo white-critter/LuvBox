@@ -206,6 +206,9 @@ class WindowsKeyTests(unittest.TestCase):
 
     def backup(self, *arguments, passphrase="throwaway passphrase for a test key"):
         environment = dict(os.environ, LUVBOX_TEST_KEY_PASSPHRASE=passphrase)
+        # Windows PowerShell must load its own Security module even when the
+        # test was started by a newer PowerShell with different module paths.
+        environment.pop("PSMODULEPATH", None)
         return subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                                "-File", str(self.BACKUP), *arguments], env=environment, capture_output=True,
                               text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL, timeout=180,

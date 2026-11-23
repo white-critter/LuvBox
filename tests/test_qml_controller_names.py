@@ -285,7 +285,7 @@ class ControllerNameTests(unittest.TestCase):
         launch = (ROOT / "luvbox" / "qt_app.py").read_text(encoding="utf-8")
         initial = re.search(r"setInitialProperties\(\{(.*?)\}\)", launch, re.S).group(1)
         self.assertEqual(set(re.findall(r'"(\w+)":', initial)),
-                         {"appController", "galleryModel", "wheelInputFilter", "uiFontFamily"})
+                         {"appController", "galleryModel", "wheelInputFilter", "uiFontFamily", "visible"})
         self.assertIn('"galleryModel": controller._library.model', initial)
         self.assertIn("self.model = GalleryModel(", (ROOT / "luvbox" / "qt_library.py").read_text(encoding="utf-8"))
         self.assertIn("readonly property var app: appController", sources()["MainWindow.qml"])
