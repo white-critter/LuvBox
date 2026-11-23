@@ -160,6 +160,104 @@ class RootTests(FolderCase):
 
 
 class ScanTests(FolderCase):
+    def _after_next_walk(self, store, operation):
+        begin_write = store._write
+        pending = True
+
+        def interleave():
+            nonlocal pending
+            if pending:
+                pending = False
+                operation()
+            return begin_write()
+
+        return patch.object(store, "_write", side_effect=interleave)
+
+    def test_overlapping_refreshes_only_insert_a_new_file_once(self):
+        picture(self.folder / "a.jpg")
+        first, second = self.store(), self.store()
+        def interleave_refresh():
+            self.assertEqual(first.sync_folder()["added"], 1)
+
+        with self._after_next_walk(second, interleave_refresh):
+            result = second.sync_folder()
+        self.assertEqual(result, {"found": 1, "added": 0, "changed": 0, "gone": 0, "restored": 0})
+        self.assertEqual(self.listed(second), ["a.jpg"])
+
+    def test_an_older_walk_does_not_hide_a_new_file_found_by_another_refresh(self):
+        picture(self.folder / "initial.jpg")
+        earlier, later = self.store(), self.store()
+        earlier.sync_folder()
+
+        def newer_refresh():
+            picture(self.folder / "created.jpg")
+            self.assertEqual(later.sync_folder()["added"], 1)
+            later.save_clusters([["initial.jpg", "created.jpg"]], "exact")
+
+        with self._after_next_walk(earlier, newer_refresh):
+            result = earlier.sync_folder()
+        self.assertEqual((result["found"], result["gone"]), (2, 0))
+        self.assertEqual(self.listed(earlier), ["created.jpg", "initial.jpg"])
+        self.assertEqual(earlier.duplicate_count(), 2)
+
+    def test_an_older_walk_does_not_restore_stale_file_details_or_rename_a_file_back(self):
+        changed = picture(self.folder / "change.jpg")
+        original = picture(self.folder / "original.jpg")
+        renamed = original.with_name("ORIGINAL.jpg" if os.name == "nt" else "renamed.jpg")
+        earlier, later = self.store(), self.store()
+        earlier.sync_folder()
+
+        def newer_refresh():
+            picture(changed, size=(220, 220))
+            original.rename(original.with_suffix(".tmp")).rename(renamed)
+            self.assertEqual(later.sync_folder()["changed"], 1)
+            later.save_hashes([(changed.name, "new-hash", "new-dhash", "new-signature")])
+
+        with self._after_next_walk(earlier, newer_refresh):
+            result = earlier.sync_folder()
+        self.assertEqual((result["changed"], result["gone"]), (0, 0))
+        self.assertEqual(set(self.listed(earlier)), {changed.name, renamed.name})
+        row = earlier.row_by_rel(changed.name)
+        self.assertEqual((row["filesize"], row["file_hash"]), (changed.stat().st_size, "new-hash"))
+
+    def test_repeated_catalog_changes_do_not_retry_forever_or_publish_the_walk(self):
+        picture(self.folder / "unapplied.jpg")
+        store = self.store()
+        begin_write = store._write
+        attempts = 0
+
+        def another_edit():
+            nonlocal attempts
+            attempts += 1
+            with begin_write() as db:
+                db.execute("INSERT OR REPLACE INTO local_meta VALUES ('interleaved', ?)", (attempts,))
+            return begin_write()
+
+        with patch.object(store, "_write", side_effect=another_edit):
+            with self.assertRaises(LocalFolderError):
+                store.sync_folder()
+        self.assertEqual(attempts, 3)
+        self.assertEqual(self.listed(store), [])
+
+    def test_cancelling_after_the_walk_leaves_the_catalog_unchanged(self):
+        from luvbox.duplicates import ScanCancelled
+
+        picture(self.folder / "unapplied.jpg")
+        store = self.store()
+        cancelled = False
+
+        def cancel():
+            nonlocal cancelled
+            cancelled = True
+
+        def check_cancel():
+            if cancelled:
+                raise ScanCancelled("cancelled before writing")
+
+        with self._after_next_walk(store, cancel), self.assertRaises(ScanCancelled):
+            store.sync_folder(check_cancel=check_cancel)
+        self.assertEqual(self.listed(store), [])
+
     def test_unreadable_subfolder_does_not_remove_its_photos_or_duplicate_group(self):
         subfolder = self.folder / "sub"
         picture(subfolder / "one.jpg")

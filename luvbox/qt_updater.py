@@ -153,13 +153,14 @@ class UpdateController(QObject):
             return f"새 버전이 나왔어요 · {self.version}"
         if self._state == "current":
             return "최신 버전이에요"
-        return "최신 버전이에요 · " + self._checked_text() if self._checked_at else "아직 확인하지 않았어요"
+        checked = self._checked_text() if self._checked_at else ""
+        return "최신 버전이에요 · " + checked if checked else "아직 확인하지 않았어요"
 
     def _checked_text(self):
         try:
             when = datetime.fromisoformat(self._checked_at).astimezone()
-        except ValueError:
-            return "확인함"
+        except (ValueError, OSError, OverflowError):
+            return ""
         return f"{when.month}월 {when.day}일 확인"
 
     def _start_worker(self):

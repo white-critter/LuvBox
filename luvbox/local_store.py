@@ -49,6 +49,8 @@ _CLOUD_ATTRIBUTES = 0x00400000 | 0x00040000 | 0x00001000      # recall on access
 _NAME_SURROGATE = 0x20000000
 _ERROR = "폴더 정보를 읽거나 저장하지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요."
 _FOLDER_READ_ERROR = "폴더를 끝까지 읽지 못했습니다. 폴더의 연결과 읽기 권한을 확인한 뒤 새로고침해 주세요."
+_FOLDER_CHANGED_ERROR = "다른 작업에서 폴더 목록을 바꾸고 있습니다. 잠시 뒤 새로고침해 주세요."
+_SCAN_ATTEMPTS = 3
 _WRITE_LOCK = threading.RLock()
 _LABEL_CHUNK = 400
 
@@ -437,18 +439,39 @@ class LocalFolderStore:
             "WHERE neg.present=1 AND neg.cluster_id = -local_files.cluster_id)"
         )
 
+    def _scan_version(self) -> tuple[int, int]:
+        try:
+            with self._tx_lock:
+                external = self._db.execute("PRAGMA data_version").fetchone()[0]
+                return external, self._db.total_changes
+        except sqlite3.Error as exc:
+            raise LocalFolderError(_ERROR) from exc
+
     def sync_folder(self, include_subfolders: bool = True, check_cancel=None) -> dict:
         """Bring the list up to date with the folder. Unchanged files keep everything known of them.
 
         Returns counts: found, added, changed, gone, restored.
         """
-        found = self.walk(include_subfolders, check_cancel)
-        if check_cancel:
-            check_cancel()
-        known = {row["rel_path"]: row for row in self._read(
+        for _ in range(_SCAN_ATTEMPTS):
+            version = self._scan_version()
+            found = self.walk(include_subfolders, check_cancel)
+            if check_cancel:
+                check_cancel()
+            with self._write() as db:
+                if check_cancel:
+                    check_cancel()
+                # An older walk can miss a file another scan just added, or carry its old size.
+                # Check both other connections and writes through this connection before using it.
+                if self._scan_version() == version:
+                    return self._apply_folder_scan(db, found, include_subfolders)
+        raise LocalFolderError(_FOLDER_CHANGED_ERROR)
+
+    def _apply_folder_scan(self, db, found, include_subfolders: bool) -> dict:
+        now = _now()
+        added = changed = gone = restored = 0
+        known = {row["rel_path"]: row for row in db.execute(
             "SELECT rel_path, filesize, mtime_ns, present, cloud FROM local_files")}
-        # Windows sees IMG_01.jpg and img_01.jpg as one file: a listed file missing only because its
-        # name's case changed takes the new name, with its star, tags, answers, feature and marks.
+        # A case-only rename keeps the file's star, tags, feedback, features and marks.
         by_case = {}
         for rel in known:
             by_case.setdefault(os.path.normcase(rel), []).append(rel)
@@ -462,42 +485,41 @@ class LocalFolderStore:
             if len(olds) == 1:
                 renamed[rel] = olds[0]
                 claimed_olds.add(olds[0])
-        now = _now()
-        added = changed = gone = restored = 0
-        with self._write() as db:
-            if renamed:
-                self._rename_rows(db, renamed)
-                for rel, old in renamed.items():
-                    known[rel] = known.pop(old)
-            for rel, (size, mtime, cloud, kind, name) in found.items():
-                old = known.get(rel)
-                if old is None:
-                    db.execute(
-                        "INSERT INTO local_files(rel_path, filename, media_type, filesize, mtime_ns, cloud, present, "
-                        "updated_at) VALUES (?,?,?,?,?,?,1,?)", (rel, name, kind, size, mtime, int(cloud), now))
-                    added += 1
-                    continue
-                if old["filesize"] != size or old["mtime_ns"] != mtime:
-                    # The bytes may differ: what was computed from them is computed again.
-                    db.execute(
-                        "UPDATE local_files SET filesize=?, mtime_ns=?, cloud=?, present=1, file_hash='', dhash='', "
-                        "file_signature='', cluster_id=0, updated_at=? WHERE rel_path=?",
-                        (size, mtime, int(cloud), now, rel))
-                    self._invalidate_file_analysis(db, rel)
-                    changed += 1
-                elif not old["present"] or bool(old["cloud"]) != cloud:
-                    db.execute("UPDATE local_files SET present=1, cloud=?, updated_at=? WHERE rel_path=?",
-                               (int(cloud), now, rel))
-                    restored += 0 if old["present"] else 1
-            for rel, old in known.items():
-                if rel not in found and old["present"]:
-                    db.execute("UPDATE local_files SET present=0, cluster_id=0, updated_at=? WHERE rel_path=?",
-                               (now, rel))
-                    gone += 1
-            if changed or gone:
-                self._prune_singleton_clusters(db)
-            db.execute("INSERT OR REPLACE INTO local_meta(key, value) VALUES ('include_subfolders', ?)",
-                       ("1" if include_subfolders else "0",))
+        if renamed:
+            self._rename_rows(db, renamed)
+            for rel, old in renamed.items():
+                known[rel] = known.pop(old)
+        for rel, (size, mtime, cloud, kind, name) in found.items():
+            old = known.get(rel)
+            if old is None:
+                db.execute(
+                    "INSERT INTO local_files(rel_path, filename, media_type, filesize, mtime_ns, cloud, present, "
+                    "updated_at) VALUES (?,?,?,?,?,?,1,?)", (rel, name, kind, size, mtime, int(cloud), now))
+                added += 1
+                continue
+            if old["filesize"] != size or old["mtime_ns"] != mtime:
+                # The bytes may differ: what was computed from them is computed again.
+                db.execute(
+                    "UPDATE local_files SET filesize=?, mtime_ns=?, cloud=?, present=1, file_hash='', dhash='', "
+                    "file_signature='', cluster_id=0, updated_at=? WHERE rel_path=?",
+                    (size, mtime, int(cloud), now, rel))
+                self._invalidate_file_analysis(db, rel)
+                changed += 1
+            elif not old["present"] or bool(old["cloud"]) != cloud:
+                db.execute("UPDATE local_files SET present=1, cloud=?, updated_at=? WHERE rel_path=?",
+                           (int(cloud), now, rel))
+                restored += 0 if old["present"] else 1
+        for rel, old in known.items():
+            if rel not in found and old["present"]:
+                db.execute("UPDATE local_files SET present=0, cluster_id=0, updated_at=? WHERE rel_path=?",
+                           (now, rel))
+                gone += 1
+        if changed or gone:
+            self._prune_singleton_clusters(db)
+        db.execute(
+            "INSERT INTO local_meta(key, value) VALUES ('include_subfolders', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE local_meta.value<>excluded.value",
+            ("1" if include_subfolders else "0",))
         return {"found": len(found), "added": added, "changed": changed, "gone": gone, "restored": restored}
 
     def _rename_rows(self, db, renamed):

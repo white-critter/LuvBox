@@ -90,6 +90,16 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertEqual(self.paths(), ["/latest"])
         self.assertTrue(controller._recheck_timer.isActive())
 
+    def test_an_unusable_saved_check_date_leaves_the_status_unchecked(self):
+        stamps = ["bad timestamp", "0001-01-01T00:00:00+23:59", "9999-12-31T23:59:59-23:59"]
+        if os.name == "nt":
+            stamps.append("0001-01-01T00:00:00")
+        for stamp in stamps:
+            with self.subTest(stamp=stamp):
+                controller = self.controller(update_checked_at=stamp, update_check=False)
+                self.assertEqual(controller.status, "아직 확인하지 않았어요")
+        self.assertEqual(self.paths(), [])
+
     def test_while_running_it_looks_again_only_when_due(self):
         self.server.publish("1.9.0")
         controller = self.controller()

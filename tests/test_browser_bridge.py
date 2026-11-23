@@ -403,7 +403,7 @@ except ImportError:
     sync_playwright = None
 
 
-@unittest.skipUnless(sync_playwright and shutil.which("chromium"), "Optional local Chromium/Playwright integration")
+@unittest.skipUnless(sync_playwright, "Optional Playwright integration")
 class BrowserBridgeExtensionTests(unittest.TestCase):
     def test_real_extension_pairs_with_synthetic_x_session(self):
         # Browser only: intercept every X page locally. No real login/network.
@@ -413,10 +413,19 @@ class BrowserBridgeExtensionTests(unittest.TestCase):
                         '<button data-testid="SideNav_AccountSwitcher_Button">Offline Name\n@Offline_User</button>'
                         '</body></html>')
         with tempfile.TemporaryDirectory() as profile, sync_playwright() as playwright, BrowserBridge() as bridge:
+            chromium = shutil.which("chromium") or playwright.chromium.executable_path
+            if not Path(chromium).is_file():
+                self.skipTest("Optional local Chromium browser is not installed")
             context = playwright.chromium.launch_persistent_context(
-                profile, executable_path=shutil.which("chromium"), headless=True,
+                profile, executable_path=chromium, headless=True,
                 ignore_default_args=["--disable-extensions"],
-                args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}", "--no-sandbox", "--enable-unsafe-extension-debugging"])
+                args=[
+                    f"--disable-extensions-except={extension}", f"--load-extension={extension}",
+                    "--no-sandbox", "--enable-unsafe-extension-debugging",
+                    # Keep the fixture offline even if Chromium fails to intercept a navigation.
+                    "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+                ],
+            )
             try:
                 if not context.service_workers:
                     try:
@@ -426,7 +435,13 @@ class BrowserBridgeExtensionTests(unittest.TestCase):
                         if "disabled by the administrator" in str(error):
                             self.skipTest("Chromium administrator policy blocks unpacked test extensions")
                         raise
-                context.route("https://x.com/**", lambda route: route.fulfill(status=200, content_type="text/html", body=profile_html))
+                intercepted = []
+
+                def serve_profile(route):
+                    intercepted.append(route.request.url)
+                    route.fulfill(status=200, content_type="text/html", body=profile_html)
+
+                context.route("https://x.com/**", serve_profile)
                 context.add_cookies([
                     {"name": "auth_token", "value": PAYLOAD["auth_token"], "domain": ".x.com", "path": "/", "secure": True, "httpOnly": True},
                     {"name": "twid", "value": "u%3D123456789", "domain": ".x.com", "path": "/", "secure": True}
@@ -440,6 +455,7 @@ class BrowserBridgeExtensionTests(unittest.TestCase):
                 self.assertEqual(page.locator("#pairing-code").inner_text(), bridge.pairing_code)
                 page.get_by_role("checkbox").check()
                 page.get_by_role("button", name="@Offline_User 연결", exact=True).wait_for(timeout=30000)
+                self.assertIn("https://x.com/home", intercepted)
                 self.assertEqual(urlsplit(page.url).fragment, "")
                 # Explicit second click is required; viewing an account is not consent.
                 self.assertIsNone(bridge._result)

@@ -365,6 +365,12 @@ def _listed(alias: str) -> str:
     return f"({alias}.path!='' AND NOT {_shadowed(alias)})"
 
 
+_LISTED_DUPLICATE_MEMBERS = (
+    "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
+    "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND " + _listed("m")
+)
+
+
 def _fileless_elsewhere(alias: str) -> str:
     """SQL: a record without a file that the gallery leaves out.
 
@@ -4195,9 +4201,7 @@ class HistoryStore:
         order = "base.is_fav DESC, base.filesize DESC, base.tweet_id DESC, base.num DESC"
         return (
             "WITH base AS (SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id, "
-            f"h.filesize, h.file_hash, {favorite} AS is_fav "
-            "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
-            "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id>0 AND " + _listed("m") + "), "
+            f"h.filesize, h.file_hash, {favorite} AS is_fav " + _LISTED_DUPLICATE_MEMBERS + "), "
             "ranked AS (SELECT base.folder_mode, base.tweet_id, base.num, base.media_type, base.cluster_id, "
             f"ROW_NUMBER() OVER (PARTITION BY base.cluster_id ORDER BY {order}) AS cluster_rank, "
             f"(base.file_hash!='' AND ROW_NUMBER() OVER (PARTITION BY base.cluster_id, base.file_hash ORDER BY {order})>1) "
@@ -4280,9 +4284,9 @@ class HistoryStore:
         """
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return 0
-        row = self._db.execute(
-            self._ranked_duplicates() + "SELECT COUNT(*) FROM ranked WHERE cluster_size>=2").fetchone()
-        return row[0] if row else 0
+        return self._db.execute(
+            "SELECT COALESCE(SUM(members),0) FROM (SELECT COUNT(*) AS members " + _LISTED_DUPLICATE_MEMBERS +
+            " GROUP BY h.cluster_id HAVING COUNT(*)>=2)").fetchone()[0]
 
     @_safe
     def duplicate_copy_identities(self, media_type="all", query="", *, period=None, author="",
@@ -4332,11 +4336,8 @@ class HistoryStore:
         groups: dict[int, list[dict]] = {}
         for row in self._read_rows(
                 "SELECT h.cluster_id AS cluster_id, m.folder_mode AS folder_mode, m.tweet_id AS tweet_id, "
-                "m.num AS num, m.media_type AS media_type, m.path AS path "
-                "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
-                "AND m.num=h.num AND m.media_type=h.media_type "
-                "WHERE h.cluster_id>0 AND " + _listed("m") + " "
-                f"ORDER BY h.cluster_id, {favorite} DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"):
+                "m.num AS num, m.media_type AS media_type, m.path AS path " + _LISTED_DUPLICATE_MEMBERS +
+                f" ORDER BY h.cluster_id, {favorite} DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"):
             groups.setdefault(row["cluster_id"], []).append({
                 "identity": (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]),
                 "path": row["path"]})

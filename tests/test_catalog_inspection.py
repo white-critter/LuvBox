@@ -5,6 +5,7 @@ has nothing to do with the AI categories leaves an unclassified photo to be
 classified.
 """
 import shutil
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,24 @@ class _Store(unittest.TestCase):
 
 
 class DuplicateCountMatchesTheViewTests(_Store):
+    def test_counting_duplicates_does_not_rank_photos(self):
+        first, second = self.photo(91), self.photo(92)
+        self.store.save_image_hashes([(*first, 12, "same", "0123456789abcdef"),
+                                      (*second, 12, "same", "0123456789abcdef")])
+        self.store.save_clusters([[first, second]])
+        total = self.store.duplicate_page(0, 100)["total"]
+
+        def deny_ranking(action, _first, second, *_):
+            if action == sqlite3.SQLITE_FUNCTION and second == "row_number":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        self.store._db.set_authorizer(deny_ranking)
+        try:
+            self.assertEqual(self.store.duplicate_counts(), total)
+        finally:
+            self.store._db.set_authorizer(None)
+
     def test_hashes_of_a_scan_that_never_grouped_are_not_counted(self):
         """A stopped scan has saved hashes but no groups: the chip must not promise photos the view cannot list."""
         first, second, third = self.photo(101), self.photo(102), self.photo(103, b"another")

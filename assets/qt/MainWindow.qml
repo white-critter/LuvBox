@@ -3315,48 +3315,69 @@ ApplicationWindow {
         property var targetField: null
         property int viewYear: 2026
         property int viewMonth: 0
+        property int startingDay: 1
         property string todayIso: ""
-        readonly property int firstWeekday: new Date(viewYear, viewMonth, 1).getDay()
-        readonly property int daysInMonth: new Date(viewYear, viewMonth + 1, 0).getDate()
+        readonly property int firstWeekday: dateInMonth(viewMonth, 1).getDay()
+        readonly property int daysInMonth: dateInMonth(viewMonth + 1, 0).getDate()
+
+        function dateInMonth(month, day) {
+            // The Date constructor treats years below 100 as 1900-1999.
+            const date = new Date(2000, 0, 1)
+            date.setFullYear(viewYear, month, day)
+            return date
+        }
 
         function pad2(n) {
             return n < 10 ? "0" + n : String(n)
         }
 
         function formatIso(y, m, d) {
-            return String(y) + "-" + pad2(m) + "-" + pad2(d)
+            return String(y).padStart(4, "0") + "-" + pad2(m) + "-" + pad2(d)
         }
 
         function stepMonth(delta) {
-            const next = new Date(viewYear, viewMonth + delta, 1)
-            viewYear = next.getFullYear()
+            const next = dateInMonth(viewMonth + delta, 1)
+            const year = next.getFullYear()
+            if (year < 1 || year > 9999)
+                return false
+            viewYear = year
             viewMonth = next.getMonth()
+            return true
+        }
+
+        function canChoose(iso) {
+            // The catalog's end date needs a following day. A later start
+            // also moves the end with it when both sides of the range are set.
+            return iso !== "9999-12-31" || (targetField === dateFromFilter && !dateToFilter.text)
         }
 
         // Store the picked date (or "" to clear it) as the start or the end of the range.
         function choose(iso) {
+            if (!canChoose(iso))
+                return
             const start = targetField === dateFromFilter
             close()
             window.applyFilters(start ? { from: iso } : { to: iso })
         }
 
         function focusDay(day) {
-            if (day < 1 || day > daysInMonth)
-                return false
-            const pending = [contentItem]
-            while (pending.length) {
-                const item = pending.pop()
-                if (!item)
-                    continue
-                if (item.objectName === "datePickerDay_" + day) {
-                    item.forceActiveFocus()
-                    return true
-                }
-                const nested = item.children || []
-                for (let index = 0; index < nested.length; index++)
-                    pending.push(nested[index])
+            if (day < 1) {
+                if (!stepMonth(-1))
+                    return
+                day += daysInMonth
+            } else if (day > daysInMonth) {
+                day -= daysInMonth
+                if (!stepMonth(1))
+                    return
             }
-            return false
+            const item = datePickerDays.itemAt(firstWeekday + day - 1)
+            if (item && item.enabled)
+                item.forceActiveFocus()
+        }
+
+        onOpened: {
+            const date = formatIso(viewYear, viewMonth + 1, startingDay)
+            focusDay(canChoose(date) ? startingDay : startingDay - 1)
         }
 
         function place() {
@@ -3388,9 +3409,11 @@ ApplicationWindow {
             if (match) {
                 viewYear = Number(match[1])
                 viewMonth = Math.max(0, Math.min(11, Number(match[2]) - 1))
+                startingDay = Math.max(1, Math.min(daysInMonth, Number(match[3])))
             } else {
                 viewYear = now.getFullYear()
                 viewMonth = now.getMonth()
+                startingDay = now.getDate()
             }
             place()
             open()
@@ -3415,7 +3438,8 @@ ApplicationWindow {
                     implicitHeight: 30
                     leftPadding: 0
                     rightPadding: 0
-                    onClicked: datePickerPopup.viewYear -= 1
+                    enabled: datePickerPopup.viewYear > 1
+                    onClicked: datePickerPopup.stepMonth(-12)
                 }
                 FlatButton {
                     objectName: "datePickerPrevMonth"
@@ -3425,6 +3449,7 @@ ApplicationWindow {
                     implicitHeight: 30
                     leftPadding: 0
                     rightPadding: 0
+                    enabled: datePickerPopup.viewYear > 1 || datePickerPopup.viewMonth > 0
                     onClicked: datePickerPopup.stepMonth(-1)
                 }
                 Label {
@@ -3443,6 +3468,7 @@ ApplicationWindow {
                     implicitHeight: 30
                     leftPadding: 0
                     rightPadding: 0
+                    enabled: datePickerPopup.viewYear < 9999 || datePickerPopup.viewMonth < 11
                     onClicked: datePickerPopup.stepMonth(1)
                 }
                 FlatButton {
@@ -3453,7 +3479,8 @@ ApplicationWindow {
                     implicitHeight: 30
                     leftPadding: 0
                     rightPadding: 0
-                    onClicked: datePickerPopup.viewYear += 1
+                    enabled: datePickerPopup.viewYear < 9999
+                    onClicked: datePickerPopup.stepMonth(12)
                 }
             }
 
@@ -3475,6 +3502,7 @@ ApplicationWindow {
                     }
                 }
                 Repeater {
+                    id: datePickerDays
                     model: 42
                     delegate: Rectangle {
                         id: dayCell
@@ -3492,18 +3520,25 @@ ApplicationWindow {
                         Layout.preferredWidth: 34
                         Layout.preferredHeight: 30
                         radius: Theme.radiusSmall
-                        activeFocusOnTab: validDay
+                        enabled: validDay && datePickerPopup.canChoose(isoDate)
+                        activeFocusOnTab: enabled
+                        Accessible.ignored: !validDay
                         Accessible.role: Accessible.Button
                         Accessible.name: validDay
                             ? datePickerPopup.viewYear + "년 " + (datePickerPopup.viewMonth + 1) + "월 " + dayNumber + "일"
                             : ""
+                        Accessible.onPressAction: chooseDay()
                         border.width: activeFocus ? 2 : (!selectedDay && isToday ? 1 : 0)
                         border.color: activeFocus ? Theme.focus : Theme.textFaint
+                        function chooseDay() {
+                            if (enabled && datePickerPopup.targetField)
+                                datePickerPopup.choose(isoDate)
+                        }
                         Keys.onPressed: event => {
                             if (!validDay)
                                 return
                             if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
-                                datePickerPopup.choose(isoDate)
+                                chooseDay()
                                 event.accepted = true
                             } else if (event.key === Qt.Key_Left) {
                                 datePickerPopup.focusDay(dayNumber - 1)
@@ -3527,18 +3562,14 @@ ApplicationWindow {
                             text: dayCell.validDay ? String(dayCell.dayNumber) : ""
                             font.pixelSize: Theme.fontCaption
                             font.bold: dayCell.selectedDay
-                            color: dayCell.selectedDay ? "white" : Theme.text
+                            color: !dayCell.enabled ? Theme.textDisabled : (dayCell.selectedDay ? "white" : Theme.text)
                         }
                         MouseArea {
                             id: dayMouse
                             anchors.fill: parent
-                            enabled: dayCell.validDay
-                            hoverEnabled: dayCell.validDay
-                            cursorShape: dayCell.validDay ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: {
-                                if (datePickerPopup.targetField && dayCell.validDay)
-                                    datePickerPopup.choose(dayCell.isoDate)
-                            }
+                            hoverEnabled: dayCell.enabled
+                            cursorShape: dayCell.enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            onClicked: dayCell.chooseDay()
                         }
                     }
                 }

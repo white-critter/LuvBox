@@ -25,6 +25,7 @@ def scene():
 
     from PIL import Image
     from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPointF, Qt, qInstallMessageHandler
+    from PySide6.QtGui import QAccessible, QAccessibleActionInterface
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from PySide6.QtQml import QQmlApplicationEngine
@@ -291,6 +292,8 @@ def scene():
             assert date_from.property("activeFocus")
             QTest.keyClick(window, Qt.Key.Key_Space)
             wait(lambda: picker.property("visible"), "date picker open via keyboard")
+            today = int(picker.property("todayIso")[-2:])
+            wait(lambda: find(f"datePickerDay_{today}").property("activeFocus"), "today receives focus")
             show_october()
             click("datePickerDay_1")
             wait(lambda: not picker.property("visible"), "date picker close")
@@ -311,10 +314,99 @@ def scene():
                 show_october()
                 invoke(find("datePickerDay_1"), "forceActiveFocus")
                 settle()
+                for key, month, day in ((Qt.Key.Key_Left, 8, 30), (Qt.Key.Key_Right, 9, 1),
+                                        (Qt.Key.Key_Up, 8, 24), (Qt.Key.Key_Down, 9, 1)):
+                    QTest.keyClick(window, key)
+                    settle()
+                    assert picker.property("viewMonth") == month, (key, month, day)
+                    assert find(f"datePickerDay_{day}").property("activeFocus")
+                assert controller.library.dateFrom == "" and controller.library.dateTo == ""
+                # Crossing New Year's Day goes to December of the previous year.
+                picker.setProperty("viewYear", 2027)
+                picker.setProperty("viewMonth", 0)
+                settle()
+                invoke(find("datePickerDay_1"), "forceActiveFocus")
+                QTest.keyClick(window, Qt.Key.Key_Left)
+                settle()
+                assert (picker.property("viewYear"), picker.property("viewMonth")) == (2026, 11)
+                assert find("datePickerDay_31").property("activeFocus")
+                QTest.keyClick(window, Qt.Key.Key_Right)
+                settle()
+                assert (picker.property("viewYear"), picker.property("viewMonth")) == (2027, 0)
+                assert find("datePickerDay_1").property("activeFocus")
+                for year, month, day, key, iso in (
+                    (1, 0, 1, Qt.Key.Key_Left, "0001-01-01"),
+                    (9999, 11, 31, Qt.Key.Key_Right, "9999-12-31"),
+                ):
+                    picker.setProperty("viewYear", year)
+                    picker.setProperty("viewMonth", month)
+                    settle()
+                    item = find(f"datePickerDay_{day}")
+                    invoke(item, "forceActiveFocus")
+                    QTest.keyClick(window, key)
+                    settle()
+                    assert (picker.property("viewYear"), picker.property("viewMonth")) == (year, month)
+                    assert item.property("activeFocus") and item.property("isoDate") == iso
+                QTest.keyClick(window, Qt.Key.Key_Return)
+                wait(lambda: not picker.property("visible") and controller.library.dateFrom == "9999-12-31",
+                     "last date allowed for an open-ended range")
+                invoke(date_to, "forceActiveFocus")
+                QTest.keyClick(window, Qt.Key.Key_Space)
+                wait(lambda: picker.property("visible"), "end picker opens near the start date")
+                last_day = find("datePickerDay_31")
+                assert not last_day.property("enabled")
+                wait(lambda: find("datePickerDay_30").property("activeFocus"), "last valid end date receives focus")
+                QTest.keyClick(window, Qt.Key.Key_Right)
+                settle()
+                assert find("datePickerDay_30").property("activeFocus")
+                inaccessible_day = QAccessible.queryAccessibleInterface(last_day)
+                assert inaccessible_day is not None and inaccessible_day.state().disabled
+                inaccessible_day.actionInterface().doAction(QAccessibleActionInterface.pressAction())
+                settle()
+                assert picker.property("visible") and controller.library.dateTo == ""
+                QTest.keyClick(window, Qt.Key.Key_Return)
+                wait(lambda: not picker.property("visible") and controller.library.dateTo == "9999-12-30",
+                     "last valid end date applied")
+                assert controller.library.dateFrom == "9999-12-30"
+                invoke(date_from, "forceActiveFocus")
+                QTest.keyClick(window, Qt.Key.Key_Space)
+                wait(lambda: picker.property("visible"), "start picker for a closed date range")
+                assert not find("datePickerDay_31").property("enabled")
+                QTest.keyClick(window, Qt.Key.Key_Escape)
+                wait(lambda: not picker.property("visible"), "close range picker")
+                for field in (date_from, date_to):
+                    invoke(field, "forceActiveFocus")
+                    QTest.keyClick(window, Qt.Key.Key_Backspace)
+                wait(lambda: controller.library.dateFrom == "" and controller.library.dateTo == "",
+                     "clear both date limits")
+                invoke(date_from, "forceActiveFocus")
+                QTest.keyClick(window, Qt.Key.Key_Space)
+                wait(lambda: picker.property("visible"), "date picker reopened")
+                show_october()
+                invoke(find("datePickerDay_1"), "forceActiveFocus")
                 QTest.keyClick(window, Qt.Key.Key_Right)
                 QTest.keyClick(window, Qt.Key.Key_Return)
                 wait(lambda: not picker.property("visible") and controller.library.dateFrom == "2026-10-02"
                      and not controller.library.model.busy, "keyboard chose the next day")
+                invoke(date_from, "forceActiveFocus")
+                settle()
+                QTest.keyClick(window, Qt.Key.Key_Space)
+                wait(lambda: picker.property("visible"), "reopen the selected date")
+                wait(lambda: find("datePickerDay_2").property("activeFocus"), "selected day receives focus")
+                QTest.keyClick(window, Qt.Key.Key_Right)
+                wait(lambda: find("datePickerDay_3").property("activeFocus"), "focus a different date")
+                QTest.keyClick(window, Qt.Key.Key_Escape)
+                wait(lambda: not picker.property("visible") and date_from.property("activeFocus"),
+                     "Escape returns focus to the date field")
+                assert controller.library.dateFrom == "2026-10-02" and controller.library.dateTo == ""
+                QTest.keyClick(window, Qt.Key.Key_Space)
+                wait(lambda: picker.property("visible") and find("datePickerDay_2").property("activeFocus"),
+                     "reopening returns to the applied date")
+                day = QAccessible.queryAccessibleInterface(find("datePickerDay_1"))
+                assert day is not None and day.actionInterface() is not None
+                day.actionInterface().doAction(QAccessibleActionInterface.pressAction())
+                wait(lambda: not picker.property("visible") and controller.library.dateFrom == "2026-10-01"
+                     and not controller.library.model.busy, "accessible press chose the date")
                 invoke(date_from, "forceActiveFocus")
                 settle()
                 QTest.keyClick(window, Qt.Key.Key_Backspace)
