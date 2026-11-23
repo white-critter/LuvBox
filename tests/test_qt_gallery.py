@@ -190,6 +190,15 @@ class GalleryModelTests(unittest.TestCase):
         self.wait_for(lambda: model.count == 200)
         model.focusViewport(10, 12, 4, 80, 60)
         self.assertEqual(provider.calls[-1], (["item10", "item11", "item12", "item13", "item14", "item15", "item16"], 80, 60))
+        before = len(provider.calls)
+        for _ in range(60):  # pixel-level scroll updates within the same rows
+            model.focusViewport(10, 12, 4, 80, 60)
+        self.assertEqual(len(provider.calls), before)
+        model.removeKeys(["item0"])
+        model.focusViewport(10, 12, 4, 80, 60)
+        self.assertEqual(provider.calls[-1][0], [f"item{index}" for index in range(11, 18)])
+        model.search("restored")
+        self.wait_for(lambda: not model.busy and model.count == 200)
         model.focusViewport(4, 6, -3, 80, 60)
         self.assertEqual(provider.calls[-1][0], ["item4", "item5", "item6", "item3", "item2", "item1"])
         model.focusViewport(0, 59, 10, 20, 16)
@@ -203,7 +212,9 @@ class GalleryModelTests(unittest.TestCase):
         model.focusViewport(0, 1, 0, 0, 16)
         self.assertEqual(len(provider.calls), before)
         model.search("again")
-        self.assertIn("reset", provider.calls)
+        self.wait_for(lambda: not model.busy and model.count == 200)
+        model.focusViewport(50, 109, -1000, 20, 16)
+        self.assertEqual(provider.calls[before:], ["reset", provider.calls[before - 1]])
 
     def test_large_visible_range_becomes_ready_with_bounded_cache_and_lookahead(self):
         folder = tempfile.TemporaryDirectory()
@@ -391,6 +402,15 @@ class SafeThumbnailProviderTests(unittest.TestCase):
         with patch.object(Path, "is_symlink", return_value=True), patch.object(self.provider, "_decoder") as decoder:
             self.assertTrue(self.request().isNull())
             decoder.assert_not_called()
+
+    def test_unresolvable_path_returns_an_empty_thumbnail(self):
+        self.assertFalse(self.request().isNull())
+        with patch.object(Path, "resolve", side_effect=PermissionError), \
+                patch.object(self.provider, "_decoder") as decoder:
+            self.assertTrue(self.request().isNull())
+            decoder.assert_not_called()
+        self.assertFalse(self.request().isNull())
+        self.assertEqual(self.provider.snapshot()["decoded"], 1)
 
     def test_close_discards_inflight_image_and_clears_registry_and_cache(self):
         entered, release = Event(), Event()

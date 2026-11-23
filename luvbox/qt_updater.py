@@ -46,6 +46,7 @@ class UpdateController(QObject):
         # The release a click was fetching turned out to be taken down, and nothing
         # newer replaced it: the notice stays to say so instead of vanishing.
         self._withdrawn = False
+        self._check_pending = False
         self._manual = False
         self._restart = False
         self._closing = False
@@ -198,10 +199,11 @@ class UpdateController(QObject):
             self._quiet_check()
 
     def _quiet_check(self):
-        if self._closing or self.busy or self._state == "ready":
+        if self._closing or self.busy or self._check_pending or self._state == "ready":
             return
-        self._manual = False
         if self._queue("check"):
+            self._check_pending = True
+            self._manual = False
             if self._state == "idle":
                 self._state = "checking"
             self.changed.emit()
@@ -210,10 +212,12 @@ class UpdateController(QObject):
     def checkNow(self):
         if self._closing or self.busy or self._state == "ready":
             return
-        self._manual = True
-        self._error = ""
-        self._withdrawn = False
-        if self._queue("check"):
+        if self._check_pending or self._queue("check"):
+            # Report the result of the quiet check if one is already in flight.
+            self._check_pending = True
+            self._manual = True
+            self._error = ""
+            self._withdrawn = False
             self._state = "checking"
             self.changed.emit()
 
@@ -305,6 +309,7 @@ class UpdateController(QObject):
                     with self._jobs.mutex:
                         install_queued = any(item[0] == "install" for item in self._jobs.queue)
                     if install_queued:
+                        self._delivered.emit(("check_skipped",))
                         continue
                     self._probe_launcher()
                     result = ("checked", *self._check())
@@ -389,12 +394,16 @@ class UpdateController(QObject):
         if kind == "launcher":
             self.changed.emit()
             return
+        if kind == "check_skipped":
+            self._check_pending = False
+            return
         if kind == "progress":
             if self._state == "downloading":
                 self._progress = max(self._progress, min(1.0, result[1]))
                 self.changed.emit()
             return
         if kind == "checked":
+            self._check_pending = False
             found, self._checked_at = result[1], result[2]
             if self._state in {"downloading", "ready"}:
                 return
@@ -433,6 +442,7 @@ class UpdateController(QObject):
         elif kind == "failed":
             stage, reason, message = result[1], result[2], result[3]
             if stage == "check":
+                self._check_pending = False
                 if self._state in {"downloading", "ready"}:
                     return
                 if self._manual:

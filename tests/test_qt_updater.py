@@ -148,6 +148,35 @@ class UpdateControllerTests(unittest.TestCase):
             other.startAutomaticCheck()
             self.assertFalse(other.noticeVisible, damaged)
 
+    def test_check_now_uses_the_background_check_already_in_progress(self):
+        program = self.server.publish("1.9.1")
+        remembered = {"version": "1.9.0", "notes": "", "installable": True, "size": len(program)}
+        controller = self.controller(update_found=remembered)
+        started, proceed = Event(), Event()
+        check = updater.check
+
+        def delayed_check(*args, **kwargs):
+            started.set()
+            if not proceed.wait(5):
+                raise TimeoutError("The test did not release the running check")
+            return check(*args, **kwargs)
+
+        with patch.object(updater, "check", side_effect=delayed_check):
+            try:
+                controller.startAutomaticCheck()
+                self.assertTrue(started.wait(5))
+                self.assertTrue(controller.noticeVisible)
+                controller.checkNow()
+                self.assertEqual(controller.state, "checking")
+            finally:
+                proceed.set()
+            self.wait(lambda: controller.state == "available" and controller.version == "1.9.1")
+            controller.shutdown()
+            controller._worker.join(5)
+            self.assertFalse(controller._worker.is_alive())
+
+        self.assertEqual(self.paths(), ["/latest"])
+
     def test_checking_by_hand_reports_the_latest_version_and_failures(self):
         self.server.publish("1.8.0")
         controller = self.controller()

@@ -292,6 +292,10 @@ class LocalFolderStore:
                         store._db.rollback()
                 except sqlite3.Error as exc:
                     if kind is None:
+                        try:
+                            store._db.rollback()
+                        except sqlite3.Error:
+                            pass
                         raise LocalFolderError(_ERROR) from exc
                 finally:
                     store._tx_lock.release()

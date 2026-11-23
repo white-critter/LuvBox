@@ -203,9 +203,9 @@ class GroupingTests(unittest.TestCase):
         """Every week is a candidate for every other; each picture should still be decoded only a few times."""
         paths = self.weeks(24)
         items = [_item(path) for path in paths]
-        pairs = duplicates._close_hash_pairs([(int(item["dhash"], 16), index) for index, item in enumerate(items)],
-                                             duplicates.NEAR_CANDIDATE_BITS)
-        self.assertGreater(len(pairs), 6 * len(paths))
+        candidate_count, _ = duplicates._close_hash_pairs(
+            [(int(item["dhash"], 16), index) for index, item in enumerate(items)], duplicates.NEAR_CANDIDATE_BITS)
+        self.assertGreater(candidate_count, 6 * len(paths))
         # Room for twelve of these pictures, half of the series.
         with patch.object(duplicates, "_DETAIL_CACHE_PIXELS", 12 * 1200 * 1200), \
                 patch.object(duplicates, "_DETAIL_BLOCK", 4), \

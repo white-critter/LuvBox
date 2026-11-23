@@ -34,6 +34,18 @@ def _timing_summary(values):
             "max_ms": round(ordered[-1], 3)}
 
 
+def _thumbnail_stamp(path):
+    try:
+        if path is None or path.is_symlink() or path.resolve() != path:
+            return None
+        status = path.stat()
+    except (OSError, RuntimeError):  # pathlib can report a link loop as RuntimeError.
+        return None
+    if cloud_only(path, status=status):
+        return None
+    return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns
+
+
 class SafeThumbnailProvider(QQuickImageProvider):
     """Decode registered files on a small priority queue, off the GUI thread.
 
@@ -392,15 +404,9 @@ class SafeThumbnailProvider(QQuickImageProvider):
             if self._closed or self._registry.get(key) != path:
                 return QImage(), False
             generation = self._registry_generation
-        if path is None or path.is_symlink() or path.resolve() != path:
+        stamp = _thumbnail_stamp(path)
+        if stamp is None:
             return QImage(), False
-        try:
-            status = path.stat()
-        except OSError:
-            return QImage(), False
-        if cloud_only(path, status=status):
-            return QImage(), False
-        stamp = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
         cache_key = key, stamp, width, height
         with self._lock:
             if self._closed or generation != self._registry_generation:
@@ -426,12 +432,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                             lambda: self._closed or generation != self._registry_generation
                             or (not deliver and (self._wanted is None or key not in self._wanted)), timeout=delay):
                         return QImage(), False
-                try:
-                    current = path.stat()
-                except OSError:
-                    return QImage(), False
-                if ((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != stamp
-                        or path.is_symlink() or path.resolve() != path or cloud_only(path, status=current)):
+                if _thumbnail_stamp(path) != stamp:
                     return QImage(), False
             result = self._decoder(path, (width, height))
             if result.image is not None or not getattr(result, "retryable", False):
@@ -452,12 +453,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                            QImage.Format.Format_RGBA8888).copy()
         finally:
             picture.close()
-        try:
-            current = path.stat()
-        except OSError:
-            return QImage(), False
-        if ((current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != stamp
-                or path.is_symlink() or path.resolve() != path or cloud_only(path, status=current)):
+        if _thumbnail_stamp(path) != stamp:
             return QImage(), False
         with self._lock:
             self._record("decode_ms", decode_ms)
@@ -513,6 +509,7 @@ class GalleryModel(QAbstractListModel):
         self._ready = set()
         self._missing = set()
         self._thumb_size = (0, 0)
+        self._thumb_focus = None
         ready = getattr(provider, "ready", None)
         if ready is not None:
             ready.connect(self._thumb_ready)
@@ -642,6 +639,7 @@ class GalleryModel(QAbstractListModel):
             del self._rows[first:last + 1]
             for index in range(first, len(self._rows)):
                 self._positions[self._rows[index]["key"]] = index
+            self._thumb_focus = None
             self.endRemoveRows()
         self._total = max(len(self._rows), self._total - len(wanted))
         self.changed.emit()
@@ -676,6 +674,7 @@ class GalleryModel(QAbstractListModel):
         self._positions.clear()
         self._ready.clear()
         self._missing.clear()
+        self._thumb_focus = None
         self._total = 0
         reset = getattr(self._provider, "reset_notifications", None)
         if reset is not None:
@@ -776,15 +775,19 @@ class GalleryModel(QAbstractListModel):
         if first > last:
             first, last = last, first
         lead = max(-_LOOKAHEAD_CAP, min(_LOOKAHEAD_CAP, lead))
-        visible = list(range(first, last + 1))
+        visible = range(first, last + 1)
         if lead > 0:
-            ahead = list(range(last + 1, min(count, last + 1 + lead)))
+            ahead = range(last + 1, min(count, last + 1 + lead))
         elif lead < 0:
-            ahead = list(range(first - 1, max(-1, first + lead - 1), -1))
+            ahead = range(first - 1, max(-1, first + lead - 1), -1)
         else:
-            ahead = []
-        keys = [self._rows[index]["key"] for index in visible + ahead]
+            ahead = range(0)
         size = (width, height)
+        focus = (visible, ahead, size)
+        # Pixel-sized scroll changes often leave the same rows in view.
+        if focus == self._thumb_focus:
+            return
+        self._thumb_focus = focus
         if size != self._thumb_size:
             reset = getattr(self._provider, "reset_notifications", None)
             if reset is not None:
@@ -795,6 +798,7 @@ class GalleryModel(QAbstractListModel):
         self._thumb_size = size
         schedule = getattr(self._provider, "schedule", None)
         if schedule is not None:
+            keys = [self._rows[index]["key"] for indexes in (visible, ahead) for index in indexes]
             schedule(keys, width, height)
 
     @Slot(str)

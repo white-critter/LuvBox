@@ -224,8 +224,9 @@ class StorageHistoryMediaRegressionTests(unittest.TestCase):
 
         hashes = [(0x123456789ABCDEF0, i) for i in range(6)]
         hashes.append((0x123456789ABCDEF1, 6))
-        pairs = _close_hash_pairs(hashes, 1)
+        count, pairs = _close_hash_pairs(hashes, 1)
         expected = {(i, j) for i in range(7) for j in range(i + 1, 7)}
+        self.assertEqual(count, len(expected))
         self.assertEqual(set(pairs), expected)
 
     def test_clip_classifier_corrupt_bundled_model_fallback_and_pixel_decode(self):

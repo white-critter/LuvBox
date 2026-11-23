@@ -1,14 +1,17 @@
 """Duplicates are identical files; "nearly identical" needs the pixels to agree as well."""
 from contextlib import closing
 import io
+from itertools import combinations
 from pathlib import Path
 import tempfile
+import tracemalloc
 import unittest
 from unittest.mock import patch
 
 from PIL import Image, ImageDraw, ImageFilter
 
 from tests import app_data_isolation  # noqa: F401  Never open the user's app data.
+from luvbox import duplicates
 from luvbox.duplicates import (ScanCancelled, cluster_images, compute_dhash, compute_file_hash, hamming_distance,
                                nearly_identical, pixel_vector)
 from luvbox.history import HistoryStore
@@ -131,6 +134,59 @@ class NearIdenticalTests(unittest.TestCase):
 
         with self.assertRaises(ScanCancelled):
             cluster_images(items, near=True, check_cancel=cancel)
+
+    def test_perceptual_hash_collisions_can_start_comparison_with_bounded_memory(self):
+        items = [{"key": str(index), "path": str(index), "dhash": "0000000000000000"} for index in range(750)]
+
+        def compare(done, total):
+            self.assertEqual((done, total), (0, 280_875))
+            raise ScanCancelled("stop")
+
+        tracemalloc.start()
+        try:
+            with self.assertRaises(ScanCancelled):
+                cluster_images(items, near=True, progress=compare)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 5 * 1024 * 1024)
+
+    def test_distinct_but_close_hashes_can_start_comparison_with_bounded_memory(self):
+        # Every two-bit hash is within four bits of every other hash.
+        hashes = [f"{(1 << first) | (1 << second):016x}" for first, second in combinations(range(26), 2)][:312]
+        items = [{"key": str(index), "path": str(index), "dhash": value} for index, value in enumerate(hashes)]
+
+        def compare(done, total):
+            self.assertEqual((done, total), (0, 48_516))
+            raise ScanCancelled("stop")
+
+        tracemalloc.start()
+        try:
+            with self.assertRaises(ScanCancelled):
+                cluster_images(items, near=True, progress=compare)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 5 * 1024 * 1024)
+
+    def test_near_checks_visit_each_candidate_once_in_decode_order(self):
+        items = [{"key": str(index), "path": str(index), "dhash": f"{value:016x}"}
+                 for index, value in enumerate([1, 1, 0, 31, 0, 15, 0])]
+        checked = []
+        progress = []
+
+        def detail(first, second):
+            checked.append((int(first), int(second)))
+            return False
+
+        with patch.object(duplicates, "NEAR_CANDIDATE_BITS", 1), patch.object(duplicates, "_DETAIL_BLOCK", 2), \
+                patch.object(duplicates, "nearly_identical", return_value=True):
+            self.assertEqual(cluster_images(items, near=True, vector_for=int, detail_for=detail,
+                                            progress=lambda done, total: progress.append((done, total))), [])
+
+        self.assertEqual(checked, [(0, 1), (0, 2), (1, 2), (0, 4), (1, 4), (0, 6), (1, 6),
+                                   (2, 4), (3, 5), (2, 6), (4, 6)])
+        self.assertEqual(progress[-1], (11, 11))
 
 
 class StoredGroupTests(unittest.TestCase):

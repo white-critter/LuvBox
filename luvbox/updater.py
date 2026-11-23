@@ -337,6 +337,8 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
     # ties them to the maintainer's key. Checked before the large download.
     if not release_signature.verify(version, listing, rows, source.keys):
         raise UpdateError("signature")
+    if stopped():
+        raise UpdateError("cancelled")
     try:
         folder.mkdir(parents=True, exist_ok=True)
     except OSError:

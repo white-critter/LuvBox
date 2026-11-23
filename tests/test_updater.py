@@ -232,6 +232,23 @@ class DownloadTests(ReleaseServerCase):
                    progress=lambda received, total: stop.set(), cancelled=stop.is_set)
         self.assertEqual(self.leftovers(), [])
 
+    def test_cancelling_during_checksum_verification_does_not_request_the_program(self):
+        self.server.publish("1.9.0")
+        stop = threading.Event()
+        verify = updater.release_signature.verify
+
+        def verify_and_cancel(*args, **kwargs):
+            valid = verify(*args, **kwargs)
+            stop.set()
+            return valid
+
+        with patch.object(updater.release_signature, "verify", side_effect=verify_and_cancel):
+            self.fails("cancelled", updater.download, "1.9.0", self.downloads, self.server.source,
+                       cancelled=stop.is_set)
+
+        self.assertEqual([path for path, _ in self.server.requests], ["/download/v1.9.0/SHA256-1.9.0.txt"])
+        self.assertEqual(self.leftovers(), [])
+
     def test_a_release_without_a_usable_checksum_row_costs_no_large_download(self):
         program = self.server.publish("1.9.0")
         for text in (b"", b"not a checksum file", hashlib.sha256(program).hexdigest().encode() + b" LuvBox.exe\n",

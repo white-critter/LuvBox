@@ -275,12 +275,12 @@ class DownloadService:
             if process is not None:
                 self._finish_process(process)
             self._control.detach()
-            self._emit(job_id, {"type": "process_exit", "code": return_code,
-                                "forced": forced, "stop_requested": self._stop.is_set()})
             with self._lock:
                 self._process = None
                 self._running = False
                 self._review_id = None
+                self._events.append({"type": "process_exit", "job_id": job_id, "code": return_code,
+                                     "forced": forced, "stop_requested": self._stop.is_set()})
 
     @staticmethod
     def _finish_process(process):

@@ -1,5 +1,6 @@
 """Download IPC ordering and bounded buffers, using disposable fake workers."""
 
+from collections import deque
 import json
 from pathlib import Path
 import tempfile
@@ -91,6 +92,21 @@ class DownloadServiceTests(unittest.TestCase):
         self.service._emit(2, {"type": "progress", "downloaded": 20})
         events = self.service.drain()
         self.assertEqual([(event["job_id"], event["downloaded"]) for event in events], [(1, 10), (2, 20)])
+
+    def test_process_exit_is_published_after_the_worker_is_retired(self):
+        service = self.service
+        states_at_exit = []
+
+        class ObservedEvents(deque):
+            def append(self, event):
+                if event["type"] == "process_exit":
+                    states_at_exit.append(service._running)
+                super().append(event)
+
+        service._events = ObservedEvents()
+        events = self.run_worker(lambda command, **kwargs: _Process(Path(command[-2])))
+        self.assertEqual(events[-1]["type"], "process_exit")
+        self.assertEqual(states_at_exit, [False])
 
     def test_close_retires_a_worker_stuck_after_its_terminal_event(self):
         self.service._job_id = 1

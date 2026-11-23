@@ -9,6 +9,7 @@ from contextlib import closing
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -75,10 +76,28 @@ class RootTests(FolderCase):
         with self.assertRaises(LocalFolderError):
             check_root(file)
 
+    def test_failed_commit_discards_changes_and_allows_the_next_edit(self):
+        store = self.store()
+
+        def reject_commit(action, argument, *_):
+            if action == sqlite3.SQLITE_TRANSACTION and argument == "COMMIT":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        store._db.set_authorizer(reject_commit)
+        try:
+            with self.assertRaises(LocalFolderError):
+                store.set_meta("edit", "uncommitted")
+        finally:
+            store._db.set_authorizer(None)
+
+        self.assertEqual(store.meta("edit"), "")
+        store.set_meta("edit", "retried")
+        self.assertEqual(store.meta("edit"), "retried")
+
     @unittest.skipUnless(os.name == "nt", "Windows junctions")
     def test_opening_the_list_again_waits_for_no_one_writing_it(self):
         """The window opens a folder's list for each small edit while a worker may be writing to it."""
-        import sqlite3
         import threading
         import time
 

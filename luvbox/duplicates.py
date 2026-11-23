@@ -7,7 +7,9 @@ another size or quality, and their pixels decide.
 
 from __future__ import annotations
 
-from collections import OrderedDict
+from bisect import bisect_right
+from collections import OrderedDict, defaultdict
+from collections.abc import Iterable
 from contextlib import ExitStack
 import hashlib
 import math
@@ -457,49 +459,71 @@ def same_in_detail(first: Path | str, second: Path | str, *, greys: _GreyCache |
         return False
 
 
-def _close_hash_pairs(hashes: list[tuple[int, int]], max_distance: int, check_cancel=None) -> list[tuple[int, int]]:
-    """Index pairs whose 64-bit hashes differ by at most ``max_distance`` bits."""
-    pairs = set()
+def _close_hash_pairs(hashes: list[tuple[int, int]], max_distance: int,
+                      check_cancel=None) -> tuple[int, Iterable[tuple[int, int]]]:
+    """Count candidate pairs by hash, then expand one block of photos at a time."""
     if max_distance < 0 or len(hashes) < 2:
-        return []
+        return 0, ()
     grouped: dict[int, list[int]] = {}
     for value, index in hashes:
         grouped.setdefault(value, []).append(index)
-    for indices in grouped.values():
+    matches: dict[int, list[int]] = defaultdict(list)
+    total = 0
+    for value, indices in grouped.items():
         count = len(indices)
-        if count < 2:
-            continue
-        for left in range(count - 1):
-            if check_cancel:
-                check_cancel()
-            index_a = indices[left]
-            for right in range(left + 1, count):
-                index_b = indices[right]
-                pairs.add((index_a, index_b) if index_a < index_b else (index_b, index_a))
-    distinct_hashes = list(grouped.items())
-    if len(distinct_hashes) >= 2:
+        if count > 1:
+            indices.sort()
+            matches[value] = [value]
+            total += count * (count - 1) // 2
+    if len(grouped) >= 2:
         slice_count = max_distance + 1
         # Strided bit slices keep uniform top/bottom edges from collapsing into one bucket.
         masks = [sum(1 << bit for bit in range(part, 64, slice_count)) for part in range(slice_count)]
-        for mask in masks:
-            buckets: dict[int, list[tuple[int, list[int]]]] = {}
-            for value, indices in distinct_hashes:
-                buckets.setdefault(value & mask, []).append((value, indices))
+        for part, mask in enumerate(masks):
+            earlier_masks = masks[:part]
+            buckets: dict[int, list[int]] = {}
+            for value in grouped:
+                buckets.setdefault(value & mask, []).append(value)
             for bucket in buckets.values():
-                size = len(bucket)
-                if size < 2:
-                    continue
-                for left in range(size - 1):
+                for left in range(len(bucket) - 1):
                     if check_cancel:
                         check_cancel()
-                    value_a, indices_a = bucket[left]
-                    for right in range(left + 1, size):
-                        value_b, indices_b = bucket[right]
-                        if (value_a ^ value_b).bit_count() <= max_distance:
-                            for index_a in indices_a:
-                                for index_b in indices_b:
-                                    pairs.add((index_a, index_b) if index_a < index_b else (index_b, index_a))
-    return sorted(pairs)
+                    value_a = bucket[left]
+                    for right in range(left + 1, len(bucket)):
+                        value_b = bucket[right]
+                        differences = value_a ^ value_b
+                        if differences.bit_count() > max_distance:
+                            continue
+                        # Count a pair only where its first matching slice occurs.
+                        for earlier in earlier_masks:
+                            if not differences & earlier:
+                                break
+                        else:
+                            matches[value_a].append(value_b)
+                            matches[value_b].append(value_a)
+                            total += len(grouped[value_a]) * len(grouped[value_b])
+
+    if not total:
+        return 0, ()
+    compared = sorted((index, value) for value in matches for index in grouped[value])
+    blocks = {index: rank // _DETAIL_BLOCK for rank, (index, _) in enumerate(compared)}
+
+    def pairs_in_blocks():
+        # Keep only one left block's pairs so a common hash in thousands of
+        # photos needs space proportional to the photos, even with quadratic comparisons.
+        for start in range(0, len(compared), _DETAIL_BLOCK):
+            pairs = []
+            for left, value in compared[start:start + _DETAIL_BLOCK]:
+                if check_cancel:
+                    check_cancel()
+                for other_value in matches[value]:
+                    indices = grouped[other_value]
+                    for offset in range(bisect_right(indices, left), len(indices)):
+                        pairs.append((left, indices[offset]))
+            pairs.sort(key=lambda pair: (blocks[pair[1]], pair))
+            yield from pairs
+
+    return total, pairs_in_blocks()
 
 
 def cluster_images(items: Sequence[dict], *, near: bool = False, vector_for=pixel_vector,
@@ -556,15 +580,10 @@ def cluster_images(items: Sequence[dict], *, near: bool = False, vector_for=pixe
                     continue
                 seen_roots.add(root)
                 hashes.append((int(value, 16), index))
-        candidates = [pair for pair in _close_hash_pairs(hashes, NEAR_CANDIDATE_BITS, check_cancel)
-                      if find(pair[0]) != find(pair[1])]
-        # Compared a block of photos against another at a time, so the pictures
+        # Compare a block of photos against another at a time, so the pictures
         # of both blocks stay decoded meanwhile: a template met in a hundred
-        # pairs is read a few times instead of once per pair. The groups do not
-        # depend on the order.
-        compared = sorted({index for pair in candidates for index in pair})
-        rank = {index: number for number, index in enumerate(compared)}
-        candidates.sort(key=lambda pair: (rank[pair[0]] // _DETAIL_BLOCK, rank[pair[1]] // _DETAIL_BLOCK, pair))
+        # pairs is read a few times instead of once per pair.
+        total, candidates = _close_hash_pairs(hashes, NEAR_CANDIDATE_BITS, check_cancel)
         vectors: dict[int, object] = {}
         greys = _GreyCache()
         detail = detail_for or (lambda first, second: same_in_detail(first, second, greys=greys))
@@ -574,7 +593,6 @@ def cluster_images(items: Sequence[dict], *, near: bool = False, vector_for=pixe
                 vectors[index] = vector_for(valid[index]["path"])
             return vectors[index]
 
-        total = len(candidates)
         for done, (left, right) in enumerate(candidates):
             if check_cancel:
                 check_cancel()
