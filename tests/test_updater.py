@@ -85,6 +85,10 @@ class ReleaseServerCase(unittest.TestCase):
 
 
 class CheckTests(ReleaseServerCase):
+    def test_connection_lost_during_release_description_is_a_network_error(self):
+        self.server.interrupted_chunks.add("/latest")
+        self.fails("network", updater.check, "1.8.0", self.server.source)
+
     def test_a_newer_release_is_offered_with_its_change_summary(self):
         program = self.server.publish("1.9.0")
         found = updater.check("1.8.0", self.server.source)
@@ -184,6 +188,15 @@ class CheckTests(ReleaseServerCase):
 class DownloadTests(ReleaseServerCase):
     def leftovers(self):
         return sorted(path.name for path in self.downloads.iterdir()) if self.downloads.is_dir() else []
+
+    def test_connection_lost_during_download_is_retryable_and_leaves_no_partial_file(self):
+        program = self.server.publish("1.9.0")
+        for name in (updater.checksum_asset("1.9.0"), updater.EXE_ASSET):
+            with self.subTest(name=name):
+                self.server.interrupted_chunks = {f"/download/v1.9.0/{name}"}
+                self.fails("download", updater.download, "1.9.0", self.downloads, self.server.source,
+                           size=len(program))
+                self.assertEqual(self.leftovers(), [])
 
     def test_a_verified_program_is_kept_with_its_checksum(self):
         program = self.server.publish("1.9.0")

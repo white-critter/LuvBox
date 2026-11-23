@@ -155,6 +155,25 @@ class CopyTests(DeletionCase):
         self.assertEqual(result["recycled"], 2)
         self.assertTrue((self.folder / "keep.jpg").exists())
 
+    def test_stop_during_copy_comparison_does_not_send_the_copy_to_the_bin(self):
+        from luvbox.deletion import _same_content
+
+        stop = threading.Event()
+        events = []
+
+        def compare_and_stop(first, second):
+            stop.set()
+            return _same_content(first, second)
+
+        rows = [self.copy("copy1.jpg", ["keep.jpg"]), self.copy("copy2.jpg", ["keep.jpg"])]
+        with patch("luvbox.deletion._same_content", side_effect=compare_and_stop):
+            result = run_local_deletion(self.folder, rows, stop, events.append)
+
+        self.assertEqual((result["recycled"], result["cancelled"]), (0, 2))
+        self.assertEqual(self.moved, [])
+        self.assertTrue((self.folder / "copy1.jpg").exists())
+        self.assertEqual((events[-1]["type"], events[-1]["processed"]), ("done", 0))
+
     def test_the_last_file_of_a_group_never_goes(self):
         # Each names only the other as what stays: when its turn comes the other is already gone.
         rows = [self.copy("copy1.jpg", ["copy2.jpg"]), self.copy("copy2.jpg", ["copy1.jpg"])]

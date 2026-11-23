@@ -47,13 +47,30 @@ Item {
         ScrollBar.vertical: ScrollBar {
             policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
         }
-        SmoothWheel { flickable: list; notchPixels: 160 }
+        SmoothWheel { id: wheel; flickable: list; notchPixels: 160 }
         onContentYChanged: review.requestMore()
         onCountChanged: Qt.callLater(review.requestMore)
 
+        function revealFocus(item: Item) {
+            if (height <= 0)
+                return
+            // A group can span several rows. Scroll to the focused control in
+            // its existing card so a photo on a later row can be seen.
+            wheel.reset()
+            cancelFlick()
+            const top = item.mapToItem(contentItem, 0, 0).y
+            const bottom = top + Math.min(item.height, height)
+            let target = contentY
+            if (top < target)
+                target = top
+            else if (bottom > target + height)
+                target = bottom - height
+            if (target !== contentY)
+                contentY = Math.max(originY, Math.min(target, originY + Math.max(0, contentHeight - height)))
+        }
+
         delegate: Card {
             id: card
-            required property int index
             required property int group
             required property int number
             required property int size
@@ -115,6 +132,7 @@ Item {
                         elide: Text.ElideRight
                     }
                     FlatButton {
+                        id: photosDistinct
                         // Some photos of the group are other pictures: only they leave it, the rest stays a group.
                         objectName: "duplicateGroupPhotosDistinct"
                         compact: true
@@ -127,10 +145,11 @@ Item {
                         enabled: !!review.library && !review.library.copiesLocked && !review.settling
                         tip: "선택한 사진만 묶음에서 빼기"
                         Accessible.name: "묶음 " + card.number + " " + text
-                        onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
+                        onActiveFocusChanged: if (activeFocus) list.revealFocus(photosDistinct)
                         onClicked: review.library.markPhotosDistinct(card.chosenKeys)
                     }
                     FlatButton {
+                        id: groupDistinct
                         // Not the same photo, or both are wanted: the group is remembered and not shown again.
                         objectName: "duplicateGroupDistinct"
                         compact: true
@@ -140,10 +159,11 @@ Item {
                         enabled: !!review.library && !review.library.copiesLocked && !review.settling && card.items.length > 0
                         tip: "묶음 전체를 중복에서 빼기"
                         Accessible.name: "묶음 " + card.number + " 중복 아님"
-                        onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
+                        onActiveFocusChanged: if (activeFocus) list.revealFocus(groupDistinct)
                         onClicked: review.library.markGroupDistinct(card.items[0].key)
                     }
                     FlatButton {
+                        id: selectCopies
                         objectName: "duplicateGroupSelect"
                         compact: true
                         focusPolicy: Qt.TabFocus
@@ -151,7 +171,7 @@ Item {
                         enabled: card.copies.length > 0 && !!review.library && !review.library.copiesLocked && !review.settling
                         tip: card.copies.length === 0 ? "완전히 같은 사본이 없습니다. 각 사진의 ‘비교’로 확인하세요" : ""
                         Accessible.name: "묶음 " + card.number + " " + text
-                        onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
+                        onActiveFocusChanged: if (activeFocus) list.revealFocus(selectCopies)
                         onClicked: {
                             if (card.copiesSelected)
                                 review.library.removeFromSelection(card.copies)
@@ -197,7 +217,7 @@ Item {
                             // Picked without a mouse too: a screen reader toggles or presses the tile.
                             Accessible.onToggleAction: tileMouse.pick()
                             Accessible.onPressAction: tileMouse.pick()
-                            onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
+                            onActiveFocusChanged: if (activeFocus) list.revealFocus(tile)
                             Keys.onSpacePressed: event => {
                                 tileMouse.pick()
                                 event.accepted = true
@@ -376,7 +396,7 @@ Item {
                                 Accessible.name: "묶음 " + card.number + " 비슷한 사진 " + tile.modelData.caption
                                     + " 남길 사진과 비교 후 휴지통으로"
                                 Accessible.onPressAction: compareMouse.open()
-                                onActiveFocusChanged: if (activeFocus) list.positionViewAtIndex(card.index, ListView.Contain)
+                                onActiveFocusChanged: if (activeFocus) list.revealFocus(compare)
                                 Keys.onSpacePressed: event => {
                                     compareMouse.open()
                                     event.accepted = true

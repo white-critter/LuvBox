@@ -29,7 +29,7 @@ def scene(shots=None):
 
     from PIL import Image, ImageDraw
     from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPointF, Qt, qInstallMessageHandler
-    from PySide6.QtGui import QFont, QFontDatabase, QMouseEvent
+    from PySide6.QtGui import QFont, QFontDatabase, QKeyEvent, QMouseEvent
     from PySide6.QtWidgets import QApplication
     from PySide6.QtQml import QQmlApplicationEngine, QQmlExpression, qmlContext
     from PySide6.QtQuickControls2 import QQuickStyle
@@ -249,6 +249,30 @@ def scene(shots=None):
         assert titles == ["묶음 1 · 같은 사진 3장", "묶음 2 · 같은 사진 2장"], titles
         assert "완전히 같은 사진 5장" in library.status, library.status
         shot("1-exact-groups")
+
+        # At the largest photo size, a group can be taller than the list. Tab and
+        # Shift+Tab must reveal the focused photo inside that group.
+        window.resize(680, 480)
+        window.setProperty("densityChoice", 2)
+        settle(100)
+        list_view = find("duplicateGroupList")
+        first, second = every("duplicateTile")[:2]
+        assert second.mapToItem(list_view, 0, 0).y() >= list_view.height()
+        first.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+        wait(lambda: first.property("activeFocus"), "first photo focused")
+        for modifiers, target in ((Qt.KeyboardModifier.NoModifier, second),
+                                  (Qt.KeyboardModifier.ShiftModifier, first)):
+            QCoreApplication.postEvent(window, QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Tab, modifiers))
+            QCoreApplication.postEvent(window, QKeyEvent(QEvent.Type.KeyRelease, Qt.Key.Key_Tab, modifiers))
+            wait(lambda: target.property("activeFocus"), "Tab reached the next photo")
+            top = target.mapToItem(list_view, 0, 0).y()
+            visible_height = min(top + target.height(), list_view.height()) - max(top, 0)
+            assert visible_height >= min(target.height(), list_view.height()) - 1, (
+                "focused photo is clipped", top, target.height(), list_view.height())
+        window.resize(1000, 720)
+        window.setProperty("densityChoice", 0)
+        QMetaObject.invokeMethod(list_view, "positionViewAtBeginning")
+        settle(100)
 
         # One photo of a group can be taken out alone: pick it, and its card offers to do so.
         assert not every("duplicateGroupPhotosDistinct")

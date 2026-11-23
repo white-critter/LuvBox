@@ -286,6 +286,39 @@ class LocalRecordTests(unittest.TestCase):
         self.assertEqual(count(self.paths.record_dir / ARCHIVE, "archive"), 2)
         self.assertEqual(count(self.paths.snapshot_dir / ARCHIVE, "archive"), 2)
 
+    def test_publish_keeps_a_snapshot_arriving_while_the_local_copy_is_staged(self):
+        from luvbox.storage import _backup_database
+
+        self.earlier_version_records(["100"])
+        prepare_storage(self.paths, protected=True)
+        publish_snapshot(self.paths)
+        local = self.paths.record_dir / ARCHIVE
+        shared = self.paths.snapshot_dir / ARCHIVE
+        incoming = self.root / "incoming.sqlite3"
+        _backup_database(shared, incoming)
+        for file, tweet in ((incoming, "200"), (local, "300")):
+            with closing(sqlite3.connect(file)) as db, db:
+                db.execute("INSERT INTO archive VALUES (?)", (f"twitter{tweet}_1",))
+        written_later(incoming)
+        incoming_bytes = incoming.read_bytes()
+
+        def stage_and_sync(source, destination):
+            _backup_database(source, destination)
+            if source == local:
+                os.replace(incoming, shared)
+
+        with patch("luvbox.storage._backup_database", side_effect=stage_and_sync):
+            with self.assertRaises(MigrationError):
+                publish_snapshot(self.paths)
+
+        self.assertEqual(shared.read_bytes(), incoming_bytes)
+        self.assertFalse(list(self.paths.snapshot_dir.glob(".snapshot-*")))
+        publish_snapshot(self.paths)
+        for file in (local, shared):
+            with closing(sqlite3.connect(file)) as db:
+                self.assertEqual(db.execute("SELECT entry FROM archive ORDER BY entry").fetchall(),
+                                 [("twitter100_1",), ("twitter200_1",), ("twitter300_1",)])
+
     def test_folder_change_carries_records_found_only_in_the_old_snapshot(self):
         self.earlier_version_records(["100"])
         destination = resolve_storage(self.root / "new", "alice")

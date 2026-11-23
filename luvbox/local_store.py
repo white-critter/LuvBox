@@ -41,6 +41,11 @@ ORDERS = {
     "name": "f.filename COLLATE NOCASE ASC, f.rel_path ASC",
     "size": "f.filesize DESC, f.rel_path ASC",
 }
+_DUPLICATE_KEEP_ORDER = "f.favorite DESC, f.filesize DESC, f.rel_path ASC"
+_DUPLICATE_GROUPS = (
+    "SELECT cluster_id FROM local_files INDEXED BY local_files_cluster "
+    "WHERE present=1 AND cluster_id>0 GROUP BY cluster_id HAVING COUNT(*) >= 2"
+)
 _KOREA = timezone(timedelta(hours=9))
 _CLOUD_ATTRIBUTES = 0x00400000 | 0x00040000 | 0x00001000      # recall on access, recall on open, offline
 # Name-surrogate reparse points (links, junctions, mount points) name another place. A cloud
@@ -572,11 +577,7 @@ class LocalFolderStore:
                            "AND t.source IN ('ai','confirmed','user'))")
             params.append(tag)
         if duplicate_only:
-            clauses.append(
-                "f.cluster_id>0 AND f.cluster_id IN ("
-                "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
-                "GROUP BY cluster_id HAVING COUNT(*) >= 2)"
-            )
+            clauses.append(f"f.cluster_id>0 AND f.cluster_id IN ({_DUPLICATE_GROUPS})")
         return " WHERE " + " AND ".join(clauses), params
 
     def records(self, offset=0, limit=200, *, order="modified", **filters) -> tuple[int, list[dict]]:
@@ -590,6 +591,17 @@ class LocalFolderStore:
         total = count_rows[0]["n"]
         return int(total), rows
 
+    @staticmethod
+    def _ranked_duplicates(clusters: str) -> str:
+        return (
+            f"SELECT f.rowid AS rowid, f.*, ROW_NUMBER() OVER (PARTITION BY f.cluster_id "
+            f"ORDER BY {_DUPLICATE_KEEP_ORDER}) AS cluster_rank, COUNT(*) OVER (PARTITION BY f.cluster_id) "
+            f"AS cluster_size, ROW_NUMBER() OVER (PARTITION BY f.cluster_id, f.file_hash "
+            f"ORDER BY {_DUPLICATE_KEEP_ORDER}) AS hash_rank "
+            "FROM local_files f INDEXED BY local_files_cluster WHERE f.present=1 "
+            f"AND f.cluster_id IN ({clusters})"
+        )
+
     def duplicate_page(self, offset=0, limit=200, **filters) -> tuple[int, list[dict]]:
         """Present photos of the stored groups, each group together, the photo it keeps first.
 
@@ -599,15 +611,17 @@ class LocalFolderStore:
         the filters show of it.
         """
         where, params = self._filter(**{**filters, "duplicate_only": True})
-        ranked = ("SELECT f.rowid AS rowid, f.*, ROW_NUMBER() OVER (PARTITION BY f.cluster_id ORDER BY f.favorite DESC, "
-                  "f.filesize DESC, f.rel_path ASC) AS cluster_rank, COUNT(*) OVER (PARTITION BY f.cluster_id) "
-                  "AS cluster_size, ROW_NUMBER() OVER (PARTITION BY f.cluster_id, f.file_hash ORDER BY f.favorite DESC, "
-                  "f.filesize DESC, f.rel_path ASC) AS hash_rank FROM local_files f WHERE f.present=1 AND f.cluster_id>0")
-        shown = f"SELECT f.rel_path FROM local_files f{where}"
+        candidates = f"FROM local_files f INDEXED BY local_files_cluster{where}"
+        # The page order is the rank order. Find the visible rows first, then
+        # rank all present members of just those groups, including hidden rows.
+        page = (f"SELECT f.rowid, f.cluster_id {candidates} "
+                f"ORDER BY f.cluster_id, {_DUPLICATE_KEEP_ORDER} LIMIT ? OFFSET ?")
+        ranked = self._ranked_duplicates("SELECT cluster_id FROM page")
         count_rows, rows = self._read_snapshot([
-            (f"SELECT COUNT(*) AS n FROM ({shown})", params),
-            (f"SELECT * FROM ({ranked}) AS g WHERE g.cluster_size >= 2 AND g.rel_path IN ({shown}) "
-             "ORDER BY g.cluster_id ASC, g.cluster_rank ASC LIMIT ? OFFSET ?", (*params, int(limit), int(offset))),
+            (f"SELECT COUNT(*) AS n {candidates}", params),
+            (f"WITH page AS MATERIALIZED ({page}) SELECT g.* FROM ({ranked}) AS g "
+             "WHERE g.rowid IN (SELECT rowid FROM page) ORDER BY g.cluster_id, g.cluster_rank",
+             (*params, int(limit), int(offset))),
         ])
         total = count_rows[0]["n"]
         for row in rows:
@@ -628,8 +642,14 @@ class LocalFolderStore:
 
     def duplicate_copies(self, **filters) -> list[dict]:
         """The copies of the shown groups: photos with the bytes of a photo before them."""
-        _total, rows = self.duplicate_page(0, 1_000_000, **filters)
-        return [row for row in rows if int(row["hash_rank"]) > 1]
+        where, params = self._filter(**{**filters, "duplicate_only": True})
+        shown = f"SELECT f.rowid FROM local_files f INDEXED BY local_files_cluster{where}"
+        ranked = self._ranked_duplicates(_DUPLICATE_GROUPS)
+        return self._read(
+            f"SELECT * FROM (SELECT g.* FROM ({ranked}) AS g WHERE g.rowid IN ({shown}) "
+            "ORDER BY g.cluster_id, g.cluster_rank LIMIT 1000000) "
+            "WHERE file_hash<>'' AND hash_rank>1 ORDER BY cluster_id, cluster_rank", params,
+        )
 
     def duplicate_copy_rel_paths(self) -> list[str]:
         return [row["rel_path"] for row in self.duplicate_copies()]

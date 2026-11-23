@@ -43,6 +43,7 @@ _RECORD_FOLDERS = (".luvbox", ".xlikesaver")
 # Sizes and times of the snapshot files this PC last wrote or read; a
 # snapshot that differs was written elsewhere and is merged in.
 _SNAPSHOT_STATE = "snapshot.json"
+_PENDING_SNAPSHOT = "저장 폴더에 있던 이전 기록을 아직 합치지 못해 그대로 두었습니다. 다음 저장 때 다시 시도합니다."
 
 
 @dataclass(frozen=True)
@@ -379,9 +380,17 @@ def _merge_changed_snapshot(paths: StoragePaths) -> set[str]:
     return pending
 
 
-def _replace(source: Path, target: Path) -> None:
-    """os.replace, retrying while a sync tool or scanner briefly holds the file."""
+def _replace_snapshot(source: Path, paths: StoragePaths, name: str, expected: list[int] | None) -> None:
+    """Replace the merged shared version, retrying if a sync tool briefly holds it."""
+    target = paths.snapshot_dir / name
     for attempt in range(10):
+        if _linked(target):
+            raise MigrationError(_MIGRATION_HELP)
+        # A sync client may deliver another copy while we build the local
+        # snapshot or wait for the file to unlock. Leave it for the next merge.
+        shared = _snapshot_source(paths, name)
+        if shared is not None and _file_state(shared) != expected:
+            raise MigrationError(_PENDING_SNAPSHOT)
         try:
             os.replace(source, target)
             return
@@ -403,7 +412,7 @@ def publish_snapshot(paths: StoragePaths) -> int:
     # failed because another connection held a write lock. Merge it first; a
     # still-unreadable valid copy must not be silently overwritten.
     if _merge_changed_snapshot(checked):
-        raise MigrationError("저장 폴더에 있던 이전 기록을 아직 합치지 못해 그대로 두었습니다. 다음 저장 때 다시 시도합니다.")
+        raise MigrationError(_PENDING_SNAPSHOT)
     snapshot = checked.snapshot_dir
     snapshot.mkdir(parents=True, exist_ok=True)
     if _linked(snapshot) or not snapshot.resolve().is_relative_to(checked.output_dir):
@@ -420,7 +429,8 @@ def publish_snapshot(paths: StoragePaths) -> int:
         temporary = snapshot / (".snapshot-" + uuid.uuid4().hex + ".sqlite3")
         try:
             _backup_database(source, temporary)
-            _replace(temporary, target)
+            published = _file_state(temporary)
+            _replace_snapshot(temporary, checked, name, state.get(name))
         finally:
             temporary.unlink(missing_ok=True)
         # Earlier versions used these as live WAL databases.
@@ -428,7 +438,7 @@ def publish_snapshot(paths: StoragePaths) -> int:
             leftover = snapshot / (name + suffix)
             if leftover.is_file() and not _linked(leftover):
                 leftover.unlink(missing_ok=True)
-        state[name] = _file_state(target)
+        state[name] = published
         written += 1
     _write_snapshot_state(checked, state)
     return written

@@ -628,12 +628,44 @@ class DuplicateTests(FolderCase):
         self.assertEqual({k: v for k, v in self.s.duplicate_members().items()}, {1: ["c.jpg", "a.jpg", "b.jpg"]})
         # The filters choose the groups shown, not which photo a group keeps.
         total, rows = self.s.duplicate_page(0, 10, query="b.jpg")
+        self.assertEqual(total, 1)
         self.assertEqual([(r["rel_path"], r["cluster_rank"]) for r in rows], [("b.jpg", 3)])
+        self.assertEqual(self.s.duplicate_copies(query="b.jpg"), rows)
+        total, page = self.s.duplicate_page(1, 1)
+        self.assertEqual(total, 3)
+        self.assertEqual([(r["rel_path"], r["cluster_rank"], r["cluster_size"], r["hash_rank"])
+                          for r in page], [("a.jpg", 2, 3, 1)])
         self.s.mark_gone(["a.jpg"])
         self.assertEqual(self.s.duplicate_count(), 2)
         # Once only one photo remains in the group, the singleton cluster is pruned.
         self.s.mark_gone(["b.jpg"])
         self.assertEqual(self.s.duplicate_count(), 0)
+
+    def test_small_duplicate_page_does_not_rank_every_group(self):
+        with self.s._write() as db:
+            db.executemany(
+                "INSERT INTO local_files(rel_path, filename, media_type, filesize, mtime_ns, "
+                "cluster_id, file_hash, updated_at) VALUES (?1, ?1, 'photo', 800, 1, ?2, ?3, 'now')",
+                ((f"copy-{index:04d}.jpg", index // 3 + 1, str(index // 3)) for index in range(3600)),
+            )
+        ticks = 0
+
+        def progress():
+            nonlocal ticks
+            ticks += 1
+            return 0
+
+        self.s._db.set_progress_handler(progress, 1000)
+        try:
+            total, rows = self.s.duplicate_page(1, 1)
+        finally:
+            self.s._db.set_progress_handler(None, 0)
+
+        self.assertEqual(total, 3600)
+        self.assertEqual([(row["rel_path"], row["cluster_rank"], row["cluster_size"], row["hash_rank"])
+                          for row in rows], [("copy-0001.jpg", 2, 3, 2)])
+        # Count SQLite's own work so the regression check is independent of clock speed.
+        self.assertLess(ticks, 500)
 
     def test_split_group_distinct_undo_and_clear_remerge_connected_components(self):
         self.s.save_clusters([["a.jpg", "b.jpg", "c.jpg", "d.jpg"]], "exact")

@@ -101,6 +101,8 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
                     protected_reasons.append(reason)
                     emit(dict(result, type="progress", processed=processed, message=reason))
                     continue
+                if stop.is_set():
+                    break
                 recycle_file(path, expected=signature)
             except RecyclingError as exc:
                 result["failed"] += 1

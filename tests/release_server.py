@@ -63,6 +63,7 @@ class ReleaseServer:
         self.files = {}
         self.requests = []
         self.cut_short = set()      # paths that announce more bytes than they send
+        self.interrupted_chunks = set()
         self.slow = threading.Event()
         self.slow.set()
         owner = self
@@ -75,6 +76,12 @@ class ReleaseServer:
 
             def do_GET(self):
                 owner.requests.append((self.path, {name.lower(): value for name, value in self.headers.items()}))
+                if self.path in owner.interrupted_chunks:
+                    self.send_response(200)
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    self.wfile.write(b"100\r\npartial")
+                    return
                 if self.path == "/latest":
                     body = (owner.raw_description if owner.raw_description is not None
                             else json.dumps(owner.description).encode("utf-8"))

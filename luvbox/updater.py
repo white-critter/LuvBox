@@ -20,6 +20,7 @@ start unpacks and runs the new version.
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -242,7 +243,7 @@ def _asset_is_gone(source: Source, url: str, timeout: float) -> bool:
             return False
     except _Refused as error:
         return error.status in _ASSET_GONE
-    except (OSError, ValueError, UpdateError):
+    except (HTTPException, OSError, ValueError, UpdateError):
         return False
 
 
@@ -266,7 +267,7 @@ def check(current: str, source: Source = GITHUB, *, timeout: float = 15) -> dict
         raise UpdateError("limited" if error.status in (403, 429) else "network") from None
     except UpdateError:
         raise
-    except (OSError, ValueError, UnicodeError):
+    except (HTTPException, OSError, ValueError):
         raise UpdateError("network") from None
     if not isinstance(description, dict):
         raise UpdateError("unexpected")
@@ -327,7 +328,7 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
     except _Refused as error:
         # Every published release has this file: without it, the release is no longer there.
         raise UpdateError("gone" if error.status in _ASSET_GONE else "download") from None
-    except (OSError, ValueError):
+    except (HTTPException, OSError, ValueError):
         raise UpdateError("download") from None
     rows = parse_checksums(listing)
     expected = rows.get(EXE_ASSET)
@@ -358,7 +359,7 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
             if error.status in _ASSET_GONE and _asset_is_gone(source, checksum_url, timeout):
                 raise UpdateError("gone") from None
             raise UpdateError("download") from None
-        except (OSError, ValueError):
+        except (HTTPException, OSError, ValueError):
             raise UpdateError("download") from None
         with response:
             announced = response.headers.get("Content-Length", "")
@@ -375,7 +376,7 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
                         raise UpdateError("cancelled")
                     try:
                         block = response.read(256 * 1024)
-                    except (OSError, ValueError):
+                    except (HTTPException, OSError, ValueError):
                         raise UpdateError("download") from None
                     if not block:
                         break
