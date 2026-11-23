@@ -105,6 +105,21 @@ class ScheduledRunTests(unittest.TestCase):
         self.assertIn("저장된 설정이 없습니다", rows[0]["message"])
         self.assertTrue(all(row["started_at"] and row["finished_at"] for row in rows))
 
+    def test_runs_starting_at_the_same_time_keep_separate_logs(self):
+        from luvbox.activity import outcome_page
+
+        with patch.object(scheduled, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 11, 23, 9, tzinfo=timezone.utc)
+            self.assertEqual(self.run_saved(self.settings)[0], 0)
+            self.assertEqual(self.run_saved({})[0], 1)
+        failure, success = outcome_page()["rows"]
+        self.assertNotEqual(failure["log"], success["log"])
+        failure_log = Path(failure["log"]).read_text(encoding="utf-8")
+        success_log = Path(success["log"]).read_text(encoding="utf-8")
+        self.assertIn("저장된 설정이 없습니다", failure_log)
+        self.assertNotIn("저장된 설정이 없습니다", success_log)
+        self.assertIn("종료 · 완료 · 저장 1개", success_log)
+
     def test_scheduled_outcome_retains_catalog_run_id_for_deduplication(self):
         from luvbox.activity import outcome_page
 
@@ -178,7 +193,7 @@ class ScheduledRunTests(unittest.TestCase):
             def flush(self): pass
             def close(self): pass
         def open_fixture(path, *args, **kwargs):
-            if path.name.startswith("scheduled-") and args and args[0] == "a":
+            if path.name.startswith("scheduled-") and args and args[0] == "x":
                 return FaultyLog()
             return original_open(path, *args, **kwargs)
         with patch.object(Path, "open", autospec=True, side_effect=open_fixture), \
@@ -203,7 +218,7 @@ class ScheduledRunTests(unittest.TestCase):
             def flush(self): pass
             def close(self): pass
         def open_fixture(path, *args, **kwargs):
-            if path.name.startswith("scheduled-") and args and args[0] == "a":
+            if path.name.startswith("scheduled-") and args and args[0] == "x":
                 return FaultyLog()
             return original_open(path, *args, **kwargs)
         def worker(options, emit):
@@ -356,19 +371,16 @@ class ScheduledRunTests(unittest.TestCase):
                 self.assertFalse(scheduled.last_run()["seen"])
 
     def test_identical_fast_runs_with_the_same_timestamp_need_separate_acknowledgments(self):
-        fixed = datetime(2026, 10, 9, 0, 0, 0, tzinfo=timezone.utc)
-        with patch("luvbox.scheduled.datetime") as clock:
-            clock.now.return_value = fixed
-            self.run_saved({})
-            first = scheduled.last_run()
-            scheduled.mark_last_run_seen(first)
-            self.assertTrue(scheduled.last_run()["seen"])
-            self.run_saved({})
-            second = scheduled.last_run()
-        self.assertNotEqual(first["run_id"], second["run_id"])
-        self.assertEqual({key: value for key, value in first.items() if key != "run_id"},
-                         {key: value for key, value in second.items() if key != "run_id"})
-        self.assertFalse(second["seen"])
+        # Earlier builds could have identical timestamps and log names. The
+        # stored run id alone still distinguishes those results.
+        first = {"run_id": "first", "finished_at": "2026-10-09T09:00:00+09:00", "status": "error",
+                 "log": "scheduled-20261009-090000.log", "seen": False}
+        second = dict(first, run_id="second")
+        scheduled._write_last_run(first)
+        scheduled.mark_last_run_seen(first)
+        self.assertTrue(scheduled.last_run()["seen"])
+        scheduled._write_last_run(second)
+        self.assertFalse(scheduled.last_run()["seen"])
         scheduled.mark_last_run_seen(first)
         self.assertFalse(scheduled.last_run()["seen"])
         scheduled.mark_last_run_seen(second)

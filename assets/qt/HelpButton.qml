@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 
 // A small round "?" beside a heading that opens a help card for that screen.
 // Resting the pointer on it shows the card while the pointer stays on the "?"
@@ -24,8 +25,12 @@ AbstractButton {
     Keys.onReturnPressed: control.click()
     Keys.onEnterPressed: control.click()
 
-    function close() { card.close() }
-    onVisibleChanged: if (!visible) card.close()
+    function close() {
+        openLater.stop()
+        closeLater.stop()
+        card.close()
+    }
+    onVisibleChanged: if (!visible) close()
     Keys.onEscapePressed: event => {
         if (card.visible) {
             card.close()
@@ -85,18 +90,31 @@ AbstractButton {
     Popup {
         id: card
         objectName: "helpCard"
-        // Under the "?", kept inside the window by the margins.
-        y: control.height + Theme.gapSmall
+        readonly property Window hostWindow: control.Window.window
+        property real buttonTop: 0
+        readonly property real aboveSpace: buttonTop - Theme.gapSmall - margins
+        readonly property real belowSpace: hostWindow
+            ? hostWindow.height - buttonTop - control.height - Theme.gapSmall - margins : implicitHeight
+        readonly property bool showAbove: implicitHeight > belowSpace && aboveSpace > belowSpace
+        y: showAbove ? -height - Theme.gapSmall : control.height + Theme.gapSmall
         x: -Theme.gapLarge
         margins: Theme.gap
-        width: control.cardWidth
+        width: hostWindow ? Math.min(control.cardWidth, hostWindow.width - 2 * margins) : control.cardWidth
+        height: Math.min(implicitHeight, Math.max(1, showAbove ? aboveSpace : belowSpace))
         padding: Theme.cardPadding
         topPadding: Theme.gapLarge
         bottomPadding: Theme.gapLarge
         modal: false
         focus: false
         closePolicy: Popup.CloseOnPressOutsideParent
+        function updatePosition() { buttonTop = control.mapToItem(null, 0, 0).y }
+        onAboutToShow: updatePosition()
         onClosed: control.pinned = false
+        Connections {
+            target: card.visible ? card.hostWindow : null
+            function onWidthChanged() { Qt.callLater(card.updatePosition) }
+            function onHeightChanged() { Qt.callLater(card.updatePosition) }
+        }
         enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 120 } }
         exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 90 } }
         background: Card {
@@ -112,20 +130,28 @@ AbstractButton {
                 onHoveredChanged: control.settle()
             }
         }
-        contentItem: ColumnLayout {
-            id: column
-            spacing: Theme.gap
-            Label {
-                visible: control.title.length > 0
-                text: control.title
-                font.pixelSize: Theme.fontSection
-                font.bold: true
-                color: Theme.text
-            }
+        contentItem: FocusScrollView {
+            id: helpScroll
+            clip: true
+            contentWidth: availableWidth
+            implicitHeight: column.implicitHeight
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
             ColumnLayout {
-                id: body
-                Layout.fillWidth: true
+                id: column
+                width: helpScroll.availableWidth
                 spacing: Theme.gap
+                Label {
+                    visible: control.title.length > 0
+                    text: control.title
+                    font.pixelSize: Theme.fontSection
+                    font.bold: true
+                    color: Theme.text
+                }
+                ColumnLayout {
+                    id: body
+                    Layout.fillWidth: true
+                    spacing: Theme.gap
+                }
             }
         }
     }

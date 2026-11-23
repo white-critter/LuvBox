@@ -2447,20 +2447,34 @@ ApplicationWindow {
                         anchors.verticalCenter: parent.verticalCenter
                         anchors.leftMargin: Theme.gapLarge
                         anchors.rightMargin: Theme.gapSmall
-                        columns: selectionBar.width >= 800 ? 2 : 1
+                        columns: width >= selectionControls.implicitWidth + selectionActions.implicitWidth + columnSpacing ? 2 : 1
                         columnSpacing: Theme.gap
                         rowSpacing: Theme.gapTiny
                         RowLayout {
+                            id: selectionControls
                             Layout.fillWidth: true
                             spacing: Theme.gapTiny
                             Label {
+                                id: selectionCount
                                 objectName: "gallerySelectionCount"
+                                readonly property string countText: window.app
+                                    ? window.app.library.selectedCount.toLocaleString() + "개 선택" : ""
                                 Layout.fillWidth: true
-                                text: window.app ? window.app.library.selectedCount.toLocaleString() + "개 선택"
-                                    + (window.app.operationBusy && window.app.library.selectedCount > 0
-                                       ? " · 작업이 끝나면 휴지통으로 이동할 수 있습니다" : "") : ""
+                                Layout.preferredWidth: Math.ceil(selectionCountMetrics.advanceWidth)
+                                Layout.minimumWidth: Layout.preferredWidth
+                                text: countText + (window.app && window.app.operationBusy && window.app.library.selectedCount > 0
+                                    ? " · 작업이 끝나면 휴지통으로 이동할 수 있습니다" : "")
                                 font.bold: true
                                 elide: Text.ElideRight
+                                TextMetrics {
+                                    id: selectionCountMetrics
+                                    font: selectionCount.font
+                                    text: selectionCount.countText
+                                }
+                                HoverHandler { id: selectionCountHover }
+                                ToolTip.delay: 500
+                                ToolTip.visible: selectionCountHover.hovered && truncated
+                                ToolTip.text: text
                             }
                             FlatButton {
                                 objectName: "gallerySelectLoaded"
@@ -2480,6 +2494,7 @@ ApplicationWindow {
                             }
                         }
                         RowLayout {
+                            id: selectionActions
                             Layout.alignment: Qt.AlignRight
                             spacing: Theme.gapSmall
                             FlatButton {

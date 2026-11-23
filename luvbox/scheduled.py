@@ -479,9 +479,10 @@ def run_saved(*, full: bool = False) -> int:
         return cannot_start(f"{exc}\n\n앱을 열어 LuvBox 기록 폴더를 정리해 주세요.")
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(_KOREA).strftime("%Y%m%d-%H%M%S")
-        path = directory / f"scheduled-{stamp}.log"
-        stream = path.open("a", encoding="utf-8")
+        stamp = datetime.now(_KOREA).strftime("%Y%m%d-%H%M%S-%f")
+        # Two processes can reach here before the worker claims its save lock.
+        path = directory / f"scheduled-{stamp}-{outcome['run_id']}.log"
+        stream = path.open("x", encoding="utf-8")
     except OSError:
         return cannot_start("자동 저장 기록을 만들지 못했습니다. LuvBox 기록 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요.")
     outcome["log"] = str(path)

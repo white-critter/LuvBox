@@ -8,6 +8,7 @@ are idempotent; only the oldest outcomes are pruned after the retention cap.
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import hashlib
+from itertools import islice
 import json
 from pathlib import Path
 import re
@@ -44,7 +45,9 @@ def _now():
 def _text(value, maximum):
     if not isinstance(value, str):
         return ""
-    return "".join(char for char in value if char in "\n\t" or ord(char) >= 32 and not 127 <= ord(char) <= 159)[:maximum]
+    allowed = (char for char in value if char in "\n\t" or
+               (code := ord(char)) >= 32 and not (127 <= code <= 159 or 0xD800 <= code <= 0xDFFF))
+    return "".join(islice(allowed, maximum))
 
 
 def _count(value):
@@ -62,9 +65,11 @@ def _row(outcome, origin, account, output_dir, started_at, *, legacy=False):
         else:
             ident = uuid.uuid4().hex
     status = outcome.get("status")
-    status = "busy" if outcome.get("busy") is True else status if status in {
-        "finished", "stopped", "error", "limited", "interrupted", "cancelled", "partial"
-    } else "error"
+    if outcome.get("busy") is True:
+        status = "busy"
+    elif not isinstance(status, str) or status not in {
+            "finished", "stopped", "error", "limited", "interrupted", "cancelled", "partial"}:
+        status = "error"
     code = outcome.get("code")
     history_id = outcome.get("history_run_id")
     return dict(run_id=ident, origin=origin, account=_text(account, 100), output_dir=_text(output_dir, 32768),

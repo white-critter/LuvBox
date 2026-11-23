@@ -39,6 +39,7 @@ def scene():
 
     from PIL import Image
     from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QPointF, Qt, qInstallMessageHandler
+    from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtQuick import QQuickItem
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
@@ -53,6 +54,11 @@ def scene():
 
     QQuickStyle.setStyle("Basic")
     application = QApplication([])
+    for filename in ("Pretendard-Regular.ttf", "Pretendard-Bold.ttf"):
+        QFontDatabase.addApplicationFont(str(ROOT / "assets/fonts/Pretendard" / filename))
+    font = QFont("Pretendard")
+    font.setPixelSize(14)
+    application.setFont(font)
     messages = []
     previous = qInstallMessageHandler(lambda _level, _context, message: messages.append(message))
     controller = engine = window = None
@@ -260,6 +266,14 @@ def scene():
         settle(60)
         assert not find("localFolderBand").property("visible")
         assert set(local.selectedKeys) == {tiles[0].property("key"), tiles[1].property("key")}, local.selectedKeys
+        window.resize(680, 480)
+        settle(120)
+        first, last = find("localFolderSelectLoaded"), find("localFolderRecycleSelected")
+        assert abs(point_of(first).y() - point_of(last).y()) <= 1, (point_of(first), point_of(last))
+        bar = find("localFolderSelectionBar")
+        assert bar.mapToScene(QPointF(bar.width(), 0)).x() >= last.mapToScene(QPointF(last.width(), 0)).x()
+        window.resize(1280, 860)
+        settle(120)
         local.clearSelection()
         local.setSelectionMode(False)
 

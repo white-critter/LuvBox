@@ -1408,10 +1408,11 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.leftMargin: Theme.gapLarge
                 anchors.rightMargin: Theme.gapSmall
-                columns: width >= 800 ? 2 : 1
+                columns: width >= localSelectionControls.implicitWidth + localSelectionActions.implicitWidth + columnSpacing ? 2 : 1
                 columnSpacing: Theme.gap
                 rowSpacing: Theme.gapTiny
                 RowLayout {
+                    id: localSelectionControls
                     Layout.fillWidth: true
                     spacing: Theme.gapTiny
                     Label {
@@ -1438,6 +1439,7 @@ Item {
                     }
                 }
                 RowLayout {
+                    id: localSelectionActions
                     Layout.alignment: Qt.AlignRight
                     spacing: Theme.gapSmall
                     FlatButton {

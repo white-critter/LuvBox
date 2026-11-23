@@ -97,6 +97,17 @@ class ActivityTests(unittest.TestCase):
         self.assertEqual({row["run_id"] for row in activity.outcome_page()["rows"]},
                          {"manual-before", "not-yet-recorded", "next-scheduled"})
 
+    def test_malformed_legacy_fields_do_not_block_reads_or_new_outcomes(self):
+        self.append("existing")
+        previous = {"run_id": "malformed", "finished_at": "2026-10-27T10:00:00+09:00"}
+        self.previous.return_value = dict(previous, status=["finished"], message="old failure")
+        self.assertEqual(activity.outcome_page()["total"], 2)
+        self.previous.return_value = dict(previous, status="error", message="old \ud800failure")
+        self.append("new")
+        rows = {row["run_id"]: row for row in activity.outcome_page()["rows"]}
+        self.assertEqual(set(rows), {"existing", "malformed", "new"})
+        self.assertEqual((rows["malformed"]["status"], rows["malformed"]["message"]), ("error", "old failure"))
+
     def test_distinct_terminal_outcomes_survive_ledger_roundtrip(self):
         for status in ("interrupted", "cancelled", "partial"):
             with self.subTest(status=status):

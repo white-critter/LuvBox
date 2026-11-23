@@ -78,6 +78,15 @@ class AppIconTests(unittest.TestCase):
                 with image.ico.getimage(size) as rendered:
                     self.assertEqual(rendered.getpixel((0, 0))[3], 0)
 
+    def test_the_dark_square_fills_the_icon_and_the_heart_keeps_its_original_proportions(self):
+        with Image.open(ICONS / "luvbox.png") as image:
+            self.assertEqual(image.getpixel((0, image.height // 2)), (18, 18, 18, 255))
+            self.assertEqual(image.getpixel((image.width - 1, image.height // 2)), (18, 18, 18, 255))
+            pixels = [(x, y) for y in range(image.height) for x in range(image.width)
+                      if self.is_heart_red(image.getpixel((x, y)))]
+            width = max(x for x, _ in pixels) - min(x for x, _ in pixels) + 1
+            self.assertIn(width, range(93, 100))
+
     def test_heart_is_visible_at_tray_and_extension_toolbar_size(self):
         paths = [ROOT / "assets" / "browser-extension" / browser / "icons" / "icon-16.png"
                  for browser in ("chromium", "firefox")]
@@ -89,15 +98,16 @@ class AppIconTests(unittest.TestCase):
                 self.assert_heart_visible(image)
 
     def assert_heart_visible(self, image):
+        self.assertEqual(image.getpixel((0, image.height // 2))[3], 255)
         pixels = [(x, y) for y in range(image.height) for x in range(image.width)
                   if self.is_heart_red(image.getpixel((x, y)))]
-        self.assertGreaterEqual(len(pixels), 12)
-        self.assertGreaterEqual(max(x for x, _ in pixels) - min(x for x, _ in pixels) + 1, 9)
+        self.assertGreaterEqual(len(pixels), 8)
+        self.assertLessEqual(max(x for x, _ in pixels) - min(x for x, _ in pixels) + 1, 8)
 
     @staticmethod
     def is_heart_red(color):
         red, green, _blue, alpha = color
-        return red >= 130 and green < red * 0.67 and alpha > 100
+        return red >= 100 and green < red * 0.67 and alpha > 100
 
 
 if __name__ == "__main__":

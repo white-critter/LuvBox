@@ -17,7 +17,7 @@ again. The count goes with its row: saving the media, removing the row, or
 trimming it forgets the count. Nothing else here decides what is saved.
 """
 
-from contextlib import closing
+from contextlib import closing, contextmanager
 import os
 from pathlib import Path
 import re
@@ -158,25 +158,39 @@ def record(items, *, account, output_dir, resolved=(), refused=None) -> None:
         raise UnsavedError(_ERROR) from None
 
 
-def _read(query, parameters=()):
-    """Rows of one read-only query; a missing ledger is an empty one, never created."""
+@contextmanager
+def _reader():
+    """Read from one ledger snapshot without creating a missing database."""
     try:
         path = unsaved_path()
         with _WRITE_LOCK, file_mutex(path):
             _plain(path)
             if not path.is_file():
-                return []
+                yield None
+                return
             with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as database:
                 database.row_factory = sqlite3.Row
                 database.execute("PRAGMA query_only=ON")
-                try:
-                    return [dict(row) for row in database.execute(query, parameters)]
-                except sqlite3.OperationalError as error:
-                    if "no such table" in str(error):
-                        return []
-                    raise
+                database.execute("BEGIN")
+                yield database
     except (OSError, ValueError, sqlite3.Error):
         raise UnsavedError(_ERROR) from None
+
+
+def _rows(database, query, parameters):
+    if database is None:
+        return []
+    try:
+        return [dict(row) for row in database.execute(query, parameters)]
+    except sqlite3.OperationalError as error:
+        if "no such table" in str(error):
+            return []
+        raise
+
+
+def _read(query, parameters):
+    with _reader() as database:
+        return _rows(database, query, parameters)
 
 
 def identities(account, output_dir) -> set:
@@ -227,11 +241,13 @@ def page(account, output_dir, kinds=(FAILED, SIZE), page=0, page_size=50) -> dic
     marks = ",".join("?" for _ in kinds)
     where = f" FROM unsaved WHERE account=? AND folder=? AND reason IN ({marks})"
     parameters = (account, folder, *kinds)
-    total = next(iter(_read("SELECT COUNT(*) total" + where, parameters)), {"total": 0})["total"]
-    pages = (total + page_size - 1) // page_size
-    page = min(page, max(0, pages - 1))
-    rows = _read("SELECT *" + where + " ORDER BY last_seen DESC,rowid DESC LIMIT ? OFFSET ?",
-                 (*parameters, page_size, page * page_size))
+    with _reader() as database:
+        count = _rows(database, "SELECT COUNT(*) total" + where, parameters)
+        total = count[0]["total"] if count else 0
+        pages = (total + page_size - 1) // page_size
+        page = min(page, max(0, pages - 1))
+        rows = _rows(database, "SELECT *" + where + " ORDER BY last_seen DESC,rowid DESC LIMIT ? OFFSET ?",
+                     (*parameters, page_size, page * page_size)) if total else []
     return {"rows": rows, "total": total, "page": page, "pages": pages, "page_size": page_size}
 
 

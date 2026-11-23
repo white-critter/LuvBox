@@ -1,4 +1,5 @@
 """The unsaved-media ledger stays bounded, per account and folder, and never creates itself on read."""
+from contextlib import contextmanager
 import os
 from pathlib import Path
 import sqlite3
@@ -95,6 +96,26 @@ class UnsavedLedgerTests(unittest.TestCase):
         self.assertEqual(unsaved.remove('alice', self.folder, items=[('100', 1, 'photo')]), 1)
         self.assertEqual(unsaved.remove('alice', self.folder, kinds=(unsaved.FAILED,)), 6)
         self.assertEqual(unsaved.counts('alice', self.folder)['failed'], 0)
+
+    def test_page_counts_and_rows_come_from_the_same_read(self):
+        self.record([item(str(100 + number)) for number in range(4)])
+        mutex = unsaved.file_mutex
+        pending = True
+
+        @contextmanager
+        def queued_writer(path):
+            nonlocal pending
+            with mutex(path):
+                yield
+            if pending:
+                pending = False
+                unsaved.remove('alice', self.folder, kinds=(unsaved.FAILED,))
+
+        with patch.object(unsaved, 'file_mutex', queued_writer):
+            page = unsaved.page('alice', self.folder, page=1, page_size=2)
+        self.assertEqual((page['total'], page['pages'], page['page']), (4, 2, 1))
+        self.assertEqual([row['tweet_id'] for row in page['rows']], ['101', '100'])
+        self.assertEqual(self.rows(), [])
 
     def test_a_ledger_that_cannot_be_written_is_reported_not_crashed(self):
         self.path.write_bytes(b'not a database' * 100)

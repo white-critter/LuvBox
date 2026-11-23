@@ -223,6 +223,14 @@ def scene(shots=None):
         assert library.selectedCount == 24
         assert find("galleryRecycleSelected").property("tone") == "danger"
         shot("5-selection")
+        window.resize(680, 480)
+        settle(120)
+        first, last = find("gallerySelectLoaded"), find("galleryRecycleSelected")
+        assert abs(center(first).y() - center(last).y()) <= 1, (center(first), center(last))
+        assert bar.mapToScene(QPointF(bar.width(), 0)).x() >= last.mapToScene(QPointF(last.width(), 0)).x()
+        assert not find("gallerySelectionCount").property("truncated")
+        window.resize(1280, 860)
+        settle(120)
         click("gallerySelectionToggle")
         wait(lambda: not library.selectionMode and not bar.property("visible"), "selection ended")
 

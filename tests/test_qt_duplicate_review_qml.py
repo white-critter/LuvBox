@@ -215,6 +215,25 @@ def scene(shots=None):
         move_to(find("galleryDuplicateFilter"))  # away from both the "?" and its card
         wait(lambda: not help_button.property("showing"), "help card left with the pointer")
 
+        # A short gallery with the date filters open still lets the ? toggle its card.
+        window.resize(680, 480)
+        click("galleryFilterToggle")
+        click("duplicateHelp")
+        wait(lambda: help_button.property("showing") and help_button.property("pinned"), "help in the small window")
+        card = help_button.findChild(QObject, "helpCard")
+        card_content = card.property("contentItem")
+        top = card_content.mapToScene(QPointF(0, 0)).y() - card.property("topPadding")
+        bottom = top + card.property("height")
+        button_top = help_button.mapToScene(QPointF(0, 0)).y()
+        button_bottom = button_top + help_button.height()
+        assert 0 <= top < bottom <= window.height() and (bottom <= button_top or top >= button_bottom), (
+            top, bottom, button_top, button_bottom)
+        click("duplicateHelp")
+        wait(lambda: not help_button.property("showing"), "the ? closes the card in the small window")
+        click("galleryFilterToggle")
+        window.resize(1000, 720)
+        settle(100)
+
         # Default scan: identical files only.
         click("galleryScanDuplicates")
         wait(lambda: not library.busy and library.duplicateCount == 5 and not model.busy and model.count == 5,

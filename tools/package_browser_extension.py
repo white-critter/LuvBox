@@ -72,7 +72,7 @@ def _icon_payloads():
         payloads = {}
         for size in ICON_SIZES:
             # The store's 128-pixel icon requires a 96-pixel artwork area.
-            artwork_size = 96 if size == 128 else size * 7 // 8
+            artwork_size = 96 if size == 128 else size
             resized = artwork.resize((artwork_size, artwork_size), Image.Resampling.LANCZOS)
             icon = Image.new("RGBA", (size, size), (0, 0, 0, 0))
             inset = (size - artwork_size) // 2
