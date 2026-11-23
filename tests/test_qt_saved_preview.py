@@ -301,6 +301,21 @@ class SavedPreviewControllerTests(unittest.TestCase):
             self.assertEqual(notifications, [])
             self.assertEqual(controller.progress, .99)
 
+    def test_next_saved_file_is_published_without_a_transient_empty_preview(self):
+        with tempfile.TemporaryDirectory() as folder, self.controller() as (controller, service):
+            path = Path(folder) / "first.png"
+            service.pending.append(self.event(path))
+            controller._pump()
+            with patch.object(controller._preview_loader, "request", return_value=True):
+                controller.setDetailsEnabled(True)
+                controller._accept_preview((controller._preview_generation, {"preview_url": "first-preview"}))
+                states = []
+                controller.savedItemChanged.connect(lambda: states.append(controller.currentSavedItem))
+                service.pending.append(self.event(path.with_name("second.png")))
+                controller._pump()
+            self.assertEqual([(state["filename"], state["preview_loading"]) for state in states],
+                             [("second.png", True)])
+
     def test_enable_decodes_static_preview_and_hiding_releases_it(self):
         with tempfile.TemporaryDirectory() as folder, self.controller() as (controller, service):
             path = Path(folder) / "last.png"

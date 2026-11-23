@@ -304,6 +304,17 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertEqual(asked, [True, True])
         self.wait_for(lambda: not self.controller.busy)
 
+    def test_saved_files_notify_the_gallery_once_until_it_is_refreshed(self):
+        notices = []
+        self.controller.changed.connect(lambda: notices.append(self.controller.galleryChanged))
+        saved = {"type": "saved", "path": "photo.jpg"}
+        for _ in range(3):
+            self.controller._download_event(saved)
+        self.assertEqual(notices, [True])
+        self.controller.refreshGallery()
+        self.controller._download_event(saved)
+        self.assertEqual(notices, [True, False, True])
+
     def test_excluding_or_releasing_media_reloads_the_gallery(self):
         refreshed = []
         self.controller.library.refresh = lambda: refreshed.append(True)

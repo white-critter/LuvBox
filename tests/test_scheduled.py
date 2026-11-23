@@ -92,6 +92,18 @@ class ScheduledRunTests(unittest.TestCase):
         settings = dict(self.settings, record_locations={"offline_test": str(self.output)})
         self.assertEqual(self.run_saved(settings)[0], 0)
 
+    def test_corrupt_settings_report_the_settings_failure_instead_of_a_folder_problem(self):
+        from luvbox.settings import SettingsDamaged
+
+        with patch("luvbox.scheduled.load_settings", side_effect=SettingsDamaged("private file")), \
+                patch("luvbox.core.run_worker") as worker:
+            self.assertEqual(scheduled.run_saved(), 1)
+        worker.assert_not_called()
+        outcome = scheduled.last_run()
+        self.assertIn("저장 설정을 읽지 못했습니다", outcome["message"])
+        self.assertNotIn("private file", outcome["message"])
+        self.assertTrue(outcome["failed"])
+
     def test_each_terminal_outcome_is_kept_in_structured_history(self):
         from luvbox.activity import outcome_page
 

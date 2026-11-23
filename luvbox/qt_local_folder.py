@@ -900,11 +900,11 @@ class LocalFolderRepository(LibraryRepository):
             if signature != previous_signature:
                 raise ManifestError("선택한 뒤 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
             rel = row["rel_path"]
-            members = next((members for members in store.duplicate_members().values() if rel in members), None)
-            copies = set(store.duplicate_copy_rel_paths()) if members else set()
-            if not members or members[0] == rel or rel in copies:
+            pair = store.alike_pair(rel)
+            if pair is None:
                 raise ManifestError("‘비슷함’으로 표시된 사진만 남길 사진과 비교해 휴지통으로 보낼 수 있습니다.")
-            keeper = store.path_of(members[0])
+            row, keeper_row = pair
+            keeper = store.path_of(keeper_row["rel_path"])
             if keeper is None or not keeper.is_file():
                 raise ManifestError("남길 사진 파일이 없어 이 사진을 보낼 수 없습니다.")
             if cloud_only(keeper):
@@ -918,9 +918,8 @@ class LocalFolderRepository(LibraryRepository):
                                     "‘중복 아님’으로 표시하거나 목록에서 휴지통으로 보내세요.")
             if file_signature(path) != signature or file_signature(keeper) != keeper_signature:
                 raise ManifestError("비교하는 동안 파일이 바뀌었습니다. 목록을 새로고침해 주세요.")
-            keeper_row = store.row_by_rel(members[0])
             shown = {"alike": self._compared_local(path, row, signature),
-                     "keeper": self._compared_local(keeper, keeper_row or {}, keeper_signature)}
+                     "keeper": self._compared_local(keeper, keeper_row, keeper_signature)}
         with self._condition:
             if self._request is not request:
                 raise ManifestError("목록이 바뀌었습니다. 사진을 다시 골라 주세요.")

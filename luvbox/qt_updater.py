@@ -374,13 +374,15 @@ class UpdateController(QObject):
             if found["version"] == version:
                 self._remember({"update_found": {}})   # still named the latest, but not there
             return ("renewed", found, stamp, False, version)
-        with self._lock:
-            if self._closing or self._cancel.is_set():
-                updater.clear_downloads(folder)
-                raise updater.UpdateError("cancelled")
-            self._swapping = True
+
+        def begin_swap():
+            with self._lock:
+                if self._closing or self._cancel.is_set():
+                    raise updater.UpdateError("cancelled")
+                self._swapping = True
+
         try:
-            updater.install(path, launcher, digest)
+            updater.install(path, launcher, digest, cancelled=self._cancel.is_set, before_replace=begin_swap)
         finally:
             with self._lock:
                 self._swapping = False

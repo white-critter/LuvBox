@@ -341,6 +341,25 @@ class DuplicateTests(FolderControllerCase):
         details = {row["caption"]: row["detail"] for row in self.controller.model._rows}
         self.assertEqual(details["other.png"], details["keep.jpg"])
 
+    def test_alike_comparison_does_not_read_unrelated_duplicate_groups(self):
+        resized = self.folder / "resized.png"
+        with Image.open(self.folder / "keep.jpg") as image:
+            image.resize((256, 192)).save(resized)
+        self.open()
+        with closing(LocalFolderStore(self.folder)) as store:
+            store.save_hashes([("keep.jpg", "h1", "0" * 16, ""), ("resized.png", "h2", "0" * 16, "")])
+            store.save_clusters([["keep.jpg", "resized.png"]], "near")
+            store.toggle_favorite(store.row_by_rel("keep.jpg")["rowid"])
+        self.controller.setDuplicateOnly(True)
+        self.settle()
+        key = next(row["key"] for row in self.controller.model._rows if row["caption"] == resized.name)
+
+        with patch.object(LocalFolderStore, "duplicate_members", side_effect=AssertionError("whole catalog")):
+            manifest = self.controller.alikeManifest(key)
+
+        self.assertEqual(manifest["alike"]["keeper"]["name"], "keep.jpg")
+        self.assertEqual(manifest["alike"]["alike"]["name"], resized.name)
+
     def test_copies_are_found_chosen_and_recycled_and_one_file_stays(self):
         self.open()
         self.assertTrue(self.controller.scanDuplicates(False))

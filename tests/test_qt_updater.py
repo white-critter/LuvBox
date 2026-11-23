@@ -334,6 +334,69 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertEqual(self.launcher.read_bytes(), self.old)
         self.server.slow.set()
 
+    def test_cancelling_or_closing_during_launcher_staging_keeps_the_old_program(self):
+        self.server.publish("1.9.0")
+        for action in ("cancel", "shutdown"):
+            with self.subTest(action=action):
+                self.launcher.write_bytes(self.old)
+                controller = self.controller()
+                controller.checkNow()
+                self.wait(lambda: controller.state == "available")
+                staging, resume = Event(), Event()
+                fsync = os.fsync
+                staged = self.launcher.with_name(self.launcher.name + ".new")
+
+                def hold_staging(descriptor):
+                    if staged.exists():
+                        staging.set()
+                        resume.wait(5)
+                    return fsync(descriptor)
+
+                with patch.object(updater.os, "fsync", side_effect=hold_staging):
+                    controller.install()
+                    try:
+                        self.wait(staging.is_set)
+                        if action == "cancel":
+                            controller.cancel()
+                        else:
+                            closed = controller.shutdown()
+                    finally:
+                        resume.set()
+                    if action == "cancel":
+                        self.wait(lambda: controller.state != "downloading")
+                        self.assertEqual(controller.state, "available")
+                    else:
+                        controller._worker.join(5)
+                        self.assertFalse(controller._worker.is_alive())
+                        self.assertTrue(closed)
+                self.assertEqual(self.launcher.read_bytes(), self.old)
+                self.assertFalse(staged.exists())
+                self.assertEqual(list((self.folder / "updates").iterdir()), [])
+
+    def test_closing_during_launcher_replacement_waits_for_the_new_program(self):
+        program = self.server.publish("1.9.0")
+        controller = self.controller()
+        controller.checkNow()
+        self.wait(lambda: controller.state == "available")
+        replacing, resume = Event(), Event()
+        replace = updater._replace_with_retry
+
+        def hold_replacement(source, target):
+            if target == self.launcher:
+                replacing.set()
+                resume.wait(5)
+            return replace(source, target)
+
+        with patch.object(updater, "_replace_with_retry", side_effect=hold_replacement):
+            controller.install()
+            try:
+                self.wait(replacing.is_set)
+                self.assertFalse(controller.shutdown())
+            finally:
+                resume.set()
+            self.wait(lambda: controller._shutdown_complete)
+        self.assertEqual(self.launcher.read_bytes(), program)
+
     def test_a_download_left_by_an_earlier_run_is_removed_at_the_next_start(self):
         updates = self.folder / "updates"
         updates.mkdir()

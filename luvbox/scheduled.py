@@ -543,6 +543,10 @@ def run_saved(*, full: bool = False) -> int:
             write(msg)
             outcome["message"] = msg
             code = 1
+        except AppDataError:
+            outcome["message"] = "저장 설정을 읽지 못했습니다. 앱을 열어 설정과 LuvBox 기록 폴더의 권한을 확인해 주세요."
+            write(outcome["message"])
+            code = 1
         except OSError:
             outcome["message"] = ("자동 저장 기록을 만들지 못했습니다. LuvBox 기록 폴더의 저장 권한과 디스크 여유 공간을 확인해 주세요."
                                   if log_failed else "저장된 설정의 폴더 경로를 확인하지 못했습니다. 앱에서 저장 폴더를 확인해 주세요.")

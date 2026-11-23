@@ -85,6 +85,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
         self._priority = {}
         self._queued_size = {}
         self._sequence = 0
+        # A refreshed catalog can request the same key and size while its old decode finishes.
         self._inflight = set()
         self._failures = set()
         self._published = set()
@@ -201,8 +202,6 @@ class SafeThumbnailProvider(QQuickImageProvider):
                         self._published.add(token)
                         publish.append(key)
                     continue
-                if token in self._failures or token in self._inflight:
-                    continue
                 self._enqueue_locked(key, width, height, index)
             self._start_workers_locked()
         for key in publish:
@@ -230,35 +229,36 @@ class SafeThumbnailProvider(QQuickImageProvider):
             if notified is not None:
                 self._record("upload_request_ms", (time.perf_counter() - notified) * 1000)
             path = self._registry.get(key) if _KEY.fullmatch(key) else None
+            generation = self._registry_generation
             scheduled = self._wanted is not None
             token = (key, width, height)
             if self._closed or path is None or token in self._failures:
                 return self._output(QImage(), size)
-        image, hit = self._read(key, path, width, height, decode=False)
+        image, hit = self._read(key, path, width, height, generation, decode=False)
         if hit:
             return self._output(image, size)
         if not scheduled:
-            return self._decode_for_request(key, path, width, height, size)
+            return self._decode_for_request(key, path, width, height, generation, size)
         with self._lock:
-            if self._closed or self._registry.get(key) != path:
+            if self._closed or generation != self._registry_generation:
                 return self._output(QImage(), size)
             priority = 0 if (self._wanted is not None and key in self._wanted) else 1_000_000
-            if (key, width, height) not in self._inflight:
-                self._enqueue_locked(key, width, height, priority)
+            self._enqueue_locked(key, width, height, priority)
             self._start_workers_locked()
-        waited = self._wait_for_cached(key, path, width, height)
+        waited = self._wait_for_cached(key, path, width, height, generation)
         if waited is not None:
             return self._output(waited, size)
-        return self._decode_for_request(key, path, width, height, size)
+        return self._decode_for_request(key, path, width, height, generation, size)
 
-    def _decode_for_request(self, key, path, width, height, size):
+    def _decode_for_request(self, key, path, width, height, generation, size):
         token = (key, width, height)
+        job = (generation, *token)
         with self._lock:
             # A slow queued decode can outlive requestImage's cache wait.
             # Join that work instead of decoding the same image/video again.
-            while token in self._inflight and not self._closed and self._registry.get(key) == path:
+            while job in self._inflight and not self._closed and generation == self._registry_generation:
                 self._lock.wait()
-            if self._closed or self._registry.get(key) != path or token in self._failures:
+            if self._closed or generation != self._registry_generation or token in self._failures:
                 return self._output(QImage(), size)
             # Retire the queued copy before taking ownership of the decode;
             # otherwise a scheduler worker can start it at the same time.
@@ -266,16 +266,16 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._live.pop(key, None)
                 self._priority.pop(key, None)
                 self._queued_size.pop(key, None)
-            self._inflight.add(token)
+            self._inflight.add(job)
             self._active += 1
         try:
-            image, _hit = self._read(key, path, width, height, decode=True)
+            image, _hit = self._read(key, path, width, height, generation)
             return self._output(image, size)
         except Exception:
             return self._output(QImage(), size)
         finally:
             with self._lock:
-                self._inflight.discard(token)
+                self._inflight.discard(job)
                 self._active -= 1
                 self._lock.notify_all()
 
@@ -308,7 +308,8 @@ class SafeThumbnailProvider(QQuickImageProvider):
 
     def _enqueue_locked(self, key, width, height, priority):
         token = (key, width, height)
-        if token in self._inflight or token in self._failures or key not in self._registry:
+        if ((self._registry_generation, *token) in self._inflight
+                or token in self._failures or key not in self._registry):
             return
         current = self._priority.get(key)
         if key in self._live and current is not None and current <= priority and self._queued_size.get(key) == token[1:]:
@@ -333,15 +334,16 @@ class SafeThumbnailProvider(QQuickImageProvider):
             thread.start()
             self._workers.append(thread)
 
-    def _wait_for_cached(self, key, path, width, height):
-        token = (key, width, height)
+    def _wait_for_cached(self, key, path, width, height, generation):
+        job = (generation, key, width, height)
         deadline = time.monotonic() + 1
         while True:
-            image, hit = self._read(key, path, width, height, decode=False)
+            image, hit = self._read(key, path, width, height, generation, decode=False)
             if hit:
                 return image
             with self._lock:
-                if self._closed or (key not in self._live and token not in self._inflight):
+                if (self._closed or generation != self._registry_generation
+                        or (key not in self._live and job not in self._inflight)):
                     return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -369,28 +371,28 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 path = self._registry.get(key)
                 generation = self._registry_generation
                 token = (key, width, height)
-                self._inflight.add(token)
+                job = (generation, *token)
+                self._inflight.add(job)
                 self._active += 1
                 self._record("queue_wait_ms", (time.perf_counter() - enqueued) * 1000)
             publish = False
             failed = False
             try:
-                image, _hit = self._read(key, path, width, height, decode=True, deliver=False) if path is not None else (QImage(), False)
+                image, _hit = self._read(key, path, width, height, generation, deliver=False)
             except Exception:
                 image = QImage()
             with self._lock:
-                self._inflight.discard(token)
+                self._inflight.discard(job)
                 self._active -= 1
                 closed = self._closed
-                stale = generation != self._registry_generation
-                if not closed and not stale and image.isNull() and self._wanted is not None and key in self._wanted:
-                    self._failures.add(token)
-                    failed = True
-                elif (not closed and not stale and not image.isNull() and self._wanted is not None
-                      and key in self._wanted
-                      and self._target_size == (width, height) and token not in self._published):
-                    self._published.add(token)
-                    publish = True
+                if (not closed and generation == self._registry_generation and self._wanted is not None
+                        and key in self._wanted and self._target_size == (width, height)):
+                    if image.isNull():
+                        self._failures.add(token)
+                        failed = True
+                    elif token not in self._published:
+                        self._published.add(token)
+                        publish = True
                 self._lock.notify_all()
             if publish:
                 self._publish(key, generation)
@@ -399,11 +401,10 @@ class SafeThumbnailProvider(QQuickImageProvider):
             if closed:
                 return
 
-    def _read(self, key, path, width, height, *, decode=True, deliver=True):
+    def _read(self, key, path, width, height, generation, *, decode=True, deliver=True):
         with self._lock:
-            if self._closed or self._registry.get(key) != path:
+            if self._closed or generation != self._registry_generation or path is None:
                 return QImage(), False
-            generation = self._registry_generation
         stamp = _thumbnail_stamp(path)
         if stamp is None:
             return QImage(), False

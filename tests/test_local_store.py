@@ -641,6 +641,23 @@ class DuplicateTests(FolderCase):
         self.s.mark_gone(["b.jpg"])
         self.assertEqual(self.s.duplicate_count(), 0)
 
+    def test_alike_pair_uses_the_full_group_order_and_excludes_exact_copies(self):
+        self.s.save_hashes([("a.jpg", "h1", "0" * 16, ""), ("b.jpg", "h1", "0" * 16, ""),
+                            ("c.jpg", "h2", "0" * 16, "")])
+        self.s.save_clusters([["a.jpg", "b.jpg", "c.jpg"], ["d.jpg", "e.jpg"]], "near")
+        self.s.toggle_favorite(self.s.row_by_rel("c.jpg")["rowid"])
+
+        selected, keeper = self.s.alike_pair("a.jpg")
+        self.assertEqual((selected["rel_path"], keeper["rel_path"]), ("a.jpg", "c.jpg"))
+        for name in ("b.jpg", "c.jpg", "missing.jpg"):
+            self.assertIsNone(self.s.alike_pair(name), name)
+
+        self.s.set_photos_distinct(["a.jpg"])
+        self.s.mark_gone(["b.jpg"])
+        self.assertIsNone(self.s.alike_pair("a.jpg"))
+        self.assertIsNone(self.s.alike_pair("b.jpg"))
+        self.assertIsNone(self.s.alike_pair("c.jpg"))
+
     def test_small_duplicate_page_does_not_rank_every_group(self):
         with self.s._write() as db:
             db.executemany(

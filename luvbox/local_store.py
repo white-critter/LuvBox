@@ -654,6 +654,22 @@ class LocalFolderStore:
     def duplicate_copy_rel_paths(self) -> list[str]:
         return [row["rel_path"] for row in self.duplicate_copies()]
 
+    def alike_pair(self, rel_path: str) -> tuple[dict, dict] | None:
+        """The similar photo and its keeper from the same current group."""
+        ranked = self._ranked_duplicates(
+            "SELECT cluster_id FROM local_files WHERE rel_path=? AND present=1 AND cluster_id>0"
+        )
+        rows = self._read(
+            f"SELECT * FROM ({ranked}) WHERE cluster_size>1 AND (cluster_rank=1 OR rel_path=?) "
+            "ORDER BY cluster_rank", (rel_path, rel_path),
+        )
+        if len(rows) != 2:
+            return None
+        keeper, selected = rows
+        if selected["file_hash"] and selected["hash_rank"] > 1:
+            return None
+        return selected, keeper
+
     def row(self, rowid) -> dict | None:
         rows = self._read("SELECT rowid AS rowid, * FROM local_files WHERE rowid=?", (int(rowid),))
         return rows[0] if rows else None

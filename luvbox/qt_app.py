@@ -1091,12 +1091,14 @@ class ApplicationController(QObject):
         self._state_changed()
 
     def _download_event(self, event):
-        if event.get("type") == "saved":
-            self._gallery_dirty = True
-            self.changed.emit()
-        elif event.get("type") == "finished":
+        kind = event.get("type")
+        if kind == "saved":
+            if not self._gallery_dirty:
+                self._gallery_dirty = True
+                self.changed.emit()
+        elif kind == "finished":
             self._activity_terminal = dict(event)
-        elif event.get("type") == "process_exit":
+        elif kind == "process_exit":
             outcome = dict(self._activity_terminal)
             status = outcome.get("status", "error")
             if event.get("forced"):

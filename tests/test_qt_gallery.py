@@ -305,6 +305,75 @@ class GalleryModelTests(unittest.TestCase):
         model.focusViewport(0, 0, 0, 24, 18)
         self.wait_for(lambda: model.data(model.index(0), model.ThumbMissingRole) is True)
 
+    def test_refresh_schedules_the_same_thumbnail_while_old_decode_is_running(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name).resolve() / "photo.png"
+        with Image.new("RGBA", (32, 24), "purple") as image:
+            image.save(path)
+        entered, release = Event(), Event()
+        calls = []
+
+        def decoder(file, dimensions):
+            calls.append((file, dimensions))
+            if len(calls) == 1:
+                entered.set()
+                release.wait(3)
+            return thumbnail(file, dimensions)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        provider.register("photo", path)
+        model = self.model(lambda *_: (1, [{"key": "photo"}]), provider=provider)
+        self.addCleanup(release.set)
+        self.wait_for(lambda: not model.busy and model.count == 1)
+        model.focusViewport(0, 0, 0, 24, 18)
+        self.assertTrue(entered.wait(1))
+
+        provider.clear_registry()
+        provider.register("photo", path)
+        model.search("refreshed")
+        self.wait_for(lambda: not model.busy and model.count == 1)
+        model.focusViewport(0, 0, 0, 24, 18)
+        release.set()
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(calls, [(path, (24, 18))] * 2)
+        self.wait_for(lambda: model.data(model.index(0), model.ThumbReadyRole) is True)
+
+    def test_old_density_failure_does_not_mark_current_thumbnail_missing(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name).resolve() / "photo.png"
+        with Image.new("RGBA", (64, 48), "purple") as image:
+            image.save(path)
+        old_entered, old_release = Event(), Event()
+        current_entered, current_release = Event(), Event()
+
+        def decoder(file, dimensions):
+            if dimensions == (24, 18):
+                old_entered.set()
+                old_release.wait(3)
+                return Thumbnail(None, "old decode failed")
+            current_entered.set()
+            current_release.wait(3)
+            return thumbnail(file, dimensions)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        provider.register("photo", path)
+        model = self.model(lambda *_: (1, [{"key": "photo"}]), provider=provider)
+        self.addCleanup(old_release.set)
+        self.addCleanup(current_release.set)
+        self.wait_for(lambda: not model.busy and model.count == 1)
+        model.focusViewport(0, 0, 0, 24, 18)
+        self.assertTrue(old_entered.wait(1))
+        model.focusViewport(0, 0, 0, 40, 30)
+        old_release.set()
+        self.assertTrue(current_entered.wait(1))
+
+        self.application.processEvents()
+        self.assertFalse(model.data(model.index(0), model.ThumbMissingRole))
+        current_release.set()
+        self.wait_for(lambda: model.data(model.index(0), model.ThumbReadyRole) is True)
+
 
 @unittest.skipUnless(_QT_AVAILABLE, "optional Qt experiment dependencies are not installed")
 class SafeThumbnailProviderTests(unittest.TestCase):

@@ -172,7 +172,6 @@ class DownloadController(QObject):
         self._preview_loader.cancel()
         if self._current_saved:
             self._current_saved.update(preview_url="", preview_note="", preview_loading=False)
-            self.savedItemChanged.emit()
 
     def _request_preview(self):
         if not self._details_enabled or not self._current_saved or self._closing:
@@ -281,6 +280,8 @@ class DownloadController(QObject):
             return
         self._closing = True
         self._invalidate_preview()
+        if self._current_saved:
+            self.savedItemChanged.emit()
         self._preview_loader.close()
         self._service.close()
         self.stop()

@@ -417,10 +417,16 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
     return target, expected
 
 
-def _digest(path) -> str:
+def _check_cancelled(cancelled) -> None:
+    if cancelled is not None and cancelled():
+        raise UpdateError("cancelled")
+
+
+def _digest(path, cancelled) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
         while block := stream.read(1024 * 1024):
+            _check_cancelled(cancelled)
             digest.update(block)
     return digest.hexdigest()
 
@@ -446,15 +452,17 @@ def _replace_with_retry(source: Path, destination: Path) -> None:
             time.sleep(delays[attempt])
 
 
-def install(downloaded, launcher, expected: str) -> None:
+def install(downloaded, launcher, expected: str, *, cancelled=None, before_replace=None) -> None:
     """Put a verified download where the launcher is; the old one is set aside.
 
     Windows lets a program that is running be renamed but not overwritten, so
     the old file is renamed first and removed by the next start. Either both
-    renames happen or the old program is back under its name.
+    renames happen or we restore the old program. Preparation can be cancelled.
+    Call `before_replace` at the point when the renames must run to completion.
     """
     downloaded, launcher = Path(downloaded), Path(launcher)
     staged = launcher.with_name(launcher.name + ".new")
+    _check_cancelled(cancelled)
     try:
         if not launcher.is_file() or launcher.is_symlink():
             raise UpdateError("replace")
@@ -462,12 +470,16 @@ def install(downloaded, launcher, expected: str) -> None:
             # Beside the launcher, so the final step is a rename on one volume.
             with downloaded.open("rb") as source, staged.open("wb") as target:
                 while block := source.read(1024 * 1024):
+                    _check_cancelled(cancelled)
                     target.write(block)
+                _check_cancelled(cancelled)
                 target.flush()
                 os.fsync(target.fileno())
+            _check_cancelled(cancelled)
+            actual = _digest(staged, cancelled)
         except OSError:
             raise UpdateError("replace") from None
-        if _digest(staged) != expected:
+        if actual != expected:
             raise UpdateError("checksum")
         aside = None
         for index in range(1000):
@@ -480,6 +492,9 @@ def install(downloaded, launcher, expected: str) -> None:
             break
         if aside is None:
             raise UpdateError("replace")
+        _check_cancelled(cancelled)
+        if before_replace is not None:
+            before_replace()
         try:
             _replace_with_retry(launcher, aside)
         except OSError:
