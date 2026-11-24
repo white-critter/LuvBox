@@ -557,6 +557,7 @@ def scene():
         # a remove mark, a typed tag with one. The chips once showed no name at all, and the
         # controls beside them were smaller than every other button.
         with closing(HistoryStore.for_storage(paths, create_media=False)) as store:
+            store.record_tweets([("100", "여행 #나들이", ["나들이"])])
             store.save_ai_tags([("flat", "100", 1, "photo", "풍경·배경")])
             store.add_tag("flat", "100", 1, "photo", "여행")
         tagged_key = next(row["key"] for row in controller.library.model._rows if "_100_" in row["key"])
@@ -596,8 +597,54 @@ def scene():
             assert find(name).property("height") == compact, (name, find(name).property("height"))
         assert all(chip.property("height") == compact for chip in chips), "chips are as tall as the buttons"
         assert find("inlineTagAdd").property("font").pixelSize() >= 13
-        invoke(tagged_preview, "close")
-        wait(lambda: not tagged_preview.property("visible"), "close the tagged preview")
+
+        def tab_to(action):
+            for _ in range(60):
+                if action.property("activeFocus"):
+                    return
+                QTest.keyClick(window, Qt.Key.Key_Tab)
+                settle()
+            raise AssertionError(f"{action.objectName()} cannot be reached with Tab")
+
+        user_chip = next(chip for chip in chips if chip.property("tagName") == "여행")
+        remove = user_chip.findChild(QQuickItem, "previewTagRemove")
+        tab_to(remove)
+        accessible = QAccessible.queryAccessibleInterface(remove)
+        assert accessible.role() == QAccessible.Role.Button
+        assert "여행" in accessible.text(QAccessible.Text.Name)
+        assert remove.property("visualFocus")
+        QTest.keyClick(window, Qt.Key.Key_Space)
+        wait(lambda: not any(row["tag"] == "여행" for row in controller.library.selectedTags),
+             "Space removed the focused tag")
+
+        window.resize(680, 480)
+        for index in range(12):
+            assert controller.library.addSelectedTag("추가 태그 " * 6 + str(index).zfill(2))
+        meta_scroll = find("previewMetaScroll")
+        flick = meta_scroll.property("contentItem")
+        last_tag = "추가 태그 " * 6 + "11"
+        wait(lambda: len(named_items("previewTagChip")) == 13 and flick.property("contentHeight") > flick.height(),
+             "metadata needs scrolling")
+        last_chip = next(chip for chip in named_items("previewTagChip") if chip.property("tagName") == last_tag)
+        last_remove = last_chip.findChild(QQuickItem, "previewTagRemove")
+        tab_to(find("previewAuthorButton"))
+        tab_to(last_remove)
+
+        def focus_is_visible():
+            top = last_remove.mapToItem(flick, QPointF(0, 0)).y()
+            return (flick.property("contentY") > 0 and top >= -1
+                    and top + last_remove.height() <= flick.height() + 1)
+
+        wait(focus_is_visible, "focused tag action scrolls into view in the smallest preview")
+        hashtag = named_items("previewHashtagChip")[0]
+        tab_to(hashtag)
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        wait(lambda: not tagged_preview.property("visible") and controller.library.filterHashtag == "#나들이"
+             and not controller.library.model.busy, "Return filtered by the focused hashtag")
+        click("galleryFilterReset")
+        wait(lambda: not controller.library.model.busy and controller.library.model.total == 5,
+             "clear the hashtag filter")
+        window.resize(1080, 760)
         # A missing tile must not make selecting and recycling the other
         # visible files impossible. Only the disposable fixture is removed.
         files[-1].unlink()

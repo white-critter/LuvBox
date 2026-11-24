@@ -83,7 +83,10 @@ def _run(arguments: list[str], *, check_stop: Callable[[], None], deadline: floa
                         raise ConversionError("GIF로 변환하지 못했습니다. 원본 동영상(MP4) 파일은 보존했습니다. 다시 저장을 시작하면 재시도합니다.")
                     errors.seek(0)
                     return errors.read(_DIAGNOSTIC_LIMIT_BYTES)
-                time.sleep(0.1)
+                try:
+                    process.wait(timeout=0.1)
+                except subprocess.TimeoutExpired:
+                    pass
         finally:
             try:
                 if process.poll() is None:
@@ -174,7 +177,12 @@ def convert_mp4_to_gif(source: Path | str, *, check_stop: Callable[[], None] | N
     finally:
         for temporary in (palette, output):
             if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    # A scanner can hold a file after FFmpeg closes it. Keep
+                    # the conversion result or the original failure intact.
+                    pass
 
 
 def move_without_overwrite(source: Path, destination: Path) -> None:

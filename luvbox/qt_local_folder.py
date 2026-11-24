@@ -37,6 +37,7 @@ from .thumbcache import cloud_only
 _KEY = re.compile(r"g([0-9]+)_lf_([0-9]{1,12})\Z")
 FOLDER_ORDERS = ("modified", "name", "size")
 _FOLDER_MEDIA_TYPES = ("all", "photo", "animated_gif")
+_FOLDER_CHANGES = ("added", "changed", "gone", "restored", "renamed", "cloud_changed")
 RECENT_LIMIT = 10
 _MISSING = "파일이 없습니다. 폴더에서 옮겨졌거나 지워졌을 수 있습니다."
 _CLOUD = "이 파일은 클라우드에만 있습니다. 탐색기에서 받은 뒤 다시 열 수 있습니다."
@@ -456,9 +457,7 @@ class LocalFolderRepository(LibraryRepository):
             with closing(request.store()) as store:
                 store._folder_cache = {}
                 synced = store.sync_folder(request.include_subfolders, check_cancel)
-                self._dup_synced_changes = bool(
-                    synced.get("added") or synced.get("changed") or synced.get("gone") or synced.get("restored")
-                )
+                self._dup_synced_changes = any(synced[key] for key in _FOLDER_CHANGES)
                 pending = store.photos_to_hash()
                 total = len(pending)
                 hashed = []
@@ -529,8 +528,9 @@ class LocalFolderRepository(LibraryRepository):
                     store.save_hashes(stale_updates)
                 groups = cluster_images(items, near=bool(near), check_cancel=check_cancel,
                                         progress=compare_callback)
-                grouped = store.save_clusters([[item["key"] for item in group] for group in groups],
-                                              "near" if near else "exact")
+                check_cancel()
+                grouped = store.save_clusters(([item["key"] for item in group] for group in groups),
+                                              "near" if near else "exact", check_cancel=check_cancel)
                 if progress_callback:
                     progress_callback(total + 1, total + 1)
                 return grouped
@@ -684,9 +684,7 @@ class LocalFolderRepository(LibraryRepository):
                 items, skipped = [], 0
                 if encode:
                     synced = store.sync_folder(request.include_subfolders, check_cancel)
-                    synced_changes = bool(
-                        synced.get("added") or synced.get("changed") or synced.get("gone") or synced.get("restored")
-                    )
+                    synced_changes = any(synced[key] for key in _FOLDER_CHANGES)
                     signatures = store.unreadable_signatures()
                     for row in store.photos_without_embeddings():
                         check_cancel()
@@ -857,12 +855,16 @@ class LocalFolderRepository(LibraryRepository):
     @staticmethod
     def _copies_only(store, rows):
         """As the gallery's: a copy goes only while another file of its group with its bytes stays."""
-        groups = store.duplicate_members()
-        member_of = {rel: number for number, members in groups.items() for rel in members}
-        first = {members[0] for members in groups.values() if members}
-        copies = set(store.duplicate_copy_rel_paths())
         chosen = {row["rel_path"] for row in rows}
-        spared = {members[0] for members in groups.values() if members and all(rel in chosen for rel in members)}
+        groups, member_of, copies = {}, {}, set()
+        for member in store.ranked_duplicate_members(sorted(chosen)):
+            rel, number = member["rel_path"], member["cluster_id"]
+            groups.setdefault(number, []).append(rel)
+            member_of[rel] = number
+            if member["file_hash"] and member["hash_rank"] > 1:
+                copies.add(rel)
+        first = {members[0] for members in groups.values()}
+        spared = {members[0] for members in groups.values() if all(rel in chosen for rel in members)}
         rule = store.duplicate_rule() or "exact"
         marked = []
         for row in rows:

@@ -477,10 +477,10 @@ class TaskSchedulerTests(unittest.TestCase):
         fake = r'''
 function Get-ScheduledTask {
     [CmdletBinding()]
-    param([string]$TaskName)
-    if ($env:XLS_FIXTURE -eq 'missing') {
+    param([string]$TaskName, [string]$TaskPath)
+    if ($env:XLS_FIXTURE -ne 'denied') {
         $errorRecord = [System.Management.Automation.ErrorRecord]::new(
-            [System.Exception]::new('missing'), 'CmdletizationQuery_NotFound_TaskName',
+            [System.Exception]::new('missing'), $env:XLS_FIXTURE,
             [System.Management.Automation.ErrorCategory]::ObjectNotFound, $TaskName)
     } else {
         $errorRecord = [System.Management.Automation.ErrorRecord]::new(
@@ -490,8 +490,11 @@ function Get-ScheduledTask {
     $PSCmdlet.ThrowTerminatingError($errorRecord)
 }
 '''
-        response = scheduled._powershell(fake + scheduled._STATUS_SCRIPT, task="fixture", legacy="", fixture="missing")
-        self.assertEqual(json.loads(response), {"registered": False})
+        for error_id in ("CmdletizationQuery_NotFound", "CmdletizationQuery_NotFound_TaskName"):
+            with self.subTest(error_id=error_id):
+                response = scheduled._powershell(fake + scheduled._STATUS_SCRIPT, task="fixture", legacy="",
+                                                 fixture=error_id)
+                self.assertEqual(json.loads(response), {"registered": False})
         with self.assertRaises(scheduled.ScheduleError):
             scheduled._powershell(fake + scheduled._STATUS_SCRIPT, task="fixture", legacy="", fixture="denied")
 
@@ -500,6 +503,13 @@ function Get-ScheduledTask {
         self.assertLess(register.index("Get-LuvBoxTask $old"), register.index("Register-ScheduledTask -TaskName"))
         unregister = scheduled._UNREGISTER_SCRIPT
         self.assertLess(unregister.index("Get-LuvBoxTask $name"), unregister.index("Unregister-ScheduledTask -TaskName"))
+
+    def test_scheduler_operations_are_scoped_to_the_root_folder(self):
+        for script in (scheduled._STATUS_SCRIPT, scheduled._REGISTER_SCRIPT, scheduled._UNREGISTER_SCRIPT):
+            for line in script.splitlines():
+                if "-ScheduledTask" in line and "-TaskName" in line:
+                    with self.subTest(command=line.strip()):
+                        self.assertIn("-TaskPath '\\'", line)
 
     def test_task_under_the_former_app_name_is_found_and_replaced(self):
         data = {"registered": True, "name": "XlikeSaver 자동 저장", "program": self.PROGRAM,

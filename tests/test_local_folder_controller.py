@@ -319,6 +319,70 @@ class DuplicateTests(FolderControllerCase):
         stand_in.start()
         self.addCleanup(stand_in.stop)
 
+    def test_stopping_after_folder_sync_refreshes_the_list_and_duplicate_count(self):
+        self.open()
+        self.assertTrue(self.controller.scanDuplicates(False))
+        self.wait(lambda: not self.controller.filesLocked and self.controller.duplicateCount == 2, "first scan")
+        (self.folder / "copy.jpg").unlink()
+        picture(self.folder / "new.jpg", (0, 30, 80))
+        hashing, resume = threading.Event(), threading.Event()
+        photos_to_hash = LocalFolderStore.photos_to_hash
+
+        def pause_after_sync(store):
+            hashing.set()
+            resume.wait(5)
+            return photos_to_hash(store)
+
+        with patch.object(LocalFolderStore, "photos_to_hash", pause_after_sync):
+            try:
+                self.assertTrue(self.controller.scanDuplicates(False))
+                self.assertTrue(hashing.wait(5))
+                self.controller.cancelDuplicateScan()
+            finally:
+                resume.set()
+            self.settle()
+
+        self.assertEqual(self.captions(), ["keep.jpg", "new.jpg", "other.png"])
+        self.assertEqual(self.controller.duplicateCount, 0)
+        self.assertIn("중복 검사를 중단했습니다", self.controller.status)
+
+    def test_stopping_after_comparison_keeps_the_previous_duplicate_rule(self):
+        from luvbox.duplicates import cluster_images
+
+        self.open()
+        self.assertTrue(self.controller.scanDuplicates(False))
+        self.wait(lambda: not self.controller.filesLocked and self.controller.duplicateCount == 2, "first scan")
+        compared, resume = threading.Event(), threading.Event()
+
+        def pause_after_comparison(*args, **kwargs):
+            groups = cluster_images(*args, **kwargs)
+            compared.set()
+            resume.wait(5)
+            return groups
+
+        with patch("luvbox.duplicates.cluster_images", side_effect=pause_after_comparison):
+            try:
+                self.assertTrue(self.controller.scanDuplicates(True))
+                self.assertTrue(compared.wait(5))
+                self.controller.cancelDuplicateScan()
+            finally:
+                resume.set()
+            self.settle()
+
+        with closing(LocalFolderStore(self.folder)) as store:
+            self.assertEqual(store.duplicate_rule(), "exact")
+        self.assertIn("중복 검사를 중단했습니다", self.controller.status)
+
+    def test_duplicate_scan_updates_a_case_only_renamed_file_in_the_list(self):
+        self.open()
+        (self.folder / "keep.jpg").rename(self.folder / "temporary.jpg")
+        (self.folder / "temporary.jpg").rename(self.folder / "KEEP.jpg")
+
+        self.assertTrue(self.controller.scanDuplicates(False))
+        self.settle()
+
+        self.assertEqual(self.captions(), ["KEEP.jpg", "copy.jpg", "other.png"])
+
     def test_first_duplicate_scan_uses_size_of_the_file_it_hashed(self):
         other = self.folder / "other.png"
         keep = self.folder / "keep.jpg"
@@ -359,6 +423,22 @@ class DuplicateTests(FolderControllerCase):
 
         self.assertEqual(manifest["alike"]["keeper"]["name"], "keep.jpg")
         self.assertEqual(manifest["alike"]["alike"]["name"], resized.name)
+
+    def test_copy_confirmation_does_not_read_unrelated_duplicate_groups(self):
+        self.open()
+        self.assertTrue(self.controller.scanDuplicates(False))
+        self.wait(lambda: not self.controller.filesLocked and self.controller.duplicateCount == 2, "scan")
+        self.controller.setDuplicateOnly(True)
+        self.settle()
+        copy = next(row for row in self.controller.model._rows if row.get("copy"))
+        keeper = next(row for row in self.controller.model._rows if row.get("keeper"))
+
+        with (patch.object(LocalFolderStore, "duplicate_members", side_effect=AssertionError("whole catalog")),
+              patch.object(LocalFolderStore, "duplicate_copy_rel_paths", side_effect=AssertionError("whole catalog"))):
+            manifest = self.controller.deletionManifest([copy["key"]])
+
+        self.assertEqual(manifest["kept"], 0)
+        self.assertEqual(manifest["rows"][0]["_copy_keepers"], [str(self.folder / keeper["caption"])])
 
     def test_copies_are_found_chosen_and_recycled_and_one_file_stays(self):
         self.open()

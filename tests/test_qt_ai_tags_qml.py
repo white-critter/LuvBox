@@ -226,8 +226,7 @@ def scene():
         assert sorted(chip.property("tagName") for chip in chips) == ["인물", "일러스트"]
         target = next(chip for chip in chips if chip.property("tagName") == "인물")
         remove = next(item for item in target.findChildren(QQuickItem) if item.objectName() == "previewTagRemove")
-        mark = next(item for item in remove.childItems())          # the MouseArea of ×
-        click(mark, "not this")
+        click(remove, "not this")
         wait(lambda: [row["tag"] for row in library.selectedAiTags] == ["일러스트"], "AI tag taken away")
         with closing(HistoryStore.for_storage(paths, create_media=False)) as store:
             assert store.tag_feedback([("flat", "103", 1, "photo")]) == {("flat", "103", 1, "photo"): {"인물": -1}}

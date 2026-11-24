@@ -1274,7 +1274,15 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 if targets:
                     size_limited.add(kwdict["_luvbox_archive_key"])
                 if self.pathfmt.temppath:
-                    Path(self.pathfmt.temppath).unlink(missing_ok=True)
+                    try:
+                        Path(self.pathfmt.temppath).unlink(missing_ok=True)
+                    except OSError:
+                        emit({"type": "log", "level": "warning", "message":
+                              "용량 제한을 넘은 임시 파일을 정리하지 못했습니다. 저장 폴더의 권한이나 파일을 사용 중인 프로그램을 확인해 주세요.",
+                              **_media_details(kwdict)})
+                    else:
+                        if self.transfer_marker is not None:
+                            _clear_completion_markers(self.transfer_marker)
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
                 note_unsaved(unsaved.SIZE, _SIZE_DETAIL.format(limit=normalized.max_video_mb), media=kwdict,
                              size=self.progress_total or self.progress_bytes)
@@ -1498,12 +1506,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # Stamp the saved file as the original transfer would have.
                     self.pathfmt.kwdict["_mtime_http"] = completed["mtime_http"]
                 cap = normalized.max_video_mb * 1024 * 1024 if media_type != "photo" else 0
-                if cap and local_source.stat().st_size > cap:
+                source_bytes = local_source.stat().st_size
+                self.progress(source_bytes, source_bytes, force=True)
+                if cap and source_bytes > cap:
                     # The limit was lowered after this file finished. Treat it
-                    # like any other oversized video and drop the temporary file.
-                    _clear_completion_markers(self.transfer_marker)
+                    # like any other oversized video. Keep its completion record
+                    # until the temporary file is removed.
                     raise SizeLimit()
-                self.progress(local_source.stat().st_size, local_source.stat().st_size, force=True)
                 result = True
             elif not targets and refused_runs.get(self.identity, 0) >= REFUSED_LIMIT:
                 # X's image host refused this media and so stopped REFUSED_LIMIT

@@ -181,7 +181,8 @@ class ScanTests(FolderCase):
 
         with self._after_next_walk(second, interleave_refresh):
             result = second.sync_folder()
-        self.assertEqual(result, {"found": 1, "added": 0, "changed": 0, "gone": 0, "restored": 0})
+        self.assertEqual(result, {"found": 1, "added": 0, "changed": 0, "gone": 0, "restored": 0,
+                                  "renamed": 0, "cloud_changed": 0})
         self.assertEqual(self.listed(second), ["a.jpg"])
 
     def test_an_older_walk_does_not_hide_a_new_file_found_by_another_refresh(self):
@@ -518,7 +519,7 @@ class ScanTests(FolderCase):
         (self.folder / "IMG_01.jpg").rename(self.folder / "temp.jpg")
         (self.folder / "temp.jpg").rename(self.folder / "img_01.jpg")
         counts = store.sync_folder(True)
-        self.assertEqual((counts["added"], counts["gone"]), (0, 0))
+        self.assertEqual((counts["added"], counts["changed"], counts["gone"], counts["renamed"]), (0, 0, 0, 1))
         self.assertIsNone(store.row_by_rel("IMG_01.jpg"))
         renamed = store.row_by_rel("img_01.jpg")
         self.assertEqual((renamed["rowid"], renamed["favorite"], renamed["filename"]), (row["rowid"], 1, "img_01.jpg"))

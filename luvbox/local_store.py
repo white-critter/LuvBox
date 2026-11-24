@@ -464,7 +464,8 @@ class LocalFolderStore:
     def sync_folder(self, include_subfolders: bool = True, check_cancel=None) -> dict:
         """Bring the list up to date with the folder. Unchanged files keep everything known of them.
 
-        Returns counts: found, added, changed, gone, restored.
+        Returns counts for files found, added, modified, removed, restored, renamed,
+        or moved between cloud-only and local storage.
         """
         for _ in range(_SCAN_ATTEMPTS):
             version = self._scan_version()
@@ -485,7 +486,7 @@ class LocalFolderStore:
 
     def _apply_folder_scan(self, db, found, include_subfolders: bool, check_cancel) -> dict:
         now = _now()
-        added = changed = gone = restored = 0
+        added = changed = gone = restored = cloud_changes = 0
         with closing(db.execute("SELECT rel_path, filesize, mtime_ns, present, cloud FROM local_files")) as rows:
             known = {row["rel_path"]: row for row in _scan_entries(rows, check_cancel)}
         # A case-only rename keeps the file's star, tags, feedback, features and marks.
@@ -514,7 +515,9 @@ class LocalFolderStore:
                     "updated_at) VALUES (?,?,?,?,?,?,1,?)", (rel, name, kind, size, mtime, int(cloud), now))
                 added += 1
                 continue
-            if old["filesize"] != size or old["mtime_ns"] != mtime:
+            contents_changed = old["filesize"] != size or old["mtime_ns"] != mtime
+            cloud_changed = bool(old["cloud"]) != cloud
+            if contents_changed:
                 # The bytes may differ: what was computed from them is computed again.
                 db.execute(
                     "UPDATE local_files SET filesize=?, mtime_ns=?, cloud=?, present=1, file_hash='', dhash='', "
@@ -522,10 +525,12 @@ class LocalFolderStore:
                     (size, mtime, int(cloud), now, rel))
                 self._invalidate_file_analysis(db, rel)
                 changed += 1
-            elif not old["present"] or bool(old["cloud"]) != cloud:
+            elif not old["present"] or cloud_changed:
                 db.execute("UPDATE local_files SET present=1, cloud=?, updated_at=? WHERE rel_path=?",
                            (int(cloud), now, rel))
                 restored += 0 if old["present"] else 1
+            if old["present"] and cloud_changed:
+                cloud_changes += 1
         for rel, old in _scan_entries(known.items(), check_cancel):
             if rel not in found and old["present"]:
                 db.execute("UPDATE local_files SET present=0, cluster_id=0, updated_at=? WHERE rel_path=?",
@@ -537,7 +542,8 @@ class LocalFolderStore:
             "INSERT INTO local_meta(key, value) VALUES ('include_subfolders', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE local_meta.value<>excluded.value",
             ("1" if include_subfolders else "0",))
-        return {"found": len(found), "added": added, "changed": changed, "gone": gone, "restored": restored}
+        return {"found": len(found), "added": added, "changed": changed, "gone": gone, "restored": restored,
+                "renamed": len(renamed), "cloud_changed": cloud_changes}
 
     def _rename_rows(self, db, renamed, check_cancel):
         """``{new rel_path: old rel_path}``: everything kept under the old name moves to the new one."""
@@ -664,6 +670,18 @@ class LocalFolderStore:
 
     def duplicate_copy_rel_paths(self) -> list[str]:
         return [row["rel_path"] for row in self.duplicate_copies()]
+
+    def ranked_duplicate_members(self, rel_paths) -> list[dict]:
+        """All present members of the duplicate groups touched by these files."""
+        ranked = self._ranked_duplicates(
+            "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
+            "AND rel_path IN (SELECT value FROM json_each(?))"
+        )
+        return self._read(
+            f"SELECT rel_path, cluster_id, file_hash, hash_rank FROM ({ranked}) "
+            "WHERE cluster_size>1 ORDER BY cluster_id, cluster_rank",
+            (json.dumps(rel_paths),),
+        )
 
     def alike_pair(self, rel_path: str) -> tuple[dict, dict] | None:
         """The similar photo and its keeper from the same current group."""
@@ -1178,16 +1196,18 @@ class LocalFolderStore:
             else:
                 db.execute("DELETE FROM local_meta WHERE key='duplicate_distinct_photos'")
 
-    def save_clusters(self, clusters, rule) -> int:
+    def save_clusters(self, clusters, rule, *, check_cancel=None) -> int:
         """Store the groups of a scan (lists of rel_path), apart where the person said "not duplicates"."""
         from .duplicates import split_distinct
 
         with self._write() as db:
+            if check_cancel:
+                check_cancel()
             # Apply the current marks under the same transaction that publishes the groups.
             distinct = self._distinct_with(self._distinct_sets(db), self._photo_marks(db))
             marked = {member for group in distinct for member in group}
             updates, grouped, number = [], 0, 1
-            for group in clusters:
+            for group in _scan_entries(clusters, check_cancel):
                 if len(group) < 2:
                     continue
                 parts = split_distinct(list(group), distinct) if marked.intersection(group) else [list(group)]
@@ -1204,6 +1224,8 @@ class LocalFolderStore:
             db.executemany("UPDATE local_files SET cluster_id=? WHERE rel_path=?", updates)
             db.execute("INSERT OR REPLACE INTO local_meta(key, value) VALUES ('duplicate_rule', ?)",
                        (rule if rule in ("exact", "near") else "exact",))
+            if check_cancel:
+                check_cancel()
         return grouped
 
     def _group_members(self, number, db=None) -> list[str]:

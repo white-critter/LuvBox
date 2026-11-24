@@ -137,12 +137,13 @@ def _powershell(script: str, cancel: Event | None = None, **values: str) -> str:
 _TASK_LOOKUP_SCRIPT = r"""
 function Get-LuvBoxTask([string]$candidate) {
     try {
-        Get-ScheduledTask -TaskName $candidate -ErrorAction Stop
+        # LuvBox registers in the root; names can be reused in other folders.
+        Get-ScheduledTask -TaskName $candidate -TaskPath '\' -ErrorAction Stop
     } catch {
         # A missing task is normal. A scheduler/permission failure is not:
         # treating it as absent could overwrite an existing task on retry.
         if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound -and
-                $_.FullyQualifiedErrorId -like 'CmdletizationQuery_NotFound_TaskName,*') {
+                $_.FullyQualifiedErrorId -match '^CmdletizationQuery_NotFound(?:_TaskName)?,') {
             return $null
         }
         throw
@@ -160,7 +161,7 @@ if (-not $task) {
     }
 }
 if (-not $task) { '{"registered": false}'; exit 0 }
-$info = Get-ScheduledTaskInfo -TaskName $name
+$info = Get-ScheduledTaskInfo -TaskName $name -TaskPath '\'
 $action = $task.Actions | Select-Object -First 1
 $trigger = $task.Triggers | Select-Object -First 1
 function Stamp($value) { if ($value -and $value.Year -gt 2000) { $value.ToString('s') } else { '' } }
@@ -192,11 +193,11 @@ if ($at -le (Get-Date)) { $at = $at.AddDays(1) }
 $trigger = New-ScheduledTaskTrigger -Daily -At $at
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
     -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Hours 12)
-Register-ScheduledTask -TaskName $env:XLS_TASK -Action $action -Trigger $trigger -Settings $settings `
+Register-ScheduledTask -TaskName $env:XLS_TASK -TaskPath '\' -Action $action -Trigger $trigger -Settings $settings `
     -Description $env:XLS_DESCRIPTION -Force | Out-Null
 # One daily task: remove the one registered under the app's former name.
 foreach ($old in $legacyTasks) {
-    Unregister-ScheduledTask -TaskName $old -Confirm:$false
+    Unregister-ScheduledTask -TaskName $old -TaskPath '\' -Confirm:$false
 }
 """
 
@@ -206,7 +207,7 @@ foreach ($name in @($env:XLS_TASK) + ($env:XLS_LEGACY -split '\|')) {
     if ($name -and (Get-LuvBoxTask $name)) { $found += $name }
 }
 foreach ($name in $found) {
-    Unregister-ScheduledTask -TaskName $name -Confirm:$false
+    Unregister-ScheduledTask -TaskName $name -TaskPath '\' -Confirm:$false
 }
 """
 

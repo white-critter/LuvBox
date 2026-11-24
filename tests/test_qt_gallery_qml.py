@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def check_scene(scenario):
-    from PySide6.QtCore import QCoreApplication, QMetaObject, QObject, QPoint, QPointF, Qt, QtMsgType, Signal, qInstallMessageHandler
+    from PySide6.QtCore import QCoreApplication, QMetaObject, QObject, QPoint, QPointF, Qt, QtMsgType, QTimer, Signal, qInstallMessageHandler
     from PySide6.QtGui import QGuiApplication, QWheelEvent
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuick import QQuickItem
@@ -97,7 +97,13 @@ def check_scene(scenario):
             raise AssertionError("save must remain the default screen")
         window.setProperty("currentScreen", 1)
         settle()
-        if scenario == "scroll":
+        if scenario == "close":
+            QTimer.singleShot(0, application.quit)
+            QTimer.singleShot(1000, lambda: application.exit(1))
+            if application.exec() != 0:
+                raise AssertionError("gallery preview rejected shutdown without an app controller")
+            checks.append("gallery-preview-quit")
+        elif scenario == "scroll":
             for density in range(3):
                 window.setProperty("densityRequest", density)
                 settle(0.4)
@@ -242,6 +248,9 @@ class GalleryQmlTests(unittest.TestCase):
     def test_mouse_wheel_routes_once_and_stops_on_density_or_tab_change(self):
         result = self.run_scene("wheel")
         self.assertEqual(len(result["checks"]), 4)
+
+    def test_standalone_gallery_preview_can_quit(self):
+        self.assertEqual(self.run_scene("close")["checks"], ["gallery-preview-quit"])
 
 
 if __name__ == "__main__":

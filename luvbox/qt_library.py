@@ -3860,9 +3860,15 @@ class LibraryController(QObject):
             if hasattr(self._repository, "_dup_synced_changes"):
                 self._repository._dup_synced_changes = False
             self._release_exclusive()
+            if dup_synced:
+                self._counts_loaded = False
+                self._user_tags_loaded = False
             if not isinstance(selection, int):
-                self._status = message
-                self.changed.emit()
+                if dup_synced:
+                    self._settle(message, reload=True)
+                else:
+                    self._status = message
+                    self.changed.emit()
                 return
             self._duplicate_count = selection
             self._duplicate_count_stamp += 1

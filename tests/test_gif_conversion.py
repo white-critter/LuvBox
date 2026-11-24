@@ -99,6 +99,22 @@ class GifConversionTests(unittest.TestCase):
         converted.unlink()
         self.assert_source_only()
 
+    def test_locked_palette_does_not_discard_a_finished_conversion(self):
+        run = media._run
+        with ExitStack() as readers:
+            def lock_palette_after_write(arguments, **kwargs):
+                result = run(arguments, **kwargs)
+                if arguments[-1].endswith(".bmp"):
+                    readers.enter_context(Path(arguments[-1]).open("rb"))
+                return result
+
+            with patch.object(media, "_run", side_effect=lock_palette_after_write):
+                converted = media.convert_mp4_to_gif(self.source)
+
+        with Image.open(converted) as image:
+            self.assertEqual((image.format, image.size), ("GIF", (80, 64)))
+        self.assertEqual(self.source.read_bytes(), self.original)
+
     def make_source(self, name, size, rate):
         source = self.directory / name
         subprocess.run([str(self.executable), "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -502,6 +518,26 @@ class GifWorkerTests(unittest.TestCase):
         self.assertEqual(self.keys(), {"twitter101_1"})
         self.assertFalse(list(self.output.rglob("*.part*")))
         self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 1)
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing lock")
+    def test_locked_oversize_source_can_be_retried_after_raising_limit(self):
+        source = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4.part"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"0" * (2 * 1024 * 1024))
+        core._mark_transfer_complete(source)
+        rows = [("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")]
+
+        with source.open("rb"):
+            code, events = self.worker(rows, options=self.options_all(max_video_mb=1))
+            self.assertEqual((code, events[-1]["saved"], events[-1]["size_skipped"]), (0, 1, 1))
+            self.assertTrue(core._transfer_complete(source))
+
+        with patch("luvbox.core.convert_mp4_to_gif", side_effect=self.convert):
+            code, events = self.worker(rows, options=self.options_all(max_video_mb=3))
+
+        self.assertEqual((code, events[-1]["saved"], events[-1]["skipped"]), (0, 1, 1))
+        self.assertEqual(len(test_core.FakeHttpDownloader.downloaded), 1)
+        self.assertTrue(source.with_suffix("").with_suffix(".gif").is_file())
 
     def test_destination_created_during_conversion_is_not_overwritten_or_archived(self):
         destination = self.output / "myaccount" / "alice" / "alice_100_gif_1.gif"

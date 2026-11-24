@@ -354,9 +354,9 @@ ApplicationWindow {
     function openPreferences() { preferencesDialog.open() }
 
     onClosing: (close) => {
-        if (!app || !app.shutdownReady) {
+        if (app && !app.shutdownReady) {
             close.accepted = false
-            if (!app || !app.closing) {
+            if (!app.closing) {
                 rememberPlacement()
                 hide()
             }
@@ -2694,6 +2694,27 @@ ApplicationWindow {
         enabled: window.currentScreen === 1 && !window.modalOpen && !!window.app && !window.app.closing
         onActivated: window.app.refreshGallery()
     }
+    component PreviewMetadataButton: FlatButton {
+        id: metadataButton
+        property color foreground: Theme.text
+        property color hoverForeground: foreground
+        tone: "ghost"
+        compact: true
+        focusPolicy: Qt.TabFocus
+        leftPadding: 6
+        rightPadding: 6
+        contentItem: Text {
+            text: metadataButton.text
+            textFormat: Text.PlainText
+            font: metadataButton.font
+            color: !metadataButton.enabled ? Theme.textDisabled
+                : (metadataButton.hovered ? metadataButton.hoverForeground : metadataButton.foreground)
+            verticalAlignment: Text.AlignVCenter
+            horizontalAlignment: Text.AlignHCenter
+            elide: Text.ElideRight
+        }
+    }
+
     Dialog {
         id: previewDialog
         objectName: "previewDialog"
@@ -3007,30 +3028,19 @@ ApplicationWindow {
                     id: previewMetaColumn
                     width: previewMetaScroll.availableWidth
                     spacing: 8
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-                        Label {
-                            id: previewAuthorLabel
-                            text: window.app && window.app.library.selectedAuthor ? "@" + window.app.library.selectedAuthor : ""
-                            textFormat: Text.PlainText
-                            font.bold: true
-                            elide: Text.ElideRight
-                            color: authorMouse.containsMouse ? Theme.accent : Theme.text
-                            MouseArea {
-                                id: authorMouse
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                hoverEnabled: true
-                                onClicked: {
-                                    if (window.app && window.app.library.selectedAuthor) {
-                                        window.applyFilters({ author: window.app.library.selectedAuthor })
-                                        previewDialog.close()
-                                    }
-                                }
-                            }
-                            ToolTip.visible: authorMouse.containsMouse && text.length > 0
-                            ToolTip.text: "작성자 모아보기"
+                    PreviewMetadataButton {
+                        objectName: "previewAuthorButton"
+                        Layout.maximumWidth: previewMetaColumn.width
+                        Layout.alignment: Qt.AlignLeft
+                        visible: text.length > 0
+                        text: window.app && window.app.library.selectedAuthor ? "@" + window.app.library.selectedAuthor : ""
+                        font.bold: true
+                        hoverForeground: Theme.accent
+                        tip: qsTr("작성자 모아보기")
+                        Accessible.name: qsTr("작성자 %1 모아보기").arg(text)
+                        onClicked: {
+                            window.applyFilters({ author: window.app.library.selectedAuthor })
+                            previewDialog.close()
                         }
                     }
                     Label {
@@ -3043,40 +3053,33 @@ ApplicationWindow {
                         font.pixelSize: Theme.fontCaption
                     }
                     Flow {
+                        id: previewTags
                         Layout.fillWidth: true
                         spacing: 6
                         visible: window.app && (window.app.library.selectedHashtags.length > 0 || window.app.library.selectedTags.length > 0 || !!window.app.library.selectedKey)
 
                         Repeater {
                             model: window.app ? window.app.library.selectedHashtags : []
-                            delegate: Rectangle {
+                            delegate: PreviewMetadataButton {
+                                id: hashtagButton
                                 objectName: "previewHashtagChip"
                                 required property string modelData
-                                color: hashMouse.containsMouse ? Theme.hashtagHover : Theme.hashtagFill
-                                radius: Theme.radiusSmall
-                                border.width: 1
-                                border.color: Theme.hashtagLine
-                                implicitWidth: hashLabel.implicitWidth + 16
-                                implicitHeight: Theme.compactHeight
-
-                                Label {
-                                    id: hashLabel
-                                    anchors.centerIn: parent
-                                    text: modelData
-                                    font.pixelSize: Theme.fontSmall
-                                    color: Theme.hashtagText
-                                    ToolTip.visible: hashMouse.containsMouse
-                                    ToolTip.text: "해시태그 모아보기"
+                                text: modelData
+                                width: Math.min(implicitWidth, previewTags.width)
+                                leftPadding: 8
+                                rightPadding: 8
+                                foreground: Theme.hashtagText
+                                tip: qsTr("해시태그 모아보기")
+                                Accessible.name: qsTr("해시태그 %1 모아보기").arg(text)
+                                background: Rectangle {
+                                    color: hashtagButton.hovered ? Theme.hashtagHover : Theme.hashtagFill
+                                    radius: Theme.radiusSmall
+                                    border.width: hashtagButton.visualFocus ? 2 : 1
+                                    border.color: hashtagButton.visualFocus ? Theme.focus : Theme.hashtagLine
                                 }
-                                MouseArea {
-                                    id: hashMouse
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    hoverEnabled: true
-                                    onClicked: {
-                                        window.applyFilters({ hashtag: modelData })
-                                        previewDialog.close()
-                                    }
+                                onClicked: {
+                                    window.applyFilters({ hashtag: modelData })
+                                    previewDialog.close()
                                 }
                             }
                         }
@@ -3094,90 +3097,73 @@ ApplicationWindow {
                                 // A tag the person typed that is also an AI tag teaches that tag.
                                 readonly property bool teaches: !isAi && !!window.app
                                     && window.app.library.aiCategories.indexOf(tagName) >= 0
-                                color: userTagMouse.containsMouse ? (isAi ? Theme.aiTagHover : Theme.userTagHover) : (isAi ? Theme.aiTagFill : Theme.userTagFill)
+                                color: userTagButton.hovered ? (isAi ? Theme.aiTagHover : Theme.userTagHover) : (isAi ? Theme.aiTagFill : Theme.userTagFill)
                                 radius: Theme.radiusSmall
                                 border.width: 1
                                 border.color: isAi ? Theme.aiTagLine : Theme.userTagLine
-                                implicitWidth: userTagRow.implicitWidth + 14
+                                implicitWidth: userTagRow.implicitWidth + 4
                                 implicitHeight: Theme.compactHeight
+                                width: Math.min(implicitWidth, previewTags.width)
 
                                 RowLayout {
                                     id: userTagRow
-                                    anchors.centerIn: parent
-                                    spacing: 4
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 2
+                                    anchors.rightMargin: 2
+                                    spacing: 2
 
-                                    Label {
+                                    PreviewMetadataButton {
+                                        id: userTagButton
                                         objectName: "previewTagName"
-                                        text: (isAi ? "AI · #" : "#") + (modelData.tag || "") + (isConfirmed ? " ✓" : "")
-                                        font.pixelSize: Theme.fontSmall
-                                        color: isAi ? Theme.aiTagText : Theme.userTagText
-                                        ToolTip.visible: userTagMouse.containsMouse
-                                        ToolTip.text: isConfirmed ? "맞다고 알려 준 AI 태그 · 모아보기"
-                                            : (isAi ? "AI가 붙인 태그 · 모아보기"
-                                                    : (teaches ? "내 태그 (AI 학습 사용 중) · 모아보기" : "이 태그만 보기"))
-                                        MouseArea {
-                                            id: userTagMouse
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            hoverEnabled: true
-                                            onClicked: {
-                                                if (modelData.source === "ai" || modelData.source === "confirmed")
-                                                    window.app.library.setAiFilter(modelData.tag, "")
-                                                else
-                                                    window.applyFilters({ userTag: modelData.tag })
-                                                previewDialog.close()
-                                            }
+                                        Layout.fillWidth: true
+                                        Layout.minimumWidth: 0
+                                        text: (isAi ? "AI · #" : "#") + tagName + (isConfirmed ? " ✓" : "")
+                                        foreground: isAi ? Theme.aiTagText : Theme.userTagText
+                                        tip: isConfirmed ? qsTr("맞다고 알려 준 AI 태그 · 모아보기")
+                                            : (isAi ? qsTr("AI가 붙인 태그 · 모아보기")
+                                                    : (teaches ? qsTr("내 태그 (AI 학습 사용 중) · 모아보기") : qsTr("이 태그만 보기")))
+                                        Accessible.name: qsTr("태그 %1 모아보기").arg(text)
+                                        onClicked: {
+                                            if (isAi)
+                                                window.app.library.setAiFilter(tagName, "")
+                                            else
+                                                window.applyFilters({ userTag: tagName })
+                                            previewDialog.close()
                                         }
                                     }
                                     // "Yes, this" for a tag the AI guessed: it is kept and the AI learns from it.
-                                    Label {
+                                    PreviewMetadataButton {
                                         objectName: "previewTagConfirm"
                                         visible: modelData.source === "ai"
+                                        enabled: !!window.app && !window.app.library.tagsLocked
                                         text: "✓"
-                                        font.pixelSize: Theme.fontSmall
                                         font.bold: true
-                                        leftPadding: 3
-                                        rightPadding: 1
-                                        color: confirmMouse.containsMouse ? Theme.good : Theme.textMuted
-                                        ToolTip.visible: confirmMouse.containsMouse
-                                        ToolTip.text: "맞아요 · AI 학습에 반영"
-                                        MouseArea {
-                                            id: confirmMouse
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            hoverEnabled: true
-                                            enabled: !window.app || !window.app.library.tagsLocked
-                                            onClicked: {
-                                                if (window.app && window.app.library.teachTag(window.app.library.selectedKey,
-                                                                                              modelData.tag, true)) {
-                                                    previewDialog.notice = ""
-                                                    previewDialog.noticeKey = previewDialog.openedKey
-                                                    window.flashNotice("#" + modelData.tag + " 분류를 배우는 중…")
-                                                }
+                                        foreground: Theme.textMuted
+                                        hoverForeground: Theme.good
+                                        tip: qsTr("맞아요 · AI 학습에 반영")
+                                        Accessible.name: qsTr("AI 태그 %1 맞아요").arg(tagName)
+                                        onClicked: {
+                                            if (window.app.library.teachTag(window.app.library.selectedKey, tagName, true)) {
+                                                previewDialog.notice = ""
+                                                previewDialog.noticeKey = previewDialog.openedKey
+                                                window.flashNotice(qsTr("#%1 분류를 배우는 중…").arg(tagName))
                                             }
                                         }
                                     }
-                                    Label {
+                                    PreviewMetadataButton {
                                         objectName: "previewTagRemove"
+                                        enabled: !!window.app && !window.app.library.tagsLocked
                                         text: "×"
-                                        font.pixelSize: Theme.fontSmall
                                         font.bold: true
-                                        leftPadding: 3
-                                        rightPadding: 3
-                                        color: removeMouse.containsMouse ? Theme.error : Theme.textMuted
-                                        ToolTip.visible: removeMouse.containsMouse
-                                        ToolTip.text: isAi ? "이 태그 아님 · AI 학습에 반영" : "태그 삭제"
-                                        MouseArea {
-                                            id: removeMouse
-                                            anchors.fill: parent
-                                            cursorShape: Qt.PointingHandCursor
-                                            hoverEnabled: true
-                                            enabled: !window.app || !window.app.library.tagsLocked
-                                            onClicked: {
-                                                previewDialog.notice = ""
-                                                previewDialog.noticeKey = previewDialog.openedKey
-                                                window.app.library.removeSelectedTag(modelData.tag)
-                                            }
+                                        foreground: Theme.textMuted
+                                        hoverForeground: Theme.error
+                                        tip: isAi ? qsTr("이 태그 아님 · AI 학습에 반영") : qsTr("태그 삭제")
+                                        Accessible.name: isAi ? qsTr("AI 태그 %1 아님").arg(tagName)
+                                                              : qsTr("태그 %1 삭제").arg(tagName)
+                                        onClicked: {
+                                            previewDialog.notice = ""
+                                            previewDialog.noticeKey = previewDialog.openedKey
+                                            window.app.library.removeSelectedTag(tagName)
                                         }
                                     }
                                 }
