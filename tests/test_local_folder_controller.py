@@ -328,10 +328,10 @@ class DuplicateTests(FolderControllerCase):
         hashing, resume = threading.Event(), threading.Event()
         photos_to_hash = LocalFolderStore.photos_to_hash
 
-        def pause_after_sync(store):
+        def pause_after_sync(store, **options):
             hashing.set()
             resume.wait(5)
-            return photos_to_hash(store)
+            return photos_to_hash(store, **options)
 
         with patch.object(LocalFolderStore, "photos_to_hash", pause_after_sync):
             try:
@@ -373,6 +373,41 @@ class DuplicateTests(FolderControllerCase):
             self.assertEqual(store.duplicate_rule(), "exact")
         self.assertIn("중복 검사를 중단했습니다", self.controller.status)
 
+    def test_exact_scan_skips_image_decoding_and_near_scan_fills_the_cache(self):
+        from luvbox import duplicates
+
+        with Image.open(self.folder / "keep.jpg") as original:
+            with original.resize((128, 96), Image.Resampling.LANCZOS) as larger:
+                larger.save(self.folder / "larger.png")
+        self.open()
+
+        with patch.object(duplicates, "_dhash_from_stream", wraps=duplicates._dhash_from_stream) as decode:
+            self.assertTrue(self.controller.scanDuplicates(False))
+            self.settle()
+            self.assertEqual(self.controller.duplicateCount, 2)
+            self.assertEqual(decode.call_count, 0)
+
+        keeper = self.folder / "keep.jpg"
+        with closing(LocalFolderStore(self.folder)) as store:
+            row = store.row_by_rel(keeper.name)
+            self.assertEqual(row["file_hash"], duplicates.compute_file_hash(keeper))
+            self.assertEqual(row["dhash"], "")
+            self.assertNotEqual(row["file_signature"], duplicates.image_signature(keeper))
+
+        with patch.object(duplicates, "_dhash_from_stream", wraps=duplicates._dhash_from_stream) as decode:
+            self.assertTrue(self.controller.scanDuplicates(True))
+            self.settle()
+            self.assertEqual(self.controller.duplicateCount, 3)
+            self.assertGreater(decode.call_count, 0)
+            decode.reset_mock()
+            self.assertTrue(self.controller.scanDuplicates(False))
+            self.settle()
+            self.assertEqual(self.controller.duplicateCount, 2)
+            self.assertTrue(self.controller.scanDuplicates(True))
+            self.settle()
+            self.assertEqual(self.controller.duplicateCount, 3)
+            self.assertEqual(decode.call_count, 0)
+
     def test_duplicate_scan_updates_a_case_only_renamed_file_in_the_list(self):
         self.open()
         (self.folder / "keep.jpg").rename(self.folder / "temporary.jpg")
@@ -390,8 +425,8 @@ class DuplicateTests(FolderControllerCase):
         self.assertNotEqual(other.stat().st_size, keep.stat().st_size)
         photos_to_hash = LocalFolderStore.photos_to_hash
 
-        def change_after_listing(store):
-            rows = photos_to_hash(store)
+        def change_after_listing(store, **options):
+            rows = photos_to_hash(store, **options)
             shutil.copyfile(keep, other)
             return rows
 

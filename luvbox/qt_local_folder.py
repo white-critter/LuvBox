@@ -441,7 +441,7 @@ class LocalFolderRepository(LibraryRepository):
 
     # -- duplicates -------------------------------------------------------------------------
     def scan_duplicates(self, generation, progress_callback=None, epoch=None, near=False, compare_callback=None):
-        from .duplicates import ScanCancelled, cluster_images, compute_image_hashes
+        from .duplicates import DEFERRED_DHASH_SUFFIX, ScanCancelled, cluster_images, compute_image_hashes
 
         request = self._catalog_request(generation, epoch)
         if request is None:
@@ -459,7 +459,7 @@ class LocalFolderRepository(LibraryRepository):
                 store._folder_cache = {}
                 synced = store.sync_folder(request.include_subfolders, check_cancel)
                 self._dup_synced_changes = any(synced[key] for key in _FOLDER_CHANGES)
-                pending = store.photos_to_hash()
+                pending = store.photos_to_hash(near=near)
                 total = len(pending)
                 hashed = []
                 for index, row in enumerate(pending):
@@ -469,15 +469,18 @@ class LocalFolderRepository(LibraryRepository):
                         continue
                     try:
                         before = file_signature(path)
-                        file_hash, dhash = compute_image_hashes(path)
+                        file_hash, dhash = compute_image_hashes(path, perceptual=near)
                         if file_signature(path) != before:
                             continue
                     except (OSError, ValueError):
                         continue
                     if not file_hash:
                         continue
-                    values = (row["rel_path"], file_hash, dhash or "", ":".join(map(str, before)))
-                    if before[2:] != (row["filesize"], row["mtime_ns"]):
+                    sig_str = ":".join(map(str, before))
+                    cache_signature = sig_str if near else sig_str + DEFERRED_DHASH_SUFFIX
+                    values = (row["rel_path"], file_hash, dhash or "", cache_signature)
+                    if (before[2:] != (row["filesize"], row["mtime_ns"])
+                            or row["file_hash"] not in ("", file_hash)):
                         values += before[2:]
                         self._dup_synced_changes = True
                     hashed.append(values)
@@ -508,17 +511,18 @@ class LocalFolderRepository(LibraryRepository):
                             continue
                         seen_files.add((volume, number))
                     sig_str = ":".join(map(str, sig))
+                    cache_signature = sig_str if near else sig_str + DEFERRED_DHASH_SUFFIX
                     file_hash, dhash, filesize = row["file_hash"], row["dhash"], row["filesize"]
-                    if row.get("file_signature") != sig_str:
+                    if row["file_signature"] not in (sig_str, cache_signature):
                         try:
-                            file_hash, dhash = compute_image_hashes(path)
+                            file_hash, dhash = compute_image_hashes(path, perceptual=near)
                             after = file_signature(path)
                         except (OSError, ValueError):
                             continue
                         if after != sig or not file_hash:
                             continue
                         filesize = after[2]
-                        stale_updates.append((row["rel_path"], file_hash, dhash or "", sig_str, after[2], after[3]))
+                        stale_updates.append((row["rel_path"], file_hash, dhash or "", cache_signature, after[2], after[3]))
                         self._dup_synced_changes = True
                         if len(stale_updates) >= 64:
                             store.save_hashes(stale_updates)

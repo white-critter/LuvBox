@@ -390,6 +390,8 @@ class UpdateController(QObject):
             path, digest = updater.download(version, folder, self._source, size=size, progress=progress,
                                             cancelled=self._cancel.is_set)
         except updater.UpdateError as error:
+            if self._cancel.is_set():
+                raise updater.UpdateError("cancelled") from None
             if error.kind != "gone":
                 raise
             # No longer published: never offer it again, and look for what replaced

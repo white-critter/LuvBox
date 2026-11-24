@@ -121,7 +121,9 @@ def scene(screenshot_dir=None):
         assert not notice.property("visible") and notice.height() == 0
         assert server.requests == []
 
-        server.publish("1.9.0", notes="### 주요 변경 사항\n\n- **새 기능**: 첫 번째 변경\n- 두 번째 변경\n")
+        long_change = "사진을 여러 장 정리할 때 보고 있던 위치를 유지하고 다음 사진으로 바로 넘어갈 수 있어요. " * 4
+        server.publish("1.9.0", notes="### 주요 변경 사항\n\n- **새 기능**: 첫 번째 변경\n- 두 번째 변경\n"
+                       f"- 세 번째 변경. {long_change}\n- 네 번째 변경. {long_change}\n")
         updates.checkNow()
         wait(lambda: updates.state == "available", "a found release")
         QTest.qWait(80)
@@ -139,7 +141,7 @@ def scene(screenshot_dir=None):
         click("updateNotesToggle")
         notes = find("updateNotes")
         assert notes.property("visible") and notes.height() > 20
-        assert updates.notes == "· 새 기능: 첫 번째 변경\n· 두 번째 변경"
+        assert updates.notes.splitlines()[:2] == ["· 새 기능: 첫 번째 변경", "· 두 번째 변경"]
         screenshot("2-notice-changes")
         click("updateNotesToggle")
         assert not notes.property("visible")
@@ -160,6 +162,23 @@ def scene(screenshot_dir=None):
         assert install[0] + install[2] <= small[0] + small[2] and install[1] + install[3] <= small[1] + small[3]
         assert title.height() >= title.property("implicitHeight") - 1
         screenshot("4-notice-small-window")
+
+        # A keyboard user can open the notes, reach the scrollable text, and read it in full.
+        notes_toggle = find("updateNotesToggle")
+        notes_toggle.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+        QTest.keyClick(window, Qt.Key.Key_Return)
+        wait(lambda: notes.height() > 0 and notes.property("contentHeight") > notes.height(), "overflowing notes")
+        for _ in range(3):
+            QTest.keyClick(window, Qt.Key.Key_Tab)
+        assert window.activeFocusItem() == notes, "Tab skipped the scrollable update notes"
+        QTest.keyClick(window, Qt.Key.Key_PageDown)
+        assert notes.property("contentY") > 0, "Page Down did not scroll the update notes"
+        QTest.keyClick(window, Qt.Key.Key_End)
+        assert abs(notes.property("contentY") + notes.height() - notes.property("contentHeight")) < 1
+        QTest.keyClick(window, Qt.Key.Key_Home)
+        assert notes.property("contentY") == 0
+        click("updateNotesToggle")
+
         window.setWidth(1080)
         window.setHeight(760)
         QTest.qWait(80)

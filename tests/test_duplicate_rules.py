@@ -269,6 +269,42 @@ class StoredGroupTests(unittest.TestCase):
         with closing(HistoryStore.for_storage(self.paths)) as store:
             self.assertEqual(store.duplicate_rule(), "near")
 
+    def test_exact_scan_skips_image_decoding_and_near_scan_fills_the_cache(self):
+        with _photo(3) as original:
+            original.save(self.files["301"], quality=95)
+            self.files["302"].write_bytes(self.files["301"].read_bytes())
+            with original.resize((450, 350), Image.Resampling.LANCZOS) as smaller:
+                smaller.save(self.files["304"], quality=80)
+        repository = self.repository()
+
+        with patch.object(duplicates, "_dhash_from_stream", wraps=duplicates._dhash_from_stream) as decode:
+            self.assertEqual(repository.scan_duplicates(1), 2)
+            self.assertEqual(decode.call_count, 0)
+
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            _, digest, dhash, signature = store.get_image_hashes(include_signatures=True)[("flat", "301", 1, "photo")]
+            self.assertEqual(digest, compute_file_hash(self.files["301"]))
+            self.assertEqual(dhash, "")
+            # Older readers compare the signature literally to decide whether to compute both hashes.
+            self.assertNotEqual(signature, duplicates.image_signature(self.files["301"]))
+
+        def cancel_after_hashing(current, total):
+            if current == total:
+                repository.cancel_duplicate_scan()
+
+        with self.assertRaises(ScanCancelled):
+            repository.scan_duplicates(1, near=True, progress_callback=cancel_after_hashing)
+        with closing(HistoryStore.for_storage(self.paths)) as store:
+            self.assertEqual(store.duplicate_rule(), "exact")
+            self.assertEqual(store.duplicate_counts(), 2)
+
+        repository._duplicate_cancel.clear()
+        with patch.object(duplicates, "_dhash_from_stream", wraps=duplicates._dhash_from_stream) as decode:
+            self.assertEqual(repository.scan_duplicates(1, near=True), 3)
+            self.assertEqual(repository.scan_duplicates(1), 2)
+            self.assertEqual(repository.scan_duplicates(1, near=True), 3)
+            self.assertEqual(decode.call_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

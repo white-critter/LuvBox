@@ -1,4 +1,4 @@
-# LuvBox 1.12.12 개발 안내
+# LuvBox 1.12.13 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -194,7 +194,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.12.12.txt`, `release/LuvBox-1.12.12-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·개발 안내·변경 사항의 버전과 사용자 비노출 규칙을 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`·`require_user_facing_wording`, `AGENTS.md`, `tests/test_guide_versions.py`, `tests/test_user_wording_policy.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.12.13.txt`, `release/LuvBox-1.12.13-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·개발 안내·변경 사항의 버전과 사용자 비노출 규칙을 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`·`require_user_facing_wording`, `AGENTS.md`, `tests/test_guide_versions.py`, `tests/test_user_wording_policy.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 

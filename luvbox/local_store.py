@@ -1101,10 +1101,17 @@ class LocalFolderStore:
             db.execute("DELETE FROM local_meta WHERE key='ai_cleared'")
 
     # -- duplicates -------------------------------------------------------------------------
-    def photos_to_hash(self) -> list[dict]:
-        """Present local photos whose hashes are not known for their current size and time."""
-        return self._read("SELECT rowid AS rowid, rel_path, filesize, mtime_ns FROM local_files WHERE present=1 "
-                          "AND cloud=0 AND media_type='photo' AND file_signature='' AND (file_hash='' OR dhash='')")
+    def photos_to_hash(self, *, near=False) -> list[dict]:
+        """Present local photos missing a hash needed by this scan."""
+        missing = "(file_signature='' AND (file_hash='' OR dhash=''))"
+        parameters = ()
+        if near:
+            from .duplicates import DEFERRED_DHASH_SUFFIX
+
+            missing = f"({missing} OR file_signature GLOB ?)"
+            parameters = ("*" + DEFERRED_DHASH_SUFFIX,)
+        return self._read("SELECT rowid AS rowid, rel_path, filesize, mtime_ns, file_hash FROM local_files "
+                          f"WHERE present=1 AND cloud=0 AND media_type='photo' AND {missing}", parameters)
 
     def save_hashes(self, rows) -> int:
         """rows are (rel_path, file_hash, dhash, file_signature[, filesize, mtime_ns])."""

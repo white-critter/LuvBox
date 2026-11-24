@@ -727,7 +727,7 @@ class LibraryRepository:
         request = self._catalog_request(generation, epoch)
         if request is None:
             return 0
-        from .duplicates import compute_image_hashes, cluster_images, image_signature, ScanCancelled
+        from .duplicates import DEFERRED_DHASH_SUFFIX, ScanCancelled, cluster_images, compute_image_hashes, image_signature
 
         def check_cancel():
             if self._duplicate_cancel.is_set():
@@ -782,10 +782,12 @@ class LibraryRepository:
                             continue
                         seen_files.add((volume, number))
                     active_paths[ident] = path
-                    if ident in cached and cached[ident][3] == signature and (cached[ident][1] or cached[ident][2]):
-                        active_hashes[ident] = cached[ident]
+                    cache_signature = signature if near else signature + DEFERRED_DHASH_SUFFIX
+                    existing = cached.get(ident)
+                    if existing and existing[3] in (signature, cache_signature) and (existing[1] or existing[2]):
+                        active_hashes[ident] = existing
                         continue
-                    fhash, dh = compute_image_hashes(path)
+                    fhash, dh = compute_image_hashes(path, perceptual=near)
                     check_cancel()
                     try:
                         unchanged = image_signature(path) == signature
@@ -795,7 +797,7 @@ class LibraryRepository:
                         stale_hashes.append(ident)
                         continue
                     active_hashes[ident] = (sz, fhash, dh)
-                    new_hashes.append((*ident, sz, fhash, dh, signature))
+                    new_hashes.append((*ident, sz, fhash, dh, cache_signature))
                     if len(new_hashes) >= 100:
                         store.save_image_hashes(new_hashes)
                         new_hashes.clear()

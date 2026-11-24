@@ -3917,14 +3917,21 @@ class HistoryStore:
 
         Legacy callers omit the signature; their rows are rechecked next scan.
         """
+        from .duplicates import DEFERRED_DHASH_SUFFIX
+
         now = _now()
-        rows = [(*h[:7], now, h[7] if len(h) > 7 else "") for h in hashes]
+        rows = [(*h[:7], now, h[7] if len(h) > 7 else "", DEFERRED_DHASH_SUFFIX) for h in hashes]
         with self._db:
             self._db.executemany(
                 "INSERT INTO image_hashes(folder_mode, tweet_id, num, media_type, filesize, file_hash, dhash, updated_at, file_signature) "
                 "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(folder_mode, tweet_id, num, media_type) DO UPDATE SET "
                 "filesize=excluded.filesize, file_hash=excluded.file_hash, dhash=excluded.dhash, "
-                "cluster_id=0, updated_at=excluded.updated_at, file_signature=excluded.file_signature",
+                # Completing the perceptual hash of an unchanged file must not clear a published group.
+                "cluster_id=CASE WHEN image_hashes.file_signature!='' "
+                "AND image_hashes.file_signature IN (excluded.file_signature, excluded.file_signature || ?) "
+                "AND image_hashes.file_hash=excluded.file_hash "
+                "AND image_hashes.filesize=excluded.filesize THEN image_hashes.cluster_id ELSE 0 END, "
+                "updated_at=excluded.updated_at, file_signature=excluded.file_signature",
                 rows
             )
         return len(rows)

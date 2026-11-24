@@ -1,3 +1,3 @@
 """LuvBox: a personal, local X media backup app."""
 
-__version__ = "1.12.12"
+__version__ = "1.12.13"

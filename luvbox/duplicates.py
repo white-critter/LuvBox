@@ -124,8 +124,12 @@ def compute_file_hash(file_path: Path | str) -> str:
         return ""
 
 
-def compute_image_hashes(file_path: Path | str, hash_size: int = 8) -> tuple[str, str]:
-    """Compute ``(file_hash, dhash)`` in a single file open."""
+# Older readers see a different signature and recompute both hashes for the file.
+DEFERRED_DHASH_SUFFIX = ":deferred"
+
+
+def compute_image_hashes(file_path: Path | str, hash_size: int = 8, *, perceptual: bool = True) -> tuple[str, str]:
+    """Compute ``(file_hash, dhash)`` in one file open, decoding only when requested."""
     if type(hash_size) is not int or not 4 <= hash_size <= 16:
         return compute_file_hash(file_path), ""
     path = Path(file_path)
@@ -139,8 +143,10 @@ def compute_image_hashes(file_path: Path | str, hash_size: int = 8) -> tuple[str
             if info.st_size > MAX_RASTER_BYTES or opened != signature:
                 return "", ""
             fhash = _stream_hash(source)
-            source.seek(0)
-            dhash = _dhash_from_stream(source, hash_size=hash_size)
+            dhash = ""
+            if perceptual:
+                source.seek(0)
+                dhash = _dhash_from_stream(source, hash_size=hash_size)
         if image_signature(path) != signature:
             return "", ""
         return fhash, dhash

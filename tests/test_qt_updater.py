@@ -289,6 +289,35 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertEqual(self.launcher.read_bytes(), self.old)
         self.assertEqual(list((self.folder / "updates").iterdir()), [])
 
+    def test_cancelling_while_the_checksum_response_is_interrupted_returns_to_the_notice(self):
+        self.server.publish("1.9.0")
+        checksum_path = "/download/v1.9.0/SHA256-1.9.0.txt"
+        self.server.interrupted_chunks.add(checksum_path)
+        controller = self.controller()
+        controller.checkNow()
+        self.wait(lambda: controller.state == "available")
+        reading, resume = Event(), Event()
+        read = updater._read_limited
+
+        def hold_checksum(response, limit):
+            if response.url.endswith(checksum_path):
+                reading.set()
+                resume.wait(5)
+            return read(response, limit)
+
+        with patch.object(updater, "_read_limited", side_effect=hold_checksum):
+            controller.install()
+            try:
+                self.wait(reading.is_set)
+                controller.cancel()
+            finally:
+                resume.set()
+            self.wait(lambda: not controller.busy)
+
+        self.assertEqual((controller.state, controller.error), ("available", ""))
+        self.assertEqual(self.launcher.read_bytes(), self.old)
+        self.assertEqual(self.paths(), ["/latest", "/latest", checksum_path])
+
     def test_without_a_launcher_or_the_release_files_the_page_is_offered_instead(self):
         self.server.publish("1.9.0")
         source_run = self.controller(launcher=False)

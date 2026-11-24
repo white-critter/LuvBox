@@ -684,10 +684,11 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     from . import unsaved
     from .metadata import available, embed_source, failure_message, persistent
 
-    saved = skipped = size_skipped = review_skipped = review_never = 0
-    failed = 0
-    # Failed media the unsaved list did not hold before this run.
-    failed_new = 0
+    saved = skipped = review_skipped = review_never = 0
+    # A Likes scan can see an attachment more than once. Keep the latest
+    # unsaved outcome for each file, independently of the ledger's size cap.
+    failed_media = set()
+    size_limited_media = set()
     # The run finished past files that failed, because they are in the unsaved list.
     failures_listed = False
     # Listed media X's image host refused, with the saves each one stopped, and
@@ -727,7 +728,6 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     ignored = set()
     ignored_encountered = False
     recovered = {}
-    size_limited = set()
     review_declined = set()
     # Files skipped in an earlier review: (tweet_id, num, type). A quick scan
     # continues until it reaches them; resolved ones are then forgotten.
@@ -1146,8 +1146,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 self.archive.check = retry_check
 
         def handle_url(self, url, kwdict):
-            nonlocal stop_reason, saved, skipped, size_skipped, review_skipped, review_never, existing_streak
-            nonlocal ignored_encountered, failed, failed_new
+            nonlocal stop_reason, saved, skipped, review_skipped, review_never, existing_streak
+            nonlocal ignored_encountered
             check_stop()
             media_type = kwdict.get("type")
             if media_type not in {"photo", "video", "animated_gif"}:
@@ -1262,6 +1262,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         self.archive.add(kwdict)
                 except (HistoryError, sqlite3.Error) as exc:
                     raise _catalog_unavailable(exc) from None
+                failed_media.discard(identity)
+                size_limited_media.discard(identity)
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
                 note_unsaved(unsaved.EXCLUDED, _EXCLUDED_DETAIL, media=kwdict)
                 emit({"type": "review-never", "path": "", **_media_details(kwdict)})
@@ -1273,11 +1275,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
                 emit({"type": "review-skipped", "path": "", **_media_details(kwdict)})
             except SizeLimit:
-                size_skipped += 1
+                failed_media.discard(identity)
+                size_limited_media.add(identity)
                 if identity in review_pending:
                     review_resolved.add(identity)
-                if targets:
-                    size_limited.add(kwdict["_luvbox_archive_key"])
                 if self.pathfmt.temppath:
                     try:
                         Path(self.pathfmt.temppath).unlink(missing_ok=True)
@@ -1404,10 +1405,13 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             history.record_media(normalized.folder_mode, kwdict, media_path, status=media_status)
                         except HistoryError as exc:
                             raise _catalog_unavailable(exc) from None
-                        if targets:
-                            recovered[kwdict["_luvbox_archive_key"]] = media_status
+                        failed_media.discard(identity)
+                        size_limited_media.discard(identity)
+                        unsaved_items.pop(identity, None)
                         if identity in unsaved_known:
                             unsaved_resolved.add(identity)
+                        if targets:
+                            recovered[kwdict["_luvbox_archive_key"]] = media_status
                     elif identity in unsaved_known:
                         # Listed as unsaved and met again without a file (a full check passes
                         # every like): fill its picture if the list still has none.
@@ -1423,8 +1427,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # whether anything else went wrong: one file X no longer
                     # serves must not make every later quick save a full check.
                     self.status = status_before
-                    failed += 1
-                    failed_new += identity not in unsaved_known
+                    failed_media.add(identity)
+                    size_limited_media.discard(identity)
                     if identity in review_pending:
                         # Met and listed for '다시 저장': the next quick save need
                         # not walk down to it again only to have it fail again.
@@ -1450,7 +1454,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     except OSError:
                         pass
                     self.gif_temporary = None
-            history_update(saved=saved, skipped=skipped, size_skipped=size_skipped, force=bool(self.last_output and self.last_output[0] == "saved"))
+            history_update(saved=saved, skipped=skipped, size_skipped=len(size_limited_media),
+                           force=bool(self.last_output and self.last_output[0] == "saved"))
             if stop_reason == "user":
                 raise exception.StopExtraction()
             if quick_scan and self.last_output:
@@ -1500,7 +1505,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             # gallery-dl's media downloader catches exceptions from request()
             # and returns False. Re-raise a protection failure before its parent
             # attempts other image sizes or the next photo.
-            nonlocal failed, failed_new, refused_now, refused_streak
+            nonlocal refused_now, refused_streak
             media_type = self.current_media.get("type")
             is_gif = media_type == "animated_gif"
             # gallery-dl's HTTP downloader writes every transfer to its .part
@@ -1544,8 +1549,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     counted = _not_served(guard.refused)
                     if counted:
                         refused_now = self.identity
-                    failed += 1
-                    failed_new += self.identity not in unsaved_known
+                    failed_media.add(self.identity)
+                    size_limited_media.discard(self.identity)
                     note_unsaved(unsaved.FAILED, _REFUSED_DETAIL if counted else _SERVER_ERROR_DETAIL,
                                  media=self.current_media)
                     emit({"type": "failed", "path": "", **_media_details(self.current_media)})
@@ -2021,7 +2026,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # A stop while this tweet was handled is not its outcome.
                     check_stop()
                     # Files over the size limit are reported as size-skipped.
-                    left = [key for key in keys if key not in recovered and key not in size_limited and
+                    left = [key for key in keys if key not in recovered and _key_identity(key) not in size_limited_media and
                             key not in review_declined]
                     if not left:
                         continue
@@ -2047,6 +2052,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         if guard.failure:
             exit_code = 1
         check_stop()
+        failed = len(failed_media)
+        size_skipped = len(size_limited_media)
         found_nothing = (not saved and not skipped and not size_skipped and not review_skipped
                          and not review_never and not ignored_encountered)
         # A file was selected and the transfer failed. That is not an empty Like list,
@@ -2140,6 +2147,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             error_kind = "authentication"
         exit_code = 1
     finally:
+        failed = len(failed_media)
+        size_skipped = len(size_limited_media)
         listed = remember_unsaved()
         if not listed and failures_listed and status == "finished":
             # The run finished past its failed files because they are listed for
@@ -2244,7 +2253,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         authentication_changed(handler.auth_state)
     emit({"type": "finished", "status": status, "saved": saved, "skipped": skipped,
           "history_run_id": run_id,
-          "size_skipped": size_skipped, "failed_media": failed, "failed_new_media": failed_new,
+          "size_skipped": size_skipped, "failed_media": failed, "failed_new_media": len(failed_media - unsaved_known),
           "review_skipped": review_skipped, "review_never": review_never,
           "metadata_failed": metadata_failed, "author_deferred": author_deferred,
           "visited": len(visited_ids), "last_tweet_id": last_tweet_id,

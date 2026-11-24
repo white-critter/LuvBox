@@ -12,6 +12,7 @@ from tests import test_core, test_media
 from tests import app_data_isolation  # noqa: F401  (never this PC's real app data)
 from luvbox import unsaved
 from luvbox.core import run_worker
+from luvbox.history import HistoryError, HistoryStore
 
 MIB = test_media.MIB
 
@@ -103,6 +104,48 @@ class UnsavedRecordingTests(unittest.TestCase):
         code, events = self.run_with(test_core.FakeHttpDownloader, rows)
         self.assertEqual((events[-1]["saved"], events[-1]["skipped"], events[-1]["failed_media"]), (0, 2, 0))
         self.assertFalse(path.exists())
+
+    def test_failed_row_remains_when_the_retried_file_cannot_be_recorded(self):
+        self.use_ledger()
+        rows = [("100", 1, "photo", "alice", None)]
+        self.run_with(QuietFailure, rows)
+
+        with patch.object(HistoryStore, "record_media", side_effect=HistoryError("record write failed")):
+            code, events = self.run_with(test_core.FakeHttpDownloader, rows)
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(events[-1]["status"], "error")
+        self.assertEqual([(row["tweet_id"], row["reason"]) for row in self.rows()], [("100", "failed")])
+
+    def test_retry_within_same_save_clears_the_earlier_failure(self):
+        self.use_ledger()
+
+        class FailsOnce(test_core.FakeHttpDownloader):
+            def download(self, url, pathfmt):
+                if not getattr(self, "failed_once", False):
+                    self.failed_once = True
+                    return False
+                return super().download(url, pathfmt)
+
+        row = ("100", 1, "photo", "alice", None)
+        code, events = self.run_with(FailsOnce, [row, row])
+        self.assertEqual([event["type"] for event in events if event["type"] in {"failed", "saved"}],
+                         ["failed", "saved"])
+        self.assertEqual(self.rows(), [])
+        self.assertEqual((code, events[-1]["saved"], events[-1]["failed_media"],
+                          events[-1]["failed_new_media"]), (0, 1, 0, 0))
+
+    def test_video_stored_later_in_the_same_save_is_no_longer_size_limited(self):
+        self.use_ledger()
+        row = ("100", 1, "video", "alice")
+        code, events, _ = self.http_worker([row, row], [
+            self.response([test_media.MP4_HEADER], size=3 * MIB),
+            self.response([test_media.MP4_HEADER], size=len(test_media.MP4_HEADER)),
+        ])
+        self.assertEqual([event["type"] for event in events if event["type"] in {"size-skipped", "saved"}],
+                         ["size-skipped", "saved"])
+        self.assertEqual(self.rows(), [])
+        self.assertEqual((code, events[-1]["saved"], events[-1]["size_skipped"]), (0, 1, 0))
 
     def test_a_size_limited_video_is_listed_with_its_size_and_leaves_once_saved(self):
         self.use_ledger()

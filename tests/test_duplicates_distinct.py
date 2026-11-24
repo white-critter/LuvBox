@@ -85,10 +85,7 @@ class DistinctCatalog(unittest.TestCase):
                                            separate_accounts=False, **filters))
 
     def scan(self):
-        # Hash with the real routine; only the picture decoding is replaced (the files are not pictures).
-        with patch("luvbox.duplicates.compute_image_hashes",
-                   side_effect=lambda path: (__import__("hashlib").sha256(Path(path).read_bytes()).hexdigest(), "")):
-            return self.repository.scan_duplicates(1)
+        return self.repository.scan_duplicates(1)
 
     def store(self):
         return closing(HistoryStore.for_storage(self.paths, create_media=False))

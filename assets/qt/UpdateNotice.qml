@@ -166,19 +166,58 @@ Card {
         Flickable {
             id: notesView
             objectName: "updateNotes"
+            readonly property bool scrollable: contentHeight > height + 1
             Layout.fillWidth: true
             Layout.preferredHeight: Math.min(notesText.implicitHeight, 132)
             visible: notice.notesOpen && notice.phase === "available"
             clip: true
             contentHeight: notesText.implicitHeight
             boundsBehavior: Flickable.StopAtBounds
-            ScrollBar.vertical: ScrollBar {
-                policy: notesView.contentHeight > notesView.height + 1 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+            activeFocusOnTab: scrollable
+            Accessible.role: Accessible.Pane
+            Accessible.name: qsTr("변경 사항")
+            Accessible.focusable: scrollable
+            Keys.onPressed: event => {
+                if (!notesView.scrollable)
+                    return
+                let offset = 0
+                switch (event.key) {
+                case Qt.Key_Up: offset = -32; break
+                case Qt.Key_Down: offset = 32; break
+                case Qt.Key_PageUp: offset = -notesView.height; break
+                case Qt.Key_PageDown: offset = notesView.height; break
+                case Qt.Key_Home: offset = -notesView.contentHeight; break
+                case Qt.Key_End: offset = notesView.contentHeight; break
+                default: return
+                }
+                notesWheel.reset()
+                notesView.cancelFlick()
+                notesView.contentY = Math.max(0, Math.min(notesView.contentHeight - notesView.height,
+                                                          notesView.contentY + offset))
+                event.accepted = true
             }
-            SmoothWheel { flickable: notesView }
+            ScrollBar.vertical: ScrollBar {
+                policy: notesView.scrollable ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+            }
+            SmoothWheel {
+                id: notesWheel
+                flickable: notesView
+            }
+            Rectangle {
+                parent: notesView
+                anchors.fill: parent
+                visible: notesView.activeFocus
+                z: 1
+                color: "transparent"
+                radius: Theme.radiusSmall
+                border.color: Theme.focus
+                border.width: 2
+                Accessible.ignored: true
+            }
             Label {
                 id: notesText
-                width: notesView.width - 14
+                x: Theme.gapSmall
+                width: notesView.width - x - 14
                 text: notice.updates ? notice.updates.notes : ""
                 color: Theme.textMuted
                 font.pixelSize: Theme.fontSmall
