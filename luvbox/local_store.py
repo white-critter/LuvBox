@@ -633,9 +633,8 @@ class LocalFolderStore:
         """``{group: [rel_path, ...]}``, the photo kept first."""
         groups: dict[int, list[str]] = {}
         for row in self._read(
-                "SELECT rel_path, cluster_id FROM local_files WHERE present=1 AND cluster_id IN ("
-                "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
-                "GROUP BY cluster_id HAVING COUNT(*) >= 2) "
+                "SELECT rel_path, cluster_id FROM local_files INDEXED BY local_files_cluster "
+                f"WHERE present=1 AND cluster_id IN ({_DUPLICATE_GROUPS}) "
                 "ORDER BY cluster_id, favorite DESC, filesize DESC, rel_path"):
             groups.setdefault(int(row["cluster_id"]), []).append(row["rel_path"])
         return groups
@@ -1171,23 +1170,24 @@ class LocalFolderStore:
         """Store the groups of a scan (lists of rel_path), apart where the person said "not duplicates"."""
         from .duplicates import split_distinct
 
-        distinct = self._distinct_with(self._distinct_sets(), self._photo_marks())
-        marked = {member for group in distinct for member in group}
-        updates, grouped, number = [], 0, 1
-        for group in clusters:
-            if len(group) < 2:
-                continue
-            parts = split_distinct(list(group), distinct) if marked.intersection(group) else [list(group)]
-            base, placed = number, set()
-            for part in parts:
-                updates.extend((number, rel) for rel in part)
-                placed.update(part)
-                grouped += len(part)
-                number += 1
-            if not parts:
-                number += 1
-            updates.extend((-base, rel) for rel in group if rel not in placed)
         with self._write() as db:
+            # Apply the current marks under the same transaction that publishes the groups.
+            distinct = self._distinct_with(self._distinct_sets(db), self._photo_marks(db))
+            marked = {member for group in distinct for member in group}
+            updates, grouped, number = [], 0, 1
+            for group in clusters:
+                if len(group) < 2:
+                    continue
+                parts = split_distinct(list(group), distinct) if marked.intersection(group) else [list(group)]
+                base, placed = number, set()
+                for part in parts:
+                    updates.extend((number, rel) for rel in part)
+                    placed.update(part)
+                    grouped += len(part)
+                    number += 1
+                if not parts:
+                    number += 1
+                updates.extend((-base, rel) for rel in group if rel not in placed)
             db.execute("UPDATE local_files SET cluster_id=0 WHERE cluster_id!=0")
             db.executemany("UPDATE local_files SET cluster_id=? WHERE rel_path=?", updates)
             db.execute("INSERT OR REPLACE INTO local_meta(key, value) VALUES ('duplicate_rule', ?)",
@@ -1244,9 +1244,8 @@ class LocalFolderStore:
 
     def duplicate_count(self) -> int:
         return int(self._read(
-            "SELECT COUNT(*) AS n FROM local_files WHERE present=1 AND cluster_id IN ("
-            "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
-            "GROUP BY cluster_id HAVING COUNT(*) >= 2)")[0]["n"])
+            "SELECT COUNT(*) AS n FROM local_files INDEXED BY local_files_cluster "
+            f"WHERE present=1 AND cluster_id IN ({_DUPLICATE_GROUPS})")[0]["n"])
 
     def set_group_distinct(self, rel_path) -> list | None:
         with self._write() as db:

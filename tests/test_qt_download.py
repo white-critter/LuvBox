@@ -112,6 +112,28 @@ class DownloadStatusTests(unittest.TestCase):
         self.assertNotIn("secret", controller.error)
         self.assertNotIn("token", controller.error)
 
+    def test_terminal_error_without_totals_keeps_the_observed_unsaved_count(self):
+        controller, service = self.controller()
+        service.pending.extend((
+            {"type": "size-skipped", "job_id": 7},
+            {"type": "failed", "job_id": 7},
+            {"type": "finished", "status": "error", "job_id": 7},
+            {"type": "process_exit", "job_id": 7, "code": 1},
+        ))
+        controller._pump()
+        self.assertEqual(controller.unsavedCount, 2)
+
+    def test_terminal_counts_replace_only_the_totals_reported(self):
+        controller, service = self.controller()
+        service.pending.extend((
+            {"type": "size-skipped", "job_id": 7},
+            {"type": "failed", "job_id": 7},
+            {"type": "finished", "status": "error", "job_id": 7, "size_skipped": 3},
+            {"type": "process_exit", "job_id": 7, "code": 1},
+        ))
+        controller._pump()
+        self.assertEqual(controller.unsavedCount, 4)
+
     def test_stop_waits_for_worker_exit_and_preserves_the_completed_count(self):
         controller, service = self.controller()
         controller.stop()

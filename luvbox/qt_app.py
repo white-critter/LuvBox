@@ -1106,8 +1106,7 @@ class ApplicationController(QObject):
                 outcome["message"] = "응답하지 않는 작업을 강제로 종료했습니다. 다음 저장에서 기록을 다시 확인합니다."
             elif event.get("code") != 0:
                 status = "error"
-            outcome.update(status=status, code=event.get("code"), saved=self._download.savedCount,
-                           skipped=self._download.skippedCount)
+            outcome.update(status=status, code=event.get("code"), **self._download.outcome_counts())
             self._record_manual_outcome(outcome)
             self._records.refresh()
             if self._download.savedCount and not self._closing:

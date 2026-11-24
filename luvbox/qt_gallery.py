@@ -170,6 +170,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
         """Decode ``keys`` in order and drop queued work that is no longer listed."""
         if type(width) is not int or type(height) is not int or not 1 <= width <= 384 or not 1 <= height <= 384:
             return
+        size = (width, height)
         wanted, seen = [], set()
         for key in keys:
             if isinstance(key, str) and key not in seen and _KEY.fullmatch(key):
@@ -182,11 +183,13 @@ class SafeThumbnailProvider(QQuickImageProvider):
             self._wanted = set(wanted)
             self._notified = {key: stamp for key, stamp in self._notified.items() if key in self._wanted}
             generation = self._registry_generation
-            self._target_size = (width, height)
+            if size != self._target_size:
+                self._target_size = size
+                self._lock.notify_all()
             self._failures = {item for item in self._failures
                               if item[0] in self._wanted and item[1] == width and item[2] == height}
             for key in list(self._live):
-                if key not in self._wanted:
+                if key not in self._wanted or self._queued_size[key] != size:
                     self._live.pop(key, None)
                     self._priority.pop(key, None)
                     self._queued_size.pop(key, None)
@@ -372,13 +375,15 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 generation = self._registry_generation
                 token = (key, width, height)
                 job = (generation, *token)
+                focused_size = self._target_size == (width, height)
                 self._inflight.add(job)
                 self._active += 1
                 self._record("queue_wait_ms", (time.perf_counter() - enqueued) * 1000)
             publish = False
             failed = False
             try:
-                image, _hit = self._read(key, path, width, height, generation, deliver=False)
+                image, _hit = self._read(key, path, width, height, generation, deliver=False,
+                                         focused_size=focused_size)
             except Exception:
                 image = QImage()
             with self._lock:
@@ -401,7 +406,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
             if closed:
                 return
 
-    def _read(self, key, path, width, height, generation, *, decode=True, deliver=True):
+    def _read(self, key, path, width, height, generation, *, decode=True, deliver=True, focused_size=False):
         with self._lock:
             if self._closed or generation != self._registry_generation or path is None:
                 return QImage(), False
@@ -431,7 +436,8 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 with self._lock:
                     if self._lock.wait_for(
                             lambda: self._closed or generation != self._registry_generation
-                            or (not deliver and (self._wanted is None or key not in self._wanted)), timeout=delay):
+                            or (not deliver and (self._wanted is None or key not in self._wanted))
+                            or (focused_size and self._target_size != (width, height)), timeout=delay):
                         return QImage(), False
                 if _thumbnail_stamp(path) != stamp:
                     return QImage(), False

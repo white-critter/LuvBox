@@ -615,6 +615,45 @@ class DuplicateTests(FolderCase):
         self.assertEqual(self.s.clear_distinct(), 1)
         self.assertEqual(self.s.duplicate_count(), 5)
 
+    def test_scan_uses_a_distinct_mark_committed_before_it_writes(self):
+        groups = [["a.jpg", "b.jpg", "c.jpg"]]
+        self.s.save_clusters(groups, "exact")
+        editor = self.store()
+        begin_write = self.s._write
+
+        def mark_before_write():
+            self.assertIsNotNone(editor.set_photos_distinct(["c.jpg"]))
+            return begin_write()
+
+        with patch.object(self.s, "_write", side_effect=mark_before_write):
+            self.assertEqual(self.s.save_clusters(groups, "exact"), 2)
+        self.assertEqual(self.s.distinct_duplicate_count(), 1)
+        self.assertEqual(self.s.duplicate_members(), {1: ["a.jpg", "b.jpg"]})
+
+    def test_duplicate_overview_skips_unclustered_files(self):
+        self.s.save_clusters([["a.jpg", "b.jpg"], ["c.jpg", "d.jpg"]], "exact")
+        with self.s._write() as db:
+            db.execute("UPDATE local_files SET present=0 WHERE rel_path='d.jpg'")
+            db.executemany(
+                "INSERT INTO local_files(rel_path, filename, media_type, filesize, mtime_ns, updated_at) "
+                "VALUES (?1, ?1, 'photo', 800, 1, 'now')",
+                ((f"unique-{index:05d}.jpg",) for index in range(12000)),
+            )
+        ticks = 0
+
+        def progress():
+            nonlocal ticks
+            ticks += 1
+            return 0
+
+        self.s._db.set_progress_handler(progress, 1000)
+        try:
+            self.assertEqual(self.s.duplicate_count(), 2)
+            self.assertEqual(self.s.duplicate_members(), {1: ["a.jpg", "b.jpg"]})
+        finally:
+            self.s._db.set_progress_handler(None, 0)
+        self.assertLess(ticks, 20)
+
     def test_the_duplicate_page_names_the_keeper_and_the_copies(self):
         self.s.save_hashes([("a.jpg", "h1", "0" * 16, ""), ("b.jpg", "h1", "0" * 16, ""), ("c.jpg", "h2", "0" * 16, "")])
         self.s.save_clusters([["a.jpg", "b.jpg", "c.jpg"]], "near")

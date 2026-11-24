@@ -820,6 +820,59 @@ class SafeThumbnailProviderTests(unittest.TestCase):
         self.assertNotIn("two", seen)
         self.assertGreaterEqual(provider.snapshot()["cancelled"], 1)
 
+    def test_cached_density_cancels_queued_decode_at_previous_density(self):
+        entered, release = Event(), Event()
+        small, large = (20, 12), (40, 24)
+        blocker = self.folder / "blocker.png"
+        blocker.write_bytes(self.path.read_bytes())
+        calls = []
+
+        def decoder(path, dimensions):
+            calls.append((path, dimensions))
+            if path == blocker:
+                entered.set()
+                release.wait(3)
+            return thumbnail(path, dimensions)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(provider.join_workers, 2)
+        self.addCleanup(provider.close)
+        self.addCleanup(release.set)
+        provider.register("photo", self.path)
+        provider.register("blocker", blocker)
+        self.assertFalse(self.request(dimensions=small, provider=provider).isNull())
+        provider.schedule(["blocker", "photo"], *large)
+        self.assertTrue(entered.wait(1))
+        provider.schedule(["photo"], *small)
+        release.set()
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(calls, [(self.path, small), (blocker, large)])
+
+    def test_density_change_stops_retry_of_obsolete_thumbnail_size(self):
+        entered, release = Event(), Event()
+        small, large = (20, 12), (40, 24)
+        calls = []
+
+        def decoder(path, dimensions):
+            calls.append(dimensions)
+            if dimensions == small:
+                entered.set()
+                release.wait(3)
+                return Thumbnail(None, "temporary sharing lock", retryable=True)
+            return thumbnail(path, dimensions)
+
+        provider = SafeThumbnailProvider(decoder=decoder, workers=1)
+        self.addCleanup(provider.join_workers, 2)
+        self.addCleanup(provider.close)
+        self.addCleanup(release.set)
+        provider.register("photo", self.path)
+        provider.schedule(["photo"], *small)
+        self.assertTrue(entered.wait(1))
+        provider.schedule(["photo"], *large)
+        release.set()
+        self.assertTrue(provider.wait_for_idle(2))
+        self.assertEqual(calls, [small, large])
+
 
 if __name__ == "__main__":
     unittest.main()

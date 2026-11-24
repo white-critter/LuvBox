@@ -58,7 +58,7 @@ Card {
                         if (!notice.updates)
                             return ""
                         if (notice.phase === "downloading")
-                            return notice.updates.version + " 받는 중 · " + Math.round(notice.updates.progress * 100) + "%"
+                            return notice.updates.status
                         if (notice.phase === "ready")
                             return notice.updates.version + " 준비 완료"
                         if (notice.phase === "failed")
@@ -102,7 +102,7 @@ Card {
             FlatButton {
                 objectName: "updateCancelButton"
                 visible: notice.phase === "downloading"
-                text: "받기 취소"
+                text: notice.updates && notice.updates.version ? "받기 취소" : "확인 취소"
                 onClicked: notice.updates.cancel()
             }
             FlatButton {
@@ -123,12 +123,12 @@ Card {
             FlatButton {
                 objectName: "updateInstallButton"
                 visible: (notice.phase === "available" || notice.phase === "failed")
-                    && !!notice.updates && notice.updates.canInstall
+                    && !!notice.updates && (notice.updates.canInstall || notice.updates.retryLatest)
                 // Lit, but not the screen's main action: that stays "저장 시작".
                 tone: "soft"
                 font.bold: true
                 text: notice.phase === "failed" ? "다시 시도" : "업데이트"
-                Accessible.name: "새 버전 받기"
+                Accessible.name: notice.updates && notice.updates.retryLatest ? "새 버전 다시 확인" : "새 버전 받기"
                 onClicked: notice.updates.install()
             }
             FlatButton {
@@ -146,7 +146,7 @@ Card {
             objectName: "updateProgress"
             Layout.fillWidth: true
             implicitHeight: 4
-            visible: notice.phase === "downloading"
+            visible: notice.phase === "downloading" && !!notice.updates && notice.updates.version.length > 0
             Accessible.role: Accessible.ProgressBar
             Accessible.name: "업데이트 받는 중"
             Rectangle {

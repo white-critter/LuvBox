@@ -46,6 +46,7 @@ class UpdateController(QObject):
         # The release a click was fetching turned out to be taken down, and nothing
         # newer replaced it: the notice stays to say so instead of vanishing.
         self._withdrawn = False
+        self._retry_latest = False
         self._check_pending = False
         self._manual = False
         self._restart = False
@@ -120,6 +121,10 @@ class UpdateController(QObject):
         with self._lock:
             return self._cached_launcher is not None
 
+    @Property(bool, notify=changed)
+    def retryLatest(self):
+        return self._retry_latest and self._state == "failed"
+
     @Property(float, notify=changed)
     def progress(self):
         return self._progress
@@ -146,7 +151,8 @@ class UpdateController(QObject):
             # Also a check by hand that failed while an earlier find is still on offer.
             return self._error
         if self._state == "downloading":
-            return f"{self.version} 받는 중 · {round(self._progress * 100)}%"
+            return (f"{self.version} 받는 중 · {round(self._progress * 100)}%" if self._found
+                    else "새 버전을 확인하는 중")
         if self._state == "ready":
             return f"{self.version} 준비 완료"
         if self._found:
@@ -218,7 +224,6 @@ class UpdateController(QObject):
             self._check_pending = True
             self._manual = True
             self._error = ""
-            self._withdrawn = False
             self._state = "checking"
             self.changed.emit()
 
@@ -226,7 +231,9 @@ class UpdateController(QObject):
     def install(self):
         """The click: read the latest release again, fetch its program, verify it and put it in the
         launcher's place."""
-        if self._closing or self._state not in {"available", "failed"} or not (self._found and self._found["installable"]):
+        if self._closing or self._state not in {"available", "failed"}:
+            return
+        if not (self.retryLatest or self.canInstall):
             return
         with self._lock:
             known = self._launcher_known
@@ -239,7 +246,8 @@ class UpdateController(QObject):
         self._error = ""
         self._progress = 0.0
         self._dismissed = False
-        if self._queue("install", version=self._found["version"], size=self._found["size"], launcher=launcher):
+        size = self._found["size"] if self._found else 0
+        if self._queue("install", version=self.version, size=size, launcher=launcher):
             self._state = "downloading"
             self.changed.emit()
 
@@ -340,7 +348,13 @@ class UpdateController(QObject):
         try:
             found, stamp = self._check()
         except updater.UpdateError:
+            if not version:
+                if self._cancel.is_set():
+                    raise updater.UpdateError("cancelled") from None
+                raise
             found = None
+        if self._cancel.is_set():
+            raise updater.UpdateError("cancelled")
         if found is not None:
             if not (found["newer"] and found["installable"]):
                 # Nothing here to fetch: a release for the release page, or the one
@@ -370,7 +384,10 @@ class UpdateController(QObject):
             # No longer published: never offer it again, and look for what replaced
             # it. When that look fails, its own reason is what the person sees.
             self._remember({"update_found": {}})
-            found, stamp = self._check()
+            try:
+                found, stamp = self._check()
+            except updater.UpdateError as check_error:
+                return ("retry_latest", str(check_error))
             if found["version"] == version:
                 self._remember({"update_found": {}})   # still named the latest, but not there
             return ("renewed", found, stamp, False, version)
@@ -411,6 +428,7 @@ class UpdateController(QObject):
             if self._state in {"downloading", "ready"}:
                 return
             self._withdrawn = False
+            self._retry_latest = False
             if found["newer"]:
                 # A different release, or the person asking (지금 확인) after "나중에".
                 if self._manual or not self._found or self._found["version"] != found["version"]:
@@ -427,6 +445,8 @@ class UpdateController(QObject):
             found, self._checked_at, fetching, gone = result[1], result[2], result[3], result[4]
             if self._state != "downloading":
                 return
+            self._retry_latest = False
+            self._withdrawn = False
             if found["newer"] and found["version"] != gone:
                 self._found = {name: found[name] for name in ("version", "notes", "installable", "size")}
             else:
@@ -434,9 +454,17 @@ class UpdateController(QObject):
             if not fetching:
                 self._progress = 0.0
                 self._error = updater.MESSAGES["gone"] if gone else ""
-                self._state = "available" if self._found else "failed"
-                self._withdrawn = not self._found
+                self._withdrawn = bool(gone and not self._found)
+                self._state = "failed" if self._withdrawn else "available" if self._found else "current"
                 self._dismissed = False
+        elif kind == "retry_latest":
+            self._found = None
+            self._state = "failed"
+            self._progress = 0.0
+            self._error = result[1]
+            self._withdrawn = True
+            self._retry_latest = True
+            self._dismissed = False
         elif kind == "installed":
             self._progress = 1.0
             self._state = "ready"
@@ -451,12 +479,14 @@ class UpdateController(QObject):
                 if self._manual:
                     self._error = message
                     self._state = "failed" if not self._found else "available"
-                else:
+                elif not self._withdrawn:
                     # A check nobody asked for fails quietly; what was known stays.
                     self._state = "available" if self._found else "idle"
             elif reason == "cancelled":
-                self._state = "available"
+                self._state = "failed" if self._retry_latest else "available"
                 self._progress = 0.0
+                if self._retry_latest:
+                    self._error = message
             else:
                 self._error = message
                 self._state = "failed"

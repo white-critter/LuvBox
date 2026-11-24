@@ -175,6 +175,17 @@ def scene(screenshot_dir=None):
         QTest.qWait(60)
         assert notice.property("visible") and title.property("text") == "새 버전이 나왔어요 · 1.9.1"
 
+        # A removed asset and failed latest check leave a retry directly in the notice.
+        del server.files["/download/v1.9.1/SHA256-1.9.1.txt"]
+        with patch.object(updater, "check", side_effect=updater.UpdateError("limited")):
+            click("updateInstallButton")
+            wait(lambda: updates.state == "failed", "an unavailable release")
+            assert title.property("text") == updater.MESSAGES["limited"]
+            assert not updates.canInstall and not updates.version
+            assert find("updateInstallButton").property("visible")
+            assert find("updateInstallButton").property("text") == "다시 시도"
+        server.publish("1.9.1", program)
+
         # One click: fetch, verify, replace. The window stays usable meanwhile.
         server.slow.clear()
         before = len(server.requests)
@@ -241,9 +252,10 @@ class UpdateNoticeQmlTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         report = json.loads(run.stdout.strip().splitlines()[-1])
         self.assertTrue(report["installed"] and report["restart_requested"])
-        # Two checks, then the click reads the latest release once more before it downloads (1.10.4).
+        # Two checks, the removed checksum, then a fresh check and verified download.
         self.assertEqual(report["requests"], [
-            "/latest", "/latest", "/latest", "/download/v1.9.1/SHA256-1.9.1.txt", "/download/v1.9.1/LuvBox.exe"])
+            "/latest", "/latest", "/download/v1.9.1/SHA256-1.9.1.txt",
+            "/latest", "/download/v1.9.1/SHA256-1.9.1.txt", "/download/v1.9.1/LuvBox.exe"])
 
 
 if __name__ == "__main__":

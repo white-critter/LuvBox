@@ -304,6 +304,20 @@ class SettingsCommitTests(unittest.TestCase):
         self.assertEqual(asked, [True, True])
         self.wait_for(lambda: not self.controller.busy)
 
+    def test_abrupt_download_exit_keeps_observed_unsaved_reasons_in_history(self):
+        from luvbox.activity import outcome_page
+
+        self.controller._begin_manual_outcome()
+        download = self.controller.download
+        for kind in ("size-skipped", "failed", "failed"):
+            download._service._emit(download.jobId, {"type": kind})
+        download._service._emit(download.jobId, {"type": "process_exit", "code": 1})
+        download._pump()
+
+        self.wait_for(lambda: outcome_page(origin="manual")["total"] == 1)
+        outcome = outcome_page(origin="manual")["rows"][0]
+        self.assertEqual((outcome["status"], outcome["size_skipped"], outcome["failed_media"]), ("error", 1, 2))
+
     def test_saved_files_notify_the_gallery_once_until_it_is_refreshed(self):
         notices = []
         self.controller.changed.connect(lambda: notices.append(self.controller.galleryChanged))
