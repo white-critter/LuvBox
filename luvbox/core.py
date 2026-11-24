@@ -1290,11 +1290,19 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     previous = None
                     if media_status == "saved":
                         if self.gif_source is not None:
-                            # The GIF is finalized and archived now. Until this
-                            # point the source remains recoverable on any error.
+                            # The GIF is already finalized and archived. A locked
+                            # MP4 must not prevent recording it or saving later likes.
                             markers = _valid_completion_markers(self.gif_source)
-                            self.gif_source.unlink(missing_ok=True)
-                            _clear_completion_markers(markers)
+                            try:
+                                self.gif_source.unlink(missing_ok=True)
+                            except OSError:
+                                # Keep the completion record with the retained MP4.
+                                self.transfer_marker = None
+                                emit({"type": "log", "level": "warning", "message":
+                                      "변환한 GIF는 저장했습니다. 원본 MP4 임시 파일을 정리하지 못했습니다.",
+                                      **_media_details(kwdict)})
+                            else:
+                                _clear_completion_markers(markers)
                             self.gif_source = None
                         if self.transfer_marker is not None:
                             # The .part it described is saved now. A leftover

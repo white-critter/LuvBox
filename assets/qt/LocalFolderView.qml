@@ -84,6 +84,7 @@ Item {
             localWheel.reset()
         Qt.callLater(updateFocus)
     }
+    onWindowShownChanged: if (windowShown) Qt.callLater(updateFocus)
 
     function flashNotice(text) {
         keyNotice = text
@@ -109,7 +110,7 @@ Item {
     }
 
     function updateFocus() {
-        if (!folder || !opened || duplicateMode || grid.width <= 0 || grid.height <= 0
+        if (!folder || !grid.visible || !windowShown || grid.width <= 0 || grid.height <= 0
                 || grid.cellWidth <= 0 || grid.cellHeight <= 0 || grid.contentHeight <= 0 || grid.count === 0)
             return
         const y = Math.max(0, grid.contentY - grid.originY)
@@ -1057,6 +1058,7 @@ Item {
                 visible: !view.duplicateMode
                 clip: true
                 focus: true
+                activeFocusOnTab: true
                 interactive: false
                 reuseItems: true
                 keyNavigationEnabled: !view.duplicateMode

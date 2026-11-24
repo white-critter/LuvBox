@@ -181,6 +181,20 @@ def scene():
         assert emphasised() == [], emphasised()
         # The keys work at once: the list has the focus, not the hidden "폴더 선택".
         wait(lambda: find("localFolderGrid").property("activeFocus"), "the list has the keys")
+        find("localFolderSelectionToggle").forceActiveFocus(Qt.FocusReason.TabFocusReason)
+        QTest.keyClick(window, Qt.Key.Key_Tab)
+        assert find("localFolderGrid").property("activeFocus"), "Tab skipped the folder grid"
+        # Resizing the gallery's tiles also updates the folder tab's shared density.
+        # Its thumbnails should only be requested after the folder tab is shown again.
+        original_thumb_size = local.model._thumb_size
+        click("navGallery")
+        window.setProperty("densityRequest", 0)
+        settle(120)
+        assert local.model._thumb_size == original_thumb_size, "hidden folder requested thumbnails"
+        click("navLocalFolder")
+        wait(lambda: local.model._thumb_size != original_thumb_size, "visible folder updates its thumbnails")
+        window.setProperty("densityRequest", 1)
+        wait(lambda: local.model._thumb_size == original_thumb_size, "folder returns to the usual size")
         # Inside the X save folder the notice says what really happens to a photo sent away here.
         local.checkXOverlap(str(base))
         wait(lambda: shown("localFolderOverlap"), "overlap notice")

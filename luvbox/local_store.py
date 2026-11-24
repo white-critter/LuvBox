@@ -180,6 +180,16 @@ def media_type_for(name: str) -> str:
     return ""
 
 
+def _scan_entries(entries, check_cancel):
+    if check_cancel is None:
+        yield from entries
+        return
+    for index, entry in enumerate(entries):
+        if index % 128 == 0:
+            check_cancel()
+        yield entry
+
+
 class LocalFolderStore:
     """One opened folder's database. Every method keeps its own short transaction."""
 
@@ -396,9 +406,7 @@ class LocalFolderStore:
             folder = stack.pop()
             try:
                 with os.scandir(folder) as entries:
-                    for index, entry in enumerate(entries, 1):
-                        if check_cancel and index % 128 == 0:
-                            check_cancel()
+                    for entry in _scan_entries(entries, check_cancel):
                         try:
                             if entry.is_symlink() or entry.is_junction():
                                 continue
@@ -435,10 +443,11 @@ class LocalFolderStore:
     @staticmethod
     def _prune_singleton_clusters(db) -> None:
         """Clear positive cluster_id when fewer than two present files remain and no distinct twin holds -cid."""
+        # Use the cluster index for both passes so unclustered files are skipped.
         db.execute(
-            "UPDATE local_files SET cluster_id=0 WHERE present=1 AND cluster_id>0 "
+            "UPDATE local_files INDEXED BY local_files_cluster SET cluster_id=0 WHERE present=1 AND cluster_id>0 "
             "AND cluster_id IN ("
-            "SELECT cluster_id FROM local_files WHERE present=1 AND cluster_id>0 "
+            "SELECT cluster_id FROM local_files INDEXED BY local_files_cluster WHERE present=1 AND cluster_id>0 "
             "GROUP BY cluster_id HAVING COUNT(*) < 2) "
             "AND NOT EXISTS (SELECT 1 FROM local_files AS neg "
             "WHERE neg.present=1 AND neg.cluster_id = -local_files.cluster_id)"
@@ -468,21 +477,24 @@ class LocalFolderStore:
                 # An older walk can miss a file another scan just added, or carry its old size.
                 # Check both other connections and writes through this connection before using it.
                 if self._scan_version() == version:
-                    return self._apply_folder_scan(db, found, include_subfolders)
+                    result = self._apply_folder_scan(db, found, include_subfolders, check_cancel)
+                    if check_cancel:
+                        check_cancel()
+                    return result
         raise LocalFolderError(_FOLDER_CHANGED_ERROR)
 
-    def _apply_folder_scan(self, db, found, include_subfolders: bool) -> dict:
+    def _apply_folder_scan(self, db, found, include_subfolders: bool, check_cancel) -> dict:
         now = _now()
         added = changed = gone = restored = 0
-        known = {row["rel_path"]: row for row in db.execute(
-            "SELECT rel_path, filesize, mtime_ns, present, cloud FROM local_files")}
+        with closing(db.execute("SELECT rel_path, filesize, mtime_ns, present, cloud FROM local_files")) as rows:
+            known = {row["rel_path"]: row for row in _scan_entries(rows, check_cancel)}
         # A case-only rename keeps the file's star, tags, feedback, features and marks.
         by_case = {}
-        for rel in known:
+        for rel in _scan_entries(known, check_cancel):
             by_case.setdefault(os.path.normcase(rel), []).append(rel)
         renamed = {}
         claimed_olds = set()
-        for rel in found:
+        for rel in _scan_entries(found, check_cancel):
             if rel in known:
                 continue
             olds = [old for old in by_case.get(os.path.normcase(rel), ())
@@ -491,10 +503,10 @@ class LocalFolderStore:
                 renamed[rel] = olds[0]
                 claimed_olds.add(olds[0])
         if renamed:
-            self._rename_rows(db, renamed)
-            for rel, old in renamed.items():
+            self._rename_rows(db, renamed, check_cancel)
+            for rel, old in _scan_entries(renamed.items(), check_cancel):
                 known[rel] = known.pop(old)
-        for rel, (size, mtime, cloud, kind, name) in found.items():
+        for rel, (size, mtime, cloud, kind, name) in _scan_entries(found.items(), check_cancel):
             old = known.get(rel)
             if old is None:
                 db.execute(
@@ -514,7 +526,7 @@ class LocalFolderStore:
                 db.execute("UPDATE local_files SET present=1, cloud=?, updated_at=? WHERE rel_path=?",
                            (int(cloud), now, rel))
                 restored += 0 if old["present"] else 1
-        for rel, old in known.items():
+        for rel, old in _scan_entries(known.items(), check_cancel):
             if rel not in found and old["present"]:
                 db.execute("UPDATE local_files SET present=0, cluster_id=0, updated_at=? WHERE rel_path=?",
                            (now, rel))
@@ -527,9 +539,9 @@ class LocalFolderStore:
             ("1" if include_subfolders else "0",))
         return {"found": len(found), "added": added, "changed": changed, "gone": gone, "restored": restored}
 
-    def _rename_rows(self, db, renamed):
+    def _rename_rows(self, db, renamed, check_cancel):
         """``{new rel_path: old rel_path}``: everything kept under the old name moves to the new one."""
-        for rel, old in renamed.items():
+        for rel, old in _scan_entries(renamed.items(), check_cancel):
             db.execute("UPDATE local_files SET rel_path=?, filename=? WHERE rel_path=?",
                        (rel, rel.rsplit("/", 1)[-1], old))
             for table in ("local_tags", "local_ai_embeddings", "local_ai_feedback", "local_unreadable"):

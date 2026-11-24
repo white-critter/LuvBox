@@ -374,6 +374,9 @@ def scene(part, shots=None):
             assert order.property("activeFocus") and library._order == "posted", (focused(), library._order)
             key(Qt.Key.Key_Escape)
             wait(lambda: grid.property("activeFocus"), "second Esc returns to the grid")
+            find("gallerySelectionToggle").forceActiveFocus(Qt.FocusReason.TabFocusReason)
+            key(Qt.Key.Key_Tab)
+            assert grid.property("activeFocus"), ("Tab skipped the gallery grid", focused())
 
         elif part == "typing":
             author = find("galleryAuthorFilter")

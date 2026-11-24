@@ -258,6 +258,37 @@ class ScanTests(FolderCase):
             store.sync_folder(check_cancel=check_cancel)
         self.assertEqual(self.listed(store), [])
 
+    def test_cancelling_during_catalog_writes_rolls_back_the_scan_promptly(self):
+        from luvbox.duplicates import ScanCancelled
+
+        picture(self.folder / "old.jpg")
+        store = self.store()
+        store.sync_folder()
+        (self.folder / "old.jpg").unlink()
+        for index in range(300):
+            (self.folder / f"new-{index:03d}.jpg").touch()
+        writes = 0
+
+        def trace(statement):
+            nonlocal writes
+            if statement.startswith("INSERT INTO local_files"):
+                writes += 1
+
+        def check_cancel():
+            if writes:
+                raise ScanCancelled("cancelled during writing")
+
+        store._db.set_trace_callback(trace)
+        try:
+            with self.assertRaises(ScanCancelled):
+                store.sync_folder(check_cancel=check_cancel)
+        finally:
+            store._db.set_trace_callback(None)
+
+        self.assertLess(writes, 300)
+        self.assertEqual(self.listed(store), ["old.jpg"])
+        self.assertEqual(store.sync_folder()["added"], 300)
+
     def test_unreadable_subfolder_does_not_remove_its_photos_or_duplicate_group(self):
         subfolder = self.folder / "sub"
         picture(subfolder / "one.jpg")
@@ -652,6 +683,31 @@ class DuplicateTests(FolderCase):
             self.assertEqual(self.s.duplicate_members(), {1: ["a.jpg", "b.jpg"]})
         finally:
             self.s._db.set_progress_handler(None, 0)
+        self.assertLess(ticks, 20)
+
+    def test_removing_a_duplicate_does_not_scan_unclustered_files(self):
+        self.s.save_clusters([["a.jpg", "b.jpg"], ["c.jpg", "d.jpg"]], "exact")
+        with self.s._write() as db:
+            db.executemany(
+                "INSERT INTO local_files(rel_path, filename, media_type, filesize, mtime_ns, updated_at) "
+                "VALUES (?1, ?1, 'photo', 800, 1, 'now')",
+                ((f"unique-{index:05d}.jpg",) for index in range(12000)),
+            )
+        ticks = 0
+
+        def progress():
+            nonlocal ticks
+            ticks += 1
+            return 0
+
+        self.s._db.set_progress_handler(progress, 1000)
+        try:
+            self.assertEqual(self.s.mark_gone(["b.jpg"]), 1)
+        finally:
+            self.s._db.set_progress_handler(None, 0)
+
+        self.assertEqual(self.s.row_by_rel("a.jpg")["cluster_id"], 0)
+        self.assertEqual(self.s.duplicate_members(), {2: ["c.jpg", "d.jpg"]})
         self.assertLess(ticks, 20)
 
     def test_the_duplicate_page_names_the_keeper_and_the_copies(self):

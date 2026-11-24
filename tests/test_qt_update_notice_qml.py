@@ -210,20 +210,26 @@ def scene(screenshot_dir=None):
         assert not find("updateCancelButton").property("visible")
         screenshot("6-ready")
 
-        # Settings show the same state, the switch and the manual button.
+        click("updateLaterButton")
+        assert not notice.property("visible")
+
+        # Settings can reopen the restart notice after it was dismissed.
         find("preferencesDialog").open()
         QTest.qWait(120)
         status = find("updateStatusLabel")
         assert "지금 버전 1.8.0" in status.property("text") and "1.9.1 준비 완료" in status.property("text")
         switch = find("updateAutoCheckSwitch")
         assert switch.property("checked") is True
-        assert not find("updateCheckButton").property("enabled")
+        assert find("updateCheckButton").property("text") == "업데이트 안내 보기"
         click("updateAutoCheckSwitch")
         wait(lambda: updates.autoCheck is False, "the switch")
         assert switch.property("checked") is False
         screenshot("7-settings")
-        find("preferencesDialog").close()
-        QTest.qWait(80)
+        click("updateCheckButton")
+        wait(lambda: notice.property("visible") and not find("preferencesDialog").property("visible"),
+             "the reopened restart notice")
+        assert updates.state == "ready" and launcher.read_bytes() == program
+        screenshot("8-ready-reopened")
 
         # Restart: the window closes as usual, and only then is the launcher due to start.
         assert not updates.restart_pending

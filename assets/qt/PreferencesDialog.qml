@@ -8,6 +8,7 @@ FlatDialog {
     property var app: null
     // Absent in previews of this dialog that carry no update controller.
     readonly property var updates: app && app.updates ? app.updates : null
+    readonly property bool updateReady: !!updates && updates.state === "ready"
     readonly property var folderModes: [
         {label: "한 폴더에 저장", value: "flat"},
         {label: "작성자별 폴더", value: "author"},
@@ -289,10 +290,17 @@ FlatDialog {
                         }
                         FlatButton {
                             objectName: "updateCheckButton"
-                            text: "지금 확인"
-                            enabled: !!dialog.updates && !dialog.updates.busy && dialog.updates.state !== "ready"
-                            Accessible.name: "새 버전 지금 확인"
-                            onClicked: dialog.updates.checkNow()
+                            text: dialog.updateReady ? "업데이트 안내 보기" : "지금 확인"
+                            enabled: !!dialog.updates && !dialog.updates.busy
+                            Accessible.name: dialog.updateReady ? text : "새 버전 지금 확인"
+                            onClicked: {
+                                if (dialog.updateReady) {
+                                    dialog.updates.showReadyNotice()
+                                    dialog.close()
+                                } else {
+                                    dialog.updates.checkNow()
+                                }
+                            }
                         }
                     }
                 }

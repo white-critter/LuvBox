@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -461,6 +461,24 @@ class GifWorkerTests(unittest.TestCase):
         self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "stopped", 0))
         self.assertEqual(self.keys(), set())
         self.assertEqual(self.records(), [])
+        source = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4.part"
+        self.assertTrue(core._transfer_complete(source))
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing lock")
+    def test_locked_conversion_source_keeps_saved_gif_and_later_photos(self):
+        rows = [("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")]
+        with ExitStack() as readers:
+            def lock_source(source, **kwargs):
+                output = self.convert(source, **kwargs)
+                readers.enter_context(source.open("rb"))
+                return output
+
+            with patch("luvbox.core.convert_mp4_to_gif", side_effect=lock_source):
+                code, events = self.worker(rows, options=self.options_all())
+
+        self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "finished", 2))
+        self.assertEqual(self.keys(), {"twitter100_animated_gif_1", "twitter101_1"})
+        self.assertEqual({Path(row["path"]).suffix for row in self.records()}, {".gif", ".jpg"})
         source = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4.part"
         self.assertTrue(core._transfer_complete(source))
 

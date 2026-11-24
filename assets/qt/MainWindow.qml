@@ -2039,6 +2039,7 @@ ApplicationWindow {
                     keyNavigationWraps: false
                     highlightMoveDuration: 0
                     focus: window.currentScreen === 1
+                    activeFocusOnTab: true
                     ScrollBar.vertical: ScrollBar {
                         objectName: "galleryScrollBar"
                         policy: gallery.contentHeight > gallery.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff

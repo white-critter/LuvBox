@@ -258,10 +258,15 @@ class UpdateController(QObject):
 
     @Slot()
     def dismiss(self):
-        """Hide the notice until the next start or a check by hand that finds a release;
-        settings keep showing the new version."""
+        """Hide the banner while keeping the version and status visible in settings."""
         if not self._dismissed:
             self._dismissed = True
+            self.changed.emit()
+
+    @Slot()
+    def showReadyNotice(self):
+        if self._state == "ready" and self._dismissed and not self._closing:
+            self._dismissed = False
             self.changed.emit()
 
     def set_auto_check(self, enabled):
