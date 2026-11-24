@@ -125,7 +125,7 @@ def photo_info(path: Path, max_pixels: int = 16_000_000) -> dict[str, int]:
                 oriented = (height, width) if orientation in (5, 6, 7, 8) else (width, height)
                 return {"pixel_width": oriented[0], "pixel_height": oriented[1],
                         "source_width": width, "source_height": height}
-    except (OSError, ValueError, TypeError, SyntaxError, struct.error,
+    except (OSError, ValueError, TypeError, EOFError, SyntaxError, struct.error,
             Image.DecompressionBombError, Image.DecompressionBombWarning):
         return {}
 
@@ -278,3 +278,18 @@ def thumbnail(path: Path, size=PREVIEW_SIZE, *, suffix: str | None = None) -> Th
     finally:
         if source is not None:
             source.close()
+
+
+def thumbnail_bytes(data: bytes, size=PREVIEW_SIZE):
+    """Decode one in-memory photo preview using the same safety limits as ``thumbnail``."""
+    if not data or len(data) > MAX_RASTER_BYTES:
+        return None
+    try:
+        _prepare_decoders(False)
+        with BytesIO(data) as source, Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as original:
+            if original.width <= 0 or original.height <= 0 or original.width * original.height > MAX_PIXELS:
+                return None
+            return oriented_thumbnail(original, size)
+    except (OSError, ValueError, SyntaxError, TypeError, EOFError, struct.error,
+            UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning):
+        return None

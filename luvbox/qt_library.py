@@ -26,11 +26,11 @@ from .qt_gallery import GalleryModel, SafeThumbnailProvider
 from .recycling import file_signature
 from .storage import records_root, resolve_storage
 from .thumbcache import cloud_only
+from .user_errors import UserFacingError, UserRuntimeError, safe_ui_error
 
 
 def _safe_ui_error(exc, fallback="작업 중 문제가 생겼습니다. 잠시 후 다시 시도해 주세요."):
-    text = str(exc).strip()
-    return text if text and not text.isascii() else fallback
+    return safe_ui_error(exc, fallback)
 
 
 _KEY = re.compile(r"g([0-9]+)_(author|date|flat)_([0-9]{1,20})_([0-9]{1,5})_(photo|video|animated_gif)\Z")
@@ -65,13 +65,13 @@ _HOLD_REASON = {
 _CATALOG_MOVED = "저장 폴더가 바뀌어 작업을 멈췄습니다. 이미 처리한 내용은 유지됩니다."
 _TAG_LOCKED = "AI 작업이 끝난 뒤 태그를 바꿀 수 있습니다."
 _FAVORITE_ERROR = "즐겨찾기를 저장하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
-_DISTINCT_ERROR = "중복 아님 표시를 저장하지 못했습니다. 목록을 새로 고친 뒤 다시 시도해 주세요."
+_DISTINCT_ERROR = "중복 아님 표시를 저장하지 못했습니다. 목록을 새로고침한 뒤 다시 시도해 주세요."
 # How the status lines of a running classification begin (see _perform).
 _AI_PROGRESS = ("AI 자동분류 중", "분류할 사진을 확인하는 중", "비슷한 사진에 분류를 맞추는 중")
 _STATISTICS_ERROR = "통계를 불러오지 못했습니다. 저장 폴더를 확인해 주세요."
 
 
-class ManifestError(ValueError):
+class ManifestError(UserFacingError, ValueError):
     """Safe user-facing rejection from building a deletion or alike manifest."""
 
 
@@ -825,7 +825,7 @@ class LibraryRepository:
         except ScanCancelled:
             raise
         except Exception as exc:
-            raise RuntimeError(
+            raise UserRuntimeError(
                 "중복 검사를 끝내지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요."
             ) from exc
 
@@ -924,7 +924,7 @@ class LibraryRepository:
 
         profile = _open_profile()
         if profile is None:
-            raise RuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
+            raise UserRuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
         try:
             with closing(profile), closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 store._folder_cache = {}
@@ -972,7 +972,7 @@ class LibraryRepository:
         except (RuntimeError, ScanCancelled):
             raise
         except Exception as exc:
-            raise RuntimeError(
+            raise UserRuntimeError(
                 "AI 자동분류를 끝내지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요."
             ) from exc
         finally:
@@ -990,7 +990,7 @@ class LibraryRepository:
                 self._ai_had_embeddings = store.count_embeddings(ACTIVE_MODEL_ID) > 0
                 store.set_ai_scored_state(-1, ACTIVE_MODEL_ID)      # everything, not only what is new
         except Exception as exc:
-            raise RuntimeError("AI 태그를 다시 매기지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
+            raise UserRuntimeError("AI 태그를 다시 매기지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
         return self.scan_ai_tags(generation, progress_callback=progress_callback, status_callback=status_callback,
                                  epoch=epoch, download=False, encode=False)
 
@@ -1002,7 +1002,7 @@ class LibraryRepository:
             with closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 return store.clear_ai_tags()
         except Exception as exc:
-            raise RuntimeError(
+            raise UserRuntimeError(
                 "AI 태그를 초기화하지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요."
             ) from exc
 
@@ -1038,7 +1038,7 @@ class LibraryRepository:
 
         profile = _open_profile()
         if profile is None:
-            raise RuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
+            raise UserRuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
         try:
             with closing(profile), closing(HistoryStore.for_storage(request.location(), create_media=False)) as store:
                 store._folder_cache = {}
@@ -1080,7 +1080,7 @@ class LibraryRepository:
         except (RuntimeError, ScanCancelled):
             raise
         except Exception as exc:
-            raise RuntimeError(
+            raise UserRuntimeError(
                 "분류를 저장하지 못했습니다. 저장 폴더를 확인한 뒤 다시 시도해 주세요."
             ) from exc
         finally:
@@ -2995,7 +2995,7 @@ class LibraryController(QObject):
                 tags.append({"tag": clean, "source": "confirmed"})
                 ai_tags = [item for item in self._selected.get("ai_tags", [])
                            if isinstance(item, dict) and item.get("tag") != clean]
-                ai_tags.append({"tag": clean, "confirmed": True})
+                ai_tags.append({"tag": clean, "confirmed": True, "source": "confirmed"})
                 self._selected["ai_tags"] = ai_tags
             else:
                 self._selected["ai_tags"] = [item for item in self._selected.get("ai_tags", [])
@@ -3956,6 +3956,7 @@ class LibraryController(QObject):
         if self._closing:
             return self._shutdown_complete
         self._closing = True
+        self._auto_ai_timer.stop()
         with self._condition:
             self._closed = True
             self._pending.clear()

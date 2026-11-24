@@ -11,9 +11,11 @@ Button {
     focusPolicy: Qt.TabFocus
     Accessible.name: windowAction === "close" ? "알림 영역으로 숨기기" : windowAction === "minimize" ? "최소화"
         : windowAction === "restore" ? "창 복원" : "최대화"
-    ToolTip.visible: hovered
-    ToolTip.delay: 600
+    ToolTip.visible: hovered && !pressed
+    ToolTip.delay: 500
     ToolTip.text: Accessible.name
+    Keys.onReturnPressed: control.click()
+    Keys.onEnterPressed: control.click()
     background: Rectangle {
         radius: Theme.radiusSmall
         color: control.down ? Theme.raisedPressed : control.hovered

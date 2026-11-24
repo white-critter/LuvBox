@@ -2,6 +2,13 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.12.11 — 2026-11-24
+
+- **오류 경계 및 `.isascii()` 패스스루 제거**: `luvbox/user_errors.py`(`UserFacingError`, `UserValueError`, `UserRuntimeError`, `safe_ui_error`)를 도입해 백엔드와 Qt 컨트롤러 전반의 임의 예외 `.isascii()` 직통 노출을 제거하고, `settings.load_settings_with_status`가 손상·충돌 시 `settings_path()` 접근 예외를 덮어쓰지 않고 안전하게 안내하도록 고쳤습니다.
+- **저장소·SQLite·중복·삭제·AI 파이프라인 보강**: `storage.py`에 `PRAGMA trusted_schema=OFF`, 허용 테이블·컬럼 기반 DDL 빌더(`_prepare_table`), 스냅샷 부분 기록 보존 및 원자적 교체를 적용하고, `local_store.py`/`history.py` 인덱스 조회(`TEMP B-TREE` 제거, 단일 `favorite_identities` 조회), `deletion.kept_copy` 크기 사전 필터, `clip_classifier.py` EXIF 회전 전 리사이즈·`thumbcache.Recorder.add_bytes` 경로를 정리했습니다.
+- **다운로드·미디어·스케줄러·브라우저 확장 안정화**: `review.py` 유예 시간 조정, `download_service.py` 프로세스 잡 핸들 및 시계 역전 방어, `metadata.py` ACL 상속 확인 및 옵션 파일 정리, `scheduled.py` 문화권 무관 시각 형식·5분 알림 닫기·Seen 마커 정리, Chromium/Firefox 연결 페이지(`connect.html`, `extension-page.js`, `background.js`)의 창 단위 포커스 및 중립 문구를 맞췄습니다.
+- **QML·컨트롤러·문서 및 3중 비노출 정책**: `qt_records.unsavedMutating`, `qt_updater` 잠금 일관성, `qt_library`/`qt_management`/`qt_local_folder` 종료 가드를 보강하고, `PreviewMetadataButton`·`PreviewTagChip`·`FilterChipCombo` 및 `FolderTile` 타입 델리게이트를 분리했습니다. `dateRange` 680×480 줄바꿈, `datePickerPopup` 로빙 Tab, `tagBatchPopup` `FlatDialog` 통일, `TouchPad` 휠, `qmllint` 0 경고를 달성하고 `AGENTS.md`·`require_user_facing_wording`·`test_user_wording_policy.py`를 추가했습니다.
+
 ## 1.12.10 — 2026-11-24
 
 - 갤러리 미리보기의 작성자·해시태그·사용자 태그·AI 태그에 초점 표시와 접근성 이름이 있는 버튼을 사용합니다. 목록 아래로 Tab 초점이 이동하면 버튼이 보이도록 스크롤합니다.

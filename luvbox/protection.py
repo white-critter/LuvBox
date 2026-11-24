@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 from requests.exceptions import RequestException
 
 from .file_mutex import replace_file
+from .user_errors import UserFacingError
 
 
 API_INTERVAL = 10.0
@@ -37,7 +38,7 @@ _RESUME_ERROR_HELP = ("서버가 이어받기를 거부해 멈췄습니다. 받�
                       "계속 실패하면 저장 폴더에서 해당 .part 파일만 지우고 다시 실행해 주세요.")
 
 
-class ProtectionError(RuntimeError):
+class ProtectionError(UserFacingError, RuntimeError):
     """Only fixed, secret-free application messages are used here."""
 
 

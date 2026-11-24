@@ -481,35 +481,57 @@ class Recorder:
             self._cache_failed()
             return False
 
+    def _should_skip_missing(self, key, *, path=None) -> bool | None:
+        """Return True if already cached, False if cache probe succeeded (miss), None to skip."""
+        if known(self.account, key):
+            return True
+        if time.monotonic() < self._retry_at or (path is not None and cloud_only(path)):
+            return None
+        try:
+            return bool(self._open_cache().stored([key]))
+        except Exception:
+            self._cache_failed()
+            return None
+
+    def _enqueue(self, key, image) -> bool:
+        if image is None:
+            return False
+        previous = self._pending.pop(key, None)
+        if previous is not None:
+            previous.close()
+        self._pending[key] = image
+        while len(self._pending) > _RECORDER_PENDING:
+            _, dropped = self._pending.popitem(last=False)
+            dropped.close()
+            self._dropped += 1
+        self._flush()
+        return key not in self._pending
+
     def add(self, key, path: Path | str, *, suffix: str | None = None, only_missing=False) -> bool:
         if self._closed:
             return False
         try:
             key = identity(*key)
             if only_missing:
-                if known(self.account, key):
-                    return True
-                if time.monotonic() < self._retry_at or cloud_only(path):
-                    return False
-                try:
-                    if self._open_cache().stored([key]):
-                        return True
-                except Exception:
-                    self._cache_failed()
-                    return False
-            image = make(path, suffix=suffix)
-            if image is None:
-                return False
-            previous = self._pending.pop(key, None)
-            if previous is not None:
-                previous.close()
-            self._pending[key] = image
-            while len(self._pending) > _RECORDER_PENDING:
-                _, dropped = self._pending.popitem(last=False)
-                dropped.close()
-                self._dropped += 1
-            self._flush()
-            return key not in self._pending
+                status = self._should_skip_missing(key, path=path)
+                if status is not False:
+                    return bool(status)
+            return self._enqueue(key, make(path, suffix=suffix))
+        except Exception:
+            return False
+
+    def add_bytes(self, key, data: bytes, *, only_missing=False) -> bool:
+        if self._closed or not isinstance(data, (bytes, bytearray, memoryview)):
+            return False
+        try:
+            key = identity(*key)
+            if only_missing:
+                status = self._should_skip_missing(key)
+                if status is not False:
+                    return bool(status)
+            from .preview import thumbnail_bytes
+            image = thumbnail_bytes(bytes(data), SIZE)
+            return self._enqueue(key, image)
         except Exception:
             return False
 

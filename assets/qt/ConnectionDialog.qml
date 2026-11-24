@@ -13,6 +13,8 @@ FlatDialog {
     readonly property bool unavailable: !accounts || accounts.locked || (app && app.closing)
     readonly property bool setupUnavailable: unavailable || !browserSetup || browserSetup.busy
         || (accounts.busy && !accounts.browserConnecting)
+    readonly property bool connectingActive: !!accounts && (accounts.browserConnecting || accounts.cancelling)
+    closePolicy: connectingActive ? Popup.NoAutoClose : (Popup.CloseOnEscape | Popup.CloseOnPressOutside)
     title: "X 로그인 연결"
     // In a wide window the opened help stands beside the connection instead of under it. In one
     // column the dialog was taller than a window of the default size and had to be scrolled,
@@ -43,11 +45,18 @@ FlatDialog {
         setupToggle.checked = lastSetupNeeded
         if (browserSetup)
             browserSetup.prepareExtension()
+        browserCombo.forceActiveFocus()
     }
     onClosed: {
         tokenField.clear()
         if (accounts)
             accounts.cancelBrowser()
+    }
+
+    Shortcut {
+        sequence: "Escape"
+        enabled: dialog.visible && dialog.connectingActive
+        onActivated: if (dialog.accounts && dialog.accounts.browserConnecting && !dialog.accounts.cancelling) dialog.accounts.cancelBrowser()
     }
 
     Connections {
@@ -110,6 +119,7 @@ FlatDialog {
 
                     Label { text: "연결할 브라우저"; color: Theme.textMuted; font.pixelSize: Theme.fontSmall }
                     FlatCombo {
+                        id: browserCombo
                         objectName: "connectionBrowser"
                         Layout.fillWidth: true
                         model: dialog.browserSetup ? dialog.browserSetup.browsers : []
@@ -206,6 +216,7 @@ FlatDialog {
                                 wrapMode: Text.Wrap
                             }
                             Label {
+                                visible: text.length > 0
                                 text: dialog.accounts ? dialog.accounts.pairingCode : ""
                                 font.pixelSize: Theme.fontDisplay
                                 font.bold: true
@@ -407,7 +418,7 @@ FlatDialog {
 
                 Label {
                     Layout.fillWidth: true
-                    text: "Chrome에서 F12 › 애플리케이션(Application) › 쿠키(Cookies) › https://x.com의 auth_token 값을 복사하세요."
+                    text: "브라우저에서 F12 › 애플리케이션(Application) 또는 저장소(Storage) › 쿠키(Cookies) › https://x.com의 auth_token 값을 복사하세요."
                     textFormat: Text.PlainText
                     wrapMode: Text.Wrap
                 }

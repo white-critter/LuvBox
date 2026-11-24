@@ -30,6 +30,7 @@ from .history import CatalogDamaged, HistoryError, HistoryStore, _author_fields
 from .storage import OutputGuard, missing_media_help, resolve_storage, saved_media_missing
 from .media import GIF_SIZES, ConversionError, ConversionSizeLimit, convert_mp4_to_gif
 from .media import move_without_overwrite as _move_without_overwrite
+from .user_errors import UserValueError, safe_ui_error
 
 
 EventSink = Callable[[dict], None]
@@ -319,20 +320,20 @@ def _normal_account(value: str) -> str:
         try:
             parsed = urlsplit(account if "://" in account else "https://" + account)
         except ValueError:
-            raise ValueError("X 프로필 주소 또는 @아이디를 입력해 주세요.") from None
+            raise UserValueError("X 프로필 주소 또는 @아이디를 입력해 주세요.") from None
         if (parsed.scheme not in {"http", "https"} or parsed.username or
                 parsed.password or parsed.netloc.lower() not in {
                     "x.com", "www.x.com", "mobile.x.com", "twitter.com",
                     "www.twitter.com", "mobile.twitter.com"}):
-            raise ValueError("X 프로필 주소 또는 @아이디를 입력해 주세요.")
+            raise UserValueError("X 프로필 주소 또는 @아이디를 입력해 주세요.")
         parts = parsed.path.strip("/").split("/")
         if len(parts) > 2 or (len(parts) == 2 and parts[1] != "likes"):
-            raise ValueError("게시물 주소 대신 본인 X 프로필 주소를 입력해 주세요.")
+            raise UserValueError("게시물 주소 대신 본인 X 프로필 주소를 입력해 주세요.")
         account = parts[0]
     elif account.startswith("@"):
         account = account[1:]
     if not _ACCOUNT.fullmatch(account) or account.lower() in _ROUTES:
-        raise ValueError("X 아이디는 영문, 숫자, 밑줄로 된 1~15자여야 합니다.")
+        raise UserValueError("X 아이디는 영문, 숫자, 밑줄로 된 1~15자여야 합니다.")
     return account.lower()
 
 
@@ -369,40 +370,42 @@ class JobOptions:
     def validate(self) -> "JobOptions":
         account = _normal_account(self.account)
         if not isinstance(self.folder_mode, str) or self.folder_mode.strip().lower() not in _FOLDER_MODES:
-            raise ValueError("폴더 구성은 한 폴더에 저장, 작성자별 폴더, 저장일별 폴더 중 하나를 선택해 주세요.")
+            raise UserValueError("폴더 구성은 한 폴더에 저장, 작성자별 폴더, 저장일별 폴더 중 하나를 선택해 주세요.")
         folder_mode = self.folder_mode.strip().lower()
         if not isinstance(self.scan_mode, str) or self.scan_mode.strip().lower() not in _SCAN_MODES:
-            raise ValueError("목록 확인 범위는 ‘새 좋아요만 확인’ 또는 ‘전체 목록 확인’ 중 하나를 선택해 주세요.")
+            raise UserValueError("목록 확인 범위는 ‘새 좋아요만 확인’ 또는 ‘전체 목록 확인’ 중 하나를 선택해 주세요.")
         scan_mode = self.scan_mode.strip().lower()
         if type(self.include_videos) is not bool or type(self.include_gifs) is not bool:
-            raise ValueError("동영상과 GIF 저장 여부를 확인해 주세요.")
+            raise UserValueError("동영상과 GIF 저장 여부를 확인해 주세요.")
         if type(self.separate_accounts) is not bool:
-            raise ValueError("계정별 폴더 설정을 확인해 주세요.")
+            raise UserValueError("계정별 폴더 설정을 확인해 주세요.")
         if type(self.allow_recreate_media) is not bool:
-            raise ValueError("사라진 저장 폴더를 새로 만드는 선택을 확인해 주세요.")
+            raise UserValueError("사라진 저장 폴더를 새로 만드는 선택을 확인해 주세요.")
         if type(self.confirm_each) is not bool:
-            raise ValueError("파일마다 저장 여부 확인 설정을 확인해 주세요.")
+            raise UserValueError("파일마다 저장 여부 확인 설정을 확인해 주세요.")
         if type(self.unsaved_previews) is not bool:
-            raise ValueError("저장하지 못한 미디어의 미리보기 설정을 확인해 주세요.")
+            raise UserValueError("저장하지 못한 미디어의 미리보기 설정을 확인해 주세요.")
         if (not isinstance(self.gif_format, str) or self.gif_format not in {"gif", "mp4"} or
                 not isinstance(self.gif_size, str) or self.gif_size not in GIF_SIZES):
-            raise ValueError("움직이는 GIF 저장 형식과 GIF 크기를 다시 선택해 주세요.")
+            raise UserValueError("움직이는 GIF 저장 형식과 GIF 크기를 다시 선택해 주세요.")
         if isinstance(self.max_video_mb, bool) or not isinstance(self.max_video_mb, int) or self.max_video_mb < 0:
-            raise ValueError("동영상·GIF 크기 제한은 0 이상의 숫자(MB)로 입력해 주세요. 0은 제한 없음입니다.")
+            raise UserValueError("동영상·GIF 크기 제한은 0 이상의 숫자(MB)로 입력해 주세요. 0은 제한 없음입니다.")
         if not isinstance(self.targets, (list, tuple)):
-            raise ValueError("다시 받을 파일 목록을 확인해 주세요.")
+            raise UserValueError("다시 받을 파일 목록을 확인해 주세요.")
         targets = tuple(dict.fromkeys(self.targets))
-        if len(targets) > RETRY_LIMIT or not all(isinstance(key, str) and _RETRY_KEY.fullmatch(key) and
-                                                 1 <= int(_RETRY_KEY.fullmatch(key)[3]) <= 10000 for key in targets):
-            raise ValueError(f"다시 받을 파일은 한 번에 {RETRY_LIMIT:,}개까지 고를 수 있습니다.")
+        if len(targets) > RETRY_LIMIT:
+            raise UserValueError(f"다시 받을 파일은 한 번에 {RETRY_LIMIT:,}개까지 고를 수 있습니다.")
+        if not all(isinstance(key, str) and _RETRY_KEY.fullmatch(key) and
+                   1 <= int(_RETRY_KEY.fullmatch(key)[3]) <= 10000 for key in targets):
+            raise UserValueError("다시 받을 파일 목록을 확인해 주세요.")
         if not self.output_dir.strip():
-            raise ValueError("미디어를 저장할 폴더를 선택해 주세요.")
+            raise UserValueError("미디어를 저장할 폴더를 선택해 주세요.")
         try:
             output = Path(self.output_dir).expanduser().resolve()
             if output.exists() and not output.is_dir():
-                raise ValueError("저장 경로가 파일입니다. 폴더를 선택해 주세요.")
+                raise UserValueError("저장 경로가 파일입니다. 폴더를 선택해 주세요.")
         except (OSError, RuntimeError):
-            raise ValueError("저장 폴더 경로를 확인해 주세요.") from None
+            raise UserValueError("저장 폴더 경로를 확인해 주세요.") from None
         return replace(self, account=account, output_dir=str(output),
                        folder_mode=folder_mode, scan_mode=scan_mode, targets=targets)
 
@@ -575,7 +578,7 @@ class _GalleryLogHandler(logging.Handler):
             if _RATE_TERMS.search(text):
                 self.rate_limited = True
             level = "error" if record.levelno >= logging.ERROR else "warning"
-            message = _safe_diagnostic(raw)
+            message = _safe_diagnostic(text)
             priority = (3 if _RATE_TERMS.search(text) or _STORAGE_TERMS.search(text) or _AUTH_TERMS.search(text)
                         or any(term in text for term in _FATAL_TERMS)
                         else 1 if record.levelno >= logging.ERROR else 0)
@@ -846,6 +849,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             session = getattr(active.extractor, "session", None)
             if session is not None:
                 unsaved_previews.keep(session, url, media)
+        except (exception.StopExtraction, exception.ControlException):
+            raise
         except Exception:
             pass
         finally:
@@ -1302,7 +1307,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                             # MP4 must not prevent recording it or saving later likes.
                             markers = _valid_completion_markers(self.gif_source)
                             try:
-                                self.gif_source.unlink(missing_ok=True)
+                                _retry_sharing_lock(
+                                    lambda: self.gif_source.unlink(missing_ok=True), check_stop=check_stop,
+                                )
                             except OSError:
                                 # Keep the completion record with the retained MP4.
                                 self.transfer_marker = None
@@ -1438,7 +1445,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     self.pathfmt.finalize = self.review_finalize
                     self.review_finalize = None
                 if self.gif_temporary is not None:
-                    self.gif_temporary.unlink(missing_ok=True)
+                    try:
+                        self.gif_temporary.unlink(missing_ok=True)
+                    except OSError:
+                        pass
                     self.gif_temporary = None
             history_update(saved=saved, skipped=skipped, size_skipped=size_skipped, force=bool(self.last_output and self.last_output[0] == "saved"))
             if quick_scan and self.last_output:
@@ -1586,7 +1596,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     # Keep the original MP4 path; the normal finalize saves and
                     # archives it, and handle_url then removes the marker.
                     if isinstance(exc, ConversionSizeLimit):
-                        message = f"GIF로 바꾸면 {normalized.max_video_mb}MB를 넘어 원본 MP4로 저장합니다."
+                        message = f"GIF로 바꾸면 {normalized.max_video_mb:,}MB를 넘어 원본 MP4로 저장합니다."
                     else:
                         message = "GIF로 바꾸지 못해 원본 MP4로 저장합니다."
                     emit({"type": "converting", "stage": "fallback", "message": message,
@@ -1895,7 +1905,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     try:
         normalized = options.validate()
         if normalized.confirm_each and review is None:
-            raise ValueError("파일마다 저장 여부 확인은 프로그램에서 직접 저장을 시작할 때 사용할 수 있습니다.")
+            raise UserValueError("파일마다 저장 여부 확인은 프로그램에서 직접 저장을 시작할 때 사용할 수 있습니다.")
         check_gallery_hooks()
         check_stop()
         guard = AccountGuard(normalized.account, sleep=sleep)
@@ -1906,7 +1916,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         # The folder can disappear after the window or scheduler checks it.
         # Recheck while owning the write guards, before creating an empty copy.
         if not normalized.allow_recreate_media and saved_media_missing(storage):
-            raise ValueError(missing_media_help(storage))
+            raise UserValueError(missing_media_help(storage))
         account_dir = storage.media_dir
         account_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=account_dir):
@@ -1932,7 +1942,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                 for row in history.pending_deletions()} & selected
         history.reconcile_deletions()
         if selected_pending:
-            raise ValueError("선택한 파일의 휴지통 이동이 중단됐습니다. 삭제 이력과 파일 상태를 확인한 뒤 다시 선택해 주세요.")
+            raise UserValueError("선택한 파일의 휴지통 이동이 중단됐습니다. 삭제 이력과 파일 상태를 확인한 뒤 다시 선택해 주세요.")
         targets = frozenset(normalized.targets)
         ignored = history.ignored_media()
         try:
@@ -2088,7 +2098,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         if failed and status == "finished" and not targets:
             # The failed media are listed for another try, so this run went on past them.
             failures_listed = True
-        if size_skipped or failed:
+        if not targets and (size_skipped or failed):
             message += f" 저장하지 못한 {size_skipped + failed:,}개는 ‘저장 못 한 미디어’에서 다시 시도할 수 있습니다."
         if preview_limited and status == "finished" and guard.retry_at:
             # The save went on, but the next one is refused until this time.
@@ -2100,10 +2110,9 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         status, exit_code, message = "error", 1, str(exc)
         error_kind = "authentication" if auth_response_rejected else ""
     except ValueError as exc:
-        # Only our validation messages are permitted here.
+        # Only explicit UserFacingError messages are permitted here.
         if active_job is None:
-            raw = str(exc).strip()
-            message = raw if raw and not raw.isascii() else "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요."
+            message = safe_ui_error(exc, "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요.")
         else:
             message = _safe_diagnostic(str(exc))
         exit_code = 1
@@ -2190,18 +2199,19 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     if not catalog_damaged:
                         status, exit_code, message = "error", 1, _HISTORY_ERROR
                     error_kind = ""
-            # A verified copy on this PC, so a damaged catalog can be restored.
-            try:
-                from .recovery import backup_catalog
-                backup_catalog(history.account_dir, normalized.account)
-            except (OSError, sqlite3.Error):
-                pass
-            # The media folder keeps a complete copy, so records travel with it.
-            try:
-                from .storage import MigrationError, publish_snapshot
-                publish_snapshot(storage)
-            except (MigrationError, OSError, sqlite3.Error, ValueError):
-                emit({"type": "log", "level": "warning", "message": _SNAPSHOT_ERROR})
+            if not catalog_damaged:
+                # A verified copy on this PC, so a damaged catalog can be restored.
+                try:
+                    from .recovery import backup_catalog
+                    backup_catalog(history.account_dir, normalized.account)
+                except (OSError, sqlite3.Error):
+                    pass
+                # The media folder keeps a complete copy, so records travel with it.
+                try:
+                    from .storage import MigrationError, publish_snapshot
+                    publish_snapshot(storage)
+                except (MigrationError, OSError, sqlite3.Error, ValueError):
+                    emit({"type": "log", "level": "warning", "message": _SNAPSHOT_ERROR})
         if guard is not None:
             guard.close()
         if output_guard is not None:

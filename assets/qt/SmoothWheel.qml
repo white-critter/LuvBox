@@ -17,7 +17,7 @@ WheelHandler {
     property double lastInput: 0
     readonly property bool motionActive: motion.running
 
-    acceptedDevices: PointerDevice.Mouse
+    acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
     target: null
 
     property NumberAnimation motion: NumberAnimation {
@@ -38,17 +38,33 @@ WheelHandler {
     onWheel: event => {
         const view = handler.flickable
         const angle = event.angleDelta.y
-        if (!view || !angle || event.angleDelta.x !== 0 || event.modifiers !== Qt.NoModifier
-                || handler.wheelLines === 0) {
+        const pixel = event.pixelDelta.y
+        if (!view || (!angle && !pixel) || (angle ? event.angleDelta.x !== 0 : event.pixelDelta.x !== 0)
+                || event.modifiers !== Qt.NoModifier || handler.wheelLines === 0) {
             event.accepted = false
             return
         }
         const minimum = view.originY
         const maximum = minimum + Math.max(0, view.contentHeight - view.height)
+        if (!angle) {
+            const sign = pixel > 0 ? -1 : 1
+            if (maximum - minimum < 1 || (sign < 0 && view.contentY <= minimum + 0.5)
+                    || (sign > 0 && view.contentY >= maximum - 0.5)) {
+                handler.reset()
+                event.accepted = !handler.passAtEnds
+                return
+            }
+            handler.reset()
+            view.cancelFlick()
+            view.contentY = Math.max(minimum, Math.min(maximum, view.contentY - pixel))
+            event.accepted = true
+            return
+        }
         const from = motion.running ? motion.to : view.contentY
         const sign = angle > 0 ? -1 : 1
         // At an end, or with nothing to scroll, the wheel belongs to the page behind.
-        if (maximum - minimum < 1 || (sign < 0 && from <= minimum + 0.5) || (sign > 0 && from >= maximum - 0.5)) {
+        if (maximum - minimum < 1 || (sign < 0 && view.contentY <= minimum + 0.5)
+                || (sign > 0 && view.contentY >= maximum - 0.5)) {
             handler.reset()
             event.accepted = !handler.passAtEnds
             return

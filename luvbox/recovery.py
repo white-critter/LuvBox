@@ -14,6 +14,7 @@ import os
 import shutil
 import sqlite3
 import struct
+import tempfile
 import time
 from contextlib import closing
 from datetime import datetime
@@ -22,14 +23,19 @@ from pathlib import Path
 import uuid
 
 from .file_mutex import replace_file
+from .user_errors import UserFacingError
 
 
 HISTORY_NAME = ".luvbox-history.sqlite3"
 _KEEP_BACKUPS = 7
 
 
-class RecoveryError(RuntimeError):
+class RecoveryError(UserFacingError, RuntimeError):
     pass
+
+
+def _linked(path: Path) -> bool:
+    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
 
 
 def _varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -92,16 +98,16 @@ class _Pages:
             self._file = open(path, "rb")
             header = self._file.read(100)
             if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
-                raise RecoveryError("not a SQLite database")
+                raise RecoveryError("기록 파일 형식이 올바르지 않아 읽을 수 없습니다.")
             size = int.from_bytes(header[16:18], "big")
             self.size = 65536 if size == 1 else size
             if self.size < 512 or (self.size & (self.size - 1)) != 0:
-                raise RecoveryError("not a SQLite database")
+                raise RecoveryError("기록 파일 형식이 올바르지 않아 읽을 수 없습니다.")
             self.usable = self.size - header[20]
             if self.usable < 480:
-                raise RecoveryError("not a SQLite database")
+                raise RecoveryError("기록 파일 형식이 올바르지 않아 읽을 수 없습니다.")
             if int.from_bytes(header[56:60], "big") not in (0, 1):
-                raise RecoveryError("only UTF-8 databases are supported")
+                raise RecoveryError("지원하지 않는 문자 형식의 기록 파일입니다.")
             self._file.seek(0, os.SEEK_END)
             self.count = self._file.tell() // self.size
         except RecoveryError:
@@ -109,7 +115,7 @@ class _Pages:
             raise
         except OSError as error:
             self.close()
-            raise RecoveryError("not a SQLite database") from error
+            raise RecoveryError("기록 파일을 읽지 못했습니다.") from error
         except BaseException:
             self.close()
             raise
@@ -266,8 +272,10 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
     from .history import HistoryStore
 
     damaged, destination = Path(damaged), Path(destination)
+    if _linked(destination) or _linked(destination.parent):
+        raise RecoveryError("복구 파일을 만들 위치가 안전한 일반 폴더가 아니어서 복구할 수 없습니다.")
     if destination.exists():
-        raise RecoveryError("destination exists")
+        raise RecoveryError("복구 파일을 만들 위치에 이미 파일이 있습니다.")
     fallback_media_count = None
     warnings = []
     try:
@@ -301,8 +309,7 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
             # backup was left out so a successful repair does not hide that.
             warnings.append("이전 백업 기록은 읽지 못해 복구 결과에 포함하지 않았습니다. "
                             "손상된 원본은 그대로 보관했습니다.")
-    workspace = destination.parent / (destination.name + ".build")
-    workspace.mkdir()
+    workspace = Path(tempfile.mkdtemp(prefix=".build-", dir=destination.parent))
     try:
         HistoryStore(workspace).close()
         built = workspace / ".luvbox-history.sqlite3"
@@ -359,10 +366,10 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
                     counts[table] = connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0] - before
                 # A catalog from before multi-label teaching holds only single answers. The fresh
                 # catalog above was marked as converted while it was still empty, so convert here.
-                from .storage import _feedback_to_tag_feedback
+                from .storage import _feedback_to_tag_feedback, _reconcile_tag_feedback
                 _feedback_to_tag_feedback(connection, connection.execute(
                     "SELECT folder_mode, tweet_id, num, media_type, category, updated_at FROM ai_feedback").fetchall())
-                connection.execute("UPDATE media_tags SET source='ai' WHERE tag='' AND source='confirmed'")
+                _reconcile_tag_feedback(connection)
                 connection.execute(
                     "DELETE FROM catalog_meta WHERE key IN ('ai_scored_rules_version','ai_scored_model_id')")
                 counts["ai_tag_feedback"] = connection.execute('SELECT COUNT(*) FROM "ai_tag_feedback"').fetchone()[0]
@@ -377,8 +384,8 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
         finally:
             connection.close()
         if _integrity(built) != "ok":
-            raise RecoveryError("rebuilt database failed its integrity check")
-        built.replace(destination)
+            raise RecoveryError("복구한 기록 파일을 확인하지 못했습니다. 원본 기록은 보존했습니다.")
+        replace_file(built, destination)
         result = {"counts": counts, "methods": {name: table["method"] for name, table in sources[0].items()}}
         if warnings:
             result["warnings"] = warnings
@@ -426,12 +433,14 @@ def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
     A damaged database is never copied over a good backup.
     """
     live = Path(record_dir) / HISTORY_NAME
-    if not live.is_file():
+    if _linked(live) or not live.is_file():
         return None
     folder = _catalog_backups(account, record_dir)
     folder.mkdir(parents=True, exist_ok=True)
     day = datetime.now().strftime("%Y%m%d")
     target = folder / f"history-{day}.sqlite3"
+    if _linked(folder) or _linked(target):
+        return None
     temporary = folder / f".history-{day}-{uuid.uuid4().hex[:8]}.partial"
     temporary.unlink(missing_ok=True)
     start = time.monotonic()
@@ -477,13 +486,19 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
     from .storage import _OLD_DATABASES
 
     record_dir = Path(record_dir)
+    if _linked(record_dir):
+        raise RecoveryError("기록 폴더가 안전한 일반 폴더가 아니어서 복구할 수 없습니다.")
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     name = HISTORY_NAME
     legacy = record_dir / _OLD_DATABASES[HISTORY_NAME]
-    if not (record_dir / HISTORY_NAME).is_file() and legacy.is_file() and not legacy.is_symlink():
+    if not (record_dir / HISTORY_NAME).is_file() and legacy.is_file() and not _linked(legacy):
         # A catalog already damaged before the rename was never copied to its
         # new name. Salvage it from the old name; that file stays where it is.
         name = legacy.name
+    for candidate_name in {HISTORY_NAME, name}:
+        for suffix in ("", "-wal", "-shm"):
+            if _linked(record_dir / (candidate_name + suffix)):
+                raise RecoveryError("기록 파일 경로에 연결 항목이 있어 복구할 수 없습니다.")
     kept_base = backup_directory() / f"{account}-{stamp}-damaged"
     kept = kept_base
     suffix_num = 1
@@ -497,7 +512,7 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
             shutil.copy2(source, kept / source.name)
     work = kept / "work"
     work.mkdir()
-    rebuilt = record_dir.parent / f".luvbox-history.repaired-{stamp}-{os.getpid()}.sqlite3"
+    rebuilt = record_dir.parent / f".luvbox-history.repaired-{stamp}-{os.getpid()}-{uuid.uuid4().hex}.sqlite3"
     try:
         for suffix in ("", "-wal", "-shm"):
             source = kept / (name + suffix)
@@ -517,10 +532,15 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
         result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir),
                                  skip_unreadable=name != HISTORY_NAME)
         for suffix in ("-wal", "-shm"):
+            sidecar = record_dir / (HISTORY_NAME + suffix)
             try:
-                (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
-            except OSError:
-                pass
+                sidecar.unlink(missing_ok=True)
+            except OSError as exc:
+                if sidecar.exists() or _linked(sidecar):
+                    raise RecoveryError(
+                        "다른 작업이 기록 파일을 사용 중이라 복구할 수 없습니다. "
+                        "LuvBox 창과 다른 작업을 닫은 뒤 다시 시도해 주세요."
+                    ) from exc
         replace_file(rebuilt, record_dir / HISTORY_NAME)
         for suffix in ("-wal", "-shm"):
             try:

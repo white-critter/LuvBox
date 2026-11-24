@@ -7,6 +7,7 @@ Row {
     spacing: 8
     FlatButton {
         text: "−"
+        focusPolicy: Qt.TabFocus
         Accessible.name: "미리보기 축소"
         implicitWidth: 36
         leftPadding: 0
@@ -26,6 +27,7 @@ Row {
     }
     FlatButton {
         text: "+"
+        focusPolicy: Qt.TabFocus
         Accessible.name: "미리보기 확대"
         implicitWidth: 36
         leftPadding: 0
@@ -36,12 +38,14 @@ Row {
     }
     FlatButton {
         text: "화면 맞춤"
+        focusPolicy: Qt.TabFocus
         enabled: controls.preview.ready
         tip: "화면에 맞추기 (0)"
         onClicked: controls.preview.fit()
     }
     FlatButton {
         text: "원본 100%"
+        focusPolicy: Qt.TabFocus
         enabled: controls.preview.canActualSize
         onClicked: controls.preview.actualSize()
         tip: "원본 100%는 1,600만 화소 이하 사진에서 쓸 수 있습니다. (1)"

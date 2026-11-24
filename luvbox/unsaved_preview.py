@@ -130,6 +130,8 @@ class UnsavedPreviews:
             return False
 
     def _store(self, key, data) -> bool:
+        if hasattr(self._recorder, "add_bytes"):
+            return bool(self._recorder.add_bytes(key, data))
         from . import thumbcache
 
         folder = Path(self._folder) if self._folder is not None else thumbcache.directory()
@@ -142,4 +144,7 @@ class UnsavedPreviews:
             # The decoder decides the format from the bytes; the name only says "a still image".
             return bool(self._recorder.add(key, path, suffix=".jpg"))
         finally:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass

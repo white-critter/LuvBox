@@ -240,7 +240,9 @@ class RecordsController(QObject):
         self._retryable_total = None
         self._retryable_limit = None
         self._unsaved_busy, self._unsaved_error, self._unsaved_status = False, "", ""
+        self._unsaved_mutating = False
         self._retry_busy = False
+        self._shutdown_complete = False
         self._missing_snapshot = None
         self._counts = {reason: 0 for reason in unsaved.REASONS}
         self._missing_count = 0
@@ -294,6 +296,8 @@ class RecordsController(QObject):
     def unsavedView(self): return self._unsaved_view
     @Property(bool, notify=changed)
     def unsavedBusy(self): return self._unsaved_busy
+    @Property(bool, notify=changed)
+    def unsavedMutating(self): return self._unsaved_mutating
     @Property(str, notify=changed)
     def unsavedError(self): return self._unsaved_error
     @Property(str, notify=changed)
@@ -339,7 +343,7 @@ class RecordsController(QObject):
         self._unsaved_total = self._unsaved_pages = self._unsaved_page = 0
         self._run_rows, self._run_tokens = [], {}
         self._run_total = self._run_page = self._run_pages = 0
-        self._run_busy = self._unsaved_busy = self._retry_busy = False
+        self._run_busy = self._unsaved_busy = self._unsaved_mutating = self._retry_busy = False
         self._unsaved_status = self._unsaved_error = self._run_error = self._run_note = ""
         self._retryable_total = None
         self._retryable_limit = None
@@ -468,51 +472,53 @@ class RecordsController(QObject):
                 self._unsaved_error = "원문을 열지 못했습니다. 브라우저 설정을 확인해 주세요."
                 self.changed.emit()
 
+    def _mutate_unsaved(self, kind, payload):
+        if self._closing or self._unsaved_mutating:
+            return
+        self._unsaved_mutating = True
+        self._unsaved_status = ""
+        self._enqueue(kind, payload)
+        self.changed.emit()
+
     @Slot(str)
     def dismiss(self, token):
         """Forget one failure or size-limit note. A catalog skip is not a note."""
         row = self._unsaved_tokens.get(token)
         if row and row.get("reason") in (unsaved.FAILED, unsaved.SIZE):
-            self._unsaved_status = ""
-            self._enqueue("dismiss", ([(row["tweet_id"], row["num"], row["media_type"])], None))
+            self._mutate_unsaved("dismiss", ([(row["tweet_id"], row["num"], row["media_type"])], None))
 
     @Slot()
     def dismissAll(self):
         """Clear the failure list only. Excluded media stays recoverable."""
         if self._unsaved_view != "unsaved":
             return
-        self._unsaved_status = ""
-        self._enqueue("dismiss", (None, _KINDS[self._unsaved_view]))
+        self._mutate_unsaved("dismiss", (None, _KINDS[self._unsaved_view]))
 
     @Slot(str)
     def release(self, token):
         """Let one excluded item be saved again. The catalog row and files stay."""
         row = self._unsaved_tokens.get(token)
         if row and row.get("reason") == unsaved.EXCLUDED:
-            self._unsaved_status = ""
-            self._enqueue("release", [(row["tweet_id"], row["num"], row["media_type"])])
+            self._mutate_unsaved("release", [(row["tweet_id"], row["num"], row["media_type"])])
 
     @Slot()
     def releaseAll(self):
         if self._unsaved_view != "excluded":
             return
-        self._unsaved_status = ""
-        self._enqueue("release", None)
+        self._mutate_unsaved("release", None)
 
     @Slot(str)
     def exclude(self, token):
         """Take one missing file out of the gallery and stop downloading it again. Its record stays."""
         row = self._unsaved_tokens.get(token)
         if row and row.get("reason") == MISSING:
-            self._unsaved_status = ""
-            self._enqueue("exclude", [(row["tweet_id"], row["num"], row["media_type"])])
+            self._mutate_unsaved("exclude", [(row["tweet_id"], row["num"], row["media_type"])])
 
     @Slot()
     def excludeAll(self):
         if self._unsaved_view != "missing":
             return
-        self._unsaved_status = ""
-        self._enqueue("exclude", None)
+        self._mutate_unsaved("exclude", None)
 
     # -- the chosen tiles of the open page ---------------------------------------------
 
@@ -622,13 +628,12 @@ class RecordsController(QObject):
         items = [(row["tweet_id"], row["num"], row["media_type"]) for row in self._chosen()]
         if not items:
             return
-        self._unsaved_status = ""
         if self._unsaved_view == "excluded":
-            self._enqueue("release", items)
+            self._mutate_unsaved("release", items)
         elif self._unsaved_view == "missing":
-            self._enqueue("exclude", items)
+            self._mutate_unsaved("exclude", items)
         else:
-            self._enqueue("dismiss", (items, None))
+            self._mutate_unsaved("dismiss", (items, None))
 
     @Slot(str)
     def retry(self, token):
@@ -972,8 +977,6 @@ class RecordsController(QObject):
         if self._closing:
             return
         if generation != self._generation:
-            if kind == "retry_keys":
-                self._retry_busy = False
             return
         if kind == "runs":
             if result.get("serial", self._run_serial) != self._run_serial:
@@ -1020,6 +1023,7 @@ class RecordsController(QObject):
                 self._counts = {reason: result.get(reason, 0) for reason in unsaved.REASONS}
                 self._missing_count = result.get(MISSING, 0)
         elif kind == "dismiss":
+            self._unsaved_mutating = False
             self._unsaved_error = error
             self._unsaved_status = "" if error else "목록에서 지웠습니다. 저장된 파일에는 영향이 없습니다."
             if not error:
@@ -1027,6 +1031,7 @@ class RecordsController(QObject):
                 # removed, and the person has to see why.
                 self.refresh()
         elif kind == "release":
+            self._unsaved_mutating = False
             self._unsaved_error = error
             if error:
                 self._unsaved_status = ""
@@ -1039,6 +1044,7 @@ class RecordsController(QObject):
                 if result.get("released"):
                     self.catalogChanged.emit()
         elif kind == "exclude":
+            self._unsaved_mutating = False
             self._unsaved_error = error
             count = result.get("excluded", 0)
             if error:
@@ -1086,6 +1092,8 @@ class RecordsController(QObject):
 
     @Slot()
     def shutdown(self):
+        if self._closing:
+            return
         self._closing = True
         with self._condition:
             self._pending.clear()
@@ -1093,7 +1101,10 @@ class RecordsController(QObject):
         self._shutdown_timer.start()
 
     def _poll_shutdown(self):
+        if not self._closing or self._shutdown_complete:
+            return
         if not self._worker.is_alive():
             self._shutdown_timer.stop()
+            self._shutdown_complete = True
             self._worker.join(timeout=0)
             self.shutdownFinished.emit()

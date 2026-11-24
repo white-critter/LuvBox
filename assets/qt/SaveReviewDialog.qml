@@ -10,7 +10,8 @@ Dialog {
     readonly property var item: app ? app.reviewItem : ({})
     readonly property alias previewMedia: media
     readonly property var hostWindow: parent ? parent.Window.window : null
-    title: "이 사진을 저장할까요?"
+    title: dialog.item && dialog.item.media_type === "video" ? "이 영상을 저장할까요?"
+        : (dialog.item && dialog.item.media_type === "animated_gif" ? "이 GIF를 저장할까요?" : "이 사진을 저장할까요?")
     modal: true
     focus: true
     closePolicy: Popup.CloseOnEscape
@@ -160,7 +161,9 @@ Dialog {
 
         Label {
             Layout.fillWidth: true
-            text: dialog.item ? (dialog.item.filename || "사진") : "사진"
+            text: dialog.item && dialog.item.filename ? dialog.item.filename
+                : (dialog.item && dialog.item.media_type === "video" ? "영상"
+                    : (dialog.item && dialog.item.media_type === "animated_gif" ? "GIF" : "사진"))
             textFormat: Text.PlainText
             elide: Text.ElideMiddle
             Accessible.name: text
@@ -187,6 +190,8 @@ Dialog {
             FlatButton {
                 id: moreButton
                 text: "더보기"
+                dropdown: true
+                dropdownOpen: moreMenu.visible
                 Accessible.name: "추가 저장 선택"
                 onClicked: moreMenu.open()
 
@@ -197,7 +202,8 @@ Dialog {
                     FlatMenuItem {
                         id: neverItem
                         objectName: "reviewNeverItem"
-                        text: "이 사진 다시 받지 않기"
+                        text: dialog.item && dialog.item.media_type === "video" ? "이 영상 다시 받지 않기"
+                            : (dialog.item && dialog.item.media_type === "animated_gif" ? "이 GIF 다시 받지 않기" : "이 사진 다시 받지 않기")
                         onTriggered: dialog.submit("never")
                     }
                     FlatMenuItem {

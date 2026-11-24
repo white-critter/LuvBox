@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 
 // A raised panel, drawn like the card of the startup screen: a shade lighter at
@@ -18,15 +20,17 @@ Rectangle {
         GradientStop { position: 0; color: card.topColor }
         GradientStop { position: 1; color: card.bottomColor }
     }
-    Glow {
-        visible: card.glow > 0
+    Loader {
+        active: card.glow > 0
         // Kept off the rounded corners, where it would spill past the outline.
         x: card.radius
         y: 1
         width: card.width - 2 * card.radius
         height: Math.min(card.height - 2, Math.max(120, card.width * 0.42))
-        strength: card.glow
-        focusX: card.glowAt
+        sourceComponent: Glow {
+            strength: card.glow
+            focusX: card.glowAt
+        }
     }
     // The lit edge: one hairline just inside the top border.
     Rectangle {

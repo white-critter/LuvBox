@@ -32,6 +32,7 @@ import urllib.request
 
 from . import release_signature
 from .launcher import read_footer
+from .user_errors import UserFacingError
 
 
 REPOSITORY = "white-critter/LuvBox"
@@ -67,7 +68,7 @@ MESSAGES = {
 }
 
 
-class UpdateError(Exception):
+class UpdateError(UserFacingError):
     """A failure the person can act on; `kind` names it, the text is fixed."""
 
     def __init__(self, kind: str):

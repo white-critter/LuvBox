@@ -146,7 +146,8 @@ Frame {
                     FlatButton {
                         objectName: "savedPreviewRetry"
                         text: "미리보기 다시 불러오기"
-                        visible: details.hasItem && !details.item.preview_loading && !details.item.preview_url
+                        visible: details.hasItem && !details.item.preview_loading
+                            && (!details.item.preview_url || savedThumbnail.status === Image.Error)
                         onClicked: if (details.download) details.download.retrySavedPreview()
                     }
                     FlatButton {

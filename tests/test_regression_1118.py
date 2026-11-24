@@ -557,6 +557,7 @@ class QtControllerRegressionTests(unittest.TestCase):
     def test_login_and_qt_accounts_hide_jargon_and_mask_english_value_error(self):
         from luvbox import login
         from luvbox.qt_accounts import AccountController
+        from luvbox.user_errors import UserValueError
 
         self.assertNotIn("auth_token", login._SESSION_HELP)
         self.assertNotIn("auth_token", login._STORE_HELP)
@@ -582,9 +583,13 @@ class QtControllerRegressionTests(unittest.TestCase):
                     ctrl._work("browser", "chrome", ev, ev, 1)
                 self.spin(pred=lambda: len(events) >= 1)
                 self.assertNotIn("error", events[-1])
-                with patch.object(ctrl, "_browser_connection", side_effect=ValueError("안전한 계정 오류")):
+                with patch.object(ctrl, "_browser_connection", side_effect=ValueError("bad path C:\\Users\\홍길동\\secret")):
                     ctrl._work("browser", "chrome", ev, ev, 1)
                 self.spin(pred=lambda: len(events) >= 2)
+                self.assertNotIn("error", events[-1])
+                with patch.object(ctrl, "_browser_connection", side_effect=UserValueError("안전한 계정 오류")):
+                    ctrl._work("browser", "chrome", ev, ev, 1)
+                self.spin(pred=lambda: len(events) >= 3)
                 self.assertEqual(events[-1].get("error"), "안전한 계정 오류")
             finally:
                 ctrl.shutdown()

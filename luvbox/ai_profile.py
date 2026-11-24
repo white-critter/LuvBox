@@ -30,6 +30,7 @@ import threading
 
 from .clip_model import ACTIVE_MODEL_ID, DEFAULT_CATEGORIES, embedding_bytes
 from .settings import app_directory
+from .user_errors import UserFacingError
 
 
 SCHEMA_VERSION = "1"
@@ -45,7 +46,7 @@ _NAME_SURROGATE = 0x20000000
 _WRITE_LOCK = threading.RLock()
 
 
-class AiProfileError(RuntimeError):
+class AiProfileError(UserFacingError, RuntimeError):
     """A fixed message; the cause may name a user path."""
 
 
@@ -417,18 +418,21 @@ class AiProfileStore:
                     new_id = new_prefix + old_id[len(old_prefix):]
                 else:
                     new_id = old_id
-                db.execute(
-                    "INSERT INTO ai_examples(example_id, source_kind, source_scope, tag, label, model_id, "
-                    "embedding, updated_at) VALUES (?,?,?,?,?,?,?,?) "
-                    "ON CONFLICT(example_id, tag) DO UPDATE SET "
-                    "source_kind=excluded.source_kind, source_scope=excluded.source_scope, "
-                    "label=excluded.label, model_id=excluded.model_id, embedding=excluded.embedding, "
-                    "updated_at=excluded.updated_at "
-                    "WHERE excluded.updated_at>ai_examples.updated_at",
-                    (new_id, source_kind, new_scope, row["tag"], row["label"], row["model_id"],
-                     bytes(row["embedding"]), row["updated_at"]),
-                )
-                if new_id != old_id:
+                if new_id == old_id:
+                    db.execute("UPDATE ai_examples SET source_scope=? WHERE example_id=? AND tag=?",
+                               (new_scope, old_id, row["tag"]))
+                else:
+                    db.execute(
+                        "INSERT INTO ai_examples(example_id, source_kind, source_scope, tag, label, model_id, "
+                        "embedding, updated_at) VALUES (?,?,?,?,?,?,?,?) "
+                        "ON CONFLICT(example_id, tag) DO UPDATE SET "
+                        "source_kind=excluded.source_kind, source_scope=excluded.source_scope, "
+                        "label=excluded.label, model_id=excluded.model_id, embedding=excluded.embedding, "
+                        "updated_at=excluded.updated_at "
+                        "WHERE excluded.updated_at>ai_examples.updated_at",
+                        (new_id, source_kind, new_scope, row["tag"], row["label"], row["model_id"],
+                         bytes(row["embedding"]), row["updated_at"]),
+                    )
                     db.execute("DELETE FROM ai_examples WHERE example_id=? AND tag=?", (old_id, row["tag"]))
                 moved += 1
             if moved:

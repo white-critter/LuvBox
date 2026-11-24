@@ -1,5 +1,28 @@
 # 성능 구조와 재현
 
+## 1.12.11 로컬 분류 조회·중복 확인·임베딩 전처리 개선
+
+로컬 분류 SQLite의 임베딩 페이지 조회, 유지 사본 해시 크기 사전 필터링, CLIP 4000×3000 EXIF 회전 이미지 전처리, 기록 DB 100,000행 조회를 격리 환경(Python 3.12.16, SQLite 3.53.1)에서 측정했습니다.
+
+| 항목 | 조건 | 기준(이전) | 개선 후 | 비고 |
+| --- | --- | --- | --- | --- |
+| `local_store` AI 태그 집계 | 10,000행, 15회 반복 | `1.824 ms` | `1.831 ms` | 동등 수준 |
+| `local_store` 임베딩 1페이지 조회 | 10,000행, 15회 반복 | `33.832 ms` | `1.972 ms` | — |
+| `deletion_kept_copy` 크기 사전 필터링 | 불일치 후보 20개, `262,144 B`, 15회 반복 | `12.177 ms` | `10.927 ms` | — |
+| CLIP 전처리(`clip_preprocess`) | `4000x3000 EXIF Orientation=6`, 15회 반복 | `151.514 ms` | `112.108 ms` | `max_abs_tensor_delta`: `0.007843` |
+| `benchmark_history.py` `open_ms` | 100,000행, 5회 반복 | `30.576 ms` | `2.177 ms` | `index_build_ms`: `372.44 ms` |
+| `empty_source_probe_ms` | 100,000행, 5회 반복 | `26.371 ms` | `0.004 ms` | — |
+| `saved_first_page_ms` | 100,000행, 5회 반복 | `38.421 ms` | `7.202 ms` | — |
+| `saved_late_page_ms` | 100,000행, 5회 반복 | `164.346 ms` | `12.156 ms` | — |
+| `library_first_page_ms` | 100,000행, 5회 반복 | `355.445 ms` | `174.614 ms` | — |
+| `library_late_page_ms` | 100,000행, 5회 반복 | `502.812 ms` | `815.087 ms` | 대형 OFFSET 조회 트레이드오프 |
+| `posted_first_page_ms` | 100,000행, 5회 반복 | `39.847 ms` | `37.464 ms` | — |
+| `oldest_first_page_ms` | 100,000행, 5회 반복 | `39.77 ms` | `39.082 ms` | — |
+| `author_first_page_ms` | 100,000행, 5회 반복 | `49.66 ms` | `3.989 ms` | — |
+| `library_author_first_page_ms` | 100,000행, 5회 반복 | `67.305 ms` | `16.311 ms` | — |
+| `author_sample_query_ms` | 100,000행, 5회 반복 | `24.85 ms` | `2.906 ms` | — |
+| DB 크기(`database_bytes`) / 1,000행 삽입(`insert_1000_rows_ms`) | 100,000행 기준 | `57,704,448 B` / `7.917 ms` | `77,090,816 B` / `14.135 ms` | 인덱스 추가 비용 |
+
 ## 1.10.8 휴지통 이동의 뒤처리와 개수 갱신
 
 Windows CPython 3.12.16, 논리 코어 12개·NVMe SSD PC 한 대에서 쟀습니다.

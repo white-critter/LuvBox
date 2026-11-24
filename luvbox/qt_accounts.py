@@ -11,6 +11,7 @@ from . import login
 from .app_settings import SettingsRepository
 from .browser_bridge import BrowserBridge, BrowserBridgeError
 from .browser_discovery import open_browser_url
+from .user_errors import safe_ui_error
 
 
 _PAIRING_CODE = re.compile(r"[A-Z0-9_-]{8}\Z", re.ASCII)
@@ -343,8 +344,8 @@ class AccountController(QObject):
         except ValueError as error:
             result["cancelled"] = cancel.is_set()
             if not result["cancelled"]:
-                message = str(error).strip()
-                if message and not message.isascii():
+                message = safe_ui_error(error, "")
+                if message:
                     result["error"] = message
         except Exception:
             result["cancelled"] = cancel.is_set()

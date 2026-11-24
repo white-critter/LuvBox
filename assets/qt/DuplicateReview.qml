@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 
 // Duplicates shown one group per card: which photos are the same, which one
 // stays ("남김") and which are the copies to clear out ("사본": a photo before
@@ -26,6 +27,9 @@ Item {
     // While the list is read again after a change, the cards on screen are the earlier ones.
     readonly property bool settling: !!library && library.duplicatesSettling
     readonly property int tileHeight: Math.round(tileWidth * 0.75) + 50
+    readonly property real thumbPixelRatio: Math.max(1, Screen.devicePixelRatio)
+    readonly property int thumbDecodeW: Math.min(384, Math.max(1, Math.round((tileWidth - 16) * thumbPixelRatio)))
+    readonly property int thumbDecodeH: Math.min(384, Math.max(1, Math.round((Math.round(tileWidth * 0.75) - 16) * thumbPixelRatio)))
     // The photo the last single click was on, and whether it was picked before that click:
     // a double-click opens the photo large and takes that click's pick back.
     property string clickedKey: ""
@@ -46,10 +50,13 @@ Item {
         model: review.library ? review.library.duplicateGroupModel : null
         ScrollBar.vertical: ScrollBar {
             policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+            onPressedChanged: if (pressed) wheel.reset()
         }
         SmoothWheel { id: wheel; flickable: list; notchPixels: 160 }
         onContentYChanged: review.requestMore()
         onCountChanged: Qt.callLater(review.requestMore)
+        onHeightChanged: Qt.callLater(review.requestMore)
+        onContentHeightChanged: Qt.callLater(review.requestMore)
 
         function revealFocus(item: Item) {
             if (height <= 0)
@@ -241,8 +248,8 @@ Item {
                                 anchors.margins: 8
                                 height: Math.round(review.tileWidth * 0.75) - 16
                                 source: tile.modelData.missing ? "" : tile.modelData.thumbUrl
-                                sourceSize.width: Math.min(384, Math.max(1, Math.round((review.tileWidth - 16) * Math.max(1, Screen.devicePixelRatio))))
-                                sourceSize.height: Math.min(384, Math.max(1, Math.round((Math.round(review.tileWidth * 0.75) - 16) * Math.max(1, Screen.devicePixelRatio))))
+                                sourceSize.width: review.thumbDecodeW
+                                sourceSize.height: review.thumbDecodeH
                                 asynchronous: true
                                 cache: false
                                 // The picture stays until the one read again is ready.
@@ -447,13 +454,22 @@ Item {
         objectName: "duplicateEmptyState"
         anchors.centerIn: parent
         width: Math.max(0, parent.width - 32)
-        visible: list.count === 0 && !review.settling && (!review.galleryModel || !review.galleryModel.busy)
-        text: review.library && review.library.copiesLocked
-            ? "중복 사진을 찾는 중…"
-            : "중복 사진이 없습니다. ‘중복 검사’를 실행해 보세요."
-              + (review.library && review.library.distinctDuplicateCount > 0
-                 ? "\n‘중복 아님’ 표시 " + review.library.distinctDuplicateCount.toLocaleString()
-                   + "개 · ‘초기화’로 다시 보기" : "")
+        visible: list.count === 0 && !review.settling
+            && (!review.galleryModel || (!review.galleryModel.busy && !review.galleryModel.error.length))
+        text: {
+            if (review.library && review.library.copiesLocked)
+                return "중복 사진을 찾는 중…"
+            if (review.library && review.library.duplicateCount > 0 && review.library.distinctDuplicateCount > 0)
+                return "지금 선택한 조건에 맞는 중복 사진이 없습니다."
+                    + "\n‘중복 아님’ 표시 " + review.library.distinctDuplicateCount.toLocaleString()
+                    + "개 · ‘초기화’로 다시 보기"
+            if (review.library && review.library.duplicateCount > 0)
+                return "지금 선택한 조건에 맞는 중복 사진이 없습니다."
+            return "중복 사진이 없습니다. ‘중복 검사’를 실행해 보세요."
+                + (review.library && review.library.distinctDuplicateCount > 0
+                   ? "\n‘중복 아님’ 표시 " + review.library.distinctDuplicateCount.toLocaleString()
+                     + "개 · ‘초기화’로 다시 보기" : "")
+        }
         horizontalAlignment: Text.AlignHCenter
         wrapMode: Text.WordWrap
         color: Theme.textMuted

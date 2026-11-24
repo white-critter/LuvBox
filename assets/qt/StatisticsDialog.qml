@@ -41,7 +41,16 @@ FlatDialog {
             app.library.requestStatistics()
     }
 
+    function scrollBy(delta) {
+        if (!statsFlick.needsScroll || statsFlick.contentHeight <= statsFlick.height)
+            return false
+        const maxY = Math.max(0, statsFlick.contentHeight - statsFlick.height)
+        statsFlick.contentY = Math.max(0, Math.min(maxY, statsFlick.contentY + delta))
+        return true
+    }
+
     onAboutToShow: reload()
+    onOpened: statsCloseButton.forceActiveFocus()
 
     Connections {
         target: dialog.app ? dialog.app.library : null
@@ -520,8 +529,23 @@ FlatDialog {
 
     footer: DialogButtons {
         FlatButton {
+            id: statsCloseButton
             text: "닫기"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+            Keys.onPressed: event => {
+                if (event.key === Qt.Key_Down)
+                    event.accepted = dialog.scrollBy(48)
+                else if (event.key === Qt.Key_Up)
+                    event.accepted = dialog.scrollBy(-48)
+                else if (event.key === Qt.Key_PageDown)
+                    event.accepted = dialog.scrollBy(Math.max(120, statsFlick.height - 48))
+                else if (event.key === Qt.Key_PageUp)
+                    event.accepted = dialog.scrollBy(-Math.max(120, statsFlick.height - 48))
+                else if (event.key === Qt.Key_Home)
+                    event.accepted = dialog.scrollBy(-statsFlick.contentHeight)
+                else if (event.key === Qt.Key_End)
+                    event.accepted = dialog.scrollBy(statsFlick.contentHeight)
+            }
         }
         onRejected: dialog.close()
     }

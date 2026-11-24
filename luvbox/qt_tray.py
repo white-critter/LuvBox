@@ -76,7 +76,8 @@ class TrayController(QObject):
         enabled = not self._controller.closing
         for action in (self._open, self._settings, self._exit):
             action.setEnabled(enabled)
-        self.icon.setToolTip("LuvBox · " + self._controller.status[:100])
+        status = self._controller.status[:100].strip()
+        self.icon.setToolTip(f"LuvBox · {status}" if status else "LuvBox")
 
     @Slot()
     def close(self):

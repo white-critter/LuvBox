@@ -115,7 +115,12 @@ async function inspectAccount(pairing, consentTabId) {
   let tab;
   try {
     const before = await sessionCookies();
-    tab = await api.tabs.create({url: "https://x.com/home", active: true});
+    const consentTab = Number.isInteger(consentTabId)
+      ? await api.tabs.get(consentTabId).catch(() => null)
+      : null;
+    const createOptions = {url: "https://x.com/home", active: true};
+    if (consentTab && Number.isInteger(consentTab.windowId)) createOptions.windowId = consentTab.windowId;
+    tab = await api.tabs.create(createOptions);
     const stores = await api.cookies.getAllCookieStores();
     const store = stores.find(candidate => candidate.tabIds.includes(tab.id));
     const storeId = tab.cookieStoreId ?? store?.id;

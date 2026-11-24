@@ -113,7 +113,7 @@ def program_path() -> str:
     return str(launcher) if launcher is not None else sys.executable
 
 
-def spawn_detached(command) -> None:
+def spawn_detached(command, *, popen=None) -> None:
     """Start a program that outlives this one: LuvBox again after an update or from a notice.
 
     A packaged Python program changes two things its children inherit: the
@@ -137,18 +137,19 @@ def spawn_detached(command) -> None:
             kernel32 = None
     base_flags = getattr(subprocess, "DETACHED_PROCESS", 0)
     flags = base_flags | (0x01000000 if sys.platform == "win32" else 0)
+    launch = subprocess.Popen if popen is None else popen
     try:
         try:
-            subprocess.Popen(command, env=environment, close_fds=True, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             creationflags=flags)
+            launch(command, env=environment, close_fds=True, stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   creationflags=flags)
         except PermissionError:
             if flags == base_flags:
                 raise
             # Outer jobs without breakaway permission reject CREATE_BREAKAWAY_FROM_JOB.
-            subprocess.Popen(command, env=environment, close_fds=True, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             creationflags=base_flags)
+            launch(command, env=environment, close_fds=True, stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   creationflags=base_flags)
     finally:
         bundle = getattr(sys, "_MEIPASS", None)
         if kernel32 is not None and bundle:

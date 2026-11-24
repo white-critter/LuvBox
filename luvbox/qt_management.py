@@ -42,7 +42,7 @@ class ManagementController(QObject):
         self._library = library
         self._context = ("", "", False)
         self._generation = 0
-        self._mutating = self._locked = self._closing = False
+        self._mutating = self._locked = self._closing = self._shutdown_complete = False
         self._error = self._status = ""
         self._delete = None
         self._recycled_keys = None
@@ -310,6 +310,8 @@ class ManagementController(QObject):
 
     @Slot()
     def shutdown(self):
+        if self._closing:
+            return
         self._closing = True
         self._stop.set()
         with self._condition:
@@ -318,7 +320,10 @@ class ManagementController(QObject):
         self._shutdown_timer.start()
 
     def _poll_shutdown(self):
+        if not self._closing or self._shutdown_complete:
+            return
         if not self._worker.is_alive():
             self._shutdown_timer.stop()
+            self._shutdown_complete = True
             self._worker.join(timeout=0)
             self.shutdownFinished.emit()

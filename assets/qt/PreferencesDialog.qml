@@ -31,6 +31,7 @@ FlatDialog {
     // The width every list and field on the right side of a row shares.
     readonly property int controlWidth: Math.min(220, Math.max(140, Math.round(columnWidth * 0.5)))
     title: "설정"
+    onOpened: prefCloseButton.forceActiveFocus()
     signal scheduleRequested()
     signal runHistoryRequested()
     signal unsavedRequested()
@@ -466,6 +467,7 @@ FlatDialog {
 
     footer: DialogButtons {
         FlatButton {
+            id: prefCloseButton
             text: "닫기"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
         }

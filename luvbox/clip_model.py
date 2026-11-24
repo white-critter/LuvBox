@@ -98,7 +98,8 @@ def forget_legacy_model() -> int:
     try:
         if not _safe_ancestor_chain(folder, base.parent) or not folder.is_dir():
             return 0
-        entries = list(os.scandir(folder))
+        with os.scandir(folder) as scan:
+            entries = list(scan)
     except OSError:
         return 0
     removed = 0

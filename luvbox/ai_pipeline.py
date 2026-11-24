@@ -23,6 +23,7 @@ import threading
 import time
 
 from .clip_model import ACTIVE_MODEL_ID, embedding_bytes
+from .user_errors import UserRuntimeError
 
 ENCODE_BATCH = 16
 _TRAIN_LOCK = threading.Lock()
@@ -185,31 +186,49 @@ def make_download_notifier(status_callback=None, check_cancel=lambda: None):
     return on_download
 
 
+def _prepare_ai_session(exit_stack: ExitStack, *, download: bool, status_callback=None, check_cancel=lambda: None):
+    from .clip_classifier import (
+        classify_detailed, encode_skip_signature, ensure_model, get_session, is_available, session_use,
+    )
+    from .duplicates import ScanCancelled
+
+    if not is_available():
+        if not download:
+            raise UserRuntimeError("AI 분류 모델이 이 PC에 없습니다.")
+        try:
+            ensure_model(progress_callback=make_download_notifier(status_callback, check_cancel))
+        except ScanCancelled:
+            raise
+        except Exception as exc:
+            raise UserRuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 "
+                                   "확인해 주세요.") from exc
+    exit_stack.enter_context(session_use())
+    try:
+        session = get_session()
+    except ScanCancelled:
+        raise
+    except Exception as exc:
+        raise UserRuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.") from exc
+    if session is None:
+        raise UserRuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
+    return session, classify_detailed, encode_skip_signature
+
+
 def encode_missing_for_teach(store, missing, *, total: int | None = None,
                              check_cancel=lambda: None, progress_callback=None,
                              status_callback=None) -> None:
     """Encode ``missing`` ``(ident, path)`` items for interactive teaching."""
-    from .clip_classifier import (
-        classify_detailed, ensure_model, get_session, is_available, session_use,
-    )
-    from .duplicates import ScanCancelled
-
     count = len(missing) if total is None else total
     if progress_callback and count:
         progress_callback(0, count)
     if missing:
-        if not is_available():
-            try:
-                ensure_model(progress_callback=make_download_notifier(status_callback, check_cancel))
-            except ScanCancelled:
-                raise
-            except Exception as exc:
-                raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 "
-                                   "확인해 주세요.") from exc
-        with session_use():
-            session = get_session()
-            if session is None:
-                raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
+        with ExitStack() as session_guard:
+            session, classify_detailed, _encode_skip_signature = _prepare_ai_session(
+                session_guard,
+                download=True,
+                status_callback=status_callback,
+                check_cancel=check_cancel,
+            )
             done = max(0, count - len(missing))
             for start in range(0, len(missing), ENCODE_BATCH):
                 check_cancel()
@@ -218,7 +237,7 @@ def encode_missing_for_teach(store, missing, *, total: int | None = None,
                     detailed = classify_detailed([path for _ident, path in chunk], batch_size=ENCODE_BATCH,
                                                  session=session)
                 except Exception as exc:
-                    raise RuntimeError("사진을 읽지 못해 분류를 저장하지 못했습니다. 다시 시도해 주세요.") from exc
+                    raise UserRuntimeError("사진을 읽지 못해 분류를 저장하지 못했습니다. 다시 시도해 주세요.") from exc
                 encoded = [
                     (ident, vector.tobytes(), confidence)
                     for (ident, _path), (_tag, confidence, vector) in zip(chunk, detailed)
@@ -286,29 +305,13 @@ def classify(store, profile, *, kind, scope, example_id, items, skipped=0, check
         def prepare_session():
             if state["session"] is not None:
                 return state["helpers"]
-            from .clip_classifier import (
-                classify_detailed, encode_skip_signature, ensure_model, get_session, is_available, session_use,
+            session, classify_detailed, encode_skip_signature = _prepare_ai_session(
+                session_guard,
+                download=download,
+                status_callback=status,
+                check_cancel=check_cancel,
             )
-
-            if not is_available():
-                if not download:
-                    raise RuntimeError("AI 분류 모델이 이 PC에 없습니다.")
-                try:
-                    ensure_model(progress_callback=make_download_notifier(status, check_cancel))
-                except ScanCancelled:
-                    raise
-                except Exception as exc:
-                    raise RuntimeError("AI 분류 모델을 준비하지 못했습니다. 인터넷 연결과 저장 공간을 "
-                                       "확인해 주세요.") from exc
-            session_guard.enter_context(session_use())
-            try:
-                state["session"] = get_session()
-            except ScanCancelled:
-                raise
-            except Exception as exc:
-                raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.") from exc
-            if state["session"] is None:
-                raise RuntimeError("AI 분류 기능을 시작하지 못했습니다. LuvBox.exe를 다시 받아 실행해 주세요.")
+            state["session"] = session
             state["helpers"] = (classify_detailed, encode_skip_signature)
             return state["helpers"]
 
@@ -332,7 +335,7 @@ def classify(store, profile, *, kind, scope, example_id, items, skipped=0, check
                                                     session=state["session"])
                 except Exception as exc:
                     kept = f" {run.tagged:,}장은 분류했습니다." if run.tagged else ""
-                    raise RuntimeError("일부 사진을 분류하지 못했습니다." + kept + " 다시 실행해 주세요.") from exc
+                    raise UserRuntimeError("일부 사진을 분류하지 못했습니다." + kept + " 다시 실행해 주세요.") from exc
                 features, forget, remember = [], [], []
                 for (ident, path), (_tag, confidence, vector) in zip(chunk, predictions):
                     if vector is not None:

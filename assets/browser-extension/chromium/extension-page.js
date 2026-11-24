@@ -62,11 +62,12 @@
     confirmation.checked = false;
     confirmation.disabled = true;
     inspect.hidden = true;
+    close.hidden = false;
     resetConnect();
     update();
     show("expired", text);
   };
-  const expired = () => end("연결 시간이 지났거나 확장이 다시 시작되었습니다. 앱에서 브라우저 연결을 다시 시작해 주세요.");
+  const expired = () => end("연결 시간이 지났거나 브라우저 연결이 끊겼습니다. LuvBox에서 연결을 다시 시작해 주세요.");
   window.addEventListener("pagehide", () => clearInterval(heartbeat), {once: true});
   confirmation.disabled = true;
   confirmation.addEventListener("change", event => {
@@ -78,6 +79,10 @@
       return show("code", codeText);
     }
     update();
+    if (busy) {
+      show("checking", "이 브라우저의 X 계정을 확인하는 중… X 탭이 잠시 열렸다 닫힙니다.");
+      return;
+    }
     return inspectAccount();
   });
   send({type: "luvbox-status"}).then(result => {
@@ -136,8 +141,9 @@
     if (event.isTrusted) return inspectAccount();
   });
   connect.addEventListener("click", async event => {
-    if (!event.isTrusted || finished || busy || !ready || !confirmation.checked) return;
+    if (!event.isTrusted || finished || busy || !ready || confirmation.disabled || !confirmation.checked) return;
     busy = true;
+    confirmation.disabled = true;
     update();
     show("sending", "LuvBox로 전달하는 중…");
     try {
@@ -147,6 +153,7 @@
         if (final.has(result?.code)) return end(failureText(result.code));
         // Every submission needs a new account check, including a failed one.
         resetConnect();
+        confirmation.disabled = false;
         showAccount("", "", "‘계정 다시 확인’을 눌러 계정을 다시 확인하세요.");
         show("failed", failureText(result?.code));
         return;
@@ -162,6 +169,7 @@
     } catch {
       if (finished) return;
       resetConnect();
+      confirmation.disabled = false;
       showAccount("", "", "‘계정 다시 확인’을 눌러 계정을 다시 확인하세요.");
       show("failed", "연결을 완료하지 못했습니다. 앱에서 연결을 다시 시작해 주세요.");
     } finally {

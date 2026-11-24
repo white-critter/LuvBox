@@ -27,6 +27,9 @@ from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
+from .file_mutex import replace_file
+from .user_errors import UserFacingError, UserValueError
+
 
 _RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)),
              *(f"lpt{i}" for i in range(1, 10))}
@@ -57,7 +60,7 @@ class StoragePaths:
     snapshot_dir: Path
 
 
-class MigrationError(ValueError):
+class MigrationError(UserFacingError, ValueError):
     """A local relocation failed; existing records remain authoritative."""
 
 
@@ -186,7 +189,7 @@ def resolve_storage(output_dir: str | Path, account: str, separate_accounts: boo
     """Resolve paths without creating folders or changing existing records."""
     account = account.strip().lstrip("@").lower()
     if not re.fullmatch(r"[a-z0-9_]{1,15}", account) or type(separate_accounts) is not bool:
-        raise ValueError("X 아이디와 계정별 폴더 설정을 확인해 주세요.")
+        raise UserValueError("X 아이디와 계정별 폴더 설정을 확인해 주세요.")
     output = Path(output_dir).expanduser().resolve()
     folder = ("_" if account in _RESERVED else "") + account
     legacy = output / folder
@@ -194,16 +197,16 @@ def resolve_storage(output_dir: str | Path, account: str, separate_accounts: boo
     for record_folder in _RECORD_FOLDERS:
         for path in (output / record_folder, output / record_folder / folder):
             if _linked(path) or not path.resolve().is_relative_to(output):
-                raise ValueError("기록 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
+                raise UserValueError("기록 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
     if separate_accounts and (_linked(legacy) or not legacy.resolve().is_relative_to(output)):
-        raise ValueError("계정 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
+        raise UserValueError("계정 폴더가 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
     root = records_root()
     if output.is_relative_to(root.resolve()) or root.resolve().is_relative_to(output / ".luvbox"):
-        raise ValueError("앱의 기록 폴더 안에는 저장 경로를 지정할 수 없습니다. 다른 저장 경로를 선택해 주세요.")
+        raise UserValueError("앱의 기록 폴더 안에는 저장 경로를 지정할 수 없습니다. 다른 저장 경로를 선택해 주세요.")
     record = root / _output_key(output) / folder
     for path in (root, record.parent, record):
         if _linked(path):
-            raise ValueError("이 PC의 기록 폴더가 다른 위치에 연결되어 있습니다. LuvBox 기록 폴더를 확인해 주세요.")
+            raise UserValueError("이 PC의 기록 폴더가 다른 위치에 연결되어 있습니다. LuvBox 기록 폴더를 확인해 주세요.")
     return StoragePaths(output, legacy if separate_accounts else output, record, legacy,
                         account, separate_accounts, snapshot)
 
@@ -225,7 +228,7 @@ def prepare_storage(paths: StoragePaths, *, protected: bool = False, create_medi
     for name in _DATABASES:
         destination = checked.record_dir / name
         if _linked(destination) or not destination.resolve().is_relative_to(checked.record_dir):
-            raise ValueError("기록 파일이 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
+            raise UserValueError("기록 파일이 다른 위치에 연결되어 있습니다. 다른 저장 경로를 선택해 주세요.")
     legacy = not _linked(checked.legacy_dir) and checked.legacy_dir.resolve().is_relative_to(checked.output_dir)
     imported = {}
     for name in _DATABASES:
@@ -327,7 +330,7 @@ def _write_snapshot_state(paths: StoragePaths, files: dict) -> None:
     try:
         temporary.write_text(json.dumps({"version": 1, "output": str(paths.output_dir), "files": files},
                                         ensure_ascii=False), encoding="utf-8")
-        os.replace(temporary, location)
+        replace_file(temporary, location)
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -349,7 +352,11 @@ def _merge_changed_snapshot(paths: StoragePaths) -> set[str]:
         shared, local = _snapshot_source(paths, name), paths.record_dir / name
         if not local.is_file() or shared is None:
             continue
-        current = _file_state(shared)
+        try:
+            current = _file_state(shared)
+        except OSError:
+            pending.add(name)
+            continue
         if state.get(name) == current:
             continue
         incoming = paths.record_dir.parent / (".incoming-" + uuid.uuid4().hex + ".sqlite3")
@@ -367,7 +374,12 @@ def _merge_changed_snapshot(paths: StoragePaths) -> set[str]:
                 # merge. An access error says nothing about the source's data.
             else:
                 try:
-                    _merge_database(name, local, incoming)
+                    allowed_roots = None
+                    if name == _HISTORY_DB:
+                        with closing(sqlite3.connect(local.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                            db.execute("PRAGMA trusted_schema=OFF")
+                            allowed_roots = [paths.output_dir, *_valid_roots(db, paths.output_dir)]
+                    _merge_database(name, local, incoming, allowed_roots=allowed_roots)
                 except (MigrationError, OSError, sqlite3.Error, ValueError):
                     pending.add(name)
                     continue
@@ -419,28 +431,31 @@ def publish_snapshot(paths: StoragePaths) -> int:
         raise MigrationError(_MIGRATION_HELP)
     state = _snapshot_state(checked)
     written = 0
-    for name in _DATABASES:
-        source = checked.record_dir / name
-        if name == _LEGACY_SYNC or not source.is_file():
-            continue
-        target = snapshot / name
-        if _linked(target):
-            raise MigrationError(_MIGRATION_HELP)
-        temporary = snapshot / (".snapshot-" + uuid.uuid4().hex + ".sqlite3")
-        try:
-            _backup_database(source, temporary)
-            published = _file_state(temporary)
-            _replace_snapshot(temporary, checked, name, state.get(name))
-        finally:
-            temporary.unlink(missing_ok=True)
-        # Earlier versions used these as live WAL databases.
-        for suffix in ("-wal", "-shm", "-journal"):
-            leftover = snapshot / (name + suffix)
-            if leftover.is_file() and not _linked(leftover):
-                leftover.unlink(missing_ok=True)
-        state[name] = published
-        written += 1
-    _write_snapshot_state(checked, state)
+    try:
+        for name in _DATABASES:
+            source = checked.record_dir / name
+            if name == _LEGACY_SYNC or not source.is_file():
+                continue
+            target = snapshot / name
+            if _linked(target):
+                raise MigrationError(_MIGRATION_HELP)
+            temporary = snapshot / (".snapshot-" + uuid.uuid4().hex + ".sqlite3")
+            try:
+                _backup_database(source, temporary)
+                published = _file_state(temporary)
+                _replace_snapshot(temporary, checked, name, state.get(name))
+            finally:
+                temporary.unlink(missing_ok=True)
+            # Earlier versions used these as live WAL databases.
+            for suffix in ("-wal", "-shm", "-journal"):
+                leftover = snapshot / (name + suffix)
+                if leftover.is_file() and not _linked(leftover):
+                    leftover.unlink(missing_ok=True)
+            state[name] = published
+            written += 1
+    finally:
+        if written:
+            _write_snapshot_state(checked, state)
     return written
 
 
@@ -587,6 +602,7 @@ def _merge_snapshot_copies(files: dict[str, Path], paths: StoragePaths, parent: 
                 allowed_roots = None
                 if name == _HISTORY_DB:
                     with closing(sqlite3.connect(copied.as_uri() + "?mode=ro", uri=True, timeout=1)) as db:
+                        db.execute("PRAGMA trusted_schema=OFF")
                         allowed_roots = [paths.output_dir, *_valid_roots(db, paths.output_dir)]
                 # _merge_history deliberately keeps the destination's local
                 # root approvals and ignores the incoming root declaration.
@@ -624,7 +640,9 @@ def _backup_database(source: Path, destination: Path) -> None:
             raise MigrationError("기록 파일이 사용 중이어서 옮기지 못했습니다. 다른 작업을 종료한 뒤 다시 시도해 주세요.")
 
     with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True, timeout=1)) as old:
+        old.execute("PRAGMA trusted_schema=OFF")
         with closing(sqlite3.connect(destination, timeout=1)) as copied:
+            copied.execute("PRAGMA trusted_schema=OFF")
             old.backup(copied, pages=256, progress=progress, sleep=0.05)
             copied.execute("PRAGMA journal_mode=DELETE")
             _integrity(copied)
@@ -639,6 +657,7 @@ def _sanitize_shared_history(path: Path) -> None:
     it during this import or a later catalog update. The source stays intact.
     """
     with closing(sqlite3.connect(path, timeout=1)) as db, db:
+        db.execute("PRAGMA trusted_schema=OFF")
         db.execute("BEGIN IMMEDIATE")
         metadata = db.execute("SELECT type FROM sqlite_master WHERE name='catalog_meta' COLLATE NOCASE").fetchone()
         if metadata is not None and metadata[0] != "table":
@@ -688,18 +707,66 @@ def _columns(db: sqlite3.Connection, table: str) -> list[str]:
     return [row[1] for row in db.execute('PRAGMA table_info("' + table + '")')]
 
 
+_HISTORY_MERGE_TABLES = frozenset({
+    "media", "runs", "likes", "tweets", "favorites", "media_tags", "image_hashes",
+    "ai_embeddings", "ai_feedback", "ai_unreadable", "missing_choices",
+    "deletion_items", "catalog_meta",
+})
+_COLUMN_TYPES = frozenset({"", "TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"})
+_DEFAULT_LITERAL = re.compile(r"^(?:-?\d+(?:\.\d+)?|'(?:[^']|'')*')$")
+
+
+def _validated_column(name: str, kind: str, default) -> tuple[str, str, str | None]:
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z_][a-z0-9_]*", name):
+        raise MigrationError(_MIGRATION_HELP)
+    norm_kind = (kind or "").strip().upper() if isinstance(kind, str) else ""
+    if norm_kind not in _COLUMN_TYPES:
+        raise MigrationError(_MIGRATION_HELP)
+    if default is None:
+        return name, norm_kind, None
+    raw_default = str(default).strip()
+    if raw_default.upper() == "NULL":
+        return name, norm_kind, "NULL"
+    if not _DEFAULT_LITERAL.fullmatch(raw_default):
+        raise MigrationError(_MIGRATION_HELP)
+    return name, norm_kind, raw_default
+
+
 def _prepare_table(target: sqlite3.Connection, source: sqlite3.Connection, table: str) -> None:
+    if table not in _HISTORY_MERGE_TABLES:
+        raise MigrationError(_MIGRATION_HELP)
+    source_rows = list(source.execute('PRAGMA table_info("' + table + '")'))
+    if not source_rows:
+        raise MigrationError(_MIGRATION_HELP)
     if table not in _tables(target):
-        sql = source.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()[0]
-        target.execute(sql)
+        definitions = []
+        primary = []
+        for _cid, col_name, kind, notnull, default, pk in source_rows:
+            col_name, norm_kind, raw_default = _validated_column(col_name, kind, default)
+            parts = ['"' + col_name + '"']
+            if norm_kind:
+                parts.append(norm_kind)
+            if notnull:
+                parts.append("NOT NULL")
+            if raw_default is not None:
+                parts.append("DEFAULT " + raw_default)
+            definitions.append(" ".join(parts))
+            if pk:
+                primary.append((pk, col_name))
+        if primary:
+            primary.sort(key=lambda item: item[0])
+            definitions.append("PRIMARY KEY(" + ",".join('"' + col + '"' for _, col in primary) + ")")
+        target.execute('CREATE TABLE "' + table + '" (' + ", ".join(definitions) + ")")
     target_columns = set(_columns(target, table))
-    for row in source.execute('PRAGMA table_info("' + table + '")'):
-        name, kind, default = row[1], row[2], row[4]
+    for _cid, name, kind, _notnull, default, _pk in source_rows:
         if name not in target_columns:
-            if not re.fullmatch(r"[a-z_][a-z0-9_]*", name):
-                raise MigrationError(_MIGRATION_HELP)
-            target.execute('ALTER TABLE "' + table + '" ADD COLUMN "' + name + '" ' + kind +
-                           (" DEFAULT " + default if default is not None else ""))
+            col_name, norm_kind, raw_default = _validated_column(name, kind, default)
+            clause = 'ALTER TABLE "' + table + '" ADD COLUMN "' + col_name + '"'
+            if norm_kind:
+                clause += " " + norm_kind
+            if raw_default is not None:
+                clause += " DEFAULT " + raw_default
+            target.execute(clause)
 
 
 def _rows(db: sqlite3.Connection, table: str) -> Iterator[dict]:
@@ -796,16 +863,16 @@ def _merge_media(previous: dict, incoming: dict, *, allowed_roots=None) -> dict:
     if any(row.get("status") == "saved" for row in (first, second)):
         result["status"], result["record_source"] = "saved", "saved"
     identity = lambda row: (row.get("author") or "", row.get("author_id") or "")
+    if result.get("author_metadata_status") == "embedded":
+        if identity(result) != identity(first):
+            # Enriching catalog information does not embed it into this file.
+            result["author_metadata_status"] = "pending"
     if first.get("path") == second.get("path"):
         if second.get("metadata_status") == "embedded":
             result["metadata_status"] = "embedded"
         if (second.get("author_metadata_status") == "embedded" and
                 identity(second) == identity(result)):
             result["author_metadata_status"] = "embedded"
-    if result.get("author_metadata_status") == "embedded":
-        if identity(result) != identity(first):
-            # Enriching catalog information does not embed it into this file.
-            result["author_metadata_status"] = "pending"
     return result
 
 
@@ -1183,7 +1250,9 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection, *, al
 
 def _merge_database(name: str, target_path: Path, source_path: Path, *, allowed_roots=None) -> None:
     with closing(sqlite3.connect(target_path, timeout=1)) as target:
+        target.execute("PRAGMA trusted_schema=OFF")
         with closing(sqlite3.connect(source_path.as_uri() + "?mode=ro", uri=True, timeout=1)) as source:
+            source.execute("PRAGMA trusted_schema=OFF")
             _integrity(source)
             with target:
                 if "archive" in name:
@@ -1694,10 +1763,14 @@ class OutputGuard:
     def _open(path):
         # Append mode cannot update the metadata after locked byte zero.
         file = os.fdopen(os.open(path, os.O_RDWR | os.O_CREAT, 0o600), "r+b")
-        if file.seek(0, os.SEEK_END) == 0:
-            file.write(b"\0")
-            file.flush()
-        file.seek(0)
+        try:
+            if file.seek(0, os.SEEK_END) == 0:
+                file.write(b"\0")
+                file.flush()
+            file.seek(0)
+        except BaseException:
+            file.close()
+            raise
         return file
 
     @staticmethod

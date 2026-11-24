@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 
 FlatDialog {
     id: dialog
@@ -72,6 +73,14 @@ FlatDialog {
         if (records)
             records.setActive("runs", true)
     }
+    onOpened: runHistoryCloseButton.forceActiveFocus()
+    function scrollBy(delta) {
+        if (list.contentHeight <= list.height)
+            return false
+        const maxY = Math.max(0, list.contentHeight - list.height)
+        list.contentY = Math.max(0, Math.min(maxY, list.contentY + delta))
+        return true
+    }
     onClosed: if (records) records.setActive("runs", false)
 
     readonly property var tones: ({
@@ -80,6 +89,8 @@ FlatDialog {
     })
 
     contentItem: ColumnLayout {
+        id: runBody
+        readonly property var hostWindow: Window.window
         spacing: 8
         Label {
             objectName: "runHistoryError"
@@ -104,10 +115,13 @@ FlatDialog {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
-            SmoothWheel { flickable: list }
+            SmoothWheel { id: runHistoryWheel; flickable: list }
             spacing: 8
             model: dialog.records ? dialog.records.runRows : []
-            ScrollBar.vertical: ScrollBar { policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff }
+            ScrollBar.vertical: ScrollBar {
+                policy: list.contentHeight > list.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                onPressedChanged: if (pressed) runHistoryWheel.reset()
+            }
             delegate: Card {
                 id: card
                 required property var modelData
@@ -192,6 +206,7 @@ FlatDialog {
                 BusyIndicator {
                     anchors.horizontalCenter: parent.horizontalCenter
                     running: parent.visible
+                        && (!runBody.hostWindow || (runBody.hostWindow.visible && runBody.hostWindow.visibility !== Window.Minimized))
                     width: 32
                     height: 32
                 }
@@ -231,8 +246,23 @@ FlatDialog {
             id: closeBox
             anchors.fill: parent
             FlatButton {
+                id: runHistoryCloseButton
                 text: "닫기"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
+                Keys.onPressed: event => {
+                    if (event.key === Qt.Key_Down)
+                        event.accepted = dialog.scrollBy(48)
+                    else if (event.key === Qt.Key_Up)
+                        event.accepted = dialog.scrollBy(-48)
+                    else if (event.key === Qt.Key_PageDown)
+                        event.accepted = dialog.scrollBy(Math.max(120, list.height - 48))
+                    else if (event.key === Qt.Key_PageUp)
+                        event.accepted = dialog.scrollBy(-Math.max(120, list.height - 48))
+                    else if (event.key === Qt.Key_Home)
+                        event.accepted = dialog.scrollBy(-list.contentHeight)
+                    else if (event.key === Qt.Key_End)
+                        event.accepted = dialog.scrollBy(list.contentHeight)
+                }
             }
             onRejected: dialog.close()
         }

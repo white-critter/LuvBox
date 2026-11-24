@@ -25,11 +25,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from .local_store import LocalFolderError, LocalFolderStore
+from .local_store import LocalFolderError, LocalFolderStore, check_root
 from .protection import ProtectionError
 from .recycling import RecyclingError, file_signature, recycle_file
 from .storage import OutputGuard
 from .thumbcache import cloud_only
+from .user_errors import safe_ui_error
 
 
 def run_local_deletion(root, rows, stop, emit) -> dict:
@@ -54,6 +55,13 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
         result["message"] = "휴지통 이동 0개"
         if result["cancelled"]:
             result["message"] += f" · 처리하지 않은 파일 {result['cancelled']:,}개"
+        emit(dict(result, type="done", processed=0))
+        return result
+    try:
+        root = check_root(root)
+    except (LocalFolderError, OSError, ValueError) as exc:
+        result["failed"] = len(candidates)
+        result["message"] = safe_ui_error(exc, "폴더를 열지 못했습니다.", allowed=(LocalFolderError,))
         emit(dict(result, type="done", processed=0))
         return result
     guard = OutputGuard(root)
@@ -113,21 +121,22 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
                     break         # the Recycle Bin did not say what happened: stop before the next file
                 continue
             except OSError:
+                try:
+                    absent = not Path(path).exists()
+                except OSError:
+                    absent = True
                 result["failed"] += 1
                 processed += 1
                 failures.append(f"{name}: 파일을 옮기지 못했습니다.")
                 emit(dict(result, type="progress", processed=processed, message=failures[-1]))
+                if absent:
+                    break
                 continue
             result["recycled"] += 1
             result["paths"].append(path)
             gone.append(row.get("rel_path"))
             processed += 1
             emit(dict(result, type="progress", processed=processed, message=f"{name}: 휴지통으로 이동했습니다."))
-        if gone:
-            try:
-                store.mark_gone([rel for rel in gone if isinstance(rel, str)])
-            except LocalFolderError:
-                pass              # the next reading of the folder finds them gone
     except LocalFolderError as exc:
         result["failed"] = len(candidates) - result["recycled"] - result["protected"]
         result["message"] = str(exc)
@@ -135,7 +144,13 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
         return result
     finally:
         if store is not None:
-            store.close()
+            try:
+                if gone:
+                    store.mark_gone([rel for rel in gone if isinstance(rel, str)])
+            except LocalFolderError:
+                pass              # the next reading of the folder finds them gone
+            finally:
+                store.close()
         guard.close()
     result["cancelled"] = result["total"] - processed
     if len(candidates) == 1 and result["protected"] == 1 and protected_reasons and not failures:

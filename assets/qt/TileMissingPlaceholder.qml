@@ -55,8 +55,8 @@ Rectangle {
         }
         Label {
             anchors.horizontalCenter: parent.horizontalCenter
-            text: placeholder.captionText.indexOf("클라우드") >= 0 ? "클라우드"
-                : (placeholder.missingFile || placeholder.captionText.indexOf("파일 없음") >= 0 ? "파일 없음" : "미리보기 없음")
+            text: placeholder.captionText.endsWith(" · 클라우드에만 있음") ? "클라우드"
+                : (placeholder.missingFile || placeholder.captionText.endsWith(" · 파일 없음") ? "파일 없음" : "미리보기 없음")
             font.pixelSize: Theme.fontTiny
             color: Theme.textFaint
             textFormat: Text.PlainText

@@ -12,6 +12,8 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .launcher import spawn_detached
+
 
 _BROWSERS = {
     "edge": ("Microsoft Edge", "msedge.exe", ("Microsoft", "Edge", "Application")),
@@ -36,8 +38,6 @@ def _installed_browser(identifier: str) -> Path | None:
         base = os.environ.get(variable)
         if base:
             candidates.append(Path(base).joinpath(*parts, filename))
-            if identifier == "firefox" and variable == "LOCALAPPDATA":
-                candidates.append(Path(base) / "Mozilla Firefox" / filename)
     if os.name == "nt":
         import winreg
 
@@ -46,7 +46,9 @@ def _installed_browser(identifier: str) -> Path | None:
                 with winreg.OpenKey(hive, "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + filename) as key:
                     value = winreg.QueryValue(key, None)
                     if isinstance(value, str) and not any(char in value for char in "\r\n\0"):
-                        candidates.append(Path(os.path.expandvars(value)))
+                        cleaned = os.path.expandvars(value).strip().strip('"')
+                        if cleaned:
+                            candidates.append(Path(cleaned))
             except (OSError, ValueError):
                 pass
     return next((path for path in candidates if path.is_absolute()
@@ -144,9 +146,7 @@ def open_browser_url(identifier: str, url: str | None = None) -> bool:
         except ValueError:
             return False
     try:
-        subprocess.Popen([str(executable)] + ([url] if url is not None else []),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, close_fds=True)
+        spawn_detached([str(executable)] + ([url] if url is not None else []), popen=subprocess.Popen)
     except OSError:
         return False
     return True

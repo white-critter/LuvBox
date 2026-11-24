@@ -69,9 +69,18 @@ FlatDialog {
         }
     }
 
-    contentItem: ColumnLayout {
+    contentItem: FocusScrollView {
+        id: dialogScroll
         clip: true
-        spacing: Theme.gap
+        contentWidth: availableWidth
+        rightPadding: ScrollBar.vertical.policy === ScrollBar.AlwaysOn ? 14 : 0
+        ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+        ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+
+        ColumnLayout {
+            id: managerColumn
+            width: dialogScroll.availableWidth
+            spacing: Theme.gap
 
         RowLayout {
             Layout.fillWidth: true
@@ -131,7 +140,6 @@ FlatDialog {
             id: ruleScroll
             objectName: "aiTagRuleList"
             Layout.fillWidth: true
-            Layout.fillHeight: true
             Layout.preferredHeight: Math.min(ruleColumn.implicitHeight, 340)
             Layout.minimumHeight: Math.min(ruleColumn.implicitHeight, 48)
             clip: true
@@ -252,6 +260,7 @@ FlatDialog {
             color: Theme.textMuted
             font.pixelSize: Theme.fontSmall
             wrapMode: Text.Wrap
+        }
         }
     }
 

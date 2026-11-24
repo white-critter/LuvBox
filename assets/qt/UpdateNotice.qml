@@ -79,7 +79,7 @@ Card {
                             return ""
                         if (notice.phase === "ready")
                             return notice.saving ? "저장이 끝나면 다시 시작하세요."
-                                : (notice.busyWork ? "진행 중인 작업이 끝나면 다시 시작하세요." : "다시 시작하면 적용됩니다.")
+                                : (notice.busyWork ? "진행 중인 작업이 끝나면 다시 시작하세요." : "다시 시작하면 적용돼요.")
                         if (notice.phase === "available" && !notice.updates.canInstall)
                             return "다운로드 페이지에서 LuvBox.exe를 받으세요."
                         if (notice.phase === "available")
@@ -96,7 +96,7 @@ Card {
                 objectName: "updateNotesToggle"
                 visible: notice.phase === "available" && !!notice.updates && notice.updates.notes.length > 0
                 text: notice.notesOpen ? "변경 사항 접기" : "변경 사항"
-                Accessible.name: "변경 사항 보기"
+                Accessible.name: notice.notesOpen ? "변경 사항 접기" : "변경 사항 보기"
                 onClicked: notice.notesOpen = !notice.notesOpen
             }
             FlatButton {

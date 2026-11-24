@@ -1,12 +1,14 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 
 ColumnLayout {
     id: panel
     objectName: "dailySchedulePanel"
     property var app: null
     readonly property var schedule: app ? app.schedule : null
+    readonly property var hostWindow: Window.window
     property string action: ""
     property string requestedTime: ""
     property bool timeEdited: false
@@ -160,7 +162,12 @@ ColumnLayout {
     RowLayout {
         Layout.fillWidth: true
         visible: !!(panel.schedule && panel.schedule.busy)
-        BusyIndicator { running: parent.visible; implicitWidth: 24; implicitHeight: 24 }
+        BusyIndicator {
+            running: parent.visible
+                && (!panel.hostWindow || (panel.hostWindow.visible && panel.hostWindow.visibility !== Window.Minimized))
+            implicitWidth: 24
+            implicitHeight: 24
+        }
         Label {
             Layout.fillWidth: true
             text: panel.schedule ? panel.schedule.status : ""

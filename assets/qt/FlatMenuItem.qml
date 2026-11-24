@@ -6,6 +6,8 @@ MenuItem {
     // The key that does the same thing, shown dimmed at the right.
     property string hint: ""
     implicitHeight: 34
+    height: visible ? implicitHeight : 0
+    readonly property bool truncated: label.truncated
     leftPadding: 10
     rightPadding: 12
     font.pixelSize: Theme.fontBody

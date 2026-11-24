@@ -10,6 +10,7 @@ import threading
 
 from .settings import SettingsDamaged, load_settings, load_settings_with_status, settings_path
 from .file_mutex import file_mutex, replace_file
+from .user_errors import UserValueError
 
 
 _WRITE_LOCK = threading.RLock()
@@ -73,7 +74,7 @@ class SettingsRepository:
 
     def update(self, changes: dict) -> dict:
         if not isinstance(changes, dict) or any(not isinstance(key, str) for key in changes):
-            raise ValueError(_SAVE_ERROR)
+            raise UserValueError(_SAVE_ERROR)
         target = settings_path()
         with _WRITE_LOCK, file_mutex(target):
             # A tolerant first display must not turn a damaged or inaccessible settings file into an

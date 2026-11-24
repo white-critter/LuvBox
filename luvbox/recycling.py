@@ -23,6 +23,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from .user_errors import UserFacingError
+
 
 # A file another program holds open. Windows itself reports 0x80070020; the Shell's
 # file operation, which does the move here, answers 0x80270027 after waiting about a second.
@@ -31,7 +33,7 @@ _SHELL_IN_USE = -2144927705
 _IN_USE_HELP = "다른 프로그램이 이 파일을 사용하고 있어 휴지통으로 보내지 못했습니다. 그 프로그램을 닫은 뒤 다시 시도해 주세요."
 
 
-class RecyclingError(OSError):
+class RecyclingError(UserFacingError, OSError):
     """A safe failure, or an explicitly uncertain outcome needing review."""
 
     def __init__(self, message: str, *, uncertain: bool = False, recycled_path: str = ""):
@@ -162,7 +164,7 @@ def verify_receipt(original: Path | str, destination: Path | str, expected, *, e
             return True
         # FAT/FAT32/exFAT assigns nFileIndex from the directory slot, which changes
         # when moved to $RECYCLE.BIN; match the remaining metadata and SHA-256 digest.
-        if (_volume_filesystem(original.anchor) in _FAT_FILESYSTEMS
+        if (_volume_filesystem(original.anchor, expected[0]) in _FAT_FILESYSTEMS
                 and (signature[0], signature[2], signature[3]) == (expected[0], expected[2], expected[3])
                 and expected_hash is not None):
             return _file_sha256(destination) == expected_hash
@@ -295,7 +297,7 @@ class _Sink:
                 raise RecyclingError("선택한 뒤 파일이 바뀌어 건너뛰었습니다. 목록을 새로고침해 주세요.")
             return 0
         except Exception as exc:
-            self.outcome.pre_error = str(exc) or "휴지통 이동 확인에 실패했습니다."
+            self.outcome.pre_error = str(exc) if isinstance(exc, RecyclingError) else "휴지통 이동 확인에 실패했습니다."
             return _E_ABORT
 
     def post_delete(self, _this, _flags, _item, result, destination):
@@ -392,7 +394,7 @@ def recycle_file(path: Path | str, expected=None) -> str:
                 if verify_receipt(path, outcome.destination, signature, expected_hash=expected_hash):
                     return outcome.destination
         message = outcome.pre_error or (
-            _IN_USE_HELP if in_use and not missing
+            _IN_USE_HELP if (in_use or _SHARING_VIOLATION in results) and not missing
             else "휴지통 이동을 확인하지 못했습니다. 파일과 휴지통을 확인해 주세요.")
         raise RecyclingError(message, uncertain=missing, recycled_path=outcome.destination)
     except RecyclingError as exc:

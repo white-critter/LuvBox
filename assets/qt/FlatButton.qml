@@ -132,26 +132,28 @@ Button {
             color: Theme.accent
         }
     }
-    Canvas {
-        id: arrow
-        visible: control.dropdown
-        width: 10
-        height: 6
+    Loader {
+        active: control.dropdown
         x: control.width - width - 14
         y: (control.height - height) / 2
-        rotation: control.dropdownOpen ? 180 : 0
-        readonly property color stroke: !control.enabled ? Theme.textDisabled
-            : (control.lit ? Theme.accentText : Theme.textMuted)
-        onStrokeChanged: requestPaint()
-        onPaint: {
-            const ctx = getContext("2d")
-            ctx.reset()
-            ctx.moveTo(0, 1)
-            ctx.lineTo(width, 1)
-            ctx.lineTo(width / 2, height)
-            ctx.closePath()
-            ctx.fillStyle = stroke
-            ctx.fill()
+        width: 10
+        height: 6
+        sourceComponent: Canvas {
+            id: arrow
+            rotation: control.dropdownOpen ? 180 : 0
+            readonly property color stroke: !control.enabled ? Theme.textDisabled
+                : (control.lit ? Theme.accentText : Theme.textMuted)
+            onStrokeChanged: requestPaint()
+            onPaint: {
+                const ctx = getContext("2d")
+                ctx.reset()
+                ctx.moveTo(0, 1)
+                ctx.lineTo(width, 1)
+                ctx.lineTo(width / 2, height)
+                ctx.closePath()
+                ctx.fillStyle = stroke
+                ctx.fill()
+            }
         }
     }
     contentItem: Text {

@@ -36,10 +36,9 @@ import threading
 from typing import Sequence
 import urllib.parse
 import urllib.request
-import warnings
 
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 
 from . import __version__
 from .ai_anchors import (  # noqa: F401  (re-exported for existing callers and tests)
@@ -318,47 +317,76 @@ def feature_output(session) -> str:
     raise RuntimeError("The vision model has no pooled image output")
 
 
+_EXIF_TRANSPOSE = {
+    2: Image.Transpose.FLIP_LEFT_RIGHT,
+    3: Image.Transpose.ROTATE_180,
+    4: Image.Transpose.FLIP_TOP_BOTTOM,
+    5: Image.Transpose.TRANSPOSE,
+    6: Image.Transpose.ROTATE_270,
+    7: Image.Transpose.TRANSVERSE,
+    8: Image.Transpose.ROTATE_90,
+}
+
+
 @contextlib.contextmanager
-def _load_rgb_image(path: Path):
-    """Safely open a local raster image, apply EXIF orientation, and yield an RGB Image."""
+def _open_rgb_image(path: Path):
+    """Safely open a local raster image and yield ``(rgb_image, exif_orientation)``."""
     _prepare_decoders(False)
-    with path.open("rb") as source, warnings.catch_warnings():
+    with path.open("rb") as source:
         if os.fstat(source.fileno()).st_size > MAX_RASTER_BYTES:
             raise ValueError("Image exceeds maximum raster byte limit")
-        warnings.simplefilter("error", Image.DecompressionBombWarning)
         with Image.open(_BoundedRasterReader(source), formats=PHOTO_FORMATS) as img:
             if img.width <= 0 or img.height <= 0 or img.width * img.height > MAX_PIXELS:
                 raise Image.DecompressionBombError("Image exceeds safe pixel count")
-            transposed = ImageOps.exif_transpose(img)
             try:
-                w, h = transposed.size
-                if w <= 0 or h <= 0:
+                orientation = img.getexif().get(274, 1)
+            except (OSError, ValueError, SyntaxError, TypeError, struct.error):
+                orientation = 1
+            rgb = img if img.mode == "RGB" else img.convert("RGB")
+            try:
+                if rgb.width <= 0 or rgb.height <= 0:
                     raise ValueError("Image has empty dimensions")
-                rgb = transposed if transposed.mode == "RGB" else transposed.convert("RGB")
-                try:
-                    yield rgb
-                finally:
-                    if rgb is not transposed:
-                        rgb.close()
+                yield rgb, orientation
             finally:
-                if transposed is not img:
-                    transposed.close()
+                if rgb is not img:
+                    rgb.close()
+
+
+@contextlib.contextmanager
+def _load_rgb_image(path: Path):
+    """Safely open a local raster image, apply EXIF orientation, and yield an RGB Image."""
+    with _open_rgb_image(path) as (rgb, orientation):
+        method = _EXIF_TRANSPOSE.get(orientation)
+        transposed = rgb.transpose(method) if method is not None else rgb
+        try:
+            yield transposed
+        finally:
+            if transposed is not rgb:
+                transposed.close()
 
 
 def preprocess_image(image_path: Path | str) -> np.ndarray | None:
-    """Safely load and transpose a photo, resize the whole of it to 224x224 and scale it to [-1, 1].
+    """Safely load a photo, resize to 224x224, apply EXIF orientation, and scale to [-1, 1].
 
     SigLIP's image processor does not crop: a tall picture is squeezed, not cut,
     so the top and bottom of a webtoon panel or a long meme still count.
+    Resizing before the EXIF transpose avoids copying multi-megapixel rotated
+    buffers while preserving identical square 224x224 output.
     """
     path = Path(image_path)
     if not _safe_local_file(path):
         return None
     try:
-        with _load_rgb_image(path) as rgb:
+        with _open_rgb_image(path) as (rgb, orientation):
             resized = rgb.resize((INPUT_SIZE, INPUT_SIZE), Image.Resampling.BILINEAR)
             try:
-                arr = np.array(resized, dtype=np.float32)
+                method = _EXIF_TRANSPOSE.get(orientation)
+                oriented = resized.transpose(method) if method is not None else resized
+                try:
+                    arr = np.array(oriented, dtype=np.float32)
+                finally:
+                    if oriented is not resized:
+                        oriented.close()
             finally:
                 resized.close()
         arr *= np.float32(2.0 / 255.0)

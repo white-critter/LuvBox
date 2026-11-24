@@ -5,6 +5,8 @@ import QtQuick.Window
 
 ComboBox {
     id: control
+    readonly property var hostWindow: Window.window
+    readonly property Item windowFocusItem: Window.activeFocusItem
     property int minimumPopupWidth: 0
     // A dim word in front of the choice ("정렬  최근 저장"), for lists whose
     // choices do not say what they are a choice of.
@@ -216,7 +218,7 @@ ComboBox {
 
     popup: Popup {
         y: control.height + 6
-        width: Math.min(control.Window.window ? Math.max(160, control.Window.window.width - 16) : 640,
+        width: Math.min(control.hostWindow ? Math.max(160, control.hostWindow.width - 16) : 640,
             Math.max(control.width, control.minimumPopupWidth, control.implicitContentWidth + 32))
         // Stay inside the window, e.g. for a combo at its right edge.
         margins: 8
@@ -227,7 +229,7 @@ ComboBox {
         // the keyboard reached keeps them.
         onAboutToShow: {
             if (!control.activeFocus) {
-                let before = control.Window.activeFocusItem
+                let before = control.windowFocusItem
                 // Keys on a picture of the grid go back to the grid itself: the choice may read
                 // the list again and put that picture away.
                 if (before && control.escapeFocus && control.inside(before, control.escapeFocus))

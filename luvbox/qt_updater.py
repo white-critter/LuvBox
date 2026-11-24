@@ -116,10 +116,16 @@ class UpdateController(QObject):
         """This release can be fetched here: it has the files, and a launcher to replace is known."""
         if not (self._found and self._found["installable"]):
             return False
-        if not self._launcher_known:
-            self._probe_launcher()
         with self._lock:
-            return self._cached_launcher is not None
+            known = self._launcher_known
+            cached = self._cached_launcher
+        if not known:
+            if self._launcher is launcher_path:
+                if not self._swept and not self._closing:
+                    self._swept = self._queue("sweep")
+                return False
+            cached, _ = self._probe_launcher()
+        return cached is not None
 
     @Property(bool, notify=changed)
     def retryLatest(self):

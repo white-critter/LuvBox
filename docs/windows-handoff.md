@@ -1,4 +1,4 @@
-# LuvBox 1.3.0 Windows 실행 순서
+# LuvBox Windows 실행 순서
 
 Windows 10·11 64비트, Python 3.12 이상과 PowerShell을 사용합니다. 앱은 PySide6 + Qt Quick으로 실행합니다. [개발 안내](development.md), [보안 검토](security-review.md), [검증 기록](verification.md)이 현재 동작과 검사 범위의 기준입니다.
 

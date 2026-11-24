@@ -27,12 +27,13 @@ from PySide6.QtCore import Property, QObject, QUrl, Signal, Slot
 
 from .ai_profile import valid_tag
 from .clip_model import ACTIVE_MODEL_ID
-from .local_store import LocalFolderError, LocalFolderStore, check_root, folder_key, forget_folder_record
+from .local_store import LocalFolderError, LocalFolderStore, SUFFIXES, check_root, folder_key, forget_folder_record
 from .qt_library import (MAX_SELECTION, LibraryController, LibraryRepository, ManifestError, _active_ai_names,
                          _format_size, _open_profile, _shown_tags)
 from .qt_management import ManagementController
 from .recycling import file_signature
 from .thumbcache import cloud_only
+from .user_errors import UserRuntimeError
 
 _KEY = re.compile(r"g([0-9]+)_lf_([0-9]{1,12})\Z")
 FOLDER_ORDERS = ("modified", "name", "size")
@@ -537,7 +538,7 @@ class LocalFolderRepository(LibraryRepository):
         except (ScanCancelled, LocalFolderError):
             raise
         except Exception as exc:
-            raise RuntimeError("중복 검사를 끝내지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
+            raise UserRuntimeError("중복 검사를 끝내지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
 
     def duplicate_copy_keys(self, generation):
         request = self.current(generation)
@@ -677,7 +678,7 @@ class LocalFolderRepository(LibraryRepository):
 
         profile = _open_profile()
         if profile is None:
-            raise RuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
+            raise UserRuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
         synced_changes = False
         try:
             with closing(profile), closing(request.store()) as store:
@@ -716,18 +717,15 @@ class LocalFolderRepository(LibraryRepository):
                                          shared=self.share_learning)
                 if run.unreadable:
                     self._scan_note = f" 읽을 수 없는 사진 {skipped + run.unreadable:,}장은 제외했습니다."
-                self._ai_synced_changes = synced_changes
-                self._ai_wrote = run.wrote
-                self._ai_changed = run.changed
                 return run.tagged if encode else run.changed
         except (RuntimeError, ScanCancelled):
+            raise
+        except Exception as exc:
+            raise UserRuntimeError("AI 자동분류를 끝내지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
+        finally:
             self._ai_synced_changes = synced_changes
             self._ai_wrote = run.wrote
             self._ai_changed = run.changed
-            raise
-        except Exception as exc:
-            raise RuntimeError("AI 자동분류를 끝내지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
-        finally:
             if release_session is not None:
                 release_session()
 
@@ -741,7 +739,7 @@ class LocalFolderRepository(LibraryRepository):
                 self._ai_had_embeddings = store.count_embeddings(ACTIVE_MODEL_ID) > 0
                 store.set_ai_scored_state(-1, ACTIVE_MODEL_ID)
         except LocalFolderError as exc:
-            raise RuntimeError("AI 태그를 다시 매기지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
+            raise UserRuntimeError("AI 태그를 다시 매기지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
         return self.scan_ai_tags(generation, progress_callback=progress_callback, status_callback=status_callback,
                                  epoch=epoch, download=False, encode=False)
 
@@ -753,7 +751,7 @@ class LocalFolderRepository(LibraryRepository):
             with closing(request.store()) as store:
                 return store.clear_ai_tags()
         except LocalFolderError as exc:
-            raise RuntimeError("AI 태그를 초기화하지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
+            raise UserRuntimeError("AI 태그를 초기화하지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
 
     def teach_labels(self, generation, identities, category, epoch=None, progress_callback=None, status_callback=None):
         return self.teach_tag(generation, identities, category, bool(category), epoch=epoch,
@@ -779,7 +777,7 @@ class LocalFolderRepository(LibraryRepository):
 
         profile = _open_profile()
         if profile is None:
-            raise RuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
+            raise UserRuntimeError("AI 태그 설정을 열지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요.")
         try:
             with closing(profile), closing(request.store()) as store:
                 rows = store.rows_for(int(item) for item in identities)
@@ -815,7 +813,7 @@ class LocalFolderRepository(LibraryRepository):
         except (RuntimeError, ScanCancelled):
             raise
         except Exception as exc:
-            raise RuntimeError("분류를 저장하지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
+            raise UserRuntimeError("분류를 저장하지 못했습니다. 폴더를 확인한 뒤 다시 시도해 주세요.") from exc
         finally:
             release_session()
 
@@ -963,6 +961,8 @@ class LocalFolderRepository(LibraryRepository):
         if not selection["path"]:
             return "파일을 찾지 못했습니다. 폴더를 확인해 주세요."
         if action == "open":
+            if Path(selection["path"]).suffix.lower() not in SUFFIXES:
+                return "지원하는 사진 파일만 열 수 있습니다. 폴더에서 파일을 확인해 주세요."
             os.startfile(selection["path"])
         elif action == "reveal":
             from .qt_browser_setup import explorer_select_command
@@ -1041,6 +1041,7 @@ class LocalFolderController(LibraryController):
         self._folder_request = 0
         self._deletion_busy = False
         self._aux_threads = []
+        self._erasing_folders = set()
 
     def _set_deletion_busy(self, busy):
         busy = bool(busy)
@@ -1200,6 +1201,11 @@ class LocalFolderController(LibraryController):
 
     def _request_open_folder(self, path):
         text = str(path) if isinstance(path, (str, Path)) else ""
+        if text:
+            norm = os.path.normcase(os.path.normpath(text))
+            if norm in self._erasing_folders:
+                self._refuse_folder("이전 정리 기록을 지우는 중입니다. 잠시 뒤 다시 열어 주세요.")
+                return False
         if self._opening_path == text:
             return False
         self._folder_request += 1
@@ -1252,6 +1258,9 @@ class LocalFolderController(LibraryController):
 
     def _open_root(self, root_text):
         """Open a folder check_root has accepted."""
+        if os.path.normcase(os.path.normpath(root_text)) in self._erasing_folders:
+            self._refuse_folder("이전 정리 기록을 지우는 중입니다. 잠시 뒤 다시 열어 주세요.")
+            return False
         if self._exclusive or self._deletion_busy:
             self._status = "진행 중인 작업이 끝난 뒤 다른 폴더를 열 수 있습니다."
             self.changed.emit()
@@ -1308,6 +1317,9 @@ class LocalFolderController(LibraryController):
         if not erase:
             self.folderForgotten.emit(path)
             return True
+        if norm in self._erasing_folders:
+            return False
+        self._erasing_folders.add(norm)
         generation, serial = self._generation, self._selection_serial
 
         def erase_record():
@@ -1360,6 +1372,8 @@ class LocalFolderController(LibraryController):
 
     @Slot(bool)
     def setShareLearning(self, enabled):
+        if self._closed:
+            return
         enabled = bool(enabled)
         if enabled == self._share_learning:
             return
@@ -1444,6 +1458,7 @@ class LocalFolderController(LibraryController):
         """The folder was read: the list shows what is there now, and new photos are classified."""
         if action == "forget_folder":
             path, removed = selection
+            self._erasing_folders.discard(os.path.normcase(os.path.normpath(path)))
             self._status = ("최근 폴더에서 빼고 그 폴더의 정리 기록을 지웠습니다." if removed
                             else "최근 폴더에서 뺐습니다. 지울 정리 기록은 없었습니다.")
             self._reload_ai_rules()

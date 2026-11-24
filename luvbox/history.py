@@ -23,6 +23,7 @@ from pathlib import Path
 from .clip_model import ACTIVE_MODEL_ID, CATEGORY_NAMES, LEGACY_MODEL_ID, embedding_bytes
 from .storage import (_RECORD_FOLDERS, StoragePaths, _DamagedDatabase, _feedback_to_tag_feedback,
                       migrate_legacy_databases, prepare_storage, records_root)
+from .user_errors import UserFacingError
 
 
 _KOREA = timezone(timedelta(hours=9))
@@ -65,6 +66,8 @@ _MEDIA_READ_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS media_author ON media(author COLLATE NOCASE)",
     # Usually empty: every catalog open probes this migration condition.
     "CREATE INDEX IF NOT EXISTS media_source_url_missing ON media(source_url) WHERE source_url=''",
+    *(("CREATE INDEX IF NOT EXISTS media_path_nocase ON media(path COLLATE NOCASE)",)
+      if os.name == "nt" else ()),
 )
 _PERIOD_FIELDS = {"posted": "media.posted_at", "saved": "media.saved_at"}
 # The five default AI tags. Any tag can be an AI tag now (see ai_profile); these
@@ -83,7 +86,7 @@ _SCAN_MODES = {"full", "quick", "retry"}
 _DELETION_STATUSES = {"pending", "recycled", "failed", "cancelled", "interrupted"}
 
 
-class HistoryError(RuntimeError):
+class HistoryError(UserFacingError, RuntimeError):
     """A fixed application error; source exceptions may include user paths."""
 
 
@@ -356,7 +359,7 @@ def _shadowed(alias: str, twin: str = "twin") -> str:
     return (
         f"({alias}.path!='' AND EXISTS (SELECT 1 FROM media AS {twin} "
         f"WHERE {twin}.folder_mode IN {_MODE_LIST} AND {twin}.tweet_id={alias}.tweet_id "
-        f"AND {twin}.path={alias}.path{_SAME_TEXT} AND {_precedes(twin, alias)}))"
+        f"AND +{twin}.path={alias}.path{_SAME_TEXT} AND {_precedes(twin, alias)}))"
     )
 
 
@@ -407,6 +410,23 @@ def _on_file(mark: str, media: str = "media") -> str:
         f"OR ({media}.path!='' AND EXISTS (SELECT 1 FROM media AS marked WHERE marked.folder_mode={mark}.folder_mode "
         f"AND marked.tweet_id={mark}.tweet_id AND marked.num={mark}.num AND marked.media_type={mark}.media_type "
         f"AND marked.path={media}.path{_SAME_TEXT})))"
+    )
+
+
+def _on_file_rowids(table: str, alias: str, extra: str = "") -> str:
+    """SQL subquery yielding ``media.rowid`` values matching mark rows in ``table``."""
+    return (
+        f"SELECT m.rowid FROM {table} AS {alias} CROSS JOIN media AS m "
+        f"ON m.folder_mode={alias}.folder_mode AND m.tweet_id={alias}.tweet_id "
+        f"AND m.num={alias}.num AND m.media_type={alias}.media_type "
+        f"WHERE +{alias}.folder_mode IN {_MODE_LIST}{extra} "
+        "UNION "
+        f"SELECT m.rowid FROM {table} AS {alias} CROSS JOIN media AS marked "
+        f"ON marked.folder_mode={alias}.folder_mode AND marked.tweet_id={alias}.tweet_id "
+        f"AND marked.num={alias}.num AND marked.media_type={alias}.media_type "
+        f"CROSS JOIN media AS m ON m.folder_mode IN {_MODE_LIST} "
+        f"AND m.tweet_id={alias}.tweet_id AND m.path=marked.path{_SAME_TEXT} "
+        f"WHERE +{alias}.folder_mode IN {_MODE_LIST}{extra} AND marked.path!=''"
     )
 
 
@@ -1369,31 +1389,53 @@ class HistoryStore:
     def _scan_files(self, root, restricted):
         pending = [root]
         account_names = set()
+        record_names = {name.lower() if os.name == "nt" else name for name in _RECORD_FOLDERS}
+        system_names = {"$recycle.bin", "system volume information"} if os.name == "nt" else set()
         if restricted:
             for folder in _RECORD_FOLDERS:
                 records = self.output_dir / folder
-                if records.is_dir() and not self._linked(records):
-                    account_names.update(path.name for path in records.iterdir() if path.is_dir())
+                try:
+                    if records.is_dir() and not self._linked(records):
+                        account_names.update(
+                            path.name.lower() if os.name == "nt" else path.name
+                            for path in records.iterdir() if path.is_dir()
+                        )
+                except OSError:
+                    continue
         if self.legacy_dir is not None:
-            account_names.add(self.legacy_dir.name)
+            account_names.add(self.legacy_dir.name.lower() if os.name == "nt" else self.legacy_dir.name)
         while pending:
             directory = pending.pop()
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    path = Path(entry.path)
+            try:
+                with os.scandir(directory) as entries:
+                    items = list(entries)
+            except OSError:
+                continue
+            for entry in items:
+                path = Path(entry.path)
+                try:
                     # The listing already carries the reparse tag (no extra
                     # disk call per file); Path.is_junction asks again.
                     junction = entry.is_junction() if hasattr(entry, "is_junction") else (
                         hasattr(path, "is_junction") and path.is_junction())
                     if entry.is_symlink() or junction:
                         continue
-                    if entry.is_dir(follow_symlinks=False):
-                        if (entry.name in _RECORD_FOLDERS or (restricted and directory == root and entry.name in account_names)
-                                or path in self._app_data):
-                            continue
-                        pending.append(path)
-                    elif entry.is_file(follow_symlinks=False) and _FILENAME.fullmatch(entry.name):
-                        yield path, root, restricted
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    continue
+                if is_dir:
+                    name_key = entry.name.lower() if os.name == "nt" else entry.name
+                    if (name_key in record_names or name_key in system_names
+                            or (restricted and directory == root and name_key in account_names)
+                            or path in self._app_data):
+                        continue
+                    pending.append(path)
+                else:
+                    try:
+                        if entry.is_file(follow_symlinks=False) and _FILENAME.fullmatch(entry.name):
+                            yield path, root, restricted
+                    except OSError:
+                        continue
 
     def _write_batches(self, items: list, apply) -> None:
         """Apply writes in short transactions so a download can record in between."""
@@ -2422,8 +2464,8 @@ class HistoryStore:
             self._db.execute(
                 "UPDATE deletion_items SET status=?,message=?,recycle_path=?,finished_at=? WHERE id=? AND status='pending'",
                 (status, _clean_text(message, 2000), recycle_path, stamp, ident))
-            if drop_archive:
-                self._drop_archive_skips(drop_archive)
+        if drop_archive:
+            self._drop_archive_skips(drop_archive)
 
     @_safe
     def pending_deletions(self) -> list[dict]:
@@ -2459,7 +2501,7 @@ class HistoryStore:
                        favorite_only=False, user_tag="", duplicate_only=False,
                        ai_category="", ai_origin="", *,
                        has_hashtags=True, has_favorites=True, has_media_tags=True, has_image_hashes=True,
-                       has_cluster_id=True):
+                       has_cluster_id=True, selective_filters=()):
         """WHERE clause on media; ``period`` is (field, first day, last day).
 
         Days are inclusive YYYY-MM-DD dates in Korean time, either may be empty.
@@ -2521,6 +2563,8 @@ class HistoryStore:
         if favorite_only:
             if not has_favorites:
                 clauses.append("0")
+            elif "favorite_only" in selective_filters:
+                clauses.append("media.rowid IN (" + _on_file_rowids("favorites", "mark") + ")")
             else:
                 clauses.append("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark") + ")")
         if user_tag:
@@ -2528,6 +2572,10 @@ class HistoryStore:
             if tag:
                 if not has_media_tags:
                     clauses.append("0")
+                elif "user_tag" in selective_filters:
+                    clauses.append("media.rowid IN (" + _on_file_rowids(
+                        "media_tags", "mark", " AND mark.source='user' AND mark.tag=?") + ")")
+                    params.extend((tag, tag))
                 else:
                     # Keep the correlated primary-key lookup on media_tags instead of
                     # scanning every row with this (source, tag) pair in the library.
@@ -2541,11 +2589,30 @@ class HistoryStore:
             else:
                 origin = ai_origin if ai_origin in {"ai", "confirmed"} else ""
                 if origin:
-                    clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
-                                   "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
-                                   "AND media_tags.media_type=media.media_type AND media_tags.tag=? "
-                                   "AND media_tags.source=?)")
-                    params.extend((tag, origin))
+                    if "ai_category" in selective_filters:
+                        clauses.append(
+                            "media.rowid IN (SELECT m.rowid FROM media_tags AS label CROSS JOIN media AS m "
+                            "ON m.folder_mode=label.folder_mode AND m.tweet_id=label.tweet_id "
+                            "AND m.num=label.num AND m.media_type=label.media_type "
+                            "WHERE label.source=? AND label.tag=?)"
+                        )
+                        params.extend((origin, tag))
+                    else:
+                        clauses.append("EXISTS (SELECT 1 FROM media_tags WHERE media_tags.folder_mode=media.folder_mode "
+                                       "AND media_tags.tweet_id=media.tweet_id AND media_tags.num=media.num "
+                                       "AND media_tags.media_type=media.media_type AND media_tags.tag=? "
+                                       "AND media_tags.source=?)")
+                        params.extend((tag, origin))
+                elif "ai_category" in selective_filters:
+                    clauses.append(
+                        "media.rowid IN ("
+                        "SELECT m.rowid FROM media_tags AS label CROSS JOIN media AS m "
+                        "ON m.folder_mode=label.folder_mode AND m.tweet_id=label.tweet_id "
+                        "AND m.num=label.num AND m.media_type=label.media_type "
+                        "WHERE label.source IN ('ai','confirmed') AND label.tag=? UNION "
+                        + _on_file_rowids("media_tags", "mark", " AND mark.source='user' AND mark.tag=?") + ")"
+                    )
+                    params.extend((tag, tag, tag))
                 else:
                     # One list per AI tag: what the AI gave the photo, what the person confirmed,
                     # and the photos the person tagged that way themselves.
@@ -2554,6 +2621,31 @@ class HistoryStore:
         if duplicate_only:
             if not has_image_hashes:
                 clauses.append("0")
+            elif "duplicate_only" in selective_filters:
+                if has_cluster_id:
+                    clauses.append(
+                        _listed("media") + " AND media.rowid IN ("
+                        "SELECT m.rowid FROM image_hashes h1 CROSS JOIN media m "
+                        "ON m.folder_mode=h1.folder_mode AND m.tweet_id=h1.tweet_id "
+                        "AND m.num=h1.num AND m.media_type=h1.media_type "
+                        "WHERE h1.cluster_id>0 AND EXISTS (SELECT 1 FROM image_hashes h2 CROSS JOIN media m2 "
+                        "ON m2.folder_mode=h2.folder_mode AND m2.tweet_id=h2.tweet_id "
+                        "AND m2.num=h2.num AND m2.media_type=h2.media_type "
+                        "WHERE h2.cluster_id=h1.cluster_id AND " + _other_file("h1", "m") + ") "
+                        "UNION "
+                        "SELECT m.rowid FROM image_hashes h1 CROSS JOIN media m "
+                        "ON m.folder_mode=h1.folder_mode AND m.tweet_id=h1.tweet_id "
+                        "AND m.num=h1.num AND m.media_type=h1.media_type "
+                        "WHERE h1.cluster_id=0 AND " + _exact_duplicate_exists("h1", "m") + ")"
+                    )
+                else:
+                    clauses.append(
+                        _listed("media") + " AND media.rowid IN ("
+                        "SELECT m.rowid FROM image_hashes h1 CROSS JOIN media m "
+                        "ON m.folder_mode=h1.folder_mode AND m.tweet_id=h1.tweet_id "
+                        "AND m.num=h1.num AND m.media_type=h1.media_type "
+                        "WHERE h1.file_hash!='' AND " + _exact_duplicate_exists("h1", "m") + ")"
+                    )
             else:
                 clauses.append(_listed("media") + " AND EXISTS (SELECT 1 FROM image_hashes h1 "
                                "WHERE h1.folder_mode=media.folder_mode AND h1.tweet_id=media.tweet_id "
@@ -2580,15 +2672,62 @@ class HistoryStore:
 
     def _filter_clause(self, media_type, query, period=None, author="", include_deleted=True, hashtag="",
                        favorite_only=False, user_tag="", duplicate_only=False, ai_category="", ai_origin=""):
+        has_favorites = self._has_table("favorites")
+        has_media_tags = self._has_table("media_tags")
+        has_image_hashes = self._has_table("image_hashes")
+        has_cluster_id = self._has_column("image_hashes", "cluster_id")
+        selective = set()
+        if favorite_only and has_favorites:
+            if self._db.execute("SELECT COUNT(*) FROM (SELECT 1 FROM favorites LIMIT 1001)").fetchone()[0] <= 1000:
+                selective.add("favorite_only")
+        if user_tag and has_media_tags:
+            tag = _normalize_tag(user_tag)
+            if tag and self._db.execute(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM media_tags WHERE source='user' AND tag=? LIMIT 1001)",
+                (tag,),
+            ).fetchone()[0] <= 1000:
+                selective.add("user_tag")
+        if ai_category and has_media_tags and isinstance(ai_category, str):
+            tag = _normalize_tag(ai_category)
+            if tag and len(tag) <= _TAG_LIMIT:
+                origin = ai_origin if ai_origin in {"ai", "confirmed"} else ""
+                if origin:
+                    if self._db.execute(
+                        "SELECT COUNT(*) FROM (SELECT 1 FROM media_tags WHERE source=? AND tag=? LIMIT 1001)",
+                        (origin, tag),
+                    ).fetchone()[0] <= 1000:
+                        selective.add("ai_category")
+                else:
+                    if self._db.execute(
+                        "SELECT COUNT(*) FROM (SELECT 1 FROM media_tags WHERE source IN ('ai','confirmed','user') AND tag=? LIMIT 1001)",
+                        (tag,),
+                    ).fetchone()[0] <= 1000:
+                        selective.add("ai_category")
+        if duplicate_only and has_image_hashes:
+            if has_cluster_id:
+                clustered = self._db.execute(
+                    "SELECT COUNT(*) FROM (SELECT 1 FROM image_hashes WHERE cluster_id>0 LIMIT 1001)"
+                ).fetchone()[0]
+                unclustered = self._db.execute(
+                    "SELECT COUNT(*) FROM (SELECT 1 FROM image_hashes WHERE cluster_id=0 AND file_hash!='' LIMIT 1001)"
+                ).fetchone()[0]
+                if clustered + unclustered <= 1000:
+                    selective.add("duplicate_only")
+            else:
+                if self._db.execute(
+                    "SELECT COUNT(*) FROM (SELECT 1 FROM image_hashes WHERE file_hash!='' LIMIT 1001)"
+                ).fetchone()[0] <= 1000:
+                    selective.add("duplicate_only")
         return self._record_filter(
             media_type, query, period, author, include_deleted,
             hashtag=hashtag, favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
             ai_category=ai_category, ai_origin=ai_origin,
             has_hashtags=self._has_column("tweets", "hashtags"),
-            has_favorites=self._has_table("favorites"),
-            has_media_tags=self._has_table("media_tags"),
-            has_image_hashes=self._has_table("image_hashes"),
-            has_cluster_id=self._has_column("image_hashes", "cluster_id"),
+            has_favorites=has_favorites,
+            has_media_tags=has_media_tags,
+            has_image_hashes=has_image_hashes,
+            has_cluster_id=has_cluster_id,
+            selective_filters=frozenset(selective),
         )
 
     @_safe
@@ -2751,11 +2890,20 @@ class HistoryStore:
         """Every record whose file carries a star, whichever of its records was starred."""
         if not self._has_table("favorites"):
             return set()
-        rows = self._read_rows("SELECT folder_mode, tweet_id, num, media_type FROM favorites")
-        found = set()
-        for row in rows:
-            found.update(self._file_records(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]))
-        return found
+        rows = self._read_rows(
+            "SELECT m.folder_mode, m.tweet_id, m.num, m.media_type FROM favorites AS mark "
+            "CROSS JOIN media AS m ON m.folder_mode=mark.folder_mode AND m.tweet_id=mark.tweet_id "
+            "AND m.num=mark.num AND m.media_type=mark.media_type "
+            "UNION "
+            "SELECT m.folder_mode, m.tweet_id, m.num, m.media_type FROM favorites AS mark "
+            "CROSS JOIN media AS marked ON marked.folder_mode=mark.folder_mode AND marked.tweet_id=mark.tweet_id "
+            "AND marked.num=mark.num AND marked.media_type=mark.media_type "
+            f"CROSS JOIN media AS m ON m.folder_mode IN {_MODE_LIST} AND m.tweet_id=mark.tweet_id "
+            f"AND m.path=marked.path{_SAME_TEXT} WHERE marked.path!='' "
+            "UNION "
+            "SELECT folder_mode, tweet_id, num, media_type FROM favorites"
+        )
+        return {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows}
 
     @_safe
     def favorite_identities_among(self, identities) -> set[tuple]:
@@ -3735,7 +3883,14 @@ class HistoryStore:
         wanted = int(limit)
         if not clean or wanted <= 0 or not self._has_table("ai_embeddings"):
             return []
-        total = self.count_embeddings(model_id)
+        total = int(self._db.execute(
+            "SELECT COUNT(*) FROM ai_embeddings e WHERE " + (
+                "e.model_id=? AND LENGTH(e.embedding)=?"
+                if model_id != LEGACY_MODEL_ID
+                else "(e.model_id=? OR e.model_id='') AND LENGTH(e.embedding)=?"
+            ),
+            self._model_params(model_id),
+        ).fetchone()[0] or 0)
         if not total:
             return []
         fb_clause = ""
@@ -3834,33 +3989,31 @@ class HistoryStore:
             return 0
         from .duplicates import split_distinct
 
-        # Files the owner called "not duplicates" keep the number of the group
-        # they would be in, negated: nothing lists them, and taking the mark
-        # back returns them to that group without another scan.
-        distinct = self._distinct_with(self._distinct_sets(), self._photo_marks())
-        marked = {member for group in distinct for member in group}
-        updates = []
-        grouped = 0
-        cluster_id = 1
-        for group in clusters:
-            if len(group) < 2:
-                continue
-            members = [(ident[0], ident[1], ident[2], ident[3]) for ident in group]
-            parts = split_distinct(members, distinct) if marked.intersection(members) else [members]
-            base = cluster_id
-            placed = set()
-            for part in parts:
-                for ident in part:
-                    updates.append((cluster_id, *ident))
-                    placed.add(ident)
-                grouped += len(part)
-                cluster_id += 1
-            if not parts:
-                cluster_id += 1               # the number stays with the files set aside
-            updates.extend((-base, *ident) for ident in members if ident not in placed)
-        # Publish one coherent snapshot. A failed update must roll back the
-        # reset too; otherwise readers see incomplete groups or wrong copies.
+        # Publish one coherent snapshot inside BEGIN IMMEDIATE so distinct marks
+        # cannot change between reading them and writing cluster_id values.
         with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            distinct = self._distinct_with(self._distinct_sets(), self._photo_marks())
+            marked = {member for group in distinct for member in group}
+            updates = []
+            grouped = 0
+            cluster_id = 1
+            for group in clusters:
+                if len(group) < 2:
+                    continue
+                members = [(ident[0], ident[1], ident[2], ident[3]) for ident in group]
+                parts = split_distinct(members, distinct) if marked.intersection(members) else [members]
+                base = cluster_id
+                placed = set()
+                for part in parts:
+                    for ident in part:
+                        updates.append((cluster_id, *ident))
+                        placed.add(ident)
+                    grouped += len(part)
+                    cluster_id += 1
+                if not parts:
+                    cluster_id += 1               # the number stays with the files set aside
+                updates.extend((-base, *ident) for ident in members if ident not in placed)
             self._db.execute("UPDATE image_hashes SET cluster_id=0 WHERE cluster_id!=0")
             if updates:
                 self._db.executemany(
@@ -3955,16 +4108,8 @@ class HistoryStore:
     def _distinct_with(sets, marks) -> list:
         """Everything that separates files: the group marks, and for each photo mark one pair
         of the photo with every other file of its group."""
-        pairs = []
-        seen = set(sets)
-        for photos, group in marks:
-            for photo in sorted(photos):
-                for other in sorted(group):
-                    pair = frozenset((photo, other))
-                    if other != photo and pair not in seen:
-                        seen.add(pair)
-                        pairs.append(pair)
-        return list(sets) + pairs
+        from .duplicates import distinct_pairs
+        return distinct_pairs(sets, marks)
 
     def _group_members(self, number: int) -> list[tuple]:
         """The listed files of stored group ``number``."""
@@ -3973,33 +4118,62 @@ class HistoryStore:
             "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
             "AND m.num=h.num AND m.media_type=h.media_type WHERE h.cluster_id=? AND " + _listed("m"), (number,))]
 
-    def _regroup(self, number: int, sets) -> None:
-        """Split stored group ``number`` again by the sets; the caller holds the transaction."""
-        from .duplicates import split_distinct
+    def _numbers_of(self, members) -> set[int]:
+        items = [tuple(member)[:4] for member in members]
+        if not items:
+            return set()
+        numbers = set()
+        for clause, params in _identity_chunks(items):
+            for row in self._db.execute(
+                f"SELECT cluster_id FROM image_hashes WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})",
+                params,
+            ):
+                if row[0]:
+                    numbers.add(abs(int(row[0])))
+        return numbers
 
+    def _prune_singleton_clusters(self) -> None:
+        self._db.execute(
+            "UPDATE image_hashes SET cluster_id=0 WHERE cluster_id>0 "
+            "AND cluster_id IN (SELECT cluster_id FROM image_hashes WHERE cluster_id>0 "
+            "GROUP BY cluster_id HAVING COUNT(*)<2) "
+            "AND NOT EXISTS (SELECT 1 FROM image_hashes AS neg WHERE neg.cluster_id=-image_hashes.cluster_id)"
+        )
+
+    def _regroup_numbers(self, numbers, sets) -> None:
+        """Split the combined pool of ``numbers`` again by ``sets``; caller holds transaction."""
+        from .duplicates import plan_regroup_members
+
+        nums = sorted({abs(int(n)) for n in numbers if n})
+        if not nums:
+            return
+        pool = nums + [-n for n in nums]
+        marks = ",".join("?" for _ in pool)
         rows = self._read_rows(
             "SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id "
             "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
             "AND m.num=h.num AND m.media_type=h.media_type "
-            "WHERE h.cluster_id IN (?,?) AND " + _listed("m") + " "
-            "ORDER BY h.filesize DESC, h.tweet_id DESC, h.num DESC", (number, -number))
+            f"WHERE h.cluster_id IN ({marks}) AND " + _listed("m") + " "
+            "ORDER BY h.filesize DESC, h.tweet_id DESC, h.num DESC",
+            pool,
+        )
         members = [(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows]
+        if not members:
+            return
         current = {member: row["cluster_id"] for member, row in zip(members, rows)}
-        wanted = {}
-        spare = None
-        for index, part in enumerate(split_distinct(members, sets)):
-            if index == 0:
-                target = number
-            else:
-                if spare is None:
-                    spare = self._db.execute("SELECT COALESCE(MAX(ABS(cluster_id)),0) FROM image_hashes").fetchone()[0]
-                spare += 1
-                target = spare
-            wanted.update((member, target) for member in part)
-        self._db.executemany(
-            "UPDATE image_hashes SET cluster_id=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-            [(wanted.get(member, -number), *member) for member in members
-             if current[member] != wanted.get(member, -number)])
+        bounds = self._db.execute(
+            "SELECT COALESCE(MAX(cluster_id),0), COALESCE(MIN(cluster_id),0) FROM image_hashes"
+        ).fetchone()
+        max_id = max(abs(int(bounds[0])), abs(int(bounds[1])))
+        updates = plan_regroup_members(members, sets, current, nums[0], max_id)
+        if updates:
+            self._db.executemany(
+                "UPDATE image_hashes SET cluster_id=? WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                [(target, *member) for target, member in updates],
+            )
+
+    def _regroup(self, number: int, sets) -> None:
+        self._regroup_numbers([number], sets)
 
     @_safe
     def distinct_duplicate_count(self) -> int:
@@ -4008,71 +4182,59 @@ class HistoryStore:
 
     @_safe
     def set_duplicate_group_distinct(self, folder_mode: str, tweet_id: str, num: int, media_type: str) -> list | None:
-        """Remember that the files grouped with this one are not duplicates of each other.
-
-        The group leaves the duplicate view, the counts and the copy selection,
-        and a later scan does not group these files again unless a new file
-        joins them. Returns the files of the group, which is what
-        ``undo_duplicates_distinct`` takes, or None when the file is in no group.
-        """
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return None
-        row = self._db.execute(
-            "SELECT cluster_id FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-            (folder_mode, tweet_id, num, media_type)).fetchone()
-        if not row or row[0] <= 0:
-            return None
-        number = row[0]
-        members = self._group_members(number)
-        if len(members) < 2:
-            return None
-        sets = self._distinct_sets()
-        if frozenset(members) not in sets:
-            sets.append(frozenset(members))
         with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                "SELECT cluster_id FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                (folder_mode, tweet_id, num, media_type)).fetchone()
+            if not row or row[0] <= 0:
+                return None
+            number = row[0]
+            members = self._group_members(number)
+            if len(members) < 2:
+                return None
+            sets = self._distinct_sets()
+            if frozenset(members) not in sets:
+                sets.append(frozenset(members))
             self._store_distinct_sets(sets)
-            self._regroup(number, self._distinct_with(sets, self._photo_marks()))
+            self._regroup_numbers([number], self._distinct_with(sets, self._photo_marks()))
         return sorted(list(member) for member in members)
 
     @_safe
     def set_duplicate_photos_distinct(self, identities) -> dict | None:
-        """Remember that these photos are no duplicates of the rest of their group.
-
-        The photos leave the group; the others stay together (a group left with
-        one file is no group any more). A later scan keeps them apart unless a
-        new file joins. The photos must belong to one group and must not be all
-        of it: a whole group is ``set_duplicate_group_distinct``. Returns the
-        mark, which is what ``undo_duplicate_photos_distinct`` takes, or None
-        when nothing was changed.
-        """
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return None
         try:
             chosen = {(item[0], item[1], int(item[2]), item[3]) for item in identities}
         except (TypeError, ValueError, IndexError, KeyError):
             return None
-        numbers = set()
-        for member in chosen:
-            row = self._db.execute(
-                "SELECT cluster_id FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                member).fetchone()
-            if not row or row[0] <= 0:
-                return None
-            numbers.add(row[0])
-        if len(numbers) != 1:
+        if not chosen:
             return None
-        number = numbers.pop()
-        members = self._group_members(number)
-        photos = [member for member in members if member in chosen]
-        if len(photos) != len(chosen) or len(photos) >= len(members):
-            return None
-        marks = self._photo_marks()
-        mark = (frozenset(photos), frozenset(members))
-        if mark not in marks:
-            marks.append(mark)
         with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            numbers = set()
+            for member in chosen:
+                row = self._db.execute(
+                    "SELECT cluster_id FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
+                    member).fetchone()
+                if not row or row[0] <= 0:
+                    return None
+                numbers.add(row[0])
+            if len(numbers) != 1:
+                return None
+            number = numbers.pop()
+            members = self._group_members(number)
+            photos = [member for member in members if member in chosen]
+            if len(photos) != len(chosen) or len(photos) >= len(members):
+                return None
+            marks = self._photo_marks()
+            mark = (frozenset(photos), frozenset(members))
+            if mark not in marks:
+                marks.append(mark)
             self._store_photo_marks(marks)
-            self._regroup(number, self._distinct_with(self._distinct_sets(), marks))
+            self._regroup_numbers([number], self._distinct_with(self._distinct_sets(), marks))
         return {"photos": sorted(list(member) for member in photos),
                 "group": sorted(list(member) for member in members)}
 
@@ -4084,22 +4246,17 @@ class HistoryStore:
                       frozenset((item[0], item[1], int(item[2]), item[3]) for item in mark["group"]))
         except (TypeError, ValueError, IndexError, KeyError):
             return False
-        marks = self._photo_marks()
-        if target not in marks:
-            return False
-        marks.remove(target)
         with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            marks = self._photo_marks()
+            if target not in marks:
+                return False
+            marks.remove(target)
             self._store_photo_marks(marks)
-            numbers = set()
-            for member in target[1]:
-                row = self._db.execute(
-                    "SELECT cluster_id FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                    member).fetchone()
-                if row and row[0]:
-                    numbers.add(abs(row[0]))
+            numbers = self._numbers_of(target[1])
             effective = self._distinct_with(self._distinct_sets(), marks)
-            for number in sorted(numbers):
-                self._regroup(number, effective)
+            if numbers:
+                self._regroup_numbers(numbers, effective)
         return True
 
     @_safe
@@ -4109,39 +4266,44 @@ class HistoryStore:
             target = frozenset((item[0], item[1], item[2], item[3]) for item in members)
         except (TypeError, IndexError, KeyError):
             return False
-        sets = self._distinct_sets()
-        if target not in sets:
-            return False
-        sets.remove(target)
         with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            sets = self._distinct_sets()
+            if target not in sets:
+                return False
+            sets.remove(target)
             self._store_distinct_sets(sets)
-            numbers = set()
-            for member in target:
-                row = self._db.execute(
-                    "SELECT cluster_id FROM image_hashes WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=?",
-                    member).fetchone()
-                if row and row[0]:
-                    numbers.add(abs(row[0]))
+            numbers = self._numbers_of(target)
             effective = self._distinct_with(sets, self._photo_marks())
-            for number in sorted(numbers):
-                self._regroup(number, effective)
+            if numbers:
+                self._regroup_numbers(numbers, effective)
         return True
 
     @_safe
     def clear_duplicates_distinct(self) -> int:
         """Forget every "not duplicates" mark; returns how many there were."""
-        sets = self._distinct_sets()
-        marks = self._photo_marks()
-        stored = self._db.execute(
-            "SELECT 1 FROM catalog_meta WHERE key IN ('duplicate_distinct','duplicate_distinct_photos')").fetchone()
-        if not sets and not marks and not stored:
-            return 0
+        from .duplicates import merge_group_components
+
         with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            sets = self._distinct_sets()
+            marks = self._photo_marks()
+            stored = self._db.execute(
+                "SELECT 1 FROM catalog_meta WHERE key IN ('duplicate_distinct','duplicate_distinct_photos')").fetchone()
+            if not sets and not marks and not stored:
+                return 0
+            count = len(sets) + len(marks)
+            if self._has_table("image_hashes") and self._has_column("image_hashes", "cluster_id"):
+                groups = list(sets) + [group for _photos, group in marks]
+                components = merge_group_components(self._numbers_of(group) for group in groups)
+                for comp in components:
+                    self._regroup_numbers(comp, ())
             self._store_distinct_sets([])
             self._store_photo_marks([])
             if self._has_table("image_hashes") and self._has_column("image_hashes", "cluster_id"):
                 self._db.execute("UPDATE image_hashes SET cluster_id=-cluster_id WHERE cluster_id<0")
-        return len(sets) + len(marks)
+                self._prune_singleton_clusters()
+        return count
 
     @_safe
     def duplicate_rule(self) -> str:
@@ -4165,7 +4327,9 @@ class HistoryStore:
     def has_duplicate_groups(self) -> bool:
         if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
             return False
-        return self._db.execute("SELECT 1 FROM image_hashes WHERE cluster_id>0 LIMIT 1").fetchone() is not None
+        return self._db.execute(
+            "SELECT 1 FROM image_hashes WHERE cluster_id>0 GROUP BY cluster_id HAVING COUNT(*)>=2 LIMIT 1"
+        ).fetchone() is not None
 
     @_safe
     def regroup_exact_duplicates(self) -> int:

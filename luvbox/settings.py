@@ -11,6 +11,8 @@ from pathlib import Path
 import threading
 import time
 
+from .user_errors import UserFacingError
+
 
 _APPDATA_LOCK = threading.RLock()
 _MIGRATION_HELP = ("이전 앱 데이터를 LuvBox 폴더로 옮기지 못했습니다. 실행 중인 앱을 모두 닫고 "
@@ -25,7 +27,7 @@ _LEFTOVER_NAMES = frozenset({"logs", "last-scheduled.json", "last-scheduled-seen
                              "request-protection", "thumbnails", "models"})
 
 
-class AppDataError(OSError):
+class AppDataError(UserFacingError, OSError):
     """Existing user data could not safely be adopted; never start fresh."""
 
 
@@ -131,9 +133,7 @@ def settings_path() -> Path:
 _UNREADABLE_HELP = "기존 설정을 읽지 못해 변경을 저장하지 않았습니다. 설정 파일을 확인한 뒤 다시 시도해 주세요."
 
 
-def load_settings(*, strict: bool = False) -> dict:
-    # A failed migration must not be mistaken for absent preferences.
-    path = settings_path()
+def _read_settings_file(path: Path, *, strict: bool = False) -> dict:
     text = None
     for attempt in range(10):
         try:
@@ -172,10 +172,19 @@ def load_settings(*, strict: bool = False) -> dict:
     return {}
 
 
+def load_settings(*, strict: bool = False) -> dict:
+    # A failed migration must not be mistaken for absent preferences.
+    path = settings_path()
+    return _read_settings_file(path, strict=strict)
+
+
 def load_settings_with_status() -> tuple[dict, bool]:
     """Read settings once, returning ``(values, damaged)``."""
+    # Resolve the app directory outside the fallback handler so AppDataConflict
+    # and migration/folder AppDataError propagate to the startup prompt.
+    path = settings_path()
     try:
-        return load_settings(strict=True), False
+        return _read_settings_file(path, strict=True), False
     except SettingsDamaged:
         return {}, True
     except AppDataError:

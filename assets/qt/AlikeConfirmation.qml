@@ -76,7 +76,7 @@ FlatDialog {
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
-            Layout.minimumHeight: 120
+            Layout.minimumHeight: 64
             radius: Theme.radiusCard
             color: Theme.well
             // The one that leaves is outlined.

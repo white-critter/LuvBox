@@ -23,9 +23,10 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .preview import MAX_PIXELS, MAX_RASTER_BYTES, PHOTO_FORMATS, _BoundedRasterReader, _prepare_decoders
 from .thumbcache import cloud_only
+from .user_errors import UserFacingError
 
 
-class ScanCancelled(RuntimeError):
+class ScanCancelled(UserFacingError, RuntimeError):
     """A requested stop, distinct from a failed duplicate scan."""
 
 
@@ -664,6 +665,63 @@ def split_distinct(members: Sequence, distinct: Sequence) -> list[list]:
     for index, member in enumerate(members):
         groups.setdefault(find(index), []).append(member)
     return [group for group in groups.values() if len(group) >= 2]
+
+
+def distinct_pairs(sets: Sequence[frozenset], marks: Sequence[tuple[frozenset, frozenset]]) -> list[frozenset]:
+    """Expand whole-group and partial-photo distinct marks into separation sets."""
+    pairs = []
+    seen = set(sets)
+    for photos, group in marks:
+        for photo in sorted(photos):
+            for other in sorted(group):
+                pair = frozenset((photo, other))
+                if other != photo and pair not in seen:
+                    seen.add(pair)
+                    pairs.append(pair)
+    return list(sets) + pairs
+
+
+def plan_regroup_members(
+    members: Sequence,
+    distinct: Sequence,
+    current_ids: dict,
+    base_number: int,
+    max_cluster_id: int,
+) -> list[tuple[int, object]]:
+    """Return ``[(new_cluster_id, member)]`` updates after re-splitting a pool of members."""
+    wanted = {}
+    spare = None
+    for index, part in enumerate(split_distinct(members, distinct)):
+        if len(part) < 2:
+            continue
+        if index == 0:
+            target = base_number
+        else:
+            if spare is None:
+                spare = max_cluster_id
+            spare += 1
+            target = spare
+        wanted.update((member, target) for member in part)
+    fallback = -base_number
+    return [(wanted.get(member, fallback), member) for member in members
+            if current_ids[member] != wanted.get(member, fallback)]
+
+
+def merge_group_components(group_numbers: Iterable[set[int]]) -> list[set[int]]:
+    """Merge overlapping cluster-ID sets into connected components."""
+    components: list[set[int]] = []
+    for nums in group_numbers:
+        if not nums:
+            continue
+        merged = set(nums)
+        kept = []
+        for comp in components:
+            if comp & merged:
+                merged |= comp
+            else:
+                kept.append(comp)
+        components = kept + [merged]
+    return components
 
 
 def hamming_distance(hex1: str, hex2: str) -> int:

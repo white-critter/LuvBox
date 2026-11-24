@@ -13,7 +13,9 @@ from threading import Event, Lock, Thread
 import time
 
 from .core import JobOptions
+from .process_limits import ChildProcessJob
 from .review import CONTROL_NAME, ReviewControl
+from .user_errors import UserValueError, safe_ui_error
 
 
 _READ_BYTES = 64 * 1024
@@ -64,7 +66,7 @@ class DownloadService:
 
     def start(self, options):
         if not isinstance(options, JobOptions):
-            raise ValueError("저장 설정을 확인해 주세요.")
+            raise UserValueError("저장 설정을 확인해 주세요.")
         with self._lock:
             if self._closed or self._running:
                 return False
@@ -84,7 +86,7 @@ class DownloadService:
             except RuntimeError:
                 self._thread = None
                 self._running = False
-                raise ValueError(_START_ERROR) from None
+                raise UserValueError(_START_ERROR) from None
         return True
 
     def stop(self):
@@ -117,6 +119,9 @@ class DownloadService:
             if not self._running or self._stop.is_set() or ident != self._review_id:
                 return False
             self._review_id = None
+            if enabled is not None:
+                self._review_enabled = bool(enabled)
+                self._review_dirty = False
             self._review_response = (str(ident), action, enabled)
             if action == "stop":
                 self._stop.set()
@@ -183,6 +188,7 @@ class DownloadService:
 
     def _run(self, job_id, options):
         process = None
+        job = None
         return_code = 1
         forced = False
         with self._lock:
@@ -197,13 +203,23 @@ class DownloadService:
                 stop = directory / "stop.flag"
                 request.write_text(json.dumps(asdict(options), ensure_ascii=False), encoding="utf-8")
                 events.touch()
-                self._control.set_enabled(options.confirm_each)
+                with self._lock:
+                    initial_review = self._review_enabled
+                self._control.set_enabled(initial_review)
                 self._control.attach(directory / CONTROL_NAME)
                 if self._stop.is_set():
                     stop.touch()
                 kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
                 process = subprocess.Popen(worker_command(request, events, stop), stdin=subprocess.DEVNULL,
                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+                if os.name == "nt" and isinstance(getattr(process, "_handle", None), int):
+                    try:
+                        job = ChildProcessJob(process)
+                    except OSError:
+                        if process.poll() is None:
+                            raise
+                    if job is not None:
+                        resources.callback(job.close)
                 resources.callback(self._finish_process, process)
                 with self._lock:
                     self._process = process
@@ -213,6 +229,7 @@ class DownloadService:
                     stop_at = None
                     terminated_at = None
                     heartbeat_at = time.monotonic()
+                    last_wall = time.time()
                     while True:
                         drained = 0
                         while drained < 1024 * 1024:
@@ -231,6 +248,7 @@ class DownloadService:
                             return_code = process.returncode
                             break
                         now = time.monotonic()
+                        wall = time.time()
                         if self._stop.is_set():
                             if stop_at is None:
                                 stop.touch(exist_ok=True)
@@ -249,12 +267,14 @@ class DownloadService:
                                 except OSError:
                                     pass
                         self._update_control()
-                        if now - heartbeat_at >= 1:
-                            heartbeat_at = now
+                        if now - heartbeat_at >= 1 or abs(wall - last_wall) > 3:
+                            last_wall = wall
                             try:
                                 self._control.heartbeat()
                             except OSError:
                                 pass
+                            else:
+                                heartbeat_at = now
                         if drained == 0:
                             time.sleep(.1)
                 process.wait()
@@ -262,8 +282,7 @@ class DownloadService:
             with self._lock:
                 already_final = self._final
             if not already_final:
-                raw = str(error).strip()
-                msg = raw if raw and not raw.isascii() else "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요."
+                msg = safe_ui_error(error, "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요.")
                 self._emit(job_id, {"type": "finished", "status": "error", "message": msg})
         except Exception:
             with self._lock:
@@ -274,6 +293,8 @@ class DownloadService:
         finally:
             if process is not None:
                 self._finish_process(process)
+            if job is not None:
+                job.close()
             self._control.detach()
             with self._lock:
                 self._process = None

@@ -19,6 +19,7 @@ import uuid
 
 from .settings import app_directory
 from .file_mutex import file_mutex
+from .user_errors import UserFacingError
 
 
 MAX_OUTCOMES = 1000
@@ -30,7 +31,7 @@ _COLUMNS = ("run_id", "origin", "account", "output_dir", "started_at", "finished
             "history_run_id", "legacy")
 
 
-class ActivityError(OSError):
+class ActivityError(UserFacingError, OSError):
     pass
 
 
@@ -176,14 +177,21 @@ def outcome_page(page=0, page_size=100, *, account="", origin="all") -> dict:
                     database.row_factory = sqlite3.Row
                     database.execute("PRAGMA query_only=ON")
                     database.execute("BEGIN")
-                    rows = [dict(row) for row in database.execute("SELECT * FROM outcomes ORDER BY rowid DESC LIMIT ?",
-                                                                (MAX_OUTCOMES,))]
+                    try:
+                        rows = [dict(row) for row in database.execute("SELECT * FROM outcomes ORDER BY rowid DESC LIMIT ?",
+                                                                    (MAX_OUTCOMES,))]
+                    except sqlite3.OperationalError as exc:
+                        if "no such table" not in str(exc).lower():
+                            raise
+                        rows = []
             previous = _legacy_row()
         if previous is not None and all(row["run_id"] != previous["run_id"] for row in rows):
             if rows and previous["finished_at"] >= rows[0]["finished_at"]:
                 rows.insert(0, previous)
             else:
                 rows.append(previous)
+        for row in rows:
+            row.setdefault("failed_media", 0)
         rows = rows[:MAX_OUTCOMES]
         rows = [row for row in rows if (not account or row["account"].lower() == account.lower())
                 and (origin == "all" or row["origin"] == origin)]

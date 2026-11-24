@@ -10,6 +10,7 @@ import QtQuick.Window
 AbstractButton {
     id: control
     property string title: ""
+    readonly property var hostWindow: Window.window
     property int cardWidth: 420
     // The card's contents: Labels, rows, … laid out one under another.
     property alias content: body.data
@@ -90,7 +91,7 @@ AbstractButton {
     Popup {
         id: card
         objectName: "helpCard"
-        readonly property Window hostWindow: control.Window.window
+        readonly property var hostWindow: control.hostWindow
         property real buttonTop: 0
         readonly property real aboveSpace: buttonTop - Theme.gapSmall - margins
         readonly property real belowSpace: hostWindow
@@ -116,7 +117,7 @@ AbstractButton {
             function onHeightChanged() { Qt.callLater(card.updatePosition) }
         }
         enter: Transition { NumberAnimation { property: "opacity"; from: 0; to: 1; duration: 120 } }
-        exit: Transition { NumberAnimation { property: "opacity"; from: 1; to: 0; duration: 90 } }
+        exit: Transition { NumberAnimation { property: "opacity"; to: 0; duration: 90 } }
         background: Card {
             radius: Theme.radiusCard
             topColor: Theme.dialogTop

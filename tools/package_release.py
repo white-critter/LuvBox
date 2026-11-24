@@ -44,7 +44,7 @@ SOURCE_FILES = (
     "tools/launcher/splash.ini", "assets/splash/card.png", "assets/splash/glow.png", "assets/splash/mark.png",
     "assets/splash/README.md",
     "entry.py", "setup.ps1", "build.ps1", "run.bat", "tools/windows_version.py", "tools/check_qt_startup.py", "tools/package_browser_extension.py", ".gitattributes", ".gitignore", "requirements.txt",
-    "requirements-dev.txt", "requirements-lock.txt", "requirements-qt.txt", "README.md", "WINDOWS_CONTINUE.md", "LICENSE",
+    "requirements-dev.txt", "requirements-lock.txt", "requirements-qt.txt", "README.md", "WINDOWS_CONTINUE.md", "AGENTS.md", "LICENSE",
     "CHANGELOG.md", "tools/qt_gallery_preview.py",
     "tools/pyinstaller/hook-PySide6.py", "tools/pyinstaller/hook-PySide6.QtQml.py",
     "tools/pyinstaller/hook-PySide6.QtGui.py",
@@ -315,6 +315,198 @@ def require_current_guides(root: Path, version: str) -> None:
         raise ValueError(f"Guides do not name version {version}: " + ", ".join(stale))
 
 
+_USER_DOC_FILES = (
+    "README.md",
+    "CHANGELOG.md",
+    "docs/사용안내.txt",
+    "docs/browser-login.md",
+    "assets/browser-extension/README.md",
+    "assets/browser-extension/PRIVACY.md",
+    ".github/ISSUE_TEMPLATE/bug.yml",
+)
+
+_FORBIDDEN_INTERNAL_PATTERNS = (
+    re.compile(
+        r"(?<![A-Za-z0-9_])(?:PySide6|PyInstaller|SQLite|sqlite3|ONNX|onnxruntime|SigLIP|"
+        r"gallery-dl|gallery_dl|ExifTool|FFmpeg|Pillow|DPAPI|Win32|QML|"
+        r"Qt Quick|WebCrypto|DevTools|LOCALAPPDATA|_internal|PRAGMA|"
+        r"Traceback|WinError|PermissionError|OperationalError|ReferenceError|"
+        r"Binding loop|AES-GCM|HMAC-SHA-256|SHA-256|SHA256)(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    ),
+    re.compile(r"%LOCALAPPDATA%", re.IGNORECASE),
+    re.compile(r"AppData\\+Local\\+LuvBox", re.IGNORECASE),
+    re.compile(r"[A-Za-z]:\\Users\\"),
+    re.compile(
+        r"(?:settings\.json|history\.sqlite3|unsaved\.sqlite3|profile\.sqlite3|"
+        r"last-scheduled\.json|\.luvbox|catalog_meta|image_hashes|missing_choices)",
+        re.IGNORECASE,
+    ),
+    re.compile(r"(?:changelog-detail|development|security-review|verification)\.md", re.IGNORECASE),
+    re.compile(r"(?<![0-9.])127\.0\.0\.1(?![0-9.])"),
+)
+
+_QML_USER_PROP_RE = re.compile(
+    r"(?:^|[\s{;])(?:[\w.]+\.)?(?:text|title|subtitle|placeholderText|tip|Accessible\.name)\s*:\s*(.*)$"
+)
+_QUOTED_LITERAL_RE = re.compile(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'')
+
+
+def _strip_c_comments(text: str) -> str:
+    result = []
+    index = 0
+    length = len(text)
+    in_string = None
+    while index < length:
+        ch = text[index]
+        if in_string:
+            result.append(ch)
+            if ch == "\\" and index + 1 < length:
+                index += 1
+                result.append(text[index])
+            elif ch == in_string:
+                in_string = None
+            index += 1
+        elif ch in ('"', "'"):
+            in_string = ch
+            result.append(ch)
+            index += 1
+        elif text.startswith("//", index):
+            end = text.find("\n", index)
+            if end == -1:
+                break
+            index = end
+        elif text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end == -1:
+                break
+            result.append("\n" * text[index:end + 2].count("\n"))
+            index = end + 2
+        else:
+            result.append(ch)
+            index += 1
+    return "".join(result)
+
+
+def _find_forbidden_terms(text: str) -> list[str]:
+    found = []
+    for pattern in _FORBIDDEN_INTERNAL_PATTERNS:
+        for match in pattern.finditer(text):
+            token = match.group(0)
+            if token not in found:
+                found.append(token)
+    return found
+
+
+def _extract_cs_messages_strings(text: str) -> str:
+    marker = "internal static class Messages"
+    start = text.find(marker)
+    if start < 0:
+        return ""
+    open_brace = text.find("{", start)
+    if open_brace < 0:
+        return ""
+    depth = 0
+    end = open_brace
+    for idx in range(open_brace, len(text)):
+        if text[idx] == "{":
+            depth += 1
+        elif text[idx] == "}":
+            depth -= 1
+            if depth == 0:
+                end = idx + 1
+                break
+    block = _strip_c_comments(text[open_brace:end])
+    return "\n".join(m.group(1) if m.group(1) is not None else (m.group(2) or "")
+                     for m in _QUOTED_LITERAL_RE.finditer(block))
+
+
+def _extract_qml_user_strings(text: str) -> str:
+    cleaned = _strip_c_comments(text)
+    collected = []
+    lines = cleaned.splitlines()
+    idx = 0
+    while idx < len(lines):
+        match = _QML_USER_PROP_RE.search(lines[idx])
+        if not match:
+            idx += 1
+            continue
+        chunk = [match.group(1)]
+        if match.group(1).lstrip().startswith("{"):
+            depth = match.group(1).count("{") - match.group(1).count("}")
+            while depth > 0 and idx + 1 < len(lines):
+                idx += 1
+                line = lines[idx]
+                depth += line.count("{") - line.count("}")
+                chunk.append(line)
+        else:
+            while idx + 1 < len(lines):
+                nxt = lines[idx + 1].lstrip()
+                prev = chunk[-1].rstrip()
+                if (prev.endswith(("+", "?", ":", "&&", "||", ","))
+                        or nxt.startswith(("+", "?", ":", "&&", "||"))):
+                    idx += 1
+                    chunk.append(lines[idx])
+                else:
+                    break
+        expr = "\n".join(chunk)
+        for lit in _QUOTED_LITERAL_RE.finditer(expr):
+            collected.append(lit.group(1) if lit.group(1) is not None else (lit.group(2) or ""))
+        idx += 1
+    return "\n".join(collected)
+
+
+def require_user_facing_wording(root: Path) -> None:
+    """Refuse internal/system/developer jargon in user-facing surfaces."""
+    root = Path(root)
+    violations = []
+
+    def scan(label: str, content: str) -> None:
+        hits = _find_forbidden_terms(content)
+        if hits:
+            violations.append(f"{label}: {', '.join(hits)}")
+
+    for rel in _USER_DOC_FILES:
+        path = root / rel
+        if path.is_file():
+            scan(rel, path.read_text(encoding="utf-8"))
+
+    splash = root / "tools" / "launcher" / "splash.ini"
+    if splash.is_file():
+        values = []
+        for raw_line in splash.read_text(encoding="utf-8").splitlines():
+            stripped = raw_line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                values.append(stripped.split("=", 1)[1])
+        scan("tools/launcher/splash.ini", "\n".join(values))
+
+    launcher = root / "tools" / "launcher" / "Launcher.cs"
+    if launcher.is_file():
+        scan("tools/launcher/Launcher.cs", _extract_cs_messages_strings(launcher.read_text(encoding="utf-8")))
+
+    qt_dir = root / "assets" / "qt"
+    if qt_dir.is_dir():
+        for qml in sorted(qt_dir.glob("*.qml")):
+            scan(f"assets/qt/{qml.name}", _extract_qml_user_strings(qml.read_text(encoding="utf-8")))
+
+    for variant in ("chromium", "firefox"):
+        html = root / "assets" / "browser-extension" / variant / "connect.html"
+        if html.is_file():
+            raw_html = re.sub(r"<(?:script|style)[^>]*>.*?</(?:script|style)>", " ",
+                              html.read_text(encoding="utf-8"), flags=re.IGNORECASE | re.DOTALL)
+            visible_html = re.sub(r"<[^>]+>", " ", raw_html)
+            scan(f"assets/browser-extension/{variant}/connect.html", visible_html)
+        ext_js = root / "assets" / "browser-extension" / variant / "extension-page.js"
+        if ext_js.is_file():
+            clean_js = _strip_c_comments(ext_js.read_text(encoding="utf-8"))
+            literals = "\n".join(m.group(1) if m.group(1) is not None else (m.group(2) or "")
+                                 for m in _QUOTED_LITERAL_RE.finditer(clean_js))
+            scan(f"assets/browser-extension/{variant}/extension-page.js", literals)
+
+    if violations:
+        raise ValueError("User-facing wording exposes internal details:\n" + "\n".join(violations))
+
+
 def _require_same_application(program: Path, application: Path, application_files) -> None:
     """The archive inside LuvBox.exe is exactly the checked application folder."""
     footer = build_launcher.read_footer(program)
@@ -340,6 +532,7 @@ def package(sign=None) -> None:
     A release for publishing is always signed (the entry point below passes
     the release key); installed versions from 1.9.2 on refuse one that is not.
     """
+    require_user_facing_wording(ROOT)
     require_inputs(ROOT)
     subprocess.run([sys.executable, str(ROOT / "tools/ffmpeg/build.py"), "--check"], check=True)
     output = ROOT / "release"
@@ -440,6 +633,7 @@ if __name__ == "__main__":
 
     # build.ps1 asks for these checks alone before the long build; packaging repeats them.
     require_current_guides(ROOT, __version__)
+    require_user_facing_wording(ROOT)
     if "--check-guides" in sys.argv[1:]:
         raise SystemExit(0)
     try:

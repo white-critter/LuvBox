@@ -30,6 +30,7 @@ import threading
 
 from .clip_model import ACTIVE_MODEL_ID, embedding_bytes
 from .settings import app_directory
+from .user_errors import UserFacingError
 
 PHOTO_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 GIF_SUFFIXES = frozenset({".gif"})
@@ -60,7 +61,7 @@ _WRITE_LOCK = threading.RLock()
 _LABEL_CHUNK = 400
 
 
-class LocalFolderError(RuntimeError):
+class LocalFolderError(UserFacingError, RuntimeError):
     """A fixed, user-facing message; the cause may name a path."""
 
 
@@ -883,9 +884,9 @@ class LocalFolderStore:
             return {}
         marks = ",".join("?" for _ in names)
         return {row["tag"]: int(row["n"]) for row in self._read(
-            "SELECT t.tag AS tag, COUNT(DISTINCT t.rel_path) AS n FROM local_tags t JOIN local_files f "
-            f"ON f.rel_path=t.rel_path WHERE f.present=1 AND t.tag IN ({marks}) "
-            "AND t.source IN ('ai','confirmed','user') GROUP BY t.tag", names)}
+            "SELECT t.tag AS tag, COUNT(*) AS n FROM local_tags t CROSS JOIN local_files f "
+            f"ON f.rel_path=t.rel_path WHERE t.source IN ('ai','confirmed','user') AND t.tag IN ({marks}) "
+            "AND f.present=1 GROUP BY t.tag", names)}
 
     # -- AI features (the same interface the X catalog offers the shared pipeline) -----------
     @staticmethod
@@ -899,11 +900,15 @@ class LocalFolderStore:
             "e WHERE e.rel_path=f.rel_path AND e.model_id=? AND LENGTH(e.embedding)=?) ORDER BY f.rowid",
             (model_id, embedding_bytes(model_id)))
 
-    def _embedding_sql(self, unlabeled: bool) -> str:
+    def _embedding_sql(self, unlabeled: bool, *, rowid_order: bool = False) -> str:
         tags = ("AND NOT EXISTS (SELECT 1 FROM local_tags t WHERE t.rel_path=e.rel_path AND t.source='ai') "
                 if unlabeled else "")
+        present = "+f.present=1" if rowid_order else "f.present=1"
+        if rowid_order:
+            return ("FROM local_files f CROSS JOIN local_ai_embeddings e ON e.rel_path=f.rel_path WHERE e.model_id=? "
+                    f"AND LENGTH(e.embedding)=? AND {present} AND f.media_type='photo' " + tags)
         return ("FROM local_ai_embeddings e JOIN local_files f ON f.rel_path=e.rel_path WHERE e.model_id=? "
-                "AND LENGTH(e.embedding)=? AND f.present=1 AND f.media_type='photo' " + tags)
+                f"AND LENGTH(e.embedding)=? AND {present} AND f.media_type='photo' " + tags)
 
     def count_embeddings(self, model_id=ACTIVE_MODEL_ID, *, unlabeled=False) -> int:
         return int(self._read("SELECT COUNT(*) AS n " + self._embedding_sql(unlabeled),
@@ -911,10 +916,10 @@ class LocalFolderStore:
 
     def iter_embeddings(self, model_id=ACTIVE_MODEL_ID, batch=512, *, unlabeled=False):
         last = 0
+        sql = ("SELECT f.rowid AS rowid, e.rel_path AS rel_path, e.embedding AS embedding " +
+               self._embedding_sql(unlabeled, rowid_order=True) + " AND f.rowid>? ORDER BY f.rowid LIMIT ?")
         while True:
-            rows = self._read("SELECT f.rowid AS rowid, e.rel_path AS rel_path, e.embedding AS embedding " +
-                              self._embedding_sql(unlabeled) + " AND f.rowid>? ORDER BY f.rowid LIMIT ?",
-                              (model_id, embedding_bytes(model_id), last, max(1, min(int(batch), 1000))))
+            rows = self._read(sql, (model_id, embedding_bytes(model_id), last, max(1, min(int(batch), 1000))))
             if not rows:
                 return
             last = int(rows[-1]["rowid"])
@@ -1070,7 +1075,7 @@ class LocalFolderStore:
         total = self.count_embeddings(model_id)
         if not total:
             return []
-        base = ("SELECT e.embedding AS embedding " + self._embedding_sql(False) +
+        base = ("SELECT e.embedding AS embedding " + self._embedding_sql(False, rowid_order=True) +
                 "AND NOT EXISTS (SELECT 1 FROM local_tags t WHERE t.rel_path=e.rel_path AND t.tag=? "
                 "AND t.source IN ('ai','confirmed','user')) "
                 "AND NOT EXISTS (SELECT 1 FROM local_ai_feedback fb WHERE fb.rel_path=e.rel_path AND fb.tag=?) ")
@@ -1170,15 +1175,8 @@ class LocalFolderStore:
 
     @staticmethod
     def _distinct_with(sets, marks) -> list:
-        pairs, seen = [], set(sets)
-        for photos, group in marks:
-            for photo in sorted(photos):
-                for other in sorted(group):
-                    pair = frozenset((photo, other))
-                    if other != photo and pair not in seen:
-                        seen.add(pair)
-                        pairs.append(pair)
-        return list(sets) + pairs
+        from .duplicates import distinct_pairs
+        return distinct_pairs(sets, marks)
 
     @staticmethod
     def _store_marks(db, sets=None, marks=None):
@@ -1235,7 +1233,7 @@ class LocalFolderStore:
         return [row["rel_path"] for row in rows]
 
     def _regroup_numbers(self, db, numbers, sets) -> None:
-        from .duplicates import split_distinct
+        from .duplicates import plan_regroup_members
 
         nums = sorted({abs(int(n)) for n in numbers if n})
         if not nums:
@@ -1251,22 +1249,8 @@ class LocalFolderStore:
         if not members:
             return
         current = {row["rel_path"]: row["cluster_id"] for row in rows}
-        base = nums[0]
-        wanted, spare = {}, None
-        for index, part in enumerate(split_distinct(members, sets)):
-            if len(part) < 2:
-                continue
-            if index == 0:
-                target = base
-            else:
-                if spare is None:
-                    spare = db.execute("SELECT COALESCE(MAX(ABS(cluster_id)),0) FROM local_files").fetchone()[0]
-                spare += 1
-                target = spare
-            wanted.update((member, target) for member in part)
-        fallback = -base
-        updates = [(wanted.get(member, fallback), member) for member in members
-                   if current[member] != wanted.get(member, fallback)]
+        max_id = db.execute("SELECT COALESCE(MAX(ABS(cluster_id)),0) FROM local_files").fetchone()[0]
+        updates = plan_regroup_members(members, sets, current, nums[0], max_id)
         if updates:
             db.executemany("UPDATE local_files SET cluster_id=? WHERE rel_path=?", updates)
 
@@ -1374,24 +1358,14 @@ class LocalFolderStore:
         return True
 
     def clear_distinct(self) -> int:
+        from .duplicates import merge_group_components
+
         with self._write() as db:
             sets = self._distinct_sets(db)
             marks = self._photo_marks(db)
             count = len(sets) + len(marks)
             groups = list(sets) + [group for _photos, group in marks]
-            components: list[set[int]] = []
-            for group in groups:
-                nums = self._numbers_of(db, group)
-                if not nums:
-                    continue
-                merged = set(nums)
-                kept = []
-                for comp in components:
-                    if comp & merged:
-                        merged |= comp
-                    else:
-                        kept.append(comp)
-                components = kept + [merged]
+            components = merge_group_components(self._numbers_of(db, group) for group in groups)
             for comp in components:
                 self._regroup_numbers(db, comp, ())
             self._store_marks(db, sets=[], marks=[])

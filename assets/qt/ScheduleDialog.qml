@@ -13,7 +13,10 @@ FlatDialog {
         + (footer && footer.implicitHeight > 0 ? footer.implicitHeight + spacing : 0)
     height: Math.min(Math.max(240, panel.implicitHeight + chromeHeight + 6),
                      parent ? Math.max(200, parent.height - 32) : 560)
-    onOpened: panel.resetDraft()
+    onOpened: {
+        panel.resetDraft()
+        closeButton.forceActiveFocus()
+    }
     onClosed: {
         panel.closeConfirmation()
         panel.resetDraft()
@@ -34,6 +37,7 @@ FlatDialog {
     }
     footer: DialogButtons {
         FlatButton {
+            id: closeButton
             text: "닫기"
             DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
         }

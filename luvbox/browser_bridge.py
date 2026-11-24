@@ -27,6 +27,8 @@ import time
 from urllib.parse import urlsplit
 import webbrowser
 
+from .user_errors import UserFacingError
+
 
 _MAX_PAYLOAD = 8192
 _REQUEST_TIMEOUT = 0.75
@@ -42,6 +44,7 @@ _BASE64URL_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx
 # hand-over does not flash white; inline style only (the policy allows nothing else).
 _PAGE = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark">
+<link rel="icon" href="data:,">
 <title>LuvBox · 브라우저 연결</title>
 <style>
 *{box-sizing:border-box}html{background:#0e0e0e}
@@ -66,11 +69,11 @@ p{overflow-wrap:anywhere}.guide{margin:0 0 12px;color:#f4f1f1}.guide b{font-weig
 <b>‘확장 설치·연결 도움말’</b>을 따르세요. 확장의 응답이 없으면 그 도움말이 저절로 펼쳐집니다.</p>
 <p class="guide">이미 설치했다면 같은 프로필인지 확인하고, 확장 관리에서 LuvBox 확장을 새로고침한 뒤 앱에서 연결을 취소하고 다시 시작하세요.</p>
 <p class="help">브라우저의 비밀번호는 LuvBox에 전달되지 않습니다. 연결을 승인하면 X 로그인 정보와 계정 정보가 이 컴퓨터의 LuvBox에만
-전달됩니다. 이 탭을 닫거나 앱에서 취소하면 연결이 중단됩니다.</p>
+전달됩니다. 이 탭을 닫고 앱에서 취소를 누르면 연결이 중단됩니다.</p>
 </main></body></html>""".encode("utf-8")
 
 
-class BrowserBridgeError(RuntimeError):
+class BrowserBridgeError(UserFacingError, RuntimeError):
     """A fixed, credential-free error suitable for the connection UI."""
 
 
@@ -383,12 +386,15 @@ class BrowserBridge:
         return self
 
     def _serve(self):
-        self._server.timeout = 0.1
-        while not self._closed and not self._event.is_set() and time.monotonic() < self._deadline:
-            self._server.handle_request()
-        self._secret = ""
-        self._server.server_close()
-        self._event.set()
+        try:
+            self._server.timeout = 0.1
+            while not self._closed and not self._event.is_set() and time.monotonic() < self._deadline:
+                self._server.handle_request()
+        finally:
+            self._secret = ""
+            if self._server is not None:
+                self._server.server_close()
+            self._event.set()
 
     def open_browser(self, *, opener=None):
         self.start()
@@ -451,5 +457,7 @@ class BrowserBridge:
             self._progress.clear()
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=1.1)
+        if self._server is not None and (self._thread is None or not self._thread.is_alive()):
+            self._server.server_close()
         if self._server is not None:
             self._server.server_close()

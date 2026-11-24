@@ -933,8 +933,21 @@ ApplicationWindow {
                                 validator: RegularExpressionValidator { regularExpression: /@?[A-Za-z0-9_]{1,15}/ }
                                 selectByMouse: true
                                 Accessible.name: "저장할 X 아이디"
-                                onEditingFinished: if (window.app) window.app.setAccount(text)
-                                onAccepted: if (window.app) window.app.setAccount(text)
+                                Keys.onEscapePressed: event => {
+                                    text = Qt.binding(function() { return window.app ? window.app.account : "" })
+                                    focus = false
+                                    event.accepted = true
+                                }
+                                onEditingFinished: {
+                                    if (window.app)
+                                        window.app.setAccount(text)
+                                    text = Qt.binding(function() { return window.app ? window.app.account : "" })
+                                }
+                                onAccepted: {
+                                    if (window.app)
+                                        window.app.setAccount(text)
+                                    text = Qt.binding(function() { return window.app ? window.app.account : "" })
+                                }
                             }
                             Rectangle {
                                 Layout.fillWidth: true
@@ -1305,7 +1318,7 @@ ApplicationWindow {
                         currentIndex: window.densityChoice
                         implicitWidth: 116
                         focusPolicy: Qt.TabFocus
-                        escapeFocus: gallery
+                        escapeFocus: window.duplicateMode ? duplicateReview : gallery
                         Accessible.name: "사진 크기"
                         onActivated: {
                             window.setDensity(currentIndex)
@@ -1395,21 +1408,16 @@ ApplicationWindow {
                             tip: !aiMenu.visible ? "AI 분류 보기 · 실행" : ""
                             onClicked: aiMenu.popup(aiMenuButton, 0, aiMenuButton.height + 4)
                         }
-                        FlatCombo {
+                        FilterChipCombo {
                             id: authorFilter
                             objectName: "galleryAuthorFilter"
-                            chip: true
                             chosen: applied.length > 0
+                            maxChipWidth: 220
                             minimumPopupWidth: 280
-                            implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
-                            width: Math.min(220, Math.max(96, implicitContentWidth + leftPadding + rightPadding))
-                            height: implicitHeight
                             // The closed chip names the author; the count belongs to the list.
                             displayText: currentIndex > 0 && model[currentIndex] ? "@" + model[currentIndex].value : "작성자"
                             Accessible.name: "작성자 선택"
-                            focusPolicy: Qt.TabFocus
-                            escapeFocus: gallery
-                            typeAhead: true
+                            escapeFocus: window.duplicateMode ? duplicateReview : gallery
                             textRole: "label"
                             valueRole: "value"
                             readonly property string applied: window.app ? window.app.library.filterAuthor : ""
@@ -1452,20 +1460,15 @@ ApplicationWindow {
                                 currentIndex = Qt.binding(function() { return authorFilter.authorIndex() })
                             }
                         }
-                        FlatCombo {
+                        FilterChipCombo {
                             id: hashtagFilter
                             objectName: "galleryHashtagFilter"
-                            chip: true
                             chosen: applied.length > 0
+                            maxChipWidth: 200
                             minimumPopupWidth: 240
-                            implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
-                            width: Math.min(200, Math.max(96, implicitContentWidth + leftPadding + rightPadding))
-                            height: implicitHeight
                             displayText: currentIndex > 0 && model[currentIndex] ? model[currentIndex].value : "해시태그"
                             Accessible.name: "해시태그 선택"
-                            focusPolicy: Qt.TabFocus
-                            escapeFocus: gallery
-                            typeAhead: true
+                            escapeFocus: window.duplicateMode ? duplicateReview : gallery
                             textRole: "label"
                             valueRole: "value"
                             readonly property string applied: window.app ? window.app.library.filterHashtag : ""
@@ -1506,20 +1509,15 @@ ApplicationWindow {
                                 currentIndex = Qt.binding(function() { return hashtagFilter.hashtagIndex() })
                             }
                         }
-                        FlatCombo {
+                        FilterChipCombo {
                             id: userTagFilter
                             objectName: "galleryUserTagFilter"
-                            chip: true
                             chosen: applied.length > 0
+                            maxChipWidth: 200
                             minimumPopupWidth: 200
-                            implicitContentWidthPolicy: ComboBox.ContentItemImplicitWidth
-                            width: Math.min(200, Math.max(96, implicitContentWidth + leftPadding + rightPadding))
-                            height: implicitHeight
                             displayText: currentIndex > 0 && model[currentIndex] ? "#" + model[currentIndex].value : "내 태그"
                             Accessible.name: "내 태그 선택"
-                            focusPolicy: Qt.TabFocus
-                            escapeFocus: gallery
-                            typeAhead: true
+                            escapeFocus: window.duplicateMode ? duplicateReview : gallery
                             textRole: "label"
                             valueRole: "value"
                             readonly property string applied: window.app ? window.app.library.filterUserTag : ""
@@ -1584,6 +1582,7 @@ ApplicationWindow {
                         Flow {
                             id: dateRange
                             visible: filterToggle.checked
+                            width: Math.min(implicitWidth, filterHost.width)
                             spacing: 6
                             FlatCombo {
                                 id: dateFieldChoice
@@ -1593,7 +1592,7 @@ ApplicationWindow {
                                 implicitHeight: Theme.controlHeight
                                 implicitWidth: 96
                                 focusPolicy: Qt.TabFocus
-                                escapeFocus: gallery
+                                escapeFocus: window.duplicateMode ? duplicateReview : gallery
                                 Accessible.name: "날짜 필터 기준"
                                 onActivated: index => {
                                     window.applyFilters({ dateField: index === 1 ? "saved" : "posted" })
@@ -2372,7 +2371,8 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
-                                    ToolTip.visible: containsMouse
+                                    ToolTip.delay: 500
+                                    ToolTip.visible: containsMouse && !pressed
                                     ToolTip.text: tile.favorite ? "즐겨찾기 해제 (F)" : "즐겨찾기 추가 (F)"
                                     onClicked: {
                                         if (window.app)
@@ -2694,26 +2694,6 @@ ApplicationWindow {
         enabled: window.currentScreen === 1 && !window.modalOpen && !!window.app && !window.app.closing
         onActivated: window.app.refreshGallery()
     }
-    component PreviewMetadataButton: FlatButton {
-        id: metadataButton
-        property color foreground: Theme.text
-        property color hoverForeground: foreground
-        tone: "ghost"
-        compact: true
-        focusPolicy: Qt.TabFocus
-        leftPadding: 6
-        rightPadding: 6
-        contentItem: Text {
-            text: metadataButton.text
-            textFormat: Text.PlainText
-            font: metadataButton.font
-            color: !metadataButton.enabled ? Theme.textDisabled
-                : (metadataButton.hovered ? metadataButton.hoverForeground : metadataButton.foreground)
-            verticalAlignment: Text.AlignVCenter
-            horizontalAlignment: Text.AlignHCenter
-            elide: Text.ElideRight
-        }
-    }
 
     Dialog {
         id: previewDialog
@@ -2850,6 +2830,7 @@ ApplicationWindow {
             resetScroll()
             window.stopWheel()
         }
+        onOpened: previewCloseButton.forceActiveFocus()
         onClosed: {
             inlineTagField.text = ""
             selectedMedia.release()
@@ -2953,6 +2934,7 @@ ApplicationWindow {
                     }
                 }
                 FlatButton {
+                    id: previewCloseButton
                     text: "닫기"
                     DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
                 }
@@ -3086,86 +3068,33 @@ ApplicationWindow {
 
                         Repeater {
                             model: window.app ? window.app.library.selectedTags : []
-                            delegate: Rectangle {
+                            delegate: PreviewTagChip {
                                 objectName: "previewTagChip"
-                                // Declared, or the fields of a tag read as undefined: the chip
-                                // then showed no name, and an AI label looked like a typed tag.
-                                required property var modelData
-                                readonly property string tagName: modelData.tag || ""
-                                readonly property bool isConfirmed: modelData.source === "confirmed"
-                                readonly property bool isAi: modelData.source === "ai" || isConfirmed
-                                // A tag the person typed that is also an AI tag teaches that tag.
-                                readonly property bool teaches: !isAi && !!window.app
-                                    && window.app.library.aiCategories.indexOf(tagName) >= 0
-                                color: userTagButton.hovered ? (isAi ? Theme.aiTagHover : Theme.userTagHover) : (isAi ? Theme.aiTagFill : Theme.userTagFill)
-                                radius: Theme.radiusSmall
-                                border.width: 1
-                                border.color: isAi ? Theme.aiTagLine : Theme.userTagLine
-                                implicitWidth: userTagRow.implicitWidth + 4
-                                implicitHeight: Theme.compactHeight
-                                width: Math.min(implicitWidth, previewTags.width)
-
-                                RowLayout {
-                                    id: userTagRow
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 2
-                                    anchors.rightMargin: 2
-                                    spacing: 2
-
-                                    PreviewMetadataButton {
-                                        id: userTagButton
-                                        objectName: "previewTagName"
-                                        Layout.fillWidth: true
-                                        Layout.minimumWidth: 0
-                                        text: (isAi ? "AI · #" : "#") + tagName + (isConfirmed ? " ✓" : "")
-                                        foreground: isAi ? Theme.aiTagText : Theme.userTagText
-                                        tip: isConfirmed ? qsTr("맞다고 알려 준 AI 태그 · 모아보기")
-                                            : (isAi ? qsTr("AI가 붙인 태그 · 모아보기")
-                                                    : (teaches ? qsTr("내 태그 (AI 학습 사용 중) · 모아보기") : qsTr("이 태그만 보기")))
-                                        Accessible.name: qsTr("태그 %1 모아보기").arg(text)
-                                        onClicked: {
-                                            if (isAi)
-                                                window.app.library.setAiFilter(tagName, "")
-                                            else
-                                                window.applyFilters({ userTag: tagName })
-                                            previewDialog.close()
-                                        }
+                                maxWidth: previewTags.width
+                                tagsLocked: !!window.app && window.app.library.tagsLocked
+                                teaches: !isAi && !!window.app && window.app.library.aiCategories.indexOf(tagName) >= 0
+                                onTagActivated: (tagName, isAi) => {
+                                    if (!window.app)
+                                        return
+                                    if (isAi)
+                                        window.app.library.setAiFilter(tagName, "")
+                                    else
+                                        window.applyFilters({ userTag: tagName })
+                                    previewDialog.close()
+                                }
+                                onConfirmRequested: tagName => {
+                                    if (window.app && window.app.library.teachTag(window.app.library.selectedKey, tagName, true)) {
+                                        previewDialog.notice = ""
+                                        previewDialog.noticeKey = previewDialog.openedKey
+                                        window.flashNotice(qsTr("#%1 분류를 배우는 중…").arg(tagName))
                                     }
-                                    // "Yes, this" for a tag the AI guessed: it is kept and the AI learns from it.
-                                    PreviewMetadataButton {
-                                        objectName: "previewTagConfirm"
-                                        visible: modelData.source === "ai"
-                                        enabled: !!window.app && !window.app.library.tagsLocked
-                                        text: "✓"
-                                        font.bold: true
-                                        foreground: Theme.textMuted
-                                        hoverForeground: Theme.good
-                                        tip: qsTr("맞아요 · AI 학습에 반영")
-                                        Accessible.name: qsTr("AI 태그 %1 맞아요").arg(tagName)
-                                        onClicked: {
-                                            if (window.app.library.teachTag(window.app.library.selectedKey, tagName, true)) {
-                                                previewDialog.notice = ""
-                                                previewDialog.noticeKey = previewDialog.openedKey
-                                                window.flashNotice(qsTr("#%1 분류를 배우는 중…").arg(tagName))
-                                            }
-                                        }
-                                    }
-                                    PreviewMetadataButton {
-                                        objectName: "previewTagRemove"
-                                        enabled: !!window.app && !window.app.library.tagsLocked
-                                        text: "×"
-                                        font.bold: true
-                                        foreground: Theme.textMuted
-                                        hoverForeground: Theme.error
-                                        tip: isAi ? qsTr("이 태그 아님 · AI 학습에 반영") : qsTr("태그 삭제")
-                                        Accessible.name: isAi ? qsTr("AI 태그 %1 아님").arg(tagName)
-                                                              : qsTr("태그 %1 삭제").arg(tagName)
-                                        onClicked: {
-                                            previewDialog.notice = ""
-                                            previewDialog.noticeKey = previewDialog.openedKey
-                                            window.app.library.removeSelectedTag(tagName)
-                                        }
-                                    }
+                                }
+                                onRemoveRequested: tagName => {
+                                    if (!window.app)
+                                        return
+                                    previewDialog.notice = ""
+                                    previewDialog.noticeKey = previewDialog.openedKey
+                                    window.app.library.removeSelectedTag(tagName)
                                 }
                             }
                         }
@@ -3235,7 +3164,7 @@ ApplicationWindow {
                     ScrollView {
                         id: bodyScroll
                         objectName: "previewBodyScroll"
-                        SmoothWheel { flickable: bodyScroll.contentItem }
+                        SmoothWheel { flickable: bodyScroll.contentItem as Flickable }
                         Layout.fillWidth: true
                         Layout.preferredHeight: Math.min(140, previewDialog.availableHeight * 0.25,
                                                         Math.max(1, bodyText.implicitHeight))
@@ -3261,7 +3190,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         text: window.app ? window.app.library.status : ""
                         textFormat: Text.PlainText
-                        visible: text.length > 0
+                        visible: text.length > 0 && text !== previewDialog.notice
                         wrapMode: Text.WordWrap
                         color: Theme.textMuted
                     }
@@ -3303,9 +3232,14 @@ ApplicationWindow {
         property int viewYear: 2026
         property int viewMonth: 0
         property int startingDay: 1
+        property int focusedDay: 1
         property string todayIso: ""
         readonly property int firstWeekday: dateInMonth(viewMonth, 1).getDay()
         readonly property int daysInMonth: dateInMonth(viewMonth + 1, 0).getDate()
+        readonly property int tabDay: {
+            const clamped = Math.max(1, Math.min(focusedDay, daysInMonth))
+            return canChoose(formatIso(viewYear, viewMonth + 1, clamped)) ? clamped : Math.max(1, clamped - 1)
+        }
 
         function dateInMonth(month, day) {
             // The Date constructor treats years below 100 as 1900-1999.
@@ -3357,6 +3291,7 @@ ApplicationWindow {
                 if (!stepMonth(1))
                     return
             }
+            focusedDay = Math.max(1, Math.min(day, daysInMonth))
             const item = datePickerDays.itemAt(firstWeekday + day - 1)
             if (item && item.enabled)
                 item.forceActiveFocus()
@@ -3402,6 +3337,7 @@ ApplicationWindow {
                 viewMonth = now.getMonth()
                 startingDay = now.getDate()
             }
+            focusedDay = startingDay
             place()
             open()
         }
@@ -3508,7 +3444,8 @@ ApplicationWindow {
                         Layout.preferredHeight: 30
                         radius: Theme.radiusSmall
                         enabled: validDay && datePickerPopup.canChoose(isoDate)
-                        activeFocusOnTab: enabled
+                        activeFocusOnTab: enabled && dayNumber === datePickerPopup.tabDay
+                        onActiveFocusChanged: if (activeFocus && validDay) datePickerPopup.focusedDay = dayNumber
                         Accessible.ignored: !validDay
                         Accessible.role: Accessible.Button
                         Accessible.name: validDay
@@ -3997,67 +3934,44 @@ ApplicationWindow {
         }
     }
 
-    Popup {
+    FlatDialog {
         id: tagBatchPopup
         objectName: "tagBatchPopup"
         parent: popupHost
-        modal: true
-        focus: true
+        title: "선택한 항목에 태그 추가"
+        preferredWidth: 340
+        light: 0.12
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-        anchors.centerIn: parent
-        width: 320
-        padding: 16
+        function submitTag() {
+            if (batchTagInput.cleanTag.length > 0 && window.app && !window.app.library.tagsLocked
+                    && window.app.library.addTagToSelection(batchTagInput.cleanTag) > 0) {
+                batchTagInput.text = ""
+                tagBatchPopup.close()
+            }
+        }
         onOpened: {
             batchTagInput.text = ""
             batchTagInput.forceActiveFocus()
         }
-        background: Card {
-            topColor: Theme.dialogTop
-            bottomColor: Theme.dialog
-            border.color: Theme.lineStrong
-            glow: 0.12
+        onAccepted: submitTag()
+        contentItem: FlatField {
+            id: batchTagInput
+            objectName: "batchTagInput"
+            readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
+            maximumLength: 50
+            placeholderText: "태그 이름 입력"
+            onAccepted: tagBatchPopup.submitTag()
         }
-        contentItem: ColumnLayout {
-            spacing: 12
-            Label {
-                text: "선택한 항목에 태그 추가"
-                font.bold: true
-                font.pixelSize: Theme.fontSection
-                color: Theme.text
+        footer: DialogButtons {
+            FlatButton {
+                text: "추가"
+                tone: "primary"
+                enabled: batchTagInput.cleanTag.length > 0 && (!window.app || !window.app.library.tagsLocked)
+                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
-            FlatField {
-                id: batchTagInput
-                objectName: "batchTagInput"
-                readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
-                Layout.fillWidth: true
-                maximumLength: 50
-                placeholderText: "태그 이름 입력"
-                onAccepted: {
-                    if (cleanTag.length > 0 && window.app && !window.app.library.tagsLocked
-                            && window.app.library.addTagToSelection(cleanTag) > 0) {
-                        text = ""
-                        tagBatchPopup.close()
-                    }
-                }
-            }
-            RowLayout {
-                Layout.alignment: Qt.AlignRight
-                spacing: 8
-                FlatButton {
-                    text: "취소"
-                    onClicked: tagBatchPopup.close()
-                }
-                FlatButton {
-                    text: "추가"
-                    tone: "primary"
-                    enabled: batchTagInput.cleanTag.length > 0 && (!window.app || !window.app.library.tagsLocked)
-                    onClicked: {
-                        if (window.app.library.addTagToSelection(batchTagInput.cleanTag) > 0) {
-                            batchTagInput.text = ""
-                            tagBatchPopup.close()
-                        }
-                    }
-                }
+            FlatButton {
+                text: "취소"
+                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
             }
         }
     }

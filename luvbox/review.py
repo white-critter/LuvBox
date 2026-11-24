@@ -16,7 +16,7 @@ _HEARTBEAT_TIMEOUT = 15.0
 # Antivirus scans or the parent's replace can hold the file for a moment, and
 # after sleep/resume the parent needs up to a second to write a new heartbeat.
 _READ_RETRY_SECONDS = 0.5
-_STALE_GRACE_SECONDS = 1.2
+_STALE_GRACE_SECONDS = 1.6
 _MAX_CONTROL_BYTES = 4096
 _DETAIL_KEYS = ("tweet_id", "num", "author", "posted_at", "media_type", "filename")
 

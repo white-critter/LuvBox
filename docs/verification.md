@@ -10,6 +10,15 @@
 
 배포 검증은 `LuvBox.exe`의 체크섬과 꼬리표, 소스·라이선스 ZIP의 내용과 개인정보 제외를 확인합니다. 공개 뒤 올린 `LuvBox.exe`를 다시 받아 해시를 대조하고 한글·공백 경로에서, 격리한 `LOCALAPPDATA`로 실행합니다. 세부 로그와 화면은 `.test-output/`에 보관하며 배포 소스에 넣지 않습니다.
 
+## 2026-11-24 1.12.11 프로그램 검수
+
+- 전체 회귀 검사 2,080건 중 2,072건이 통과했습니다(실패 0건, 오류 0건, 생략 8건: Windows 심볼릭 링크 생성 권한 미보유 5건, 선택형 Playwright 통합 1건, `LUVBOX_SIGLIP_MODEL` 미지정 1건, 선택형 네이티브 휴지통 셸 1건).
+- 의존성(`pip check`), 고정 빌드 입력(`tools/check_build_inputs.py`), 사용자 문구·버전 정책(`tools/package_release.py --check-guides`, `tests/test_user_wording_policy.py`), 서명 키(`tools/release_key.py --check`)를 통과했고, `assets/qt/*.qml` 전체 `qmllint` 점검에서 `QL:*` 오류 0건을 확인했습니다.
+- 격리된 임시 `LOCALAPPDATA`·`QML_DISK_CACHE_PATH` 환경에서 `entry.py --self-test` (`ok: true`, `qml_errors: []`), `entry.py --download-smoke` (`ok: true`, `prepared_requests: 1`), `tests/test_qt_look_qml.py --scene` (`ok: true`, `qml_errors: []`), `tests/test_qt_preview_media_switch.py --scene` (6개 전환·비율 점검, `qml_errors: []`)를 모두 통과했습니다.
+- 오프스크린 장면 회귀(`tests/test_regression_11211.py --scene`)에서 달력 로빙 Tab 포커스, 일괄 태그 대화상자, 중복 빈 목록 필터 구분 안내, 저장 못 한 미디어 `Esc` 취소 순서·수정 중 잠금, 로컬 폴더 미리보기 태그 버튼·`m` 음소거, 예약 창 초기 포커스, 연결 창 연결 중 `Esc` 취소(창 유지)를 확인했습니다.
+- 10,000~100,000행 합성 벤치마크(`docs/performance.md`)에서 `local_store.iter_embeddings` 1페이지 조회(`33.832ms -> 1.972ms`), 4000×3000 EXIF 회전 CLIP 전처리(`151.514ms -> 112.108ms`), 기록 DB 100,000행 `saved_first_page` (`38.421ms -> 7.202ms`)·`saved_late_page` (`164.346ms -> 12.156ms`)·`author_first_page` (`49.66ms -> 3.989ms`)를 실측했습니다.
+- 실제 X 계정 로그인·네트워크 다운로드 및 실제 Firefox 브라우저 확장 실시간 연결은 이번 검수에서 실행하지 않았습니다.
+
 ## 2026-11-24 1.12.10 프로그램 검수
 
 - 실제 Windows Qt 창을 680×480으로 열어 긴 태그 목록에서 Tab으로 이동했습니다. 화면 밖의 버튼이 스크롤되어 보였고, Space로 사용자 태그를 삭제하고 Enter로 해시태그 필터를 적용했습니다.

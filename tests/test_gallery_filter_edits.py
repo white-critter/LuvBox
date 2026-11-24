@@ -188,10 +188,11 @@ class GalleryFilterEditTests(unittest.TestCase):
         self.wait(lambda: not self.library.model.busy and self.library.model.total == 0)
 
         def partial_scan(generation, progress_callback=None, status_callback=None, epoch=None, download=True):
+            from luvbox.duplicates import ScanCancelled
             with closing(HistoryStore.for_storage(self.paths)) as store:
                 store.save_ai_tags([("flat", "101", 1, "photo", "풍경·배경")])
             self.library._repository._ai_wrote = True
-            raise RuntimeError("AI 자동분류를 중단했습니다. 이미 분류된 1장은 유지됩니다.")
+            raise ScanCancelled("AI 자동분류를 중단했습니다. 이미 분류된 1장은 유지됩니다.")
 
         original = self.library._repository.scan_ai_tags
         self.library._repository.scan_ai_tags = partial_scan

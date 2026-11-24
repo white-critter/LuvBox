@@ -33,6 +33,7 @@ from pathlib import Path
 from .file_mutex import replace_file
 from .launcher import program_path, spawn_detached
 from .settings import AppDataError, app_directory, load_settings
+from .user_errors import UserFacingError, UserValueError, safe_ui_error
 
 
 TASK_NAME = "LuvBox 자동 저장"
@@ -44,7 +45,7 @@ _TIME = re.compile(r"([01]?[0-9]|2[0-3]):([0-5][0-9])\Z")
 _SCHEDULE_HELP = "Windows 자동 실행 예약을 설정하지 못했습니다. 잠시 뒤 다시 시도해 주세요. (회사·학교 PC에서는 관리자 제한으로 막혀 있을 수 있습니다.)"
 
 
-class ScheduleError(RuntimeError):
+class ScheduleError(UserFacingError, RuntimeError):
     """A fixed message about Task Scheduler; PowerShell output is never shown."""
 
 
@@ -78,7 +79,7 @@ def app_command() -> list[str]:
 def normal_time(value: str) -> str:
     match = _TIME.fullmatch(str(value).strip())
     if not match:
-        raise ValueError("실행 시각은 09:00처럼 24시간 형식으로 입력해 주세요.")
+        raise UserValueError("실행 시각은 09:00처럼 24시간 형식으로 입력해 주세요.")
     return f"{int(match[1]):02d}:{match[2]}"
 
 
@@ -188,7 +189,7 @@ foreach ($old in ($env:XLS_LEGACY -split '\|')) {
 $action = New-ScheduledTaskAction -Execute $env:XLS_PROGRAM -Argument $env:XLS_ARGUMENTS
 # Start tomorrow if today's time has passed: with StartWhenAvailable, a start
 # in the past would otherwise count as missed and run at once.
-$at = [datetime]::ParseExact($env:XLS_TIME, 'HH:mm', $null)
+$at = [datetime]::ParseExact($env:XLS_TIME, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
 if ($at -le (Get-Date)) { $at = $at.AddDays(1) }
 $trigger = New-ScheduledTaskTrigger -Daily -At $at
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -288,15 +289,28 @@ def _outcome_identity(data: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _prune_seen_markers(directory: Path, *, keep: int = _KEEP_LOGS) -> None:
+    try:
+        entries = [path for path in directory.iterdir() if path.suffix == ".json" and path.is_file()]
+        entries.sort(key=lambda path: path.stat().st_mtime_ns)
+        for old in entries[:-keep]:
+            old.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def mark_last_run_seen(outcome: dict | None = None) -> None:
     """Acknowledge the displayed run without rewriting a newer run's result."""
     data = last_run() if outcome is None else outcome
     if data is not None and not data.get("seen"):
-        _write_last_run_json(_last_run_seen_path(data), {"outcome": _outcome_identity(data)})
+        target = _last_run_seen_path(data)
+        _write_last_run_json(target, {"outcome": _outcome_identity(data)})
+        _prune_seen_markers(target.parent)
 
 
 def _write_last_run(data: dict) -> None:
     _write_last_run_json(last_run_path(), data)
+    _prune_seen_markers(last_run_path().parent / "last-scheduled-seen")
 
 
 def _write_last_run_json(path: Path, data: dict) -> None:
@@ -315,7 +329,7 @@ def _options_from_settings(settings: dict, full: bool):
 
     account, output = settings.get("account"), settings.get("output_dir")
     if not isinstance(account, str) or not account.strip() or not isinstance(output, str) or not output.strip():
-        raise ValueError("저장된 설정이 없습니다. 앱에서 한 번 저장을 실행한 뒤 예약 실행을 사용해 주세요.")
+        raise UserValueError("저장된 설정이 없습니다. 앱에서 한 번 저장을 실행한 뒤 예약 실행을 사용해 주세요.")
     locations = settings.get("record_locations")
     if isinstance(locations, dict):
         recorded = locations.get(_normal_account(account))
@@ -323,7 +337,7 @@ def _options_from_settings(settings: dict, full: bool):
                 Path(recorded).expanduser().resolve() != Path(output).expanduser().resolve()):
             # The window moves an account's records when its folder changes.
             # Never start in a folder whose records have not been moved yet.
-            raise ValueError("저장 폴더 변경이 끝나지 않았습니다. 앱에서 저장 폴더를 확인한 뒤 다시 시도해 주세요.")
+            raise UserValueError("저장 폴더 변경이 끝나지 않았습니다. 앱에서 저장 폴더를 확인한 뒤 다시 시도해 주세요.")
     from .storage import missing_media_help, resolve_storage, saved_media_missing
     try:
         paths = resolve_storage(output, account, settings.get("separate_accounts", False) is True)
@@ -331,7 +345,7 @@ def _options_from_settings(settings: dict, full: bool):
         paths = None   # JobOptions.validate below names the invalid setting
     if paths is not None and saved_media_missing(paths):
         # Never start a second, empty library in place of a moved folder.
-        raise ValueError("자동 저장을 건너뛰었습니다. " + missing_media_help(paths))
+        raise UserValueError("자동 저장을 건너뛰었습니다. " + missing_media_help(paths))
     size = settings.get("max_video_mb", 200)
     folder_mode = settings.get("folder_mode", "flat")
     return JobOptions(
@@ -379,7 +393,7 @@ def _failure_text(outcome: dict) -> str:
 def _notify_failure(outcome: dict) -> None:
     """Tell the signed-in user right away; a scheduled run has no window."""
     try:
-        from PySide6.QtCore import Qt
+        from PySide6.QtCore import Qt, QTimer
         from PySide6.QtGui import QIcon
         from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -387,7 +401,7 @@ def _notify_failure(outcome: dict) -> None:
         if not isinstance(application, QApplication):
             return
         dialog = QMessageBox()
-        dialog.setWindowTitle("러브박스 자동 저장 실패")
+        dialog.setWindowTitle("LuvBox 자동 저장 실패")
         dialog.setWindowIcon(QIcon(str(Path(__file__).resolve().parents[1] / "assets/icons/luvbox.ico")))
         dialog.setIcon(QMessageBox.Icon.Warning)
         dialog.setTextFormat(Qt.TextFormat.PlainText)
@@ -396,6 +410,10 @@ def _notify_failure(outcome: dict) -> None:
         open_button = dialog.addButton("앱 열기", QMessageBox.ButtonRole.AcceptRole)
         close_button = dialog.addButton("닫기", QMessageBox.ButtonRole.RejectRole)
         dialog.setDefaultButton(close_button)
+        auto_close = QTimer(dialog)
+        auto_close.setSingleShot(True)
+        auto_close.timeout.connect(dialog.accept)
+        auto_close.start(5 * 60 * 1000)
         dialog.exec()
         if dialog.clickedButton() is open_button:
             spawn_detached(app_command())
@@ -527,7 +545,12 @@ def run_saved(*, full: bool = False) -> int:
                       f"용량 초과 {event.get('size_skipped', 0)}개 · 저장 실패 {event.get('failed_media', 0)}개")
                 write(str(event.get("message", "")))
                 if event.get("retry_at"):
-                    write("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + str(event["retry_at"]))
+                    retry_text = str(event["retry_at"])
+                    try:
+                        retry_text = datetime.fromisoformat(retry_text).strftime("%Y-%m-%d %H:%M:%S")
+                    except ValueError:
+                        pass
+                    write("요청을 다시 시도할 수 있는 시각 (한국 시간) · " + retry_text)
 
         write("예약 실행 시작 · " + ("전체 목록 다시 확인" if full else "새 좋아요만 빠르게 확인"))
         try:
@@ -538,9 +561,8 @@ def run_saved(*, full: bool = False) -> int:
                            output_dir=settings.get("output_dir", "") if isinstance(settings.get("output_dir"), str) else "")
             options = _options_from_settings(settings, full)
         except ValueError as exc:
-            # Only this app's fixed validation messages reach this handler.
-            raw = str(exc).strip()
-            msg = raw if raw and not raw.isascii() else "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요."
+            # Only explicit UserFacingError messages reach this handler.
+            msg = safe_ui_error(exc, "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요.")
             write(msg)
             outcome["message"] = msg
             code = 1

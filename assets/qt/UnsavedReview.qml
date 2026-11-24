@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 
 // Media that is not in the gallery, looked at the way the gallery is: what a save could not
 // store, what the person excluded, and saved files that are gone. Tiles are picked as in
@@ -12,6 +13,7 @@ Item {
     id: review
     property var app: null
     property int tileWidth: 168
+    readonly property var hostWindow: Window.window
     signal backRequested()
 
     readonly property var records: app ? app.records : null
@@ -32,12 +34,16 @@ Item {
             records.setUnsavedView(name)
     }
 
-    // Esc lets go of what is picked first, then leaves the page (as in the gallery).
+    // Esc cancels whole-list confirmation first, then clears picked tiles, then leaves the page.
     function stepBack() {
-        if (chosen > 0)
+        if (confirmAll) {
+            confirmAll = false
+            confirmTimer.stop()
+        } else if (chosen > 0) {
             records.clearUnsavedSelection()
-        else
+        } else {
             backRequested()
+        }
     }
 
     function selectAll() {
@@ -53,6 +59,10 @@ Item {
 
     onViewChanged: confirmAll = false
     onChosenChanged: confirmAll = false
+    onVisibleChanged: if (!visible) {
+        confirmAll = false
+        confirmTimer.stop()
+    }
 
     Timer {
         id: confirmTimer
@@ -177,12 +187,21 @@ Item {
                                                 : "모두 " + review.retryWord
                         enabled: !!review.app && review.app.canStart
                             && review.app.accounts.authenticationState !== "reconnect_required"
-                            && !!review.records && (review.chosen > 0 || review.records.retryableCount > 0)
+                            && !!review.records && !review.records.unsavedMutating
+                            && (review.chosen > 0 || review.records.retryableCount > 0)
+                        tip: !enabled && !!review.records && review.records.unsavedMutating
+                            ? "선택한 항목을 정리하는 중…"
+                            : (!enabled && !!review.app && (!review.app.canStart
+                                    || review.app.accounts.authenticationState === "reconnect_required")
+                                ? "X 계정을 연결하고 작업이 끝난 뒤 다시 시도할 수 있습니다"
+                                : (!enabled && !!review.records && review.chosen === 0 && review.records.retryableCount === 0
+                                    ? "크기 제한 초과 등으로 다시 받을 수 있는 항목이 없습니다" : ""))
                         onDoubleClicked: {}
                         onClicked: review.chosen > 0 ? review.records.retrySelected() : review.records.retryAll()
                     }
                     FlatButton {
                         objectName: "unsavedSettle"
+                        enabled: !!review.records && !review.records.unsavedMutating
                         text: review.chosen > 0 ? "선택한 " + review.chosen.toLocaleString() + "개 " + review.settleWord
                             : review.confirmAll ? "한 번 더 누르면 모두 " + review.settleWord
                             : "모두 " + review.settleWord
@@ -264,8 +283,13 @@ Item {
                 model: review.records ? review.records.unsavedModel : null
                 ScrollBar.vertical: ScrollBar {
                     policy: grid.contentHeight > grid.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                    onPressedChanged: if (pressed) unsavedWheel.reset()
                 }
-                SmoothWheel { flickable: grid; notchPixels: Math.max(120, Math.round(grid.cellHeight * 0.6)) }
+                SmoothWheel {
+                    id: unsavedWheel
+                    flickable: grid
+                    notchPixels: Math.max(120, Math.round(grid.cellHeight * 0.6))
+                }
                 onContentYChanged: review.requestMore()
                 onCountChanged: Qt.callLater(review.requestMore)
                 onHeightChanged: Qt.callLater(review.requestMore)
@@ -278,7 +302,10 @@ Item {
                 property int resets: 0
                 Connections {
                     target: grid.model
-                    function onModelAboutToBeReset() { grid.keptY = grid.contentY - grid.originY }
+                    function onModelAboutToBeReset() {
+                        unsavedWheel.reset()
+                        grid.keptY = grid.contentY - grid.originY
+                    }
                     function onModelReset() {
                         const wanted = grid.keptY
                         const serial = ++grid.resets
@@ -359,50 +386,53 @@ Item {
                                 anchors.fill: parent
                                 // Read from this PC's preview cache when the tile is shown.
                                 source: cell.preview
+                                sourceSize: Qt.size(150, 112)
                                 asynchronous: true
                                 cache: false
                                 fillMode: Image.PreserveAspectFit
                                 visible: status === Image.Ready
                             }
                             // No picture kept on this PC: say what kind of media it is.
-                            Canvas {
-                                objectName: "unsavedPlaceholder"
-                                visible: !picture.visible
+                            Loader {
                                 anchors.centerIn: parent
                                 width: 32
                                 height: 26
-                                property string kind: cell.mediaType
-                                onKindChanged: requestPaint()
-                                onPaint: {
-                                    const ctx = getContext("2d")
-                                    ctx.reset()
-                                    ctx.strokeStyle = Theme.textFaint
-                                    ctx.fillStyle = Theme.textFaint
-                                    ctx.lineWidth = 1.6
-                                    ctx.lineJoin = "round"
-                                    ctx.strokeRect(2, 2, 28, 22)
-                                    if (kind === "photo") {
-                                        ctx.beginPath()
-                                        ctx.arc(10, 9.5, 2.2, 0, Math.PI * 2)
-                                        ctx.stroke()
-                                        ctx.beginPath()
-                                        ctx.moveTo(5, 21)
-                                        ctx.lineTo(13, 13)
-                                        ctx.lineTo(18, 18)
-                                        ctx.lineTo(23, 14)
-                                        ctx.lineTo(27, 21)
-                                        ctx.stroke()
-                                    } else if (kind === "video") {
-                                        ctx.beginPath()
-                                        ctx.moveTo(13, 8)
-                                        ctx.lineTo(13, 18)
-                                        ctx.lineTo(21, 13)
-                                        ctx.closePath()
-                                        ctx.fill()
-                                    } else {
-                                        ctx.font = "bold 10px sans-serif"
-                                        ctx.textAlign = "center"
-                                        ctx.fillText("GIF", 16, 17)
+                                active: !picture.visible
+                                sourceComponent: Canvas {
+                                    objectName: "unsavedPlaceholder"
+                                    property string kind: cell.mediaType
+                                    onKindChanged: requestPaint()
+                                    onPaint: {
+                                        const ctx = getContext("2d")
+                                        ctx.reset()
+                                        ctx.strokeStyle = Theme.textFaint
+                                        ctx.fillStyle = Theme.textFaint
+                                        ctx.lineWidth = 1.6
+                                        ctx.lineJoin = "round"
+                                        ctx.strokeRect(2, 2, 28, 22)
+                                        if (kind === "photo") {
+                                            ctx.beginPath()
+                                            ctx.arc(10, 9.5, 2.2, 0, Math.PI * 2)
+                                            ctx.stroke()
+                                            ctx.beginPath()
+                                            ctx.moveTo(5, 21)
+                                            ctx.lineTo(13, 13)
+                                            ctx.lineTo(18, 18)
+                                            ctx.lineTo(23, 14)
+                                            ctx.lineTo(27, 21)
+                                            ctx.stroke()
+                                        } else if (kind === "video") {
+                                            ctx.beginPath()
+                                            ctx.moveTo(13, 8)
+                                            ctx.lineTo(13, 18)
+                                            ctx.lineTo(21, 13)
+                                            ctx.closePath()
+                                            ctx.fill()
+                                        } else {
+                                            ctx.font = "bold 10px sans-serif"
+                                            ctx.textAlign = "center"
+                                            ctx.fillText("GIF", 16, 17)
+                                        }
                                     }
                                 }
                             }
@@ -483,8 +513,12 @@ Item {
                             cursorShape: Qt.PointingHandCursor
                             ToolTip.visible: containsMouse && !bandDrag.active
                             ToolTip.delay: 600
-                            ToolTip.text: cell.detail + (cell.seen ? "\n마지막 확인 " + cell.seen : "")
-                                + "\n클릭 선택 · Shift+클릭 범위 선택 · 더블 클릭 원문 보기"
+                            ToolTip.text: [
+                                cell.detail,
+                                cell.seen ? (review.view === "excluded" ? "제외 일시 "
+                                    : review.view === "missing" ? "확인 일시 " : "마지막 확인 ") + cell.seen : "",
+                                "클릭 선택 · Shift+클릭 범위 선택 · 더블 클릭 원문 보기"
+                            ].filter(Boolean).join("\n")
                             onClicked: mouse => {
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     review.clickedToken = ""
@@ -552,6 +586,7 @@ Item {
                     }
                     onActiveChanged: {
                         if (active) {
+                            unsavedWheel.reset()
                             const pressed = inView(centroid.scenePressPosition)
                             startX = Math.max(0, Math.min(grid.width, pressed.x))
                             startY = pressed.y + grid.contentY - grid.originY
@@ -623,6 +658,7 @@ Item {
                 BusyIndicator {
                     anchors.horizontalCenter: parent.horizontalCenter
                     running: parent.visible
+                        && (!review.hostWindow || (review.hostWindow.visible && review.hostWindow.visibility !== Window.Minimized))
                     width: 32
                     height: 32
                 }

@@ -27,6 +27,7 @@ from .qt_management import ManagementController
 from .qt_records import PREVIEW_PROVIDER, RecordsController
 from .qt_updater import UpdateController
 from .qt_wheel import WheelInputFilter
+from .user_errors import UserValueError, safe_ui_error
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -742,6 +743,7 @@ class ApplicationController(QObject):
         last = self._preferences.get("local_folder_last")
         if not self._closing and isinstance(last, str) and last and os.path.normcase(last) == os.path.normcase(path):
             self._persist({"local_folder_last": ""})
+            self._state_changed()
 
     def _remember_local_folder(self):
         """Keep the 폴더 정리 tab's folder and switches for the next start."""
@@ -756,6 +758,7 @@ class ApplicationController(QObject):
         changes = {name: value for name, value in changes.items() if self._preferences.get(name) != value}
         if changes:
             self._persist(changes)
+            self._state_changed()
 
     @Slot()
     def startSave(self):
@@ -881,7 +884,7 @@ class ApplicationController(QObject):
                     migrated = True
         if saved_media_missing(destination):
             if destination.media_dir.anchor and not Path(destination.media_dir.anchor).exists():
-                raise ValueError("저장 드라이브를 연결해 주세요.")
+                raise UserValueError("저장 드라이브를 연결해 주세요.")
             if "recreate" not in consents:
                 return {"choice": "recreate", "message": "저장 폴더를 찾을 수 없습니다. 이 위치에 새 폴더를 만들까요?"}
             options = replace(options, allow_recreate_media=True)
@@ -917,7 +920,7 @@ class ApplicationController(QObject):
                     path = Path(payload["path"])
                     if (not path.is_absolute() or path.is_symlink() or path.resolve() != path
                             or tuple(payload.get("signature", ())) != file_signature(path) or cloud_only(path)):
-                        raise ValueError("저장 확인 중 파일이 바뀌었습니다.")
+                        raise UserValueError("저장 확인 중 파일이 바뀌었습니다.")
                     from .preview import gif_screen_size, photo_info
                     media_type = payload.get("media_type")
                     if media_type == "photo":
@@ -931,7 +934,7 @@ class ApplicationController(QObject):
                         dimensions = {}
                     if (path.is_symlink() or path.resolve() != path or cloud_only(path)
                             or tuple(payload.get("signature", ())) != file_signature(path)):
-                        raise ValueError("저장 확인 중 파일이 바뀌었습니다.")
+                        raise UserValueError("저장 확인 중 파일이 바뀌었습니다.")
                     result = {"id": str(payload["id"]), "url": QUrl.fromLocalFile(str(path)).toString(),
                               "job_id": payload.get("job_id"),
                               "media_type": str(payload.get("media_type") or "photo"),
@@ -943,7 +946,7 @@ class ApplicationController(QObject):
                 elif kind == "open":
                     path = payload() if callable(payload) else Path(payload)
                     if not path.is_dir():
-                        raise ValueError("폴더가 아직 없습니다. 먼저 사진을 저장해 주세요.")
+                        raise UserValueError("폴더가 아직 없습니다. 먼저 사진을 저장해 주세요.")
                     result = QUrl.fromLocalFile(str(path))
                 elif kind == "overlap_roots":
                     overlap_gen, active_raw, active_account, active_output, separate, locations = payload
@@ -985,8 +988,7 @@ class ApplicationController(QObject):
                     # Lock messages are fixed text; anything else may name a path.
                     message = str(error) if isinstance(error, ProtectionError) else _REPAIR_ERROR
                 elif isinstance(error, ValueError) and kind in {"prepare", "open"}:
-                    raw = str(error).strip()
-                    message = raw if raw and not raw.isascii() else "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요."
+                    message = safe_ui_error(error, "설정을 확인하지 못했습니다. 저장 위치와 옵션을 다시 확인해 주세요.")
                 else:
                     message = "작업을 마치지 못했습니다. 저장 위치와 권한을 확인해 주세요."
                 if kind == "settings":
@@ -1005,6 +1007,8 @@ class ApplicationController(QObject):
         if not success:
             if kind == "settings":
                 self._settings_finished(value["revision"], False)
+            elif kind in {"activity", "overlap_roots"}:
+                return
             elif kind == "review":
                 job_id = value.get("job_id") if isinstance(value, dict) else None
                 message = value.get("message", "") if isinstance(value, dict) else str(value)

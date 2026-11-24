@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 
 from .file_mutex import file_mutex, replace_file
+from .user_errors import UserFacingError, UserValueError
 
 
 _HEADER = b"LuvBox-DPAPI-v1\0"
@@ -46,7 +47,7 @@ def _session_mutation():
             yield
 
 
-class SessionCancelled(ValueError):
+class SessionCancelled(UserFacingError, ValueError):
     """A cancelled connection must not replace the last saved session."""
 
 
@@ -64,7 +65,7 @@ def session_path() -> Path:
 def _dpapi(data: bytes, *, protect: bool, entropy: bytes | None = None) -> bytes:
     """Protect/unprotect bytes with Windows DPAPI's current-user scope."""
     if os.name != "nt":
-        raise ValueError("로그인 정보 저장은 Windows에서만 사용할 수 있습니다.")
+        raise UserValueError("로그인 정보 저장은 Windows에서만 사용할 수 있습니다.")
     from ctypes import wintypes
 
     class DataBlob(ctypes.Structure):
@@ -100,7 +101,7 @@ def _dpapi(data: bytes, *, protect: bool, entropy: bytes | None = None) -> bytes
             ok = unprotect_data(ctypes.byref(source), None, ctypes.byref(entropy),
                                 None, None, 1, ctypes.byref(target))
         if not ok:
-            raise ValueError(_SESSION_HELP)
+            raise UserValueError(_SESSION_HELP)
         return ctypes.string_at(target.pbData, target.cbData)
     finally:
         ctypes.memset(source_buffer, 0, len(source_buffer))
@@ -150,7 +151,7 @@ def _write_payload(payload: dict, *, cancel=None) -> None:
     _check_cancelled(cancel)
     raw = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     if len(raw) > _MAX_SESSION_BYTES // 2:
-        raise ValueError(_STORE_HELP)
+        raise UserValueError(_STORE_HELP)
     encrypted = _HEADER + _dpapi(raw, protect=True)
     target = session_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -173,16 +174,16 @@ def _read_payload() -> dict:
     with session_path().open("rb") as file:
         encrypted = file.read(_MAX_SESSION_BYTES + 1)
     if len(encrypted) > _MAX_SESSION_BYTES:
-        raise ValueError(_SESSION_HELP)
+        raise UserValueError(_SESSION_HELP)
     if encrypted.startswith(_HEADER):
         decrypted = _dpapi(encrypted[len(_HEADER):], protect=False)
     elif encrypted.startswith(_LEGACY_HEADER):
         decrypted = _dpapi(encrypted[len(_LEGACY_HEADER):], protect=False, entropy=_LEGACY_ENTROPY)
     else:
-        raise ValueError(_SESSION_HELP)
+        raise UserValueError(_SESSION_HELP)
     payload = json.loads(decrypted.decode("utf-8"))
     if not isinstance(payload, dict) or type(payload.get("version")) is not int or payload["version"] != 1:
-        raise ValueError(_SESSION_HELP)
+        raise UserValueError(_SESSION_HELP)
     return payload
 
 
@@ -193,14 +194,14 @@ def normalize_identity(identity: object) -> dict:
     checks validate shape and bounded text; they do not authenticate a username.
     """
     if not isinstance(identity, dict):
-        raise ValueError(_ACCOUNT_HELP)
+        raise UserValueError(_ACCOUNT_HELP)
     user_id, handle = identity.get("user_id"), identity.get("handle")
     display_name = identity.get("display_name", handle)
     if (not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id) or
             not isinstance(handle, str) or not _HANDLE.fullmatch(handle) or
             not isinstance(display_name, str) or len(display_name) > 200 or
             any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in display_name)):
-        raise ValueError(_ACCOUNT_HELP)
+        raise UserValueError(_ACCOUNT_HELP)
     return {"user_id": user_id, "handle": handle.lower(),
             "display_name": display_name.strip() or handle}
 
@@ -208,7 +209,7 @@ def normalize_identity(identity: object) -> dict:
 def _account_records(payload: dict) -> list[dict]:
     rows = payload.get("accounts", [])
     if not isinstance(rows, list) or len(rows) > _MAX_ACCOUNTS:
-        raise ValueError(_SESSION_HELP)
+        raise UserValueError(_SESSION_HELP)
     records = {}
     # Include early identity-aware sessions which did not yet have an account
     # collection, and prefer the active copy if a previous writer left it newer.
@@ -237,7 +238,7 @@ def _existing_accounts() -> list[dict]:
 def _store_session_cookies(cookies: list[dict]) -> None:
     clean = _x_cookies(cookies)
     if not _has_auth(clean):
-        raise ValueError(_SESSION_HELP)
+        raise UserValueError(_SESSION_HELP)
     with _session_mutation():
         payload = {"version": 1, "cookies": clean}
         accounts = _existing_accounts()
@@ -257,26 +258,26 @@ def save_authenticated_session(token: str, identity: dict, *, cookies: list[dict
     normalized = normalize_identity(identity)
     if not isinstance(token, str) or not 1 <= len(token) <= _MAX_TOKEN_LENGTH or any(
             ord(char) < 33 or ord(char) > 126 or char in '\",;\\' for char in token):
-        raise ValueError(_TOKEN_HELP)
+        raise UserValueError(_TOKEN_HELP)
     clean = _x_cookies(cookies) if cookies is not None else [{
         "name": "auth_token", "value": token, "domain": ".x.com", "path": "/",
         "expires": -1, "secure": True, "httpOnly": True}]
     tokens = [item["value"] for item in clean if item["name"] == "auth_token" and item["path"] == "/"]
     if not tokens or any(value != token for value in tokens):
-        raise ValueError(_TOKEN_HELP)
+        raise UserValueError(_TOKEN_HELP)
     with _session_mutation():
         try:
             accounts = [row for row in _existing_accounts()
                         if row["identity"]["user_id"] != normalized["user_id"]]
             if len(accounts) >= _MAX_ACCOUNTS:
-                raise ValueError(_STORE_HELP)
+                raise UserValueError(_STORE_HELP)
             accounts.append({"identity": normalized, "cookies": clean})
             _write_payload({"version": 1, "cookies": clean, "identity": normalized,
                             "accounts": accounts}, cancel=cancel)
         except SessionCancelled:
             raise
         except (OSError, ValueError, TypeError):
-            raise ValueError(_STORE_HELP) from None
+            raise UserValueError(_STORE_HELP) from None
     return dict(normalized)
 
 
@@ -308,7 +309,7 @@ def account_state() -> dict:
         except FileNotFoundError:
             return {"accounts": [], "identity": {}, "connected": False}
         except (OSError, ValueError, UnicodeError, TypeError):
-            raise ValueError(_SESSION_HELP) from None
+            raise UserValueError(_SESSION_HELP) from None
 
 
 def active_account() -> dict | None:
@@ -337,7 +338,7 @@ def list_accounts() -> list[dict]:
 def select_account(user_id: str) -> dict:
     """Atomically make an already connected account the downloader session."""
     if not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id):
-        raise ValueError(_ACCOUNT_HELP)
+        raise UserValueError(_ACCOUNT_HELP)
     with _session_mutation():
         try:
             accounts = _account_records(_read_payload())
@@ -345,13 +346,13 @@ def select_account(user_id: str) -> dict:
             _write_payload({"version": 1, **selected, "accounts": accounts})
             return dict(selected["identity"])
         except (OSError, ValueError, UnicodeError, TypeError, StopIteration):
-            raise ValueError(_ACCOUNT_HELP) from None
+            raise UserValueError(_ACCOUNT_HELP) from None
 
 
 def remove_account(user_id: str) -> None:
     """Remove one account; select another if the removed account was active."""
     if not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id):
-        raise ValueError(_ACCOUNT_HELP)
+        raise UserValueError(_ACCOUNT_HELP)
     with _session_mutation():
         try:
             payload = _read_payload()
@@ -368,7 +369,7 @@ def remove_account(user_id: str) -> None:
         except FileNotFoundError:
             return
         except (OSError, ValueError, UnicodeError, TypeError):
-            raise ValueError(_ACCOUNT_HELP) from None
+            raise UserValueError(_ACCOUNT_HELP) from None
 
 
 def clear_active_session() -> None:
@@ -393,7 +394,7 @@ def clear_active_session() -> None:
         except FileNotFoundError:
             return
         except (OSError, ValueError, UnicodeError, TypeError):
-            raise ValueError(_ACCOUNT_HELP) from None
+            raise UserValueError(_ACCOUNT_HELP) from None
 
 
 def save_auth_token(token: str) -> None:
@@ -404,18 +405,18 @@ def save_auth_token(token: str) -> None:
     previous session. Neither values nor upstream exception text are logged.
     """
     if not isinstance(token, str):
-        raise ValueError(_TOKEN_HELP)
+        raise UserValueError(_TOKEN_HELP)
     value = token.strip()
     if (not 1 <= len(value) <= _MAX_TOKEN_LENGTH or any(
             ord(char) < 33 or ord(char) > 126 or char in '\",;\\'
             for char in value)):
-        raise ValueError(_TOKEN_HELP)
+        raise UserValueError(_TOKEN_HELP)
     cookies = [{"name": "auth_token", "value": value, "domain": ".x.com",
                 "path": "/", "expires": -1, "secure": True, "httpOnly": True}]
     try:
         _store_session_cookies(cookies)
     except (OSError, ValueError, TypeError):
-        raise ValueError(_STORE_HELP) from None
+        raise UserValueError(_STORE_HELP) from None
 
 
 def load_session_cookies(*, account: str | None = None) -> list[dict]:
@@ -431,13 +432,13 @@ def load_session_cookies(*, account: str | None = None) -> list[dict]:
             payload = _read_payload()
             if account is not None:
                 if not isinstance(account, str) or not _HANDLE.fullmatch(account):
-                    raise ValueError(_ACCOUNT_HELP)
+                    raise UserValueError(_ACCOUNT_HELP)
                 if "identity" in payload:
                     matches = [row for row in _account_records(payload)
                                if row["identity"]["handle"] == account.lower()]
                     if len(matches) == 1:
                         return matches[0]["cookies"]
-                    raise ValueError(_ACCOUNT_HELP)
+                    raise UserValueError(_ACCOUNT_HELP)
         clean = _x_cookies(payload.get("cookies"))
         if not _has_auth(clean):
             raise ValueError
@@ -445,9 +446,9 @@ def load_session_cookies(*, account: str | None = None) -> list[dict]:
     except ValueError as error:
         if error.args == (_ACCOUNT_HELP,):
             raise
-        raise ValueError(_SESSION_HELP) from None
+        raise UserValueError(_SESSION_HELP) from None
     except (OSError, UnicodeError, TypeError):
-        raise ValueError(_SESSION_HELP) from None
+        raise UserValueError(_SESSION_HELP) from None
 
 
 def has_session() -> bool:

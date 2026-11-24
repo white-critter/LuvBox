@@ -218,8 +218,42 @@ def _preserve_permissions(source: Path, temporary: Path) -> None:
         flags, revision = wintypes.WORD(), wintypes.DWORD()
         if not control(descriptor, ctypes.byref(flags), ctypes.byref(revision)):
             raise ctypes.WinError(ctypes.get_last_error())
+        protected = bool(flags.value & 0x1000)
+        needs_acl = protected
+        if not needs_acl:
+            if not hasattr(security, "GetAclInformation") or not hasattr(security, "GetAce"):
+                needs_acl = True
+            elif dacl.value:
+                class _AclSizeInfo(ctypes.Structure):
+                    _fields_ = [("AceCount", wintypes.DWORD), ("AclBytesInUse", wintypes.DWORD),
+                                ("AclBytesFree", wintypes.DWORD)]
+
+                class _AceHeader(ctypes.Structure):
+                    _fields_ = [("AceType", wintypes.BYTE), ("AceFlags", wintypes.BYTE),
+                                ("AceSize", wintypes.WORD)]
+
+                get_acl_info = security.GetAclInformation
+                get_acl_info.argtypes = (pointer, pointer, wintypes.DWORD, ctypes.c_int)
+                get_acl_info.restype = wintypes.BOOL
+                get_ace = security.GetAce
+                get_ace.argtypes = (pointer, wintypes.DWORD, ctypes.POINTER(pointer))
+                get_ace.restype = wintypes.BOOL
+                acl_info = _AclSizeInfo()
+                if not get_acl_info(dacl, ctypes.byref(acl_info), ctypes.sizeof(acl_info), 2):
+                    needs_acl = True
+                else:
+                    for index in range(acl_info.AceCount):
+                        ace_ptr = pointer()
+                        if not get_ace(dacl, index, ctypes.byref(ace_ptr)) or not ace_ptr.value:
+                            needs_acl = True
+                            break
+                        if not (_AceHeader.from_address(ace_ptr.value).AceFlags & 0x10):
+                            needs_acl = True
+                            break
+        if not needs_acl:
+            return
         # Preserve whether the file inherits permissions from its folder.
-        protection = 0x80000000 if flags.value & 0x1000 else 0x20000000
+        protection = 0x80000000 if protected else 0x20000000
         result = set_security(str(temporary), 1, 4 | protection, None, None, dacl, None)
         if result and result not in _NO_ACL_WINERRORS:
             raise ctypes.WinError(result)
@@ -824,10 +858,10 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             wanted = {content for content, _ in wanted_entries.get(tag, ())}
             return previous_owned.get(tag, set()) - wanted
 
-        def text_argument(tag: str, old_value: str) -> tuple[str, str]:
+        def text_argument(tag: str, raw_old_value, *, required: bool = True) -> tuple[str | None, str]:
             nonlocal text_status, update_description
-            if not isinstance(old_value, str):
-                old_value = ""
+            has_string = isinstance(raw_old_value, str)
+            old_value = raw_old_value if has_string else ""
             ownership_tag = tag.removesuffix("-x-default")
             value = old_value
             if structured and ownership_tag == "XMP-dc:Description":
@@ -838,6 +872,8 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                     if value:
                         description_markers.append(_OWNED_DESCRIPTION_MARKER + hashlib.sha256(value.encode("utf-8")).hexdigest())
                 text_status = "embedded" if value == text else "preserved"
+            if not required and (not has_string or not value):
+                return None, ""
             fd, name = tempfile.mkstemp(prefix=".luvbox-source-", suffix=".txt", dir=target.parent)
             text_path = Path(name)
             text_files.append(text_path)
@@ -845,10 +881,14 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                 output.write(value)
             return f"-{tag}<={text_path}", value
 
-        description_arg, description_value = text_argument("XMP-dc:Description-x-default", previous_tags.get("XMP-dc:Description", ""))
+        description_arg, description_value = text_argument(
+            "XMP-dc:Description-x-default", previous_tags.get("XMP-dc:Description", ""), required=structured,
+        )
         # Only the private copy is updated in place. The faster rename mode
         # would discard the named streams just copied by Windows.
-        arguments = ["-overwrite_original_in_place", "-P", f"-XMP-dc:Source={url}", description_arg]
+        arguments = ["-overwrite_original_in_place", "-P", f"-XMP-dc:Source={url}"]
+        if description_arg is not None:
+            arguments.append(description_arg)
         required_tags = {}
         removed_tags = {}
         if has_author:
@@ -868,10 +908,15 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                         owned_markers.append(marker)
                     elif value in previous_owned.get(tag, ()):
                         owned_markers.append(marker)
+        comment_arg = None
+        comment_value = ""
         if target.suffix.lower() == ".mp4":
             # ItemList belongs to QuickTime. Other Comment locations remain intact.
-            comment_arg, comment_value = text_argument("ItemList:Comment", previous_tags.get("ItemList:Comment", ""))
-            arguments.append(comment_arg)
+            comment_arg, comment_value = text_argument(
+                "ItemList:Comment", previous_tags.get("ItemList:Comment", ""), required=False,
+            )
+            if comment_arg is not None:
+                arguments.append(comment_arg)
         if has_author or update_description:
             wanted_identifiers = []
             if has_author and identity["author"]:
@@ -900,9 +945,10 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             raise ValueError("metadata write failed")
         reason = "verification"
         tags = _read_tags(temporary, deadline)
-        if tags.get("XMP-dc:Source") != url or tags.get("XMP-dc:Description", "") != description_value:
+        if tags.get("XMP-dc:Source") != url or (
+                description_arg is not None and tags.get("XMP-dc:Description", "") != description_value):
             raise ValueError("metadata verification failed")
-        if target.suffix.lower() == ".mp4" and tags.get("ItemList:Comment", "") != comment_value:
+        if comment_arg is not None and tags.get("ItemList:Comment", "") != comment_value:
             raise ValueError("metadata verification failed")
         for tag, expected in required_tags.items():
             actual = _values(tags.get(tag))
@@ -919,6 +965,7 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
                 raise ValueError("author metadata verification failed")
         # Do not overwrite a file another local process changed during the copy.
         _original_unchanged(target, original)
+        reason = "replace"
         os.utime(temporary, ns=(original.st_atime_ns, original.st_mtime_ns))
         _preserve_creation_time(temporary, original)
         reason = "permission"
@@ -954,12 +1001,11 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             except OSError:
                 pass
         if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-                Path(str(temporary) + "_original").unlink(missing_ok=True)
-                Path(str(temporary) + "_exiftool_tmp").unlink(missing_ok=True)
-            except OSError:
-                pass
+            for candidate in (temporary, Path(str(temporary) + "_original"), Path(str(temporary) + "_exiftool_tmp")):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
     return {"status": status, "url": url, "message": _MESSAGES[status],
             "reason": reason, "reason_message": failure_message(reason) if reason else "",
             "author_status": author_status, "text_status": text_status, **identity}

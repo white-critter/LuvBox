@@ -1,6 +1,6 @@
 # Qt redistribution source inventory
 
-This inventory covers the Windows Qt Quick runtime bundled with LuvBox 1.2.0. It records upstream material and observed binary build information; it does not change LuvBox's GPL version 2 license or grant a different license to any dependency.
+This inventory covers the Windows Qt Quick runtime bundled with LuvBox. It records upstream material and observed binary build information; it does not change LuvBox's GPL version 2 license or grant a different license to any dependency.
 
 ## Preparation and ZIP locations
 
@@ -23,7 +23,7 @@ All Qt and PySide runtime files come from the pinned PySide6/PySide6_Essentials/
 | `Qt6Multimedia`, `Qt6MultimediaQuick`, `Qt6MultimediaWidgets`; FFmpeg and Windows media plugins | `qtmultimedia-everywhere-src-6.10.3.tar.xz` |
 | `Qt6Svg`, `qsvg`, `qsvgicon` | `qtsvg-everywhere-src-6.10.3.tar.xz` |
 | ICNS/TGA/TIFF/WBMP/WebP image plugins collected by the standard GUI dependency hook | `qtimageformats-everywhere-src-6.10.3.tar.xz` |
-| Qt translation catalogs collected by the standard hooks | `qttranslations-everywhere-src-6.10.3.tar.xz` |
+| Qt translation catalogs (upstream source archive retained; `.qm` catalogs excluded from the app bundle by `hook-PySide6.py`) | `qttranslations-everywhere-src-6.10.3.tar.xz` |
 | Shader baking build tools referenced by Qt Declarative's build dependencies; no ShaderTools runtime is added | `qtshadertools-everywhere-src-6.10.3.tar.xz` |
 | `PySide6/Qt*.pyd`, `pyside6.abi3.dll`, `pyside6qml.abi3.dll`, `shiboken6` runtime and associated Python support | `pyside-setup-everywhere-src-6.10.3.tar.xz` |
 | Playback `avcodec-61`, `avformat-61`, `avutil-59`, `swresample-5`, `swscale-8` DLLs | `FFmpeg-n7.1.3.tar.gz` |
@@ -51,7 +51,7 @@ The original Qt source attribution metadata and license files accompany the comp
 
 The installed PySide distribution metadata contains the licensing alternatives `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`, but its `licenses/` directory contains only the commercial-reference text. That metadata is retained separately in the ZIP; it does not replace the newly included upstream GPL/LGPL texts, source copyright headers or third-party attributions. Each Qt component's own source terms remain applicable. The GPL version 2-only gallery-dl dependency cannot be silently relicensed to GPL version 3, and a blanket LGPLv3 claim does not resolve GPLv2 compatibility.
 
-The custom build hooks exclude unused `qpdf`, `qtvirtualkeyboardplugin`, and all QML debugger plugins at collection time. This prevents the unrelated Qt PDF, Virtual Keyboard and Quick3DUtils dependency chains. A packaging guard rejects those DLLs/bindings or QML debugger entries if they reappear in PyInstaller's actual collection manifest. No Qt WebEngine or browser runtime is needed.
+The custom build hooks exclude unused `qpdf`, `qtvirtualkeyboardplugin`, Qt `.qm` translation catalogs, and all QML debugger plugins at collection time. This prevents the unrelated Qt PDF, Virtual Keyboard and Quick3DUtils dependency chains. A packaging guard rejects those DLLs/bindings, `.qm` catalogs, or QML debugger entries if they reappear in PyInstaller's actual collection manifest. No Qt WebEngine or browser runtime is needed.
 
 The optional `opengl32sw.dll` Mesa/LLVM software OpenGL runtime is also excluded by the base PySide hook and packaging guard. The application keeps Qt's Windows default Direct3D 11 renderer, including Qt's supported WARP fallback behavior. No graphics environment override or application graphics-API change is made. A user-forced software OpenGL mode requiring Mesa is outside this package's included renderer options.
 

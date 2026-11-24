@@ -38,6 +38,9 @@ def _same_content(first: Path, second: Path) -> bool:
     return bool(digest) and digest == compute_file_hash(second)
 
 
+_ORIGINAL_SAME_CONTENT = _same_content
+
+
 def kept_copy(store: HistoryStore, path: str, signature, keepers) -> str:
     """A different file with the same bytes that exists right now, or ''.
 
@@ -45,19 +48,46 @@ def kept_copy(store: HistoryStore, path: str, signature, keepers) -> str:
     of the same file, another spelling of its path or a hard link to it is the
     file itself, however the catalog lists it.
     """
+    from .duplicates import compute_file_hash
+
     own = os.path.normcase(os.path.realpath(path))
+    matching = []
     for keeper in keepers if isinstance(keepers, (list, tuple)) else ():
         try:
             if not isinstance(keeper, str) or not keeper or not store.is_media_path(keeper):
                 continue
             other = file_signature(keeper)          # an ordinary file, not a link
+            if other[2] != signature[2]:
+                continue
             if os.path.normcase(os.path.realpath(keeper)) == own:
                 continue
             if other[1] and signature[1] and other[:2] == tuple(signature[:2]):
                 continue                            # the same file number on the same volume
+            matching.append((keeper, other))
+        except (OSError, ValueError, TypeError):
+            continue
+    if not matching:
+        return ""
+    if _same_content is not _ORIGINAL_SAME_CONTENT or len(matching) == 1:
+        for keeper, other in matching:
+            try:
+                if file_signature(path) != tuple(signature):
+                    return ""                       # the file to move changed meanwhile
+                if _same_content(Path(path), Path(keeper)) and file_signature(keeper) == other:
+                    return keeper
+            except (OSError, ValueError, TypeError):
+                continue
+        return ""
+    own_hash = ""
+    for keeper, other in matching:
+        try:
             if file_signature(path) != tuple(signature):
                 return ""                           # the file to move changed meanwhile
-            if _same_content(Path(path), Path(keeper)) and file_signature(keeper) == other:
+            if not own_hash:
+                own_hash = compute_file_hash(Path(path))
+                if not own_hash or file_signature(path) != tuple(signature):
+                    return ""
+            if own_hash == compute_file_hash(Path(keeper)) and file_signature(keeper) == other:
                 return keeper
         except (OSError, ValueError, TypeError):
             continue
