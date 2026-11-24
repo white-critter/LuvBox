@@ -19,4 +19,4 @@ body:
     attributes:
       label: LuvBox 버전
       description: 앱에 표시되는 버전입니다. 모르면 비워 두세요.
-      placeholder: 예) 1.12.11
+      placeholder: 예) 1.12.12

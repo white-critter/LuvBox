@@ -498,6 +498,35 @@ class GifWorkerTests(unittest.TestCase):
         source = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4.part"
         self.assertTrue(core._transfer_complete(source))
 
+    @unittest.skipUnless(os.name == "nt", "Windows sharing lock")
+    def test_stop_during_locked_source_cleanup_records_the_finished_gif(self):
+        rows = [("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")]
+        flag = self.base / "stop"
+        source = self.output / "myaccount" / "alice" / "alice_100_gif_1.mp4.part"
+        unlink = Path.unlink
+        with ExitStack() as readers:
+            def lock_source(path, **kwargs):
+                converted = self.convert(path, **kwargs)
+                readers.enter_context(path.open("rb"))
+                return converted
+
+            def stop_at_source_cleanup(path, *args, **kwargs):
+                if path.name == source.name:
+                    flag.touch()
+                return unlink(path, *args, **kwargs)
+
+            with patch.object(core, "convert_mp4_to_gif", side_effect=lock_source), \
+                    patch.object(Path, "unlink", stop_at_source_cleanup):
+                code, events = self.worker(rows, options=self.options_all(), stop_file=str(flag))
+
+        self.assertEqual((code, events[-1]["status"], events[-1]["saved"]), (0, "stopped", 1))
+        self.assertEqual(self.keys(), {"twitter100_animated_gif_1"})
+        saved = Path(self.records()[0]["path"])
+        self.assertEqual(saved.suffix, ".gif")
+        self.assertTrue(saved.is_file())
+        self.assertEqual([event["path"] for event in events if event["type"] == "saved"], [str(saved)])
+        self.assertTrue(core._transfer_complete(source))
+
     def test_gif_over_size_cap_saves_original_mp4_and_next_file(self):
         with patch("luvbox.core.convert_mp4_to_gif", side_effect=media.ConversionSizeLimit()):
             code, events = self.worker([("100", 1, "animated_gif", "alice"), ("101", 1, "photo", "alice")],

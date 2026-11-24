@@ -1303,14 +1303,14 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     previous = None
                     if media_status == "saved":
                         if self.gif_source is not None:
-                            # The GIF is already finalized and archived. A locked
-                            # MP4 must not prevent recording it or saving later likes.
+                            # The GIF is already finalized and archived. Even a stop
+                            # during temporary cleanup must let us record that save.
                             markers = _valid_completion_markers(self.gif_source)
                             try:
                                 _retry_sharing_lock(
                                     lambda: self.gif_source.unlink(missing_ok=True), check_stop=check_stop,
                                 )
-                            except OSError:
+                            except (OSError, exception.StopExtraction):
                                 # Keep the completion record with the retained MP4.
                                 self.transfer_marker = None
                                 emit({"type": "log", "level": "warning", "message":
@@ -1451,6 +1451,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         pass
                     self.gif_temporary = None
             history_update(saved=saved, skipped=skipped, size_skipped=size_skipped, force=bool(self.last_output and self.last_output[0] == "saved"))
+            if stop_reason == "user":
+                raise exception.StopExtraction()
             if quick_scan and self.last_output:
                 # Size-limited and failed files are neither saved nor known,
                 # so they neither extend nor break the already-saved streak.

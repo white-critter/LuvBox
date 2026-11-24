@@ -39,8 +39,14 @@ Button {
     font.pixelSize: large ? Theme.fontSection : (compact ? Theme.fontSmall : Theme.fontBody)
     // Enter presses the button that has the keys, as Space does. A dialog puts the keys on its
     // main or its cancelling button when it opens, and Enter did nothing there.
-    Keys.onReturnPressed: control.click()
-    Keys.onEnterPressed: control.click()
+    Keys.onReturnPressed: event => {
+        if (!event.isAutoRepeat || control.autoRepeat)
+            control.click()
+    }
+    Keys.onEnterPressed: event => {
+        if (!event.isAutoRepeat || control.autoRepeat)
+            control.click()
+    }
     // Only a press under the pointer spends the tip; a key press must not hide the next one.
     onPressed: if (pointer.hovered) tipSpent = true
     ToolTip.visible: tip.length > 0 && pointer.hovered && !tipSpent

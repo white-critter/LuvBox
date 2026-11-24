@@ -256,9 +256,8 @@ class LibraryRepository:
         """The open catalog. An epoch keeps a folder-wide job across filter reloads."""
         if epoch is None:
             return self.current(generation)
-        if not self.same_catalog(epoch):
-            return None
-        return self.current()
+        with self._condition:
+            return self._request if self._epoch == epoch else None
 
     def cancel_ai_scan(self):
         self._ai_cancel.set()

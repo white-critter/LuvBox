@@ -110,6 +110,32 @@ class LibraryRepositoryTests(unittest.TestCase):
         # A file that is merely missing is still shown, marked as such.
         self.assertTrue(any(row["key"].split("_")[2] == "101" and "파일 없음" in row["caption"] for row in rows))
 
+    def test_clearing_ai_tags_cannot_follow_a_concurrent_catalog_switch(self):
+        other = resolve_storage(self.base / "Other", "offline")
+        photo = ("flat", "200", 1, "photo")
+        with closing(HistoryStore.for_storage(other)) as store:
+            path = other.media_dir / "200_1.jpg"
+            path.write_bytes(b"test photo")
+            store.record_media("flat", {"tweet_id": "200", "num": 1, "type": "photo"}, path)
+            store.add_tag(*photo, "인물", source="ai")
+
+        epoch = self.repository.catalog_epoch()
+        same_catalog = self.repository.same_catalog
+
+        def switch_after_check(previous_epoch):
+            valid = same_catalog(previous_epoch)
+            # Force the interleaving if checking the epoch and taking the request are separate.
+            self.repository.configure(_Request(2, "offline", str(other.output_dir), False))
+            return valid
+
+        with patch.object(self.repository, "same_catalog", side_effect=switch_after_check):
+            self.repository.clear_ai_tags(1, epoch=epoch)
+
+        self.repository.configure(_Request(2, "offline", str(other.output_dir), False))
+        self.assertEqual(self.repository.clear_ai_tags(1, epoch=epoch), 0)
+        with closing(HistoryStore.for_storage(other)) as store:
+            self.assertEqual(store.ai_tag_counts(["인물"]), {"인물": 1})
+
     def test_decode_uses_the_registered_file_without_reopening_the_catalog(self):
         self.repository.read("1", 0, 100)
         path = next(iter(self.registered.values()))

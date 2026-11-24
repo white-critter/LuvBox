@@ -711,6 +711,30 @@ class DuplicateTests(FolderCase):
         self.assertEqual(self.s.duplicate_members(), {2: ["c.jpg", "d.jpg"]})
         self.assertLess(ticks, 20)
 
+    def test_marking_a_group_distinct_does_not_scan_unclustered_files(self):
+        self.s.save_clusters([["a.jpg", "b.jpg"], ["c.jpg", "d.jpg"]], "exact")
+        with self.s._write() as db:
+            db.executemany(
+                "INSERT INTO local_files(rel_path, filename, media_type, filesize, mtime_ns, updated_at) "
+                "VALUES (?1, ?1, 'photo', 800, 1, 'now')",
+                ((f"unique-{index:05d}.jpg",) for index in range(12000)),
+            )
+        ticks = 0
+
+        def progress():
+            nonlocal ticks
+            ticks += 1
+            return 0
+
+        self.s._db.set_progress_handler(progress, 1000)
+        try:
+            self.assertEqual(self.s.set_group_distinct("a.jpg"), ["a.jpg", "b.jpg"])
+        finally:
+            self.s._db.set_progress_handler(None, 0)
+
+        self.assertEqual(self.s.duplicate_members(), {2: ["c.jpg", "d.jpg"]})
+        self.assertLess(ticks, 20)
+
     def test_the_duplicate_page_names_the_keeper_and_the_copies(self):
         self.s.save_hashes([("a.jpg", "h1", "0" * 16, ""), ("b.jpg", "h1", "0" * 16, ""), ("c.jpg", "h2", "0" * 16, "")])
         self.s.save_clusters([["a.jpg", "b.jpg", "c.jpg"]], "near")

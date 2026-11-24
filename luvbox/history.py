@@ -4161,8 +4161,9 @@ class HistoryStore:
         if not members:
             return
         current = {member: row["cluster_id"] for member, row in zip(members, rows)}
+        # Separate aggregates seek the ends of the cluster index even in a large catalog.
         bounds = self._db.execute(
-            "SELECT COALESCE(MAX(cluster_id),0), COALESCE(MIN(cluster_id),0) FROM image_hashes"
+            "SELECT (SELECT MAX(cluster_id) FROM image_hashes), (SELECT MIN(cluster_id) FROM image_hashes)"
         ).fetchone()
         max_id = max(abs(int(bounds[0])), abs(int(bounds[1])))
         updates = plan_regroup_members(members, sets, current, nums[0], max_id)

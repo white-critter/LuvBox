@@ -1233,18 +1233,22 @@ def _place_window(application, window, saved):
     width = saved.get("width", window.width())
     height = saved.get("height", window.height())
     target = window.screen()
+
+    def fitted_width(area):
+        return min(width, max(window.minimumWidth(), area.width() - 24))
+
     if "x" in saved and "y" in saved:
         # Use the remembered place only while enough of the title bar is on a screen.
         for screen in application.screens():
             area = screen.availableGeometry()
-            if (area.left() - width + 120 <= saved["x"] <= area.right() - 120
+            if (area.left() - fitted_width(area) + 120 <= saved["x"] <= area.right() - 120
                     and area.top() <= saved["y"] <= area.bottom() - 80):
                 target = screen
                 break
         else:
             saved = {key: value for key, value in saved.items() if key not in ("x", "y")}
     available = target.availableGeometry()
-    window.setWidth(min(width, max(window.minimumWidth(), available.width() - 24)))
+    window.setWidth(fitted_width(available))
     window.setHeight(min(height, max(window.minimumHeight(), available.height() - 48)))
     if "x" in saved and "y" in saved:
         window.setX(saved["x"])

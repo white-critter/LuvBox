@@ -254,6 +254,13 @@ class RememberedTests(PlacementCase):
         self.assert_centred(window, self.screen.area)
         self.assert_inside(window, self.screen.area)
 
+    def test_reducing_the_width_after_a_monitor_is_unplugged_keeps_the_window_reachable(self):
+        screen = Screen(0, 0, 1280, 720)
+        # A wide window used to span a monitor on the left and the laptop.
+        window = self.place(self.window(screen), {"width": 2400, "height": 700, "x": -1600, "y": 0})
+        self.assert_centred(window, screen.area)
+        self.assert_inside(window, screen.area)
+
     def test_a_place_is_kept_while_the_title_bar_can_still_be_grabbed(self):
         # Parked mostly off the screen on purpose: that is where it opens again.
         for name, x, y in (("200 px showing at the right edge", 1920 - 200, 300),

@@ -3,8 +3,8 @@
 dialogs  Enter presses the button a dialog put the keys on (the save review's 저장); Esc while
          typing the size limit in the settings takes the typing back instead of saving it; the
          connection dialog with its help open fits a window of the default size without scrolling
-unsaved  a double click on a "모두 …" button only asks, it does not also confirm; a double click
-         on a tile opens the post and leaves the tile as it was
+unsaved  a double click or a held Enter key on a "모두 …" button only asks for confirmation;
+         a double click on a tile opens the post and leaves the tile as it was
 """
 
 from importlib.util import find_spec
@@ -36,7 +36,7 @@ def scene(part):
 
     from PIL import Image
     from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPointF, Qt, QUrl, qInstallMessageHandler
-    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtGui import QKeyEvent, QMouseEvent
     from PySide6.QtQml import QQmlApplicationEngine
     from PySide6.QtQuickControls2 import QQuickStyle
     from PySide6.QtTest import QTest
@@ -233,14 +233,28 @@ def scene(part):
                  and not records.unsavedBusy and grid.property("count") >= 20, "page opened")
             settle(400)
             # A double click on the whole-list button with nothing picked: it asks, nothing is released.
+            review = find("unsavedReview")
             settle_button = find("unsavedSettle")
             assert records.unsavedSelectedCount == 0
             double_at(settle_button)
             wait(lambda: not records.unsavedBusy, "settled")
             settle(600)
             report["after_double_click"] = [records.excludedCount,
-                                            bool(window.findChild(QObject, "unsavedReview").property("confirmAll"))]
+                                            bool(review.property("confirmAll"))]
             assert report["after_double_click"] == [TOTAL, True], report
+
+            for key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                QTest.keyClick(window, Qt.Key.Key_Escape)
+                wait(lambda: not review.property("confirmAll"), "confirmation cleared")
+                settle_button.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+                QTest.keyPress(window, key)
+                wait(lambda: review.property("confirmAll"), "Enter asked for confirmation")
+                QCoreApplication.sendEvent(window, QKeyEvent(
+                    QEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier, "", True))
+                QTest.keyRelease(window, key)
+                wait(lambda: not records.unsavedBusy, "held key settled")
+                assert review.property("confirmAll"), "holding Enter confirmed the whole-list action"
+                assert records.excludedCount == TOTAL
 
             # A double click on a tile opens its post and leaves the tile unpicked.
             def point():
@@ -254,6 +268,14 @@ def scene(part):
             # A single click still picks it.
             click_at(point)
             wait(lambda: records.unsavedSelectedCount == 1, "a click picks the tile")
+
+            # A separate second press still confirms the action.
+            records.clearUnsavedSelection()
+            settle_button.forceActiveFocus(Qt.FocusReason.TabFocusReason)
+            QTest.keyClick(window, Qt.Key.Key_Return)
+            wait(lambda: review.property("confirmAll"), "first Enter asked for confirmation")
+            QTest.keyClick(window, Qt.Key.Key_Return)
+            wait(lambda: records.excludedCount == 0, "second Enter confirmed")
 
         controller.requestClose()
         wait(lambda: controller.shutdownReady, "shutdown")
@@ -306,7 +328,7 @@ class DialogKeysSceneTests(unittest.TestCase):
     def test_enter_presses_the_focused_button_and_escape_takes_back_a_half_typed_limit(self):
         self.run_scene("dialogs")
 
-    def test_a_double_click_neither_confirms_a_whole_list_action_nor_picks_a_tile(self):
+    def test_a_double_click_or_held_enter_cannot_confirm_a_whole_list_action(self):
         self.run_scene("unsaved")
 
 

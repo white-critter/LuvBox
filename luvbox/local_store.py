@@ -1241,7 +1241,8 @@ class LocalFolderStore:
         pool = nums + [-n for n in nums]
         marks = ",".join("?" for _ in pool)
         rows = db.execute(
-            f"SELECT rel_path, cluster_id FROM local_files WHERE cluster_id IN ({marks}) AND present=1 "
+            "SELECT rel_path, cluster_id FROM local_files INDEXED BY local_files_cluster "
+            f"WHERE cluster_id IN ({marks}) AND present=1 "
             "ORDER BY favorite DESC, filesize DESC, rel_path",
             pool,
         ).fetchall()
@@ -1249,7 +1250,11 @@ class LocalFolderStore:
         if not members:
             return
         current = {row["rel_path"]: row["cluster_id"] for row in rows}
-        max_id = db.execute("SELECT COALESCE(MAX(ABS(cluster_id)),0) FROM local_files").fetchone()[0]
+        # Separate aggregates can seek to both ends of the existing cluster index.
+        minimum, maximum = db.execute(
+            "SELECT (SELECT MIN(cluster_id) FROM local_files), (SELECT MAX(cluster_id) FROM local_files)"
+        ).fetchone()
+        max_id = max(abs(minimum), abs(maximum))
         updates = plan_regroup_members(members, sets, current, nums[0], max_id)
         if updates:
             db.executemany("UPDATE local_files SET cluster_id=? WHERE rel_path=?", updates)

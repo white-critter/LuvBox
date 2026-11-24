@@ -48,6 +48,8 @@ class Pipe {
 (async () => {
   const browser = spawn(browserPath, [
     "--headless=new", `--user-data-dir=${profileDir}`, "--remote-debugging-pipe", "--enable-unsafe-extension-debugging",
+    // Edge's compatibility relaunch drops the inherited test pipe. Start with the flag its child receives.
+    ...(path.basename(browserPath).toLowerCase() === "msedge.exe" ? ["--edge-skip-compat-layer-relaunch"] : []),
     "--no-first-run", "--no-default-browser-check", "--disable-background-networking", "--disable-component-update",
     "--disable-sync", "--disable-default-apps", "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1", "about:blank"
   ], {stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"]});
