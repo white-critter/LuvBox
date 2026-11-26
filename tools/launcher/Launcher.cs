@@ -136,7 +136,8 @@ namespace LuvBox
             Array.Copy(data, 28, footer.Hash, 0, 32);
             footer.Version = Encoding.ASCII.GetString(data, 60, 16).TrimEnd('\0');
             if (footer.Offset < 4096 || footer.Length < 22
-                    || footer.Offset + footer.Length + Size != stream.Length
+                    || footer.Offset > stream.Length - Size
+                    || footer.Length != stream.Length - Size - footer.Offset
                     || !VersionShape.IsMatch(footer.Version))
                 throw new LauncherError(ExitCodes.Damaged, Messages.Damaged);
             return footer;

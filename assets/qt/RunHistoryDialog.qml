@@ -77,9 +77,25 @@ FlatDialog {
     function scrollBy(delta) {
         if (list.contentHeight <= list.height)
             return false
+        runHistoryWheel.reset()
+        list.cancelFlick()
         const maxY = Math.max(0, list.contentHeight - list.height)
         list.contentY = Math.max(0, Math.min(maxY, list.contentY + delta))
         return true
+    }
+    function handleScrollKey(event) {
+        if (event.key === Qt.Key_Down)
+            event.accepted = dialog.scrollBy(48)
+        else if (event.key === Qt.Key_Up)
+            event.accepted = dialog.scrollBy(-48)
+        else if (event.key === Qt.Key_PageDown)
+            event.accepted = dialog.scrollBy(Math.max(120, list.height - 48))
+        else if (event.key === Qt.Key_PageUp)
+            event.accepted = dialog.scrollBy(-Math.max(120, list.height - 48))
+        else if (event.key === Qt.Key_Home)
+            event.accepted = dialog.scrollBy(-list.contentHeight)
+        else if (event.key === Qt.Key_End)
+            event.accepted = dialog.scrollBy(list.contentHeight)
     }
     onClosed: if (records) records.setActive("runs", false)
 
@@ -92,6 +108,7 @@ FlatDialog {
         id: runBody
         readonly property var hostWindow: Window.window
         spacing: 8
+        Keys.onPressed: event => dialog.handleScrollKey(event)
         Label {
             objectName: "runHistoryError"
             Layout.fillWidth: true
@@ -116,6 +133,7 @@ FlatDialog {
             Layout.fillHeight: true
             clip: true
             SmoothWheel { id: runHistoryWheel; flickable: list }
+            Keys.onPressed: event => dialog.handleScrollKey(event)
             spacing: 8
             model: dialog.records ? dialog.records.runRows : []
             ScrollBar.vertical: ScrollBar {
@@ -249,20 +267,7 @@ FlatDialog {
                 id: runHistoryCloseButton
                 text: "닫기"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-                Keys.onPressed: event => {
-                    if (event.key === Qt.Key_Down)
-                        event.accepted = dialog.scrollBy(48)
-                    else if (event.key === Qt.Key_Up)
-                        event.accepted = dialog.scrollBy(-48)
-                    else if (event.key === Qt.Key_PageDown)
-                        event.accepted = dialog.scrollBy(Math.max(120, list.height - 48))
-                    else if (event.key === Qt.Key_PageUp)
-                        event.accepted = dialog.scrollBy(-Math.max(120, list.height - 48))
-                    else if (event.key === Qt.Key_Home)
-                        event.accepted = dialog.scrollBy(-list.contentHeight)
-                    else if (event.key === Qt.Key_End)
-                        event.accepted = dialog.scrollBy(list.contentHeight)
-                }
+                Keys.onPressed: event => dialog.handleScrollKey(event)
             }
             onRejected: dialog.close()
         }

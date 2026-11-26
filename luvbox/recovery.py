@@ -23,6 +23,7 @@ from pathlib import Path
 import uuid
 
 from .file_mutex import replace_file
+from .file_safety import is_reparse_or_link
 from .user_errors import UserFacingError
 
 
@@ -35,7 +36,7 @@ class RecoveryError(UserFacingError, RuntimeError):
 
 
 def _linked(path: Path) -> bool:
-    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+    return is_reparse_or_link(path)
 
 
 def _varint(data: bytes, offset: int) -> tuple[int, int]:
@@ -205,27 +206,52 @@ class _Pages:
                     continue
 
 
-def salvage(path: Path | str) -> dict:
+def salvage(path: Path | str, *, immutable_fallback: bool = False) -> dict:
     """Read every table of a (possibly damaged) database.
 
     Returns {table: {"columns": [...], "rows": [(rowid, {column: value})]}}.
     Tables SQLite can still read are read normally; damaged ones by pages.
     """
     path = Path(path)
-    connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+
+    def _open_readonly(immutable: bool):
+        uri = path.as_uri() + ("?mode=ro&immutable=1" if immutable else "?mode=ro")
+        conn = sqlite3.connect(uri, uri=True)
+        try:
+            conn.execute("PRAGMA trusted_schema=OFF")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
+
+    connection = None
     pages = None
     try:
-        schema = connection.execute(
-            "SELECT name,rootpage FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+        try:
+            connection = _open_readonly(False)
+            schema = connection.execute(
+                "SELECT name,rootpage FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
+        except sqlite3.OperationalError:
+            if not immutable_fallback:
+                raise
+            if connection is not None:
+                connection.close()
+                connection = None
+            connection = _open_readonly(True)
+            schema = connection.execute(
+                "SELECT name,rootpage FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").fetchall()
         result = {}
         pages = None
         for name, root in schema:
-            table_info = connection.execute(f'PRAGMA table_info("{name}")').fetchall()
+            quoted = name.replace('"', '""')
+            table_info = connection.execute(f'PRAGMA table_info("{quoted}")').fetchall()
             columns = [row[1] for row in table_info]
-            primary = [row[1] for row in table_info if row[5] == 1 and row[2].upper() == "INTEGER"]
+            pk_cols = [row for row in table_info if row[5] > 0]
+            primary = ([row[1] for row in pk_cols if str(row[2]).upper() == "INTEGER"]
+                       if len(pk_cols) == 1 else [])
             try:
                 rows = [(row[0], dict(zip(columns, row[1:])))
-                        for row in connection.execute(f'SELECT rowid,* FROM "{name}"')]
+                        for row in connection.execute(f'SELECT rowid,* FROM "{quoted}"')]
                 method = "sql"
             except sqlite3.DatabaseError:
                 if pages is None:
@@ -246,7 +272,8 @@ def salvage(path: Path | str) -> dict:
     finally:
         if pages is not None:
             pages.close()
-        connection.close()
+        if connection is not None:
+            connection.close()
 
 
 def _integrity(path: Path) -> str:
@@ -258,7 +285,7 @@ def _integrity(path: Path) -> str:
 
 
 def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: Path | str | None = None,
-                    skip_unreadable: bool = False) -> dict:
+                    skip_unreadable: bool = False, immutable_fallback: bool = False) -> dict:
     """Write a new, verified records database at ``destination``.
 
     Rows come from ``damaged`` (by pages where needed); rows only found in an
@@ -279,7 +306,7 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
     fallback_media_count = None
     warnings = []
     try:
-        sources = [salvage(damaged)]
+        sources = [salvage(damaged, immutable_fallback=True) if immutable_fallback else salvage(damaged)]
     except (RecoveryError, sqlite3.Error, OSError) as error:
         if skip_unreadable:
             sources = [{}]
@@ -287,17 +314,31 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
             # A current-name catalog can lose its header/schema too. Do not
             # ignore a usable scoped backup merely because page salvage cannot
             # start, but never turn a lock/access error into a rollback.
+            code = (getattr(error, "sqlite_errorcode", 0) or 0) & 0xFF
+            msg = str(error).lower()
             damaged_source = isinstance(error, RecoveryError) or (
-                isinstance(error, sqlite3.DatabaseError) and
-                (getattr(error, "sqlite_errorcode", 0) or 0) & 0xFF in {11, 26})
-            if (not damaged_source or fallback is None or not Path(fallback).is_file()
-                    or _integrity(Path(fallback)) != "ok"):
+                isinstance(error, sqlite3.DatabaseError) and (
+                    code in {10, 11, 26}
+                    or (isinstance(error, sqlite3.OperationalError) and immutable_fallback
+                        and "locked" not in msg and "busy" not in msg)
+                )
+            )
+            if not damaged_source:
                 raise
-            recovered = salvage(Path(fallback))
+            try:
+                backup_ok = (fallback is not None and Path(fallback).is_file()
+                             and _integrity(Path(fallback)) == "ok")
+                recovered = salvage(Path(fallback)) if backup_ok else None
+            except (RecoveryError, sqlite3.Error, OSError) as backup_err:
+                if isinstance(error, RecoveryError):
+                    raise error
+                raise RecoveryError("기록 파일을 읽을 수 없고 백업 파일 확인에도 실패했습니다. 원본 기록은 보존했습니다.") from backup_err
             required = {"folder_mode", "tweet_id", "num", "media_type", "path",
                         "status", "record_source", "updated_at"}
-            if not required.issubset(recovered.get("media", {}).get("columns", ())):
-                raise
+            if recovered is None or not required.issubset(recovered.get("media", {}).get("columns", ())):
+                if isinstance(error, RecoveryError):
+                    raise error
+                raise RecoveryError("기록 파일을 읽을 수 없고 사용할 수 있는 백업도 찾지 못했습니다. 원본 기록은 보존했습니다.") from error
             sources = [recovered]
             fallback_media_count = len(recovered["media"]["rows"])
             fallback = None
@@ -390,6 +431,10 @@ def rebuild_history(damaged: Path | str, destination: Path | str, *, fallback: P
         if warnings:
             result["warnings"] = warnings
         return result
+    except RecoveryError:
+        raise
+    except sqlite3.Error as exc:
+        raise RecoveryError("복구 파일을 만드는 중 오류가 발생했습니다. 원본 기록은 보존했습니다.") from exc
     finally:
         for leftover in sorted(workspace.glob("*"), reverse=True):
             leftover.unlink(missing_ok=True)
@@ -477,6 +522,42 @@ def backup_catalog(record_dir: Path | str, account: str) -> Path | None:
     return target
 
 
+def _install_rebuilt_history(rebuilt: Path, target: Path) -> None:
+    # The old sidecars can contain committed rows absent from the database file.
+    # Keep them on the same volume until the replacement succeeds.
+    held = []
+    try:
+        for suffix in ("-wal", "-shm"):
+            sidecar = target.with_name(target.name + suffix)
+            holding = target.with_name(rebuilt.name + ".previous" + suffix)
+            try:
+                sidecar.rename(holding)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise RecoveryError(
+                    "다른 작업이 기록 파일을 사용 중이라 복구할 수 없습니다. "
+                    "LuvBox 창과 다른 작업을 닫은 뒤 다시 시도해 주세요."
+                ) from exc
+            held.append((sidecar, holding))
+        replace_file(rebuilt, target)
+    except BaseException:
+        restore_error = None
+        for sidecar, holding in reversed(held):
+            try:
+                holding.rename(sidecar)
+            except OSError as exc:
+                restore_error = exc
+        if restore_error is not None:
+            raise RecoveryError("기록을 원래 위치로 되돌리지 못했습니다. 복구 전 기록은 보관했습니다.") from restore_error
+        raise
+    for _, holding in held:
+        try:
+            holding.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 def repair_history(record_dir: Path | str, account: str) -> dict:
     """Replace a damaged records database with a rebuilt, verified one.
 
@@ -524,29 +605,15 @@ def repair_history(record_dir: Path | str, account: str) -> dict:
             with closing(sqlite3.connect(work / HISTORY_NAME)) as connection:
                 connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error:
+            # Read-only salvage may still see the committed changes in the copied WAL.
             pass
         # Old account-only backups cannot identify their output folder. Keep
         # them intact, but never mix an unrelated catalog into this repair.
         # An old-name file stays in place, so a copy SQLite cannot read at all
         # must not block the backup-only rebuild that worked before.
         result = rebuild_history(work / HISTORY_NAME, rebuilt, fallback=latest_backup(account, record_dir),
-                                 skip_unreadable=name != HISTORY_NAME)
-        for suffix in ("-wal", "-shm"):
-            sidecar = record_dir / (HISTORY_NAME + suffix)
-            try:
-                sidecar.unlink(missing_ok=True)
-            except OSError as exc:
-                if sidecar.exists() or _linked(sidecar):
-                    raise RecoveryError(
-                        "다른 작업이 기록 파일을 사용 중이라 복구할 수 없습니다. "
-                        "LuvBox 창과 다른 작업을 닫은 뒤 다시 시도해 주세요."
-                    ) from exc
-        replace_file(rebuilt, record_dir / HISTORY_NAME)
-        for suffix in ("-wal", "-shm"):
-            try:
-                (record_dir / (HISTORY_NAME + suffix)).unlink(missing_ok=True)
-            except OSError:
-                pass
+                                 skip_unreadable=name != HISTORY_NAME, immutable_fallback=True)
+        _install_rebuilt_history(rebuilt, record_dir / HISTORY_NAME)
     finally:
         rebuilt.unlink(missing_ok=True)
         shutil.rmtree(work, ignore_errors=True)

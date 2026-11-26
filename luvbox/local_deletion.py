@@ -33,6 +33,9 @@ from .thumbcache import cloud_only
 from .user_errors import safe_ui_error
 
 
+_CLOUD_ONLY = "클라우드에만 있는 파일은 옮기지 않습니다. 탐색기에서 받은 뒤 다시 시도해 주세요."
+
+
 def run_local_deletion(root, rows, stop, emit) -> dict:
     """Move the confirmed files of the folder ``root``. ``emit`` gets progress and the result."""
     from .deletion import _NEAR_ONLY, kept_alike, kept_copy
@@ -75,6 +78,7 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
         return result
     store = None
     gone = []
+    folder_error = False
     try:
         store = LocalFolderStore(root)
         for row in candidates:
@@ -86,7 +90,7 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
                 if not store.is_media_path(path):
                     raise RecyclingError("열린 폴더 안의 일반 파일만 휴지통으로 옮길 수 있습니다.")
                 if cloud_only(path):
-                    raise RecyclingError("클라우드에만 있는 파일은 옮기지 않습니다. 탐색기에서 받은 뒤 다시 시도해 주세요.")
+                    raise RecyclingError(_CLOUD_ONLY)
                 signature = file_signature(path)
                 expected = row.get("_delete_signature")
                 if not isinstance(expected, (list, tuple)) or tuple(expected) != signature:
@@ -111,6 +115,8 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
                     continue
                 if stop.is_set():
                     break
+                if cloud_only(path):
+                    raise RecyclingError(_CLOUD_ONLY)
                 recycle_file(path, expected=signature)
             except RecyclingError as exc:
                 result["failed"] += 1
@@ -138,10 +144,9 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
             processed += 1
             emit(dict(result, type="progress", processed=processed, message=f"{name}: 휴지통으로 이동했습니다."))
     except LocalFolderError as exc:
+        folder_error = True
         result["failed"] = len(candidates) - result["recycled"] - result["protected"]
         result["message"] = str(exc)
-        emit(dict(result, type="done", processed=processed))
-        return result
     finally:
         if store is not None:
             try:
@@ -152,6 +157,9 @@ def run_local_deletion(root, rows, stop, emit) -> dict:
             finally:
                 store.close()
         guard.close()
+    if folder_error:
+        emit(dict(result, type="done", processed=processed))
+        return result
     result["cancelled"] = result["total"] - processed
     if len(candidates) == 1 and result["protected"] == 1 and protected_reasons and not failures:
         result["message"] = protected_reasons[0]

@@ -5,7 +5,8 @@ Switch {
     id: control
     // A settings row: the text on the left and the switch at the right edge.
     property bool trailing: false
-    implicitHeight: Theme.controlHeight
+    property bool wrap: false
+    implicitHeight: wrap ? Math.max(Theme.controlHeight, switchLabel.implicitHeight + 8) : Theme.controlHeight
     // In a row the text lines up with the labels above and below it.
     leftPadding: trailing ? 0 : 6
     rightPadding: trailing ? 0 : 6
@@ -40,6 +41,7 @@ Switch {
     }
 
     contentItem: Text {
+        id: switchLabel
         text: control.text
         textFormat: Text.PlainText
         font: control.font
@@ -47,6 +49,7 @@ Switch {
         leftPadding: control.trailing ? 0 : control.indicator.width + control.spacing
         rightPadding: control.trailing ? control.indicator.width + control.spacing : 0
         verticalAlignment: Text.AlignVCenter
-        elide: Text.ElideRight
+        wrapMode: control.wrap ? Text.WordWrap : Text.NoWrap
+        elide: control.wrap ? Text.ElideNone : Text.ElideRight
     }
 }

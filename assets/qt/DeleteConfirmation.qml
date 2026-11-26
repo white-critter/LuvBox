@@ -38,6 +38,8 @@ FlatDialog {
             Layout.fillWidth: true
             Layout.fillHeight: true
             clip: true
+            contentWidth: availableWidth
+            rightPadding: 14
             SmoothWheel { flickable: summaryScroll.contentItem as Flickable }
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
             ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff

@@ -12,6 +12,9 @@ TextField {
     selectedTextColor: "white"
     placeholderTextColor: Theme.textFaint
     hoverEnabled: true
+    function clearText() {
+        control.clear()
+    }
     background: Rectangle {
         radius: Theme.radiusControl
         color: control.enabled ? Theme.field : Theme.fieldDisabled

@@ -378,8 +378,8 @@ class RecordsControllerTests(unittest.TestCase):
         self.wait(lambda: len(self.records.unsavedRows) == 60 and not self.records.unsavedBusy)
         with patch.object(HistoryStore, '_lost_items', wraps=HistoryStore._lost_items, autospec=True) as lost_spy:
             self.records.refresh()
-            self.wait(lambda: not self.records.unsavedBusy)
-        self.assertEqual(lost_spy.call_count, 2)  # counts() + single-pass missing through read
+            self.wait(lambda: not self.records.unsavedBusy and not self.records._pending and self.records.missingCount == 60)
+        self.assertEqual(lost_spy.call_count, 1)  # single-pass missing through read without duplicate _lost_items in counts()
         self.assertEqual(len(self.records.unsavedRows), 60)
 
 

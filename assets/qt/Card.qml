@@ -21,12 +21,12 @@ Rectangle {
         GradientStop { position: 1; color: card.bottomColor }
     }
     Loader {
-        active: card.glow > 0
+        active: card.glow > 0 && card.visible && card.width > 2 * card.radius && card.height > 2
         // Kept off the rounded corners, where it would spill past the outline.
         x: card.radius
         y: 1
-        width: card.width - 2 * card.radius
-        height: Math.min(card.height - 2, Math.max(120, card.width * 0.42))
+        width: Math.max(0, card.width - 2 * card.radius)
+        height: Math.max(0, Math.min(Math.max(0, card.height - 2), Math.max(120, card.width * 0.42)))
         sourceComponent: Glow {
             strength: card.glow
             focusX: card.glowAt
@@ -36,7 +36,7 @@ Rectangle {
     Rectangle {
         x: card.radius
         y: 1
-        width: card.width - 2 * card.radius
+        width: Math.max(0, card.width - 2 * card.radius)
         height: 1
         color: Theme.edgeLight
     }

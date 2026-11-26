@@ -434,6 +434,7 @@ class MigrationTests(LibraryCase):
         legacy = self.paths.record_dir / ".luvbox-history.sqlite3"
         with closing(sqlite3.connect(legacy)) as db, db:
             # What 1.11.9 left: no model column, no answers per tag.
+            db.execute("DROP INDEX IF EXISTS ai_embeddings_model_len")
             db.execute("ALTER TABLE ai_embeddings DROP COLUMN model_id")
             db.execute("DROP TABLE ai_tag_feedback")
             db.execute("DELETE FROM catalog_meta WHERE key='ai_feedback_migrated_v2'")
@@ -462,6 +463,8 @@ class MigrationTests(LibraryCase):
 
     def test_answers_and_tags_survive_and_the_photos_are_encoded_once_more(self):
         with closing(self.store()) as store:
+            indexes = {row["name"] for row in store._db.execute("PRAGMA index_list(ai_embeddings)")}
+            self.assertIn("ai_embeddings_model_len", indexes)
             self.assertEqual(store.count_embeddings(LEGACY_MODEL_ID), 7)
             feedback = store.tag_feedback()
             self.assertEqual(feedback[("flat", "101", 1, "photo")], {"인물": 1})

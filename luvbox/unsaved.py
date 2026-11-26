@@ -110,7 +110,7 @@ def _scope(account, output_dir):
     return str(account or "").strip().lstrip("@").lower(), folder_key(output_dir)
 
 
-def record(items, *, account, output_dir, resolved=(), refused=None) -> None:
+def record(items, *, account, output_dir, resolved=(), refused=None, counted_attempt: bool = True) -> None:
     """Add or refresh unsaved media and forget the ones that were saved meanwhile.
 
     ``refused`` is the (tweet_id, num, media_type) whose refusal by X's image
@@ -118,16 +118,20 @@ def record(items, *, account, output_dir, resolved=(), refused=None) -> None:
     count goes up by one.
     """
     account, folder = _scope(account, output_dir)
-    rows = [row for row in (_item(item, account, folder) for item in list(items)[:MAX_ITEMS]) if row]
+    paired = [(row, bool(item.get("counted_attempt", counted_attempt)))
+              for item in list(items)[:MAX_ITEMS]
+              if (row := _item(item, account, folder)) is not None]
     gone = [(account, folder, str(tweet_id), media_type, num) for tweet_id, num, media_type in resolved]
-    if not account or (not rows and not gone):
+    if not account or (not paired and not gone):
         return
     names = ",".join(_COLUMNS)
-    update = ("reason=excluded.reason,author=COALESCE(NULLIF(excluded.author,''),author),"
-              "posted_at=COALESCE(NULLIF(excluded.posted_at,''),posted_at),"
-              + ",".join(f"{name}=CASE WHEN excluded.{name}>0 THEN excluded.{name} ELSE {name} END"
-                         for name in ("width", "height", "duration", "size_bytes"))
-              + ",limit_mb=excluded.limit_mb,detail=excluded.detail,attempts=attempts+1,last_seen=excluded.last_seen")
+    base_update = ("reason=excluded.reason,author=COALESCE(NULLIF(excluded.author,''),author),"
+                   "posted_at=COALESCE(NULLIF(excluded.posted_at,''),posted_at),"
+                   + ",".join(f"{name}=CASE WHEN excluded.{name}>0 THEN excluded.{name} ELSE {name} END"
+                              for name in ("width", "height", "duration", "size_bytes"))
+                   + ",limit_mb=excluded.limit_mb,detail=excluded.detail,")
+    update_counted = base_update + "attempts=attempts+1,last_seen=excluded.last_seen"
+    update_uncounted = base_update + "attempts=attempts,last_seen=excluded.last_seen"
     try:
         path = unsaved_path()
         with _WRITE_LOCK, file_mutex(path):
@@ -137,7 +141,8 @@ def record(items, *, account, output_dir, resolved=(), refused=None) -> None:
                 _prepare(database)
                 database.executemany("DELETE FROM unsaved WHERE account=? AND folder=? AND tweet_id=? "
                                      "AND media_type=? AND num=?", gone)
-                for row in rows:
+                for row, count_attempt in paired:
+                    update = update_counted if count_attempt else update_uncounted
                     database.execute(f"INSERT INTO unsaved({names}) VALUES ({','.join('?' for _ in _COLUMNS)}) "
                                      "ON CONFLICT(account,folder,tweet_id,media_type,num) DO UPDATE SET " + update,
                                      tuple(row[name] for name in _COLUMNS))
@@ -227,8 +232,8 @@ def retryable_count(account, output_dir, limit_mb) -> int:
     account, folder = _scope(account, output_dir)
     row = next(iter(_read(
         "SELECT COUNT(*) total FROM unsaved WHERE account=? AND folder=? AND ("
-        "reason=? OR (reason=? AND (?=0 OR (limit_mb>0 AND ?>limit_mb))))",
-        (account, folder, FAILED, SIZE, limit_mb, limit_mb))), {"total": 0})
+        "reason=? OR (reason=? AND (?=0 OR (limit_mb>0 AND ?>limit_mb AND (size_bytes=0 OR size_bytes<=?)))))",
+        (account, folder, FAILED, SIZE, limit_mb, limit_mb, limit_mb * 1024 * 1024))), {"total": 0})
     return int(row["total"])
 
 
@@ -269,7 +274,10 @@ def remove(account, output_dir, items=None, kinds=None) -> int:
                             "DELETE FROM unsaved WHERE account=? AND folder=? AND tweet_id=? AND media_type=? AND num=?",
                             (account, folder, str(tweet_id), media_type, num)).rowcount
                 else:
-                    kinds = [kind for kind in (kinds or REASONS) if kind in REASONS]
+                    selected = REASONS if kinds is None else kinds
+                    kinds = [kind for kind in selected if kind in REASONS]
+                    if not kinds:
+                        return 0
                     removed = database.execute(
                         "DELETE FROM unsaved WHERE account=? AND folder=? AND reason IN (%s)" % ",".join("?" for _ in kinds),
                         (account, folder, *kinds)).rowcount

@@ -34,6 +34,36 @@ Item {
     // a double-click opens the photo large and takes that click's pick back.
     property string clickedKey: ""
     property bool clickedWasChosen: false
+    onSettlingChanged: if (settling) clickedKey = ""
+
+    function scrollBy(delta) {
+        if (list.contentHeight <= list.height)
+            return false
+        wheel.reset()
+        list.cancelFlick()
+        const minimum = list.originY
+        const maximum = minimum + Math.max(0, list.contentHeight - list.height)
+        list.contentY = Math.max(minimum, Math.min(maximum, list.contentY + delta))
+        return true
+    }
+
+    Keys.onPressed: event => {
+        let step = 0
+        if (event.key === Qt.Key_Down)
+            step = 64
+        else if (event.key === Qt.Key_Up)
+            step = -64
+        else if (event.key === Qt.Key_PageDown)
+            step = Math.max(120, list.height - 64)
+        else if (event.key === Qt.Key_PageUp)
+            step = -Math.max(120, list.height - 64)
+        else if (event.key === Qt.Key_Home)
+            step = -list.contentHeight
+        else if (event.key === Qt.Key_End)
+            step = list.contentHeight
+        if (step !== 0)
+            event.accepted = scrollBy(step)
+    }
 
     function requestMore() {
         if (galleryModel && list.contentY - list.originY + list.height + 600 >= list.contentHeight)

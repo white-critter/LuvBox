@@ -30,7 +30,7 @@ def scene(shots=None):
 
     from PIL import Image
     from PySide6.QtCore import Q_ARG, QCoreApplication, QEvent, QMetaObject, QObject, QPoint, QPointF, Qt, qInstallMessageHandler
-    from PySide6.QtGui import QFont, QFontDatabase
+    from PySide6.QtGui import QFont, QFontDatabase, QInputDevice
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from PySide6.QtQml import QQmlApplicationEngine, QQmlExpression, qmlContext
@@ -266,15 +266,35 @@ def scene(shots=None):
         click("unsavedSelectPage")
         wait(lambda: records.unsavedSelectedCount == 0, "selection cleared by its button")
 
+        # A touchscreen drag scrolls the list without starting mouse selection.
+        device = QTest.createTouchDevice(QInputDevice.DeviceType.TouchScreen)
+        start = tile_point(columns + 1)
+        QTest.touchEvent(window, device).press(0, start, window).commit()
+        for step in range(1, 7):
+            end = start - QPoint(0, step * 18)
+            QTest.touchEvent(window, device).move(0, end, window).commit()
+            settle(15)
+        QTest.touchEvent(window, device).release(0, end, window).commit()
+        wait(lambda: grid.property("contentY") > grid.property("originY") + 20, "touch drag scrolled grid")
+        assert not band.property("visible") and not picked()
+        QMetaObject.invokeMethod(grid, "cancelFlick")
+
         # Putting two away from further down reads the list again without jumping to the top.
         target = grid.property("originY") + 2 * grid.property("cellHeight")
         grid.setProperty("contentY", target)
         settle(120)
         row = round((grid.property("contentY") - grid.property("originY")) / grid.property("cellHeight")) + 1
         first, second = row * columns, row * columns + 1
-        QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, tile_point(first))
-        QTest.mouseClick(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, tile_point(second))
-        wait(lambda: picked() == [first, second], "two tiles further down picked")
+        begin, finish = tile_point(first), tile_point(second)
+        QTest.mousePress(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, begin)
+        for step in range(1, 7):
+            QTest.mouseMove(window, QPoint(begin.x() + (finish.x() - begin.x()) * step // 6, begin.y()))
+            settle(15)
+        wait(lambda: band.property("visible") and picked() == [first, second], "drag picked two scrolled tiles")
+        corner = band.mapToItem(grid, QPointF(0, 0))
+        expected = grid.mapFromScene(QPointF(begin))
+        assert abs(corner.x() - expected.x()) < 2 and abs(corner.y() - expected.y()) < 2, (corner, expected)
+        QTest.mouseRelease(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, finish)
         before = grid.property("contentY")
         click("unsavedSettle")
         wait(lambda: records.excludedCount == TOTAL - 2 and not records.unsavedBusy

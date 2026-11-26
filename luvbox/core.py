@@ -83,6 +83,14 @@ _REVIEW_ERROR = ("저장 여부 확인을 완료하지 못해 멈췄습니다. �
 _FAILED_DETAIL = "파일을 받지 못했습니다. 연결 상태나 저장 폴더를 확인한 뒤 다시 시도해 주세요."
 _SIZE_DETAIL = "크기 제한({limit:,}MB)을 넘어 저장하지 않았습니다."
 _EXCLUDED_DETAIL = "저장 확인에서 ‘이 사진 다시 받지 않기’를 골랐습니다."
+_EXCLUDED_DETAIL_BY_TYPE = {
+    "video": "저장 확인에서 ‘이 영상 다시 받지 않기’를 골랐습니다.",
+    "animated_gif": "저장 확인에서 ‘이 GIF 다시 받지 않기’를 골랐습니다.",
+}
+
+
+def _excluded_detail(media_type: str | None) -> str:
+    return _EXCLUDED_DETAIL_BY_TYPE.get(media_type or "", _EXCLUDED_DETAIL)
 _REFUSED_DETAIL = (f"사진 서버가 이 파일을 거부해 저장을 멈췄습니다. 같은 파일에서 {REFUSED_LIMIT}번 멈추면 "
                    "그다음 저장부터는 건너뜁니다.")
 _PASSED_BY_DETAIL = (f"사진 서버가 이 파일을 거부해 저장이 {REFUSED_LIMIT}번 멈췄습니다. 이제 저장할 때 건너뜁니다. "
@@ -545,11 +553,12 @@ class _GalleryLogHandler(logging.Handler):
         self.fatal = False
         self.auth_state = ""
         self.error_kind = ""
+        self.guard = None
 
     def emit(self, record: logging.LogRecord) -> None:
         # INFO can contain URLs, arbitrary server text or other user metadata.
         # Progress is emitted separately, so only mapped diagnostics are useful.
-        if record.levelno < logging.WARNING or self.stopping:
+        if record.levelno < logging.WARNING or self.stopping or (self.guard is not None and self.guard.failure):
             return
         raw = record.getMessage()
         if raw == "media size exceeded":
@@ -722,6 +731,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
     previous_output_guards = []
     history = None
     previews = None
+    shared_session = None
+    shared_cookies_loaded = False
     run_id = None
     likes = None
     targets = frozenset()
@@ -799,7 +810,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             tweet_texts.clear()
             history.record_tweets(batch)
 
-    def note_unsaved(reason, detail, *, media=None, identity=None, size=0):
+    def note_unsaved(reason, detail, *, media=None, identity=None, size=0, counted_attempt=True):
         """Remember one media this run did not store, with only bounded public facts."""
         details = _media_details(media) if media is not None else {}
         tweet_id, number, media_type = identity or (details["tweet_id"], details["num"], details["media_type"])
@@ -815,7 +826,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             unsaved_items[key] = dict(
                 existing, reason=reason, detail=detail,
                 size_bytes=size or existing["size_bytes"],
-                limit_mb=normalized.max_video_mb if reason == unsaved.SIZE else existing["limit_mb"])
+                limit_mb=normalized.max_video_mb if reason == unsaved.SIZE else existing["limit_mb"],
+                counted_attempt=bool(counted_attempt))
             return
         media = media or {}
         duration = media.get("duration")
@@ -824,7 +836,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             author=details.get("author", ""), posted_at=details.get("posted_at", ""),
             width=media.get("width"), height=media.get("height"),
             duration=round(duration) if type(duration) in (int, float) and 0 <= duration < 10**6 else 0,
-            size_bytes=size, limit_mb=normalized.max_video_mb if reason == unsaved.SIZE else 0, detail=detail)
+            size_bytes=size, limit_mb=normalized.max_video_mb if reason == unsaved.SIZE else 0,
+            detail=detail, counted_attempt=bool(counted_attempt))
 
     unsaved_previews = None
     previews_stopped = False
@@ -1080,12 +1093,22 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             initialize_session = self.extractor._init_session
 
             def protected_session():
+                nonlocal shared_session
+                if targets and shared_session is not None:
+                    self.extractor.session = shared_session
+                    self.extractor.cookies = shared_session.cookies
+                    return
                 initialize_session()
                 _observe_authentication(self.extractor.session, authentication_response)
                 guard.protect_session(self.extractor.session)
+                if targets:
+                    shared_session = self.extractor.session
 
             self.extractor._init_session = protected_session
             def normalize_cookies():
+                nonlocal shared_cookies_loaded
+                if targets and shared_cookies_loaded:
+                    return
                 from requests.cookies import create_cookie
                 from .login import load_session_cookies
 
@@ -1117,6 +1140,8 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                    and existing.name == copied.name for existing in jar):
                             jar.set_cookie(copied)
                         jar.clear(cookie.domain, cookie.path, cookie.name)
+                if targets:
+                    shared_cookies_loaded = True
 
             self.extractor._init_cookies = normalize_cookies
 
@@ -1265,7 +1290,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                 failed_media.discard(identity)
                 size_limited_media.discard(identity)
                 self.progress(self.progress_bytes, self.progress_total, force=True, final=True)
-                note_unsaved(unsaved.EXCLUDED, _EXCLUDED_DETAIL, media=kwdict)
+                note_unsaved(unsaved.EXCLUDED, _excluded_detail(kwdict.get("type")), media=kwdict)
                 emit({"type": "review-never", "path": "", **_media_details(kwdict)})
             except ReviewSkip:
                 review_skipped += 1
@@ -1281,7 +1306,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                     review_resolved.add(identity)
                 if self.pathfmt.temppath:
                     try:
-                        Path(self.pathfmt.temppath).unlink(missing_ok=True)
+                        _retry_sharing_lock(
+                            lambda: Path(self.pathfmt.temppath).unlink(missing_ok=True),
+                            check_stop=check_stop,
+                        )
                     except OSError:
                         emit({"type": "log", "level": "warning", "message":
                               "용량 제한을 넘은 임시 파일을 정리하지 못했습니다. 저장 폴더의 권한이나 파일을 사용 중인 프로그램을 확인해 주세요.",
@@ -1338,7 +1366,10 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                                     completed_path.parent.mkdir(parents=True, exist_ok=True)
                                     if not completed_path.resolve().is_relative_to(account_dir.resolve()):
                                         raise OSError("date folder changed outside the account")
-                                    _move_without_overwrite(original_path, completed_path)
+                                    _retry_sharing_lock(
+                                        lambda: _move_without_overwrite(original_path, completed_path),
+                                        check_stop=check_stop,
+                                    )
                                 except OSError:
                                     emit({"type": "log", "level": "warning", "message": _DATE_MOVE_ERROR,
                                           **_media_details(kwdict)})
@@ -1435,7 +1466,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
                         review_resolved.add(identity)
                     if self.passed_by:
                         # Not asked for at all: its own host refuses it, so no picture either.
-                        note_unsaved(unsaved.FAILED, _PASSED_BY_DETAIL, media=kwdict)
+                        note_unsaved(unsaved.FAILED, _PASSED_BY_DETAIL, media=kwdict, counted_attempt=False)
                     else:
                         detail = _REFUSED_RETRY_DETAIL if identity in retry_refused else _FAILED_DETAIL
                         note_unsaved(unsaved.FAILED, detail, media=kwdict)
@@ -1916,6 +1947,7 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
         check_gallery_hooks()
         check_stop()
         guard = AccountGuard(normalized.account, sleep=sleep)
+        handler.guard = guard
         guard.acquire()
         output_guard = OutputGuard(normalized.output_dir)
         output_guard.acquire()
@@ -2008,40 +2040,42 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             if targets:
                 handler.per_tweet = True
                 exit_code = 0
-                for tweet_id, keys in _retry_groups(normalized.targets):
-                    check_stop()
-                    active_job = PhotoJob(f"https://x.com/i/web/status/{tweet_id}")
-                    try:
+                try:
+                    for tweet_id, keys in _retry_groups(normalized.targets):
+                        check_stop()
+                        active_job = PhotoJob(f"https://x.com/i/web/status/{tweet_id}")
                         active_job.run()
-                    finally:
-                        session = getattr(active_job.extractor, "session", None)
-                        if session is not None:
-                            session.cookies.clear()
-                            session.close()
-                    if catalog_damaged:
-                        raise CatalogDamaged(catalog_error)
-                    if guard.failure or handler.fatal or handler.rate_limited:
-                        exit_code = 1
-                        break
-                    # A stop while this tweet was handled is not its outcome.
-                    check_stop()
-                    # Files over the size limit are reported as size-skipped.
-                    left = [key for key in keys if key not in recovered and _key_identity(key) not in size_limited_media and
-                            key not in review_declined]
-                    if not left:
-                        continue
-                    if tweet_id in visited_ids:
-                        absent_files += len(left)
-                        notice = "게시물에서 이 미디어를 찾지 못했거나 받지 못했습니다."
-                    else:
-                        unavailable_tweets += 1
-                        notice = "게시물을 볼 수 없어(삭제·비공개·제한) 다시 받지 못했습니다."
-                    for key in left:
-                        identity = _key_identity(key)
-                        note_unsaved(unsaved.FAILED, _REFUSED_RETRY_DETAIL if identity in retry_refused else notice,
-                                     identity=identity)
-                    # The address lets the user check the tweet in a browser.
-                    emit({"type": "log", "level": "info", "message": f"{notice} https://x.com/i/web/status/{tweet_id}"})
+                        if catalog_damaged:
+                            raise CatalogDamaged(catalog_error)
+                        if guard.failure or handler.fatal or handler.rate_limited:
+                            exit_code = 1
+                            break
+                        # A stop while this tweet was handled is not its outcome.
+                        check_stop()
+                        # Files over the size limit are reported as size-skipped.
+                        left = [key for key in keys if key not in recovered and _key_identity(key) not in size_limited_media and
+                                key not in review_declined]
+                        if not left:
+                            continue
+                        if tweet_id in visited_ids:
+                            absent_files += len(left)
+                            notice = "게시물에서 이 미디어를 찾지 못했거나 받지 못했습니다."
+                        else:
+                            unavailable_tweets += 1
+                            notice = "게시물을 볼 수 없어(삭제·비공개·제한) 다시 받지 못했습니다."
+                        for key in left:
+                            identity = _key_identity(key)
+                            note_unsaved(unsaved.FAILED, _REFUSED_RETRY_DETAIL if identity in retry_refused else notice,
+                                         identity=identity)
+                        # The address lets the user check the tweet in a browser.
+                        emit({"type": "log", "level": "info", "message": f"{notice} https://x.com/i/web/status/{tweet_id}"})
+                finally:
+                    session = shared_session or (getattr(active_job.extractor, "session", None)
+                                                 if active_job is not None else None)
+                    if session is not None:
+                        session.cookies.clear()
+                        session.close()
+                    shared_session = None
             else:
                 active_job = PhotoJob(f"https://x.com/{normalized.account}/likes")
                 exit_code = active_job.run()
@@ -2229,11 +2263,15 @@ def run_worker(options: JobOptions, emit: EventSink, stop_file: Path | str | Non
             output_guard.close()
         for previous_guard in reversed(previous_output_guards):
             previous_guard.close()
-        if active_job is not None:
+        if not targets and active_job is not None:
             session = getattr(active_job.extractor, "session", None)
             if session is not None:
                 session.cookies.clear()
                 session.close()
+        elif shared_session is not None:
+            shared_session.cookies.clear()
+            shared_session.close()
+            shared_session = None
         common.CACHE_COOKIES.clear()
         common.CACHE_MEMORY.clear()
         config.clear()

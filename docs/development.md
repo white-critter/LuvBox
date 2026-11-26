@@ -1,4 +1,4 @@
-# LuvBox 1.12.13 개발 안내
+# LuvBox 1.13.0 개발 안내
 
 현재 앱은 Windows용 PySide6 + Qt Quick 단일 UI입니다. 기본 실행은 저장 화면이며, 같은 앱에서 X 연결·저장·갤러리·설정을 사용합니다. 최신 검사 결과는 [검증 기록](verification.md), 유지하는 보안 경계는 [보안 검토](security-review.md), 측정 방법은 [성능 안내](performance.md)를 참고하세요.
 
@@ -26,7 +26,7 @@ Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사�
 | --- | --- |
 | `entry.py`, `luvbox/qt_app.py`, `assets/qt/` | 실행 진입점, Qt 앱 제어와 QML 화면 |
 | `qt_tray.py`, `window_frame.py`, `single_instance.py` | 트레이 아이콘과 메뉴, Windows 11의 창 모서리·테두리, 다시 실행하면 이미 켜진 창을 여는 단일 실행 |
-| `assets/qt/Theme.qml`, `qmldir`, `Flat*.qml`, `Card.qml`, `Glow.qml`, `DialogButtons.qml`, `SettingRow.qml`, `WrapRow.qml`, `PreviewMetadataButton.qml`, `PreviewTagChip.qml`, `FilterChipCombo.qml` | 테마 값 한 곳, 화면이 함께 쓰는 버튼·입력·메뉴·필터 칩·태그 칩·대화상자 틀·카드·붉은 빛 |
+| `assets/qt/Theme.qml`, `qmldir`, `Flat*.qml`, `Card.qml`, `Glow.qml`, `DialogButtons.qml`, `SettingRow.qml`, `WrapRow.qml`, `PreviewMetadataButton.qml`, `PreviewTagChip.qml`, `FilterChipCombo.qml`, `GridBandSelection.qml`, `PreviewShortcuts.qml`, `BatchTagDialog.qml` | 테마 값 한 곳, 화면이 함께 쓰는 버튼·입력·메뉴·필터 칩·태그 칩·대화상자 틀·카드·붉은 빛·공통 끌기 선택·미리보기 단축키 |
 | `qt_accounts.py`, `qt_browser_setup.py`, `browser_discovery.py`, `login.py`, `browser_bridge.py` | 연결 승인·확장 설치 안내·DPAPI 계정 보관 |
 | `qt_download.py`, `qt_saved_preview.py`, `download_service.py`, `core.py`, `review.py` | 저장 상태·선택적 첫 장면, 별도 worker와 IPC, 실제 다운로드와 저장 여부 확인 |
 | `qt_library.py`, `qt_gallery.py`, `qt_wheel.py`, `duplicates.py` | 읽기 전용 갤러리, 썸네일·스크롤·휠 입력, 중복 탐지(완전 일치, 선택 시 픽셀 확인) |
@@ -38,7 +38,7 @@ Python은 현재 각 계열의 3.12.16·3.13.18·3.14.10·3.15.2 이상을 사�
 | `history.py`, `storage.py`, `recovery.py`, `deletion.py`, `recycling.py`, `qt_management.py` | 기록·갤러리 필터의 읽기, 경로 승인·이전·사본·복구와 휴지통 이동 |
 | `activity.py`, `run_history.py`, `unsaved.py`, `qt_records.py` | 실행 결과 기록부, 실행 기록 병합 조회, 저장 못 한 미디어 기록부와 설정 › 고급의 목록·다시 저장 |
 | `preview.py`, `thumbcache.py`, `media.py` | 로컬 미리보기·캐시와 GIF 변환 |
-| `metadata.py`, `process_limits.py`, `protection.py`, `user_errors.py` | 출처·작성자 기록, 외부 도구 제한과 X 요청 보호, 사용자 오류 경계 |
+| `metadata.py`, `file_safety.py`, `process_limits.py`, `protection.py`, `user_errors.py` | 출처·작성자 기록, 링크·태그 정규화 공용 검사, 외부 도구 제한과 X 요청 보호, 사용자 오류 경계 |
 | `tools/launcher/Launcher.cs`, `tools/build_launcher.py`, `launcher.py`, `tools/draw_splash.py`, `assets/splash/` | `LuvBox.exe` 실행기(한 번 풀기·시작 화면), 한 파일로 묶기와 꼬리표 형식, 시작 화면 그림 |
 | `updater.py`, `qt_updater.py`, `assets/qt/UpdateNotice.qml` | 최신 릴리스 확인, 받기·검증·교체, 알림과 설정의 업데이트 항목 |
 | `selftest.py`, `qt_smoke.py`, `tools/check_*startup.py`, `tools/package_release.py` | 격리 검사와 배포 파일(단일 EXE·체크섬·소스·라이선스 ZIP) 만들기 |
@@ -194,7 +194,7 @@ Windows OpenSSL DLL은 빌드 Python의 `DLLs`에서 명시적으로 수집합�
 
 앱이 읽지 않는 구성요소는 의도적으로 싣지 않습니다. Qt 번역 파일은 `tools\pyinstaller\hook-PySide6.py`가, Pillow의 AVIF 디코더는 `--exclude-module PIL._avif`가, ExifTool의 HTML 설명서 폴더는 `tools\exiftool\download.py`가 뺍니다(앱은 번역기를 설치하지 않고 모든 이미지 열기가 형식을 직접 지정합니다). 패키징은 번역 파일이 다시 수집되면 거부합니다. ExifTool의 `t` 폴더는 이 프로젝트의 시험이 실제 MP4/MOV 샘플(`t/images/QuickTime.mov`)로 읽으므로 남깁니다. 구성을 바꾼 뒤에는 전체 시험과 실제 EXE의 `--self-test`로 메타데이터·미디어 기능을 다시 확인합니다.
 
-산출물은 `release/LuvBox.exe`, `release/SHA256-1.12.13.txt`, `release/LuvBox-1.12.13-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·개발 안내·변경 사항의 버전과 사용자 비노출 규칙을 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`·`require_user_facing_wording`, `AGENTS.md`, `tests/test_guide_versions.py`, `tests/test_user_wording_policy.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
+산출물은 `release/LuvBox.exe`, `release/SHA256-1.13.0.txt`, `release/LuvBox-1.13.0-source-licenses.zip`입니다. 이 세 파일을 그 이름 그대로 GitHub 릴리스에 올립니다. 빌드는 시작할 때, 직접 패키징은 실행할 때 README·사용 안내·개발 안내·변경 사항의 버전과 사용자 비노출 규칙을 확인하고, 다르면 멈춥니다(`tools/package_release.py --check-guides`의 `require_current_guides`·`require_user_facing_wording`, `AGENTS.md`, `tests/test_guide_versions.py`, `tests/test_user_wording_policy.py`). 빌드 단계의 격리 검사는 실제 X 인증·다운로드나 사용자 예약 변경을 대신하지 않습니다.
 
 릴리스 커밋과 태그를 만들기 전에 `git fetch` 뒤 `origin/main`과 비교합니다. 원격에 새 커밋이 있으면 먼저 병합해 다시 검사·빌드하고, 브랜치 푸시가 성공한 뒤에만 태그를 올립니다(1.6.9는 태그를 먼저 올린 뒤 원격의 병합 커밋을 발견해 배포하지 않았습니다). 올린 뒤에는 `LuvBox.exe`를 다시 받아 해시를 대조하고 격리된 `LOCALAPPDATA`로 시작 검사를 한 번 더 합니다. 릴리스의 이전 버전은 앱 안의 업데이트로 이 릴리스를 받으므로, 첨부 이름을 바꾸거나 빼지 않습니다.
 

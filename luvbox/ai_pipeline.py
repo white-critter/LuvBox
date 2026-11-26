@@ -114,7 +114,7 @@ def scoring_models(profile):
     models = []
     for rule in profile.scoring_rules(ACTIVE_MODEL_ID):
         weight = rule.get("weight")
-        if weight is not None and weight.get("regime") == "linear" and rule["tag"] in dirty_set:
+        if weight is not None and rule["tag"] in dirty_set:
             weight = None
             rule = {**rule, "weight": None}
         if weight is None:

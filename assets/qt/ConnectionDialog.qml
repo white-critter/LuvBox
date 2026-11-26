@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Window
 
 FlatDialog {
     id: dialog
@@ -9,6 +10,7 @@ FlatDialog {
     property int methodIndex: 0
     property bool lastSetupNeeded: false
     property bool lastExtensionReady: false
+    property bool focusWaitingForBrowser: false
     readonly property var browserSetup: app ? app.browserSetup : null
     readonly property bool unavailable: !accounts || accounts.locked || (app && app.closing)
     readonly property bool setupUnavailable: unavailable || !browserSetup || browserSetup.busy
@@ -45,7 +47,16 @@ FlatDialog {
         setupToggle.checked = lastSetupNeeded
         if (browserSetup)
             browserSetup.prepareExtension()
-        browserCombo.forceActiveFocus()
+        if (browserCombo.enabled) {
+            focusWaitingForBrowser = false
+            browserCombo.forceActiveFocus()
+        } else {
+            focusWaitingForBrowser = !!browserSetup && browserSetup.busy
+            if (setupToggle.enabled)
+                setupToggle.forceActiveFocus()
+            else
+                closeButton.forceActiveFocus()
+        }
     }
     onClosed: {
         tokenField.clear()
@@ -74,6 +85,18 @@ FlatDialog {
                 setupToggle.checked = false
             dialog.lastSetupNeeded = dialog.accounts.setupNeeded
             dialog.lastExtensionReady = dialog.accounts.extensionReady
+        }
+    }
+    Connections {
+        target: dialog.browserSetup
+        function onChanged() {
+            if (!dialog.visible || !dialog.focusWaitingForBrowser || !dialog.browserSetup || dialog.browserSetup.busy)
+                return
+            dialog.focusWaitingForBrowser = false
+            const win = contentColumn.Window.window
+            const current = win ? win.activeFocusItem : null
+            if (browserCombo.enabled && (!current || current === setupToggle || current === closeButton))
+                browserCombo.forceActiveFocus()
         }
     }
 
@@ -493,6 +516,7 @@ FlatDialog {
             onClicked: dialog.accounts.disconnectAccount()
         }
         FlatButton {
+            id: closeButton
             text: dialog.accounts && dialog.accounts.cancelling ? "취소하는 중…"
                   : dialog.accounts && dialog.accounts.browserConnecting ? "연결 취소" : "닫기"
             enabled: !dialog.accounts || !dialog.accounts.cancelling

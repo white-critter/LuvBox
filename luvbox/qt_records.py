@@ -233,8 +233,9 @@ class RecordsController(QObject):
         self._run_rows, self._run_tokens = [], {}
         self._run_total = self._run_page = self._run_pages = 0
         self._run_busy, self._run_error, self._run_note = False, "", ""
-        self._run_serial = self._unsaved_serial = 0
+        self._run_serial = self._unsaved_serial = self._retry_serial = 0
         self._unsaved_view, self._unsaved_page = "unsaved", 0
+        self._unsaved_loading = None
         self._unsaved_rows, self._unsaved_tokens = [], {}
         self._unsaved_total = self._unsaved_pages = 0
         self._retryable_total = None
@@ -297,7 +298,7 @@ class RecordsController(QObject):
     @Property(bool, notify=changed)
     def unsavedBusy(self): return self._unsaved_busy
     @Property(bool, notify=changed)
-    def unsavedMutating(self): return self._unsaved_mutating
+    def unsavedMutating(self): return self._unsaved_mutating or self._retry_busy
     @Property(str, notify=changed)
     def unsavedError(self): return self._unsaved_error
     @Property(str, notify=changed)
@@ -337,6 +338,8 @@ class RecordsController(QObject):
         with self._condition:
             self._generation += 1
             self._context = context
+        self._retry_serial += 1
+        self._unsaved_loading = None
         self._counts = {reason: 0 for reason in unsaved.REASONS}
         self._missing_count = 0
         self._empty_unsaved()
@@ -356,6 +359,8 @@ class RecordsController(QObject):
         if megabytes != self._limit_mb:
             self._limit_mb = megabytes
             self._retryable_total = None
+            self._retry_serial += 1
+            self._retry_busy = False
             self._rebuild_unsaved()
             if self._unsaved_pages > 1:
                 # Everything loaded so far, not the last part alone.
@@ -368,13 +373,25 @@ class RecordsController(QObject):
         (self._active.add if active else self._active.discard)(section)
         if active:
             self._unsaved_status = ""
+        elif section == "unsaved" and self._retry_busy:
+            self._retry_serial += 1
+            self._retry_busy = False
+            self.changed.emit()
         if active and section == "runs":
             self.loadRuns(0)
         elif active and section == "unsaved":
             # Opened again: the list starts at its top, not where an earlier visit left it.
+            target = (self._generation, self._unsaved_view, 0, "replace")
+            if self._unsaved_busy and self._unsaved_loading == target:
+                return
             if self._unsaved_rows:
                 self._empty_unsaved()
             self.loadUnsaved(0)
+
+    @Slot()
+    def refreshRuns(self):
+        if not self._closing and "runs" in self._active:
+            self.loadRuns(self._run_page)
 
     @Slot()
     def refresh(self):
@@ -436,10 +453,12 @@ class RecordsController(QObject):
         if self._closing:
             return
         self._unsaved_serial += 1
+        target_page = max(0, int(page))
+        self._unsaved_loading = (self._generation, self._unsaved_view, target_page, mode)
         self._unsaved_busy = True
         self._unsaved_error = ""
         self._retryable_total = None
-        self._enqueue("unsaved", (self._unsaved_view, max(0, int(page)), self._unsaved_serial,
+        self._enqueue("unsaved", (self._unsaved_view, target_page, self._unsaved_serial,
                                   self._limit_mb, mode), replace=True)
         self.changed.emit()
 
@@ -450,6 +469,7 @@ class RecordsController(QObject):
     def _empty_unsaved(self):
         """Show nothing until the next list arrives: no tile of another list stays on screen."""
         self._unsaved_rows, self._unsaved_tokens = [], {}
+        self._unsaved_page = self._unsaved_pages = 0
         self._clear_selection()
         self._previews.replace("", {})
         self._unsaved_model.replace([])
@@ -459,7 +479,9 @@ class RecordsController(QObject):
     def setUnsavedView(self, view):
         if view in _KINDS and view != self._unsaved_view:
             self._unsaved_view, self._unsaved_status = view, ""
-            self._unsaved_total = 0
+            self._unsaved_total = self._unsaved_page = self._unsaved_pages = 0
+            self._retry_serial += 1
+            self._retry_busy = False
             self._empty_unsaved()
             self.loadUnsaved(0)
 
@@ -646,14 +668,20 @@ class RecordsController(QObject):
         """Every row that could now succeed, including the ones on other pages."""
         if self._closing or self._retry_busy:
             return
+        self._retry_serial += 1
         self._retry_busy = True
-        self._enqueue("retry_keys", (self._unsaved_view, self._limit_mb), replace=True)
+        self._enqueue("retry_keys", (self._unsaved_view, self._limit_mb, self._retry_serial, "unsaved" in self._active),
+                      replace=True)
+        self.changed.emit()
 
     def _can_retry(self, row, limit_mb=None):
         limit = self._limit_mb if limit_mb is None else limit_mb
         # A size-limited file only fits after the limit was raised since it was skipped.
-        return (row["reason"] != unsaved.SIZE or limit == 0
-                or (row["limit_mb"] > 0 and limit > row["limit_mb"]))
+        if row["reason"] != unsaved.SIZE or limit == 0:
+            return True
+        size_bytes = row.get("size_bytes") or 0
+        return (row["limit_mb"] > 0 and limit > row["limit_mb"]
+                and (size_bytes == 0 or size_bytes <= limit * 1024 * 1024))
 
     def _rebuild_unsaved(self):
         self._unsaved_rows = [self._unsaved_row(token, row) for token, row in self._unsaved_tokens.items()]
@@ -782,9 +810,15 @@ class RecordsController(QObject):
                     self._missing_snapshot = None
                     result = {"excluded": self._exclude_missing(account, output_dir, separate, payload)}
                 else:
-                    view, limit_mb = payload if isinstance(payload, tuple) else (payload, 0)
+                    if isinstance(payload, tuple) and len(payload) >= 4:
+                        view, limit_mb, retry_serial, was_active = payload[:4]
+                    else:
+                        view, limit_mb = payload if isinstance(payload, tuple) else (payload, 0)
+                        retry_serial, was_active = None, False
                     keys = self._retry_keys(account, output_dir, separate, view, limit_mb)
-                    result = {"keys": keys}
+                    result = {"keys": keys, "was_active": was_active}
+                    if retry_serial is not None:
+                        result["serial"] = retry_serial
                 error = ""
             except (ProtectionError, HistoryError) as exc:
                 result, error = {}, str(exc)
@@ -797,6 +831,8 @@ class RecordsController(QObject):
             if kind == "runs":
                 result["serial"] = payload[1]
             elif kind == "unsaved":
+                result["serial"] = payload[2]
+            elif kind == "retry_keys" and isinstance(payload, tuple) and len(payload) >= 3:
                 result["serial"] = payload[2]
             self._delivered.emit((kind, generation, result, error))
 
@@ -994,6 +1030,7 @@ class RecordsController(QObject):
             if result.get("serial", self._unsaved_serial) != self._unsaved_serial:
                 return
             self._unsaved_busy = False
+            self._unsaved_loading = None
             self._unsaved_error = error
             if not error and result.get("view") == self._unsaved_view:
                 fresh = {uuid.uuid4().hex: row for row in result.get("rows", [])}
@@ -1059,9 +1096,14 @@ class RecordsController(QObject):
                 if count:
                     self.catalogChanged.emit()
         elif kind == "retry_keys":
+            if result.get("serial", self._retry_serial) != self._retry_serial:
+                return
             self._retry_busy = False
             self._unsaved_error = error
             if not error:
+                if result.get("was_active") and "unsaved" not in self._active:
+                    self.changed.emit()
+                    return
                 if result["keys"]:
                     self.retryRequested.emit(result["keys"])
                 else:

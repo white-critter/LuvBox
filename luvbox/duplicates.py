@@ -855,11 +855,20 @@ def cluster_duplicates(items: Sequence[dict], max_distance: int = 6, *, check_ca
     groups: list[list[dict]] = []
     for group in clusters_by_root.values():
         if len(group) >= 2:
+            # Break ties deterministically in ascending layout/type/path order
+            # before applying the descending favorite/size/tweet_id/num sort.
+            group.sort(
+                key=lambda x: (
+                    str(x.get("folder_mode") or ""),
+                    str(x.get("media_type") or ""),
+                    str(x.get("rel_path") or ""),
+                )
+            )
             group.sort(
                 key=lambda x: (
                     bool(x.get("favorite")),
                     x.get("filesize") or 0,
-                    str(x.get("tweet_id") or x.get("key") or ""),
+                    str(x.get("tweet_id") or ("" if x.get("rel_path") else (x.get("key") or ""))),
                     int(x.get("num") or 0),
                 ),
                 reverse=True,

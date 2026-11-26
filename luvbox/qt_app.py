@@ -42,6 +42,9 @@ _BOOLEANS = {"include_videos", "include_gifs", "separate_accounts", "confirm_eac
 _PUBLIC_PREFERENCES = {*_CHOICES, *_BOOLEANS, "max_video_mb", "gallery_density"}
 # Screen-only choices: they change nothing a save reads, so a running save does not lock them.
 _VIEW_PREFERENCES = {"confirm_each", "detailed_progress", "gallery_density", "auto_classify", "update_check"}
+_NON_SAVE_PREFERENCES = _VIEW_PREFERENCES | {
+    "local_folder_last", "local_folder_recent", "local_folder_subfolders", "local_folder_share_learning"
+}
 _SETTINGS_ERROR = "설정을 저장하지 못했습니다. 설정 파일과 저장 권한을 확인해 주세요."
 # The settings file could not be read, so the window opened with the first settings (the file is
 # kept under another name at the first change, see app_settings).
@@ -424,8 +427,12 @@ class ApplicationController(QObject):
 
     def _state_changed(self):
         local_delete_overlap = self._local_folder.may_overlap_x_library and self._local_management.mutating
+        save_pending = any(
+            not (set(changes) <= _NON_SAVE_PREFERENCES)
+            for changes, _rollback in self._pending_settings.values()
+        )
         locked = (self._closing or self._preparing or self._repairing or self._pending_start is not None
-                  or bool(self._pending_settings) or self._download.running or local_delete_overlap)
+                  or save_pending or self._download.running or local_delete_overlap)
         account_locked = locked or self._schedule.mutating or self._management.mutating
         if self._accounts.locked != account_locked:
             self._accounts.setLocked(account_locked)
@@ -507,16 +514,19 @@ class ApplicationController(QObject):
             if success and not self._closing:
                 options = pending_download[1]
                 if self._local_folder.may_overlap_x_library and self._local_management.mutating:
-                    self._record_manual_outcome({
-                        "status": "error",
-                        "message": "겹치는 폴더 정리 작업이 끝난 뒤 다시 시작해 주세요.",
-                    })
+                    message = "겹치는 폴더 정리 작업이 끝난 뒤 다시 시작해 주세요."
+                    self._error = message
+                    self._record_manual_outcome({"status": "error", "message": message})
+                    self._state_changed()
                 elif self._download.start(options):
                     # A damaged catalog is reported for this save's records,
                     # even if the folder or account changes afterwards.
                     self._repair_target = (options.account, options.output_dir, options.separate_accounts)
                 else:
-                    self._record_manual_outcome({"status": "error", "message": "저장 작업을 시작하지 못했습니다."})
+                    message = "저장 작업을 시작하지 못했습니다."
+                    self._error = message
+                    self._record_manual_outcome({"status": "error", "message": message})
+                    self._state_changed()
             elif not success:
                 self._record_manual_outcome({"status": "error", "message": _SETTINGS_ERROR})
         if success and not self._pending_settings and self._save_after_settings:
@@ -681,14 +691,15 @@ class ApplicationController(QObject):
             return
         self._scheduled_stamp = stamp
         outcome = outcome or {}
-        self._records.refresh()                     # run history, lost and unsaved counts
         saved = outcome.get("saved")
         if type(saved) is not int or saved <= 0:
+            self._records.refresh()                 # run history, lost and unsaved counts
             return
         self._library.classifyNewPhotos()           # what the run left, when the model is here
         self._refresh_overlapping_local()
         if self._gallery_visible:
             # Not reloaded under the person's eyes: the refresh button offers the new photos.
+            self._records.refresh()
             self._gallery_dirty = True
             self.changed.emit()
         else:
@@ -1030,7 +1041,10 @@ class ApplicationController(QObject):
         if kind == "settings":
             self._settings_finished(value["revision"], True)
         elif kind == "activity":
-            self._records.refresh()
+            if hasattr(self._records, "refreshRuns"):
+                self._records.refreshRuns()
+            else:
+                self._records.refresh()
         elif kind == "prepare":
             self._preparing = False
             if "choice" in value:
@@ -1044,7 +1058,8 @@ class ApplicationController(QObject):
             if self._activity_info is not None:
                 self._activity_info.update(account=options.account, output_dir=options.output_dir)
             locations = self._preferences.get("record_locations", {})
-            locations = dict(locations) if isinstance(locations, dict) else {}
+            prev_locations = dict(locations) if isinstance(locations, dict) else {}
+            locations = dict(prev_locations)
             locations[options.account] = options.output_dir
             previous_account, previous_output = self._account, self._output
             self._account, self._output = options.account, options.output_dir
@@ -1054,7 +1069,11 @@ class ApplicationController(QObject):
             )
             self._message = self._error = ""
             self._pending_download = (revision, options)
-            self._load_library()
+            if value.get("migrated") or (
+                (options.account, options.output_dir, locations)
+                != (previous_account, previous_output, prev_locations)
+            ):
+                self._load_library()
             if value.get("migrated"):
                 self._library.refresh()
                 self._records.refresh()
@@ -1112,12 +1131,13 @@ class ApplicationController(QObject):
                 status = "error"
             outcome.update(status=status, code=event.get("code"), **self._download.outcome_counts())
             self._record_manual_outcome(outcome)
-            self._records.refresh()
             if self._download.savedCount and not self._closing:
                 self._library.classifyNewPhotos()       # what this save brought, when the model is here
                 self._refresh_overlapping_local()
             if not self._gallery_visible and not self._closing:
                 self.refreshGallery()
+            else:
+                self._records.refresh()
 
     def _begin_manual_outcome(self):
         self._activity_info = dict(run_id=uuid.uuid4().hex, account=self._account, output_dir=self._output,
@@ -1315,8 +1335,12 @@ class _FirstFrame(QObject):
         launcher.signal_ready()
 
 
-def _start_controller(message_box, *, startup_probe=None):
+def _start_controller(message_box, *, startup_probe=None, stop_listening=None):
     from . import launcher
+
+    def halt_listener():
+        if callable(stop_listening):
+            stop_listening()
 
     try:
         return ApplicationController()
@@ -1335,23 +1359,28 @@ def _start_controller(message_box, *, startup_probe=None):
                 settings.set_aside_previous()
                 return ApplicationController()
             except settings.AppDataError as retry_error:
+                halt_listener()
                 message_box.critical(None, "LuvBox", str(retry_error))
                 return None
             except Exception:
+                halt_listener()
                 message_box.critical(
                     None, "LuvBox", "기존 앱 데이터를 열지 못했습니다. 다른 LuvBox 창을 닫고 다시 실행해 주세요.")
                 return None
+        halt_listener()
         return None
     except settings.AppDataError as exc:
         if startup_probe is not None:
             raise
         launcher.signal_ready()
+        halt_listener()
         message_box.critical(None, "LuvBox", str(exc))
         return None
     except Exception:
         if startup_probe is not None:
             raise
         launcher.signal_ready()
+        halt_listener()
         message_box.critical(
             None, "LuvBox", "기존 앱 데이터를 열지 못했습니다. 다른 LuvBox 창을 닫고 다시 실행해 주세요.")
         return None
@@ -1422,7 +1451,10 @@ def launch(*, startup_probe=None):
     ui_font.setWeight(QFont.Weight.Normal)
     ui_font.setHintingPreference(QFont.HintingPreference.PreferVerticalHinting)
     application.setFont(ui_font)
-    controller = _start_controller(QMessageBox, startup_probe=startup_probe)
+    controller = _start_controller(
+        QMessageBox, startup_probe=startup_probe,
+        stop_listening=(instance.stopListening if instance is not None else None),
+    )
     if controller is None:
         if instance is not None:
             instance.release()
@@ -1437,6 +1469,8 @@ def launch(*, startup_probe=None):
                                  "uiFontFamily": family, "visible": False})
     engine.load(_ROOT / "assets/qt/MainWindow.qml")
     if not engine.rootObjects():
+        if instance is not None:
+            instance.stopListening()
         controller.shutdownFinished.connect(application.quit)
         controller.requestClose()
         application.exec()

@@ -26,7 +26,7 @@ _PROTOCOL_ERROR = "저장 작업의 진행 정보를 읽지 못해 중단했습�
 _START_ERROR = "저장 작업을 시작하지 못했습니다. 잠시 뒤 다시 시도해 주세요."
 
 
-class _ProtocolError(ValueError):
+class _ProtocolError(UserValueError):
     pass
 
 
@@ -171,20 +171,23 @@ class DownloadService:
             response = self._review_response
             self._review_dirty = False
             self._review_response = None
-        if dirty:
+        if response is not None:
+            ident, action, resp_enabled = response
+            final_enabled = enabled if dirty else resp_enabled
+            try:
+                self._control.respond(ident, action, enabled=final_enabled)
+            except OSError:
+                with self._lock:
+                    if self._review_response is None:
+                        self._review_response = response
+                    if dirty:
+                        self._review_dirty = True
+        elif dirty:
             try:
                 self._control.set_enabled(enabled)
             except OSError:
                 with self._lock:
                     self._review_dirty = True
-        if response is not None:
-            ident, action, enabled = response
-            try:
-                self._control.respond(ident, action, enabled=enabled)
-            except OSError:
-                with self._lock:
-                    if self._review_response is None:
-                        self._review_response = response
 
     def _run(self, job_id, options):
         process = None

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .clip_model import ACTIVE_MODEL_ID, CATEGORY_NAMES, LEGACY_MODEL_ID, embedding_bytes
+from .file_safety import is_reparse_or_link, normalize_tag as _normalize_tag, regular_file_stat
 from .storage import (_RECORD_FOLDERS, StoragePaths, _DamagedDatabase, _feedback_to_tag_feedback,
                       migrate_legacy_databases, prepare_storage, records_root)
 from .user_errors import UserFacingError
@@ -314,14 +315,6 @@ def _clean_text(value, limit=2000) -> str:
     if not isinstance(value, str):
         return ""
     return "".join(char for char in value[:limit] if ord(char) >= 32 and ord(char) != 127)
-
-
-def _normalize_tag(tag) -> str:
-    """Strip a leading # and ASCII control characters from a stored tag."""
-    if not isinstance(tag, str):
-        return ""
-    cleaned = "".join(char for char in tag.strip().lstrip("#") if ord(char) >= 32 and ord(char) != 127)
-    return cleaned.strip()
 
 
 # One file can have a record per folder layout: a photo saved by author folder,
@@ -747,6 +740,14 @@ class HistoryStore:
                 if "model_id" not in embedding_columns:
                     self._db.execute("ALTER TABLE ai_embeddings ADD COLUMN model_id TEXT NOT NULL DEFAULT "
                                      f"'{LEGACY_MODEL_ID}'")
+                self._db.execute(
+                    "CREATE INDEX IF NOT EXISTS ai_embeddings_model_len "
+                    "ON ai_embeddings(model_id, LENGTH(embedding), folder_mode, tweet_id, num, media_type)"
+                )
+                self._db.execute(
+                    "CREATE INDEX IF NOT EXISTS tweets_hashtags_nonempty "
+                    "ON tweets(tweet_id) WHERE hashtags != ''"
+                )
                 # Each answer of the single-label teaching becomes one answer per tag, once.
                 migrated = self._db.execute(
                     "SELECT 1 FROM catalog_meta WHERE key='ai_feedback_migrated_v2'").fetchone()
@@ -861,7 +862,7 @@ class HistoryStore:
 
     @staticmethod
     def _linked(path: Path) -> bool:
-        return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+        return is_reparse_or_link(path)
 
     def _real_folders(self, folder: Path) -> bool:
         """Whether a folder and every ancestor are ordinary folders.
@@ -968,11 +969,8 @@ class HistoryStore:
                 return "", None, candidate.name
             raise HistoryError(_HISTORY_HELP)
         candidate = resolved
-        try:
-            status = candidate.stat()
-        except FileNotFoundError:
-            return "", None, candidate.name
-        if not stat.S_ISREG(status.st_mode):
+        status = regular_file_stat(candidate)
+        if status is None:
             return "", None, candidate.name
         return str(candidate), status.st_size, candidate.name
 
@@ -2088,6 +2086,20 @@ class HistoryStore:
             raise ValueError("invalid excluded key limit")
         return tuple(archive_key(*identity) for identity in self._excluded_identities(limit))
 
+    def _lost_candidates(self) -> tuple[set, set]:
+        """Listed media identities and those currently behind a disconnected drive."""
+        where, params = self._filter_clause("all", "", include_deleted=False)
+        listed = set()
+        disconnected = set()
+        anchor_disconnected = {}
+        for row in self._db.execute(
+                "SELECT media.tweet_id,media.num,media.media_type,media.path FROM media" + where, params):
+            identity = (row[0], row[1], row[2])
+            listed.add(identity)
+            if self._drive_disconnected(row[3], anchor_disconnected):
+                disconnected.add(identity)
+        return listed, disconnected
+
     def _lost_items(self) -> list[dict]:
         """Media the gallery lists although no saved file is left: its "파일 없음" tiles.
 
@@ -2100,16 +2112,7 @@ class HistoryStore:
                 return []
         except OSError:
             return []
-        where, params = self._filter_clause("all", "", include_deleted=False)
-        listed = set()
-        disconnected = set()
-        anchor_disconnected = {}
-        for row in self._db.execute(
-                "SELECT media.tweet_id,media.num,media.media_type,media.path FROM media" + where, params):
-            identity = (row[0], row[1], row[2])
-            listed.add(identity)
-            if self._drive_disconnected(row[3], anchor_disconnected):
-                disconnected.add(identity)
+        listed, disconnected = self._lost_candidates()
         return [item for item in self.missing_media(verify_files=True)
                 if not item["ignored"]
                 and (item["tweet_id"], item["num"], item["media_type"]) in listed
@@ -2118,7 +2121,36 @@ class HistoryStore:
     @_safe
     def lost_count(self) -> int:
         """How many "파일 없음" tiles the gallery has."""
-        return len(self._lost_items())
+        try:
+            if not self.media_dir.is_dir():
+                return 0
+        except OSError:
+            return 0
+        with self._read_snapshot():
+            listed, disconnected = self._lost_candidates()
+            if not listed:
+                return 0
+            # Project only columns needed for file presence verification, avoiding
+            # full ``SELECT * FROM media`` and ``tweets`` text/hashtag joins.
+            with closing(self._db.cursor()) as cursor:
+                cursor.row_factory = None
+                cursor.execute(
+                    "SELECT folder_mode, tweet_id, num, media_type, path, filesize, "
+                    "record_source, updated_at FROM media"
+                )
+                rows = [{
+                    "folder_mode": row[0], "tweet_id": row[1], "num": row[2], "media_type": row[3],
+                    "path": row[4], "filesize": row[5], "record_source": row[6], "updated_at": row[7],
+                    "author": "", "author_id": "", "posted_at": None, "posted_source": "",
+                    "saved_at": None, "metadata_status": "", "author_metadata_status": "",
+                } for row in cursor]
+            _, _, found = self._unique_files(rows, verify_files=True)
+            ignored = self._ignored()
+            missing = {_identity(row) for row in rows} - found
+            return sum(
+                1 for identity in (missing - ignored)
+                if identity in listed and identity not in disconnected
+            )
 
     @_safe
     def lost_media(self, *, page=0, page_size=50, through=False) -> dict:
@@ -2730,19 +2762,11 @@ class HistoryStore:
             selective_filters=frozenset(selective),
         )
 
-    @_safe
-    def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None,
-                author="", include_deleted=True, after=None, hashtag="", favorite_only=False, user_tag="",
-                duplicate_only=False, ai_category="", ai_origin="") -> list[dict]:
-        if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
-                isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
-                media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS or
-                not isinstance(hashtag, str) or type(favorite_only) is not bool or not isinstance(user_tag, str) or
-                type(duplicate_only) is not bool or not isinstance(ai_category, str) or not isinstance(ai_origin, str)):
-            raise HistoryError(_HISTORY_HELP)
-        where, params = self._filter_clause(media_type, query, period, author, include_deleted, hashtag=hashtag,
-                                            favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
-                                            ai_category=ai_category, ai_origin=ai_origin)
+    @staticmethod
+    def _needs_joined_where(where: str, order: str) -> bool:
+        return order == "liked" or "tweets." in where or "likes." in where
+
+    def _records_filtered(self, limit, offset, where, params, *, order="saved", after=None) -> list[dict]:
         extra, extra_params = _after_clause(order, after)
         if extra:
             # A cursor replaces OFFSET. Inserts at the front of a newest-first
@@ -2756,7 +2780,7 @@ class HistoryStore:
         # to those rows only. Sorting every joined row with its text took most
         # of each page's time in a large library. Only Like order and a text
         # search need the other tables while choosing.
-        source = _JOINED if query or hashtag or order == "liked" else "media"
+        source = _JOINED if self._needs_joined_where(where, order) else "media"
         hashtags_col = "tweets.hashtags" if self._has_column("tweets", "hashtags") else "'' AS hashtags"
         return self._read_rows("SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,"
                                 "tweets.content," + hashtags_col + " FROM (SELECT media.rowid AS chosen FROM " +
@@ -2765,6 +2789,21 @@ class HistoryStore:
                                 "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
                                 "LEFT JOIN tweets ON tweets.tweet_id=media.tweet_id" + order_by,
                                 (*params, limit, offset))
+
+    @_safe
+    def records(self, limit=100, offset=0, media_type="all", query="", *, order="saved", period=None,
+                author="", include_deleted=True, after=None, hashtag="", favorite_only=False, user_tag="",
+                duplicate_only=False, ai_category="", ai_origin="") -> list[dict]:
+        if (isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10000 or
+                isinstance(offset, bool) or not isinstance(offset, int) or offset < 0 or
+                media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS or
+                not isinstance(hashtag, str) or type(favorite_only) is not bool or not isinstance(user_tag, str) or
+                type(duplicate_only) is not bool or not isinstance(ai_category, str) or not isinstance(ai_origin, str)):
+            raise HistoryError(_HISTORY_HELP)
+        where, params = self._filter_clause(media_type, query, period, author, include_deleted, hashtag=hashtag,
+                                            favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
+                                            ai_category=ai_category, ai_origin=ai_origin)
+        return self._records_filtered(limit, offset, where, params, order=order, after=after)
 
     @_safe
     def runs(self, limit=20, offset=0) -> list[dict]:
@@ -2781,18 +2820,36 @@ class HistoryStore:
             raise HistoryError(_HISTORY_HELP)
         if type(count_total) is not bool:
             raise HistoryError(_HISTORY_HELP)
+        if (media_type not in _TYPES | {"all"} or not isinstance(query, str) or order not in _ORDERS or
+                not isinstance(hashtag, str) or type(favorite_only) is not bool or not isinstance(user_tag, str) or
+                type(duplicate_only) is not bool or not isinstance(ai_category, str) or not isinstance(ai_origin, str)):
+            raise HistoryError(_HISTORY_HELP)
+        if not count_total:
+            return self._page("media", (), page, page_size,
+                              lambda limit, offset: self.records(limit, offset, media_type, query,
+                                                                 order=order, period=period, author=author,
+                                                                 include_deleted=include_deleted, after=after,
+                                                                 hashtag=hashtag, favorite_only=favorite_only,
+                                                                 user_tag=user_tag, duplicate_only=duplicate_only,
+                                                                 ai_category=ai_category, ai_origin=ai_origin),
+                              count_total=False)
         where, params = self._filter_clause(media_type, query, period, author, include_deleted, hashtag=hashtag,
                                             favorite_only=favorite_only, user_tag=user_tag, duplicate_only=duplicate_only,
                                             ai_category=ai_category, ai_origin=ai_origin)
+        records_patched = "records" in self.__dict__ or type(self).records is not HistoryStore.records
+        reader = (
+            (lambda limit, offset: self.records(limit, offset, media_type, query,
+                                                order=order, period=period, author=author,
+                                                include_deleted=include_deleted, after=after,
+                                                hashtag=hashtag, favorite_only=favorite_only,
+                                                user_tag=user_tag, duplicate_only=duplicate_only,
+                                                ai_category=ai_category, ai_origin=ai_origin))
+            if records_patched else
+            (lambda limit, offset: self._records_filtered(limit, offset, where, params, order=order, after=after))
+        )
         # Only a text search reads tweets; the joins never change the count.
         return self._page((_JOINED if query or hashtag else "media") + where, params, page, page_size,
-                          lambda limit, offset: self.records(limit, offset, media_type, query,
-                                                             order=order, period=period, author=author,
-                                                             include_deleted=include_deleted, after=after,
-                                                             hashtag=hashtag, favorite_only=favorite_only,
-                                                             user_tag=user_tag, duplicate_only=duplicate_only,
-                                                             ai_category=ai_category, ai_origin=ai_origin),
-                          count_total=count_total)
+                          reader, count_total=True)
 
     @_safe
     def authors(self, *, include_deleted=False) -> list[dict]:
@@ -2801,8 +2858,8 @@ class HistoryStore:
         rows = self._read_rows(
             "SELECT MAX(media.author) AS author, COUNT(*) AS count "
             "FROM media" + clause +
-            " GROUP BY LOWER(media.author) "
-            "ORDER BY count DESC, LOWER(media.author) ASC",
+            " GROUP BY media.author COLLATE NOCASE "
+            "ORDER BY count DESC, media.author COLLATE NOCASE ASC",
             params,
         )
         return [{"author": row["author"], "count": row["count"]}
@@ -2814,24 +2871,27 @@ class HistoryStore:
             return []
         where, params = self._filter_clause("all", "", include_deleted=include_deleted)
         clause = (where + " AND " if where else " WHERE ") + "tweets.hashtags!=''"
-        rows = self._read_rows(
-            "SELECT tweets.hashtags "
-            "FROM media JOIN tweets ON tweets.tweet_id=media.tweet_id" + clause,
-            params,
-        )
         counts = Counter()
         display = {}
-        for row in rows:
-            tags = (row.get("hashtags") or "").split()
-            seen = set()
-            for tag in tags:
-                clean = tag.strip()
-                if clean.startswith("#") and len(clean) > 1:
-                    lower = clean.lower()
-                    if lower not in seen:
-                        seen.add(lower)
-                        counts[lower] += 1
-                        display.setdefault(lower, clean)
+        with closing(self._db.cursor()) as cursor:
+            cursor.row_factory = None
+            cursor.execute(
+                "SELECT tweets.hashtags "
+                "FROM tweets JOIN media ON media.tweet_id=tweets.tweet_id" + clause,
+                params,
+            )
+            for (raw_hashtags,) in cursor:
+                if not raw_hashtags:
+                    continue
+                seen = set()
+                for tag in raw_hashtags.split():
+                    clean = tag.strip()
+                    if clean.startswith("#") and len(clean) > 1:
+                        lower = clean.lower()
+                        if lower not in seen:
+                            seen.add(lower)
+                            counts[lower] += 1
+                            display.setdefault(lower, clean)
         return [{"tag": display[key], "count": count} for key, count in counts.most_common(limit)]
 
     @_safe
@@ -3229,7 +3289,7 @@ class HistoryStore:
             self._model_params(model_id),
         )
 
-    def _embedding_sql(self, unlabeled: bool) -> str:
+    def _embedding_sql(self, unlabeled: bool, *, rowid_order: bool = False) -> str:
         """Listed photos with a feature of the model given as the first parameters.
 
         ``unlabeled`` keeps only photos no classification has looked at yet:
@@ -3244,12 +3304,28 @@ class HistoryStore:
                 "AND t.tweet_id=e.tweet_id AND t.num=e.num AND t.media_type=e.media_type "
                 "AND t.source='ai') "
             )
+        if rowid_order:
+            return (
+                "FROM media m CROSS JOIN ai_embeddings e "
+                "ON e.folder_mode=m.folder_mode AND e.tweet_id=m.tweet_id "
+                "AND e.num=m.num AND e.media_type=m.media_type "
+                "WHERE m.media_type='photo' AND " + _listed("m") + " AND " + match + " " + tags
+            )
         return (
             "FROM ai_embeddings e "
             "JOIN media m ON m.folder_mode=e.folder_mode AND m.tweet_id=e.tweet_id "
             "AND m.num=e.num AND m.media_type=e.media_type "
             "WHERE " + match + " AND m.media_type='photo' AND " + _listed("m") + " " + tags
         )
+
+    @_safe
+    def has_embeddings(self, model_id: str = ACTIVE_MODEL_ID, *, unlabeled: bool = False) -> bool:
+        if not self._has_table("ai_embeddings"):
+            return False
+        return self._db.execute(
+            "SELECT 1 " + self._embedding_sql(unlabeled) + " LIMIT 1",
+            self._model_params(model_id),
+        ).fetchone() is not None
 
     @_safe
     def count_embeddings(self, model_id: str = ACTIVE_MODEL_ID, *, unlabeled: bool = False) -> int:
@@ -3279,11 +3355,9 @@ class HistoryStore:
             "m.rowid AS rowid "
         )
         params = self._model_params(model_id)
+        sql = columns + self._embedding_sql(unlabeled, rowid_order=True) + " AND m.rowid>? ORDER BY m.rowid ASC LIMIT ?"
         while True:
-            rows = self._read_rows(
-                columns + self._embedding_sql(unlabeled) + " AND m.rowid>? ORDER BY m.rowid ASC LIMIT ?",
-                (*params, last, batch),
-            )
+            rows = self._read_rows(sql, (*params, last, batch))
             if not rows:
                 return
             last = int(rows[-1]["rowid"])
@@ -3561,6 +3635,7 @@ class HistoryStore:
         stamp = _now()
         with self._db:
             self._apply_tag_feedback(self._file_set(identities), tag, 1 if positive else -1, stamp)
+            self._db.execute("DELETE FROM catalog_meta WHERE key='ai_cleared'")
         return len(identities)
 
     @_safe
@@ -3606,6 +3681,7 @@ class HistoryStore:
                         "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
                         "AND source='ai' AND tag!='' LIMIT 1", record).fetchone() is None:
                     self._db.execute(_LOOKED_AT, (*record, stamp))
+            self._db.execute("DELETE FROM catalog_meta WHERE key='ai_cleared'")
         return answers
 
     @_safe
@@ -3667,67 +3743,15 @@ class HistoryStore:
         for start in range(0, len(idents), _LABEL_CHUNK):
             chunk = idents[start:start + _LABEL_CHUNK]
             stamp = _now()
+            # Pre-check outside the write lock so unchanged chunks do not acquire BEGIN IMMEDIATE.
+            with self._read_snapshot():
+                _, _, pre_updates = self._ai_tag_chunk_updates(chunk, wanted)
+            if not pre_updates:
+                continue
             with self._db:
                 if not self._db.in_transaction:
                     self._db.execute("BEGIN IMMEDIATE")
-                record_to_idents: dict[tuple, list[tuple]] = {}
-                all_records: list[tuple] = []
-                seen_records: set[tuple] = set()
-                chunk_paths: dict[tuple, str] = {}
-                for clause, params in _identity_chunks(chunk):
-                    for row in self._read_rows(
-                            "SELECT folder_mode, tweet_id, num, media_type, path FROM media "
-                            f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})", params):
-                        rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                        chunk_paths[rec] = row["path"] or ""
-                by_file: dict[tuple, list[tuple]] = {}
-                tweet_ids = sorted({ident[1] for ident in chunk if chunk_paths.get(ident)})
-                if tweet_ids:
-                    modes = sorted(_MODES)
-                    mode_marks = ",".join("?" for _ in modes)
-                    for start_t in range(0, len(tweet_ids), 400):
-                        batch_tids = tweet_ids[start_t:start_t + 400]
-                        tid_marks = ",".join("?" for _ in batch_tids)
-                        for row in self._read_rows(
-                                f"SELECT folder_mode, tweet_id, num, media_type, path FROM media "
-                                f"WHERE folder_mode IN ({mode_marks}) AND tweet_id IN ({tid_marks}) AND path!=''",
-                                (*modes, *batch_tids)):
-                            rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                            by_file.setdefault((row["tweet_id"], self._file_key(row["path"])), []).append(rec)
-                for ident in chunk:
-                    path = chunk_paths.get(ident, "")
-                    if not path:
-                        file_records = [ident]
-                    else:
-                        siblings = by_file.get((ident[1], self._file_key(path)), ())
-                        file_records = [ident] + [rec for rec in siblings if rec != ident]
-                    for rec in file_records:
-                        record_to_idents.setdefault(rec, []).append(ident)
-                        if rec not in seen_records:
-                            seen_records.add(rec)
-                            all_records.append(rec)
-                decided: dict[tuple, set] = {}
-                current: dict[tuple, set] = {}
-                for rec, answers in self.tag_feedback(all_records).items():
-                    for target_ident in record_to_idents.get(rec, ()):
-                        decided.setdefault(target_ident, set()).update(answers)
-                for clause, params in _identity_chunks(all_records):
-                    for row in self._read_rows(
-                            "SELECT folder_mode, tweet_id, num, media_type, tag, source FROM media_tags "
-                            f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})", params):
-                        rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
-                        if row["source"] == "ai":
-                            if rec in wanted:
-                                current.setdefault(rec, set()).add(row["tag"])
-                        elif row["tag"]:
-                            for target_ident in record_to_idents.get(rec, ()):
-                                decided.setdefault(target_ident, set()).add(row["tag"])
-                updates = []
-                for ident in chunk:
-                    final = {tag for tag in wanted[ident] if tag not in decided.get(ident, set())} or {""}
-                    if current.get(ident) == final:
-                        continue
-                    updates.append((ident, final))
+                _, _, updates = self._ai_tag_chunk_updates(chunk, wanted)
                 for ident, final in updates:
                     self._db.execute("DELETE FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? "
                                      "AND media_type=? AND source='ai'", ident)
@@ -3741,7 +3765,69 @@ class HistoryStore:
                     changed += 1
                     if final != {""}:
                         tagged += 1
+                if any(final != {""} for _ident, final in updates):
+                    self._db.execute("DELETE FROM catalog_meta WHERE key='ai_cleared'")
         return changed, tagged
+
+    def _ai_tag_chunk_updates(self, chunk: list[tuple], wanted: dict[tuple, list[str]]) -> tuple[dict, dict, list]:
+        record_to_idents: dict[tuple, list[tuple]] = {}
+        all_records: list[tuple] = []
+        seen_records: set[tuple] = set()
+        chunk_paths: dict[tuple, str] = {}
+        for clause, params in _identity_chunks(chunk):
+            for row in self._read_rows(
+                    "SELECT folder_mode, tweet_id, num, media_type, path FROM media "
+                    f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})", params):
+                rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                chunk_paths[rec] = row["path"] or ""
+        by_file: dict[tuple, list[tuple]] = {}
+        tweet_ids = sorted({ident[1] for ident in chunk if chunk_paths.get(ident)})
+        if tweet_ids:
+            modes = sorted(_MODES)
+            mode_marks = ",".join("?" for _ in modes)
+            for start_t in range(0, len(tweet_ids), 400):
+                batch_tids = tweet_ids[start_t:start_t + 400]
+                tid_marks = ",".join("?" for _ in batch_tids)
+                for row in self._read_rows(
+                        f"SELECT folder_mode, tweet_id, num, media_type, path FROM media "
+                        f"WHERE folder_mode IN ({mode_marks}) AND tweet_id IN ({tid_marks}) AND path!=''",
+                        (*modes, *batch_tids)):
+                    rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                    by_file.setdefault((row["tweet_id"], self._file_key(row["path"])), []).append(rec)
+        for ident in chunk:
+            path = chunk_paths.get(ident, "")
+            if not path:
+                file_records = [ident]
+            else:
+                siblings = by_file.get((ident[1], self._file_key(path)), ())
+                file_records = [ident] + [rec for rec in siblings if rec != ident]
+            for rec in file_records:
+                record_to_idents.setdefault(rec, []).append(ident)
+                if rec not in seen_records:
+                    seen_records.add(rec)
+                    all_records.append(rec)
+        decided: dict[tuple, set] = {}
+        current: dict[tuple, set] = {}
+        for rec, answers in self.tag_feedback(all_records).items():
+            for target_ident in record_to_idents.get(rec, ()):
+                decided.setdefault(target_ident, set()).update(answers)
+        for clause, params in _identity_chunks(all_records):
+            for row in self._read_rows(
+                    "SELECT folder_mode, tweet_id, num, media_type, tag, source FROM media_tags "
+                    f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause})", params):
+                rec = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                if row["source"] == "ai":
+                    if rec in wanted:
+                        current.setdefault(rec, set()).add(row["tag"])
+                elif row["tag"]:
+                    for target_ident in record_to_idents.get(rec, ()):
+                        decided.setdefault(target_ident, set()).add(row["tag"])
+        updates = []
+        for ident in chunk:
+            final = {tag for tag in wanted[ident] if tag not in decided.get(ident, set())} or {""}
+            if current.get(ident) != final:
+                updates.append((ident, final))
+        return decided, current, updates
 
     @_safe
     def replace_estimated_labels(self, labels: list[tuple]) -> int:
@@ -3768,7 +3854,16 @@ class HistoryStore:
             ).fetchone()[0]
             self._db.execute("DELETE FROM media_tags WHERE source = 'ai'")
             self._db.execute("DELETE FROM catalog_meta WHERE key IN ('ai_scored_rules_version','ai_scored_model_id')")
+            self._db.execute("INSERT OR REPLACE INTO catalog_meta(key, value) VALUES ('ai_cleared', '1')")
             return int(visible_count)
+
+    @_safe
+    def ai_cleared(self) -> bool:
+        """Whether AI tags were explicitly cleared and no new AI classification has run yet."""
+        if not self._has_table("catalog_meta"):
+            return False
+        row = self._db.execute("SELECT value FROM catalog_meta WHERE key='ai_cleared'").fetchone()
+        return row is not None and row[0] == "1"
 
     @_safe
     def ai_tag_stats(self) -> dict[str, int]:
@@ -3813,6 +3908,7 @@ class HistoryStore:
             self._db.executemany("INSERT OR REPLACE INTO catalog_meta(key, value) VALUES (?,?)",
                                  (("ai_scored_rules_version", str(int(rules_version))),
                                   ("ai_scored_model_id", str(model_id))))
+            self._db.execute("DELETE FROM catalog_meta WHERE key='ai_cleared'")
 
     @_safe
     def ai_examples(self, tags, model_id: str = ACTIVE_MODEL_ID) -> list[tuple]:
@@ -3883,14 +3979,7 @@ class HistoryStore:
         wanted = int(limit)
         if not clean or wanted <= 0 or not self._has_table("ai_embeddings"):
             return []
-        total = int(self._db.execute(
-            "SELECT COUNT(*) FROM ai_embeddings e WHERE " + (
-                "e.model_id=? AND LENGTH(e.embedding)=?"
-                if model_id != LEGACY_MODEL_ID
-                else "(e.model_id=? OR e.model_id='') AND LENGTH(e.embedding)=?"
-            ),
-            self._model_params(model_id),
-        ).fetchone()[0] or 0)
+        total = self.count_embeddings(model_id)
         if not total:
             return []
         fb_clause = ""
@@ -3899,7 +3988,7 @@ class HistoryStore:
             fb_clause = ("AND NOT EXISTS (SELECT 1 FROM ai_tag_feedback AS fb "
                          f"WHERE {_on_file('fb', 'm')} AND fb.tag=?) ")
             fb_params = (clean,)
-        base = ("SELECT e.embedding AS embedding " + self._embedding_sql(False) +
+        base = ("SELECT e.embedding AS embedding " + self._embedding_sql(False, rowid_order=True) +
                 "AND NOT " + _ai_tag_predicate("m") + " " + fb_clause)
         base_params = (*self._model_params(model_id), clean, clean, *fb_params)
         step = max(1, total // max(1, wanted))
@@ -4161,7 +4250,7 @@ class HistoryStore:
             "FROM image_hashes h JOIN media m ON m.folder_mode=h.folder_mode AND m.tweet_id=h.tweet_id "
             "AND m.num=h.num AND m.media_type=h.media_type "
             f"WHERE h.cluster_id IN ({marks}) AND " + _listed("m") + " "
-            "ORDER BY h.filesize DESC, h.tweet_id DESC, h.num DESC",
+            "ORDER BY h.filesize DESC, h.tweet_id DESC, h.num DESC, h.folder_mode ASC, h.media_type ASC",
             pool,
         )
         members = [(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows]
@@ -4357,7 +4446,7 @@ class HistoryStore:
         self.set_duplicate_rule("exact")
         return self.duplicate_counts()
 
-    def _ranked_duplicates(self) -> str:
+    def _ranked_duplicates(self, extra_base_where: str = "") -> str:
         """``WITH ranked AS (...)``: every present file of a stored group, as the duplicate view orders it.
 
         ``cluster_rank`` 1 is the photo to keep: a favorite, then the larger
@@ -4370,15 +4459,17 @@ class HistoryStore:
         """
         favorite = ("EXISTS (SELECT 1 FROM favorites AS mark WHERE " + _on_file("mark", "m") + ")"
                     if self._has_table("favorites") else "0")
-        order = "base.is_fav DESC, base.filesize DESC, base.tweet_id DESC, base.num DESC"
+        order = ("base.is_fav DESC, base.filesize DESC, base.tweet_id DESC, base.num DESC, "
+                 "base.folder_mode ASC, base.media_type ASC")
         return (
             "WITH base AS (SELECT h.folder_mode, h.tweet_id, h.num, h.media_type, h.cluster_id, "
-            f"h.filesize, h.file_hash, {favorite} AS is_fav " + _LISTED_DUPLICATE_MEMBERS + "), "
+            f"h.filesize, h.file_hash, {favorite} AS is_fav " + _LISTED_DUPLICATE_MEMBERS + extra_base_where + "), "
             "ranked AS (SELECT base.folder_mode, base.tweet_id, base.num, base.media_type, base.cluster_id, "
             f"ROW_NUMBER() OVER (PARTITION BY base.cluster_id ORDER BY {order}) AS cluster_rank, "
             f"(base.file_hash!='' AND ROW_NUMBER() OVER (PARTITION BY base.cluster_id, base.file_hash ORDER BY {order})>1) "
             "AS cluster_copy, "
-            "COUNT(*) OVER (PARTITION BY base.cluster_id) AS cluster_size FROM base) ")
+            "COUNT(*) OVER (PARTITION BY base.cluster_id) AS cluster_size FROM base) "
+        )
 
     @_safe
     def duplicate_page(self, page=0, page_size=100, media_type="all", query="", *, period=None, author="",
@@ -4413,19 +4504,26 @@ class HistoryStore:
                   "AND media.num=ranked.num AND media.media_type=ranked.media_type "
                   "LEFT JOIN likes ON likes.tweet_id=media.tweet_id "
                   "LEFT JOIN tweets ON tweets.tweet_id=media.tweet_id")
+        count_source = (source if query or hashtag else
+                        "FROM ranked JOIN media ON media.folder_mode=ranked.folder_mode "
+                        "AND media.tweet_id=ranked.tweet_id AND media.num=ranked.num "
+                        "AND media.media_type=ranked.media_type")
         condition = (where + " AND " if where else " WHERE ") + "ranked.cluster_size>=2"
         row_condition = condition
+        row_ranked = ranked
         row_params = list(params)
         if after is not None:
-            # Keyset continuation keeps incremental duplicate paging independent of OFFSET.
+            # Bound base CTE to clusters at or after the cursor while keeping
+            # the full cluster members intact for accurate rank/size.
+            row_ranked = self._ranked_duplicates(" AND h.cluster_id>=?")
             row_condition += " AND (ranked.cluster_id>? OR (ranked.cluster_id=? AND ranked.cluster_rank>?))"
-            row_params.extend((after[0], after[0], after[1]))
+            row_params = [after[0], *params, after[0], after[0], after[1]]
         hashtags_col = "tweets.hashtags" if self._has_column("tweets", "hashtags") else "'' AS hashtags"
         if not count_total:
             if page != 0:
                 raise HistoryError(_HISTORY_HELP)
             rows = self._read_rows(
-                ranked + "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,"
+                row_ranked + "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,"
                 + hashtags_col + ",ranked.cluster_id AS cluster_id,ranked.cluster_rank AS cluster_rank,"
                 "ranked.cluster_copy AS cluster_copy,ranked.cluster_size AS cluster_size " + source + row_condition +
                 " ORDER BY ranked.cluster_id, ranked.cluster_rank LIMIT ?",
@@ -4434,11 +4532,11 @@ class HistoryStore:
             return {"rows": rows[:page_size], "total": None, "has_more": has_more,
                     "page": 0, "pages": 0, "page_size": page_size}
         with self._read_snapshot():
-            total = self._db.execute(ranked + "SELECT COUNT(*) " + source + condition, params).fetchone()[0]
+            total = self._db.execute(ranked + "SELECT COUNT(*) " + count_source + condition, params).fetchone()[0]
             pages = (total + page_size - 1) // page_size
             page = 0 if after is not None else min(page, max(0, pages - 1))
             rows = self._read_rows(
-                ranked + "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,"
+                row_ranked + "SELECT media.*,likes.like_key,likes.liked_after,likes.liked_before,tweets.content,"
                 + hashtags_col + ",ranked.cluster_id AS cluster_id,ranked.cluster_rank AS cluster_rank,"
                 "ranked.cluster_copy AS cluster_copy,ranked.cluster_size AS cluster_size " + source + row_condition +
                 " ORDER BY ranked.cluster_id, ranked.cluster_rank LIMIT ? OFFSET ?",
@@ -4509,11 +4607,51 @@ class HistoryStore:
         for row in self._read_rows(
                 "SELECT h.cluster_id AS cluster_id, m.folder_mode AS folder_mode, m.tweet_id AS tweet_id, "
                 "m.num AS num, m.media_type AS media_type, m.path AS path " + _LISTED_DUPLICATE_MEMBERS +
-                f" ORDER BY h.cluster_id, {favorite} DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC"):
+                f" ORDER BY h.cluster_id, {favorite} DESC, h.filesize DESC, h.tweet_id DESC, h.num DESC, "
+                "h.folder_mode ASC, h.media_type ASC"):
             groups.setdefault(row["cluster_id"], []).append({
                 "identity": (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]),
                 "path": row["path"]})
         return {number: members for number, members in groups.items() if len(members) >= 2}
+
+    @_safe
+    def ranked_duplicate_groups(self, identities) -> tuple[dict[int, list[dict]], set[tuple]]:
+        """Members and copy identities only for clusters containing ``identities``."""
+        if not self._has_table("image_hashes") or not self._has_column("image_hashes", "cluster_id"):
+            return {}, set()
+        items = [tuple(item)[:4] for item in identities]
+        if not items:
+            return {}, set()
+        cluster_ids: set[int] = set()
+        for clause, params in _identity_chunks(items):
+            for row in self._db.execute(
+                    "SELECT DISTINCT cluster_id FROM image_hashes "
+                    f"WHERE (folder_mode, tweet_id, num, media_type) IN (VALUES {clause}) AND cluster_id>0",
+                    params):
+                cluster_ids.add(int(row[0]))
+        if not cluster_ids:
+            return {}, set()
+        sorted_ids = sorted(cluster_ids)
+        groups: dict[int, list[dict]] = {}
+        copies: set[tuple] = set()
+        for start in range(0, len(sorted_ids), 400):
+            chunk = sorted_ids[start:start + 400]
+            marks = ",".join("?" for _ in chunk)
+            ranked = self._ranked_duplicates(f" AND h.cluster_id IN ({marks})")
+            for row in self._read_rows(
+                    ranked + "SELECT ranked.cluster_id AS cluster_id, ranked.folder_mode AS folder_mode, "
+                    "ranked.tweet_id AS tweet_id, ranked.num AS num, ranked.media_type AS media_type, "
+                    "ranked.cluster_copy AS cluster_copy, media.path AS path "
+                    "FROM ranked JOIN media ON media.folder_mode=ranked.folder_mode "
+                    "AND media.tweet_id=ranked.tweet_id AND media.num=ranked.num "
+                    "AND media.media_type=ranked.media_type "
+                    "WHERE ranked.cluster_size>=2 ORDER BY ranked.cluster_id, ranked.cluster_rank",
+                    chunk):
+                identity = (row["folder_mode"], row["tweet_id"], row["num"], row["media_type"])
+                groups.setdefault(row["cluster_id"], []).append({"identity": identity, "path": row["path"]})
+                if row["cluster_copy"]:
+                    copies.add(identity)
+        return groups, copies
 
     @_safe
     def run_page(self, page=0, page_size=100) -> dict:

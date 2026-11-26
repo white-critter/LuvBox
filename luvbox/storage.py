@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .file_mutex import replace_file
+from .file_safety import is_reparse_or_link
 from .user_errors import UserFacingError, UserValueError
 
 
@@ -78,7 +79,7 @@ class MigrationResult:
 
 
 def _linked(path: Path) -> bool:
-    return path.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+    return is_reparse_or_link(path)
 
 
 def _legacy_source(path: Path, output_dir: Path) -> bool:
@@ -856,8 +857,12 @@ def _merge_media(previous: dict, incoming: dict, *, allowed_roots=None) -> dict:
     for key, value in second.items():
         if key in {"path", "filesize"} and first.get("last_path") and not first.get("path"):
             continue
+        if key == "missing_since" and first.get("path"):
+            continue
         if key not in result or result[key] in (None, ""):
             result[key] = value
+    if result.get("path"):
+        result["missing_since"] = ""
     if second.get("posted_source") == "metadata" and first.get("posted_source") != "metadata":
         result["posted_at"], result["posted_source"] = second.get("posted_at"), "metadata"
     if any(row.get("status") == "saved" for row in (first, second)):
@@ -966,6 +971,17 @@ def _reconcile_tag_feedback(db: sqlite3.Connection) -> None:
                     "AND tag=? AND source IN ('ai','confirmed')",
                     (*identity, row["tag"]),
                 )
+                has_ai = db.execute(
+                    "SELECT 1 FROM media_tags WHERE folder_mode=? AND tweet_id=? AND num=? AND media_type=? "
+                    "AND source='ai' LIMIT 1",
+                    identity,
+                ).fetchone()
+                if has_ai is None:
+                    db.execute(
+                        "INSERT INTO media_tags(folder_mode,tweet_id,num,media_type,tag,source,created_at) "
+                        "VALUES (?,?,?,?,'','ai',?) ON CONFLICT(folder_mode,tweet_id,num,media_type,tag) DO NOTHING",
+                        (*identity, row.get("updated_at") or ""),
+                    )
     # The empty AI row only says "looked at, no AI tag" (1.11.9 stored "none of these" as a
     # confirmed one): it is an AI row, and it goes where a real AI tag is.
     db.execute("UPDATE media_tags SET source='ai' WHERE tag='' AND source='confirmed'")
@@ -974,6 +990,64 @@ def _reconcile_tag_feedback(db: sqlite3.Connection) -> None:
         "WHERE other.folder_mode=media_tags.folder_mode AND other.tweet_id=media_tags.tweet_id "
         "AND other.num=media_tags.num AND other.media_type=media_tags.media_type "
         "AND other.source='ai' AND other.tag!='')"
+    )
+
+
+def _parse_distinct_members(items) -> frozenset[tuple[str, str, int, str]]:
+    found = set()
+    for item in items if isinstance(items, list) else ():
+        if (isinstance(item, list) and len(item) == 4 and type(item[2]) is int
+                and all(isinstance(item[index], str) for index in (0, 1, 3))):
+            found.add((item[0], item[1], item[2], item[3]))
+    return frozenset(found)
+
+
+def _merge_distinct_groups(existing_raw: str | None, incoming_raw: str | None) -> str | None:
+    merged: list[frozenset[tuple[str, str, int, str]]] = []
+    seen: set[frozenset] = set()
+    for raw in (existing_raw, incoming_raw):
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        for group in parsed if isinstance(parsed, list) else ():
+            members = _parse_distinct_members(group)
+            if len(members) >= 2 and members not in seen:
+                seen.add(members)
+                merged.append(members)
+    if not merged:
+        return None
+    return json.dumps([sorted(list(member) for member in group) for group in merged], ensure_ascii=False)
+
+
+def _merge_distinct_photo_marks(existing_raw: str | None, incoming_raw: str | None) -> str | None:
+    merged: list[tuple[frozenset, frozenset]] = []
+    seen: set[tuple[frozenset, frozenset]] = set()
+    for raw in (existing_raw, incoming_raw):
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        for entry in parsed if isinstance(parsed, list) else ():
+            if not isinstance(entry, dict):
+                continue
+            group = _parse_distinct_members(entry.get("group"))
+            photos = _parse_distinct_members(entry.get("photos")) & group
+            pair = (photos, group)
+            if photos and len(photos) < len(group) and pair not in seen:
+                seen.add(pair)
+                merged.append(pair)
+    if not merged:
+        return None
+    return json.dumps(
+        [{"photos": sorted(list(member) for member in photos),
+          "group": sorted(list(member) for member in group)}
+         for photos, group in merged],
+        ensure_ascii=False,
     )
 
 
@@ -1235,6 +1309,14 @@ def _merge_history(target: sqlite3.Connection, source: sqlite3.Connection, *, al
                 merged = None if incoming is None or local is None else sorted(incoming | local)
                 target.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES ('review_pending',?)",
                                (json.dumps(merged, separators=(",", ":")),))
+                continue
+            if key in {"duplicate_distinct", "duplicate_distinct_photos"}:
+                previous = target.execute("SELECT value FROM catalog_meta WHERE key=?", (key,)).fetchone()
+                prev_raw = previous[0] if previous else None
+                merged_json = (_merge_distinct_groups(prev_raw, value) if key == "duplicate_distinct"
+                               else _merge_distinct_photo_marks(prev_raw, value))
+                if merged_json is not None:
+                    target.execute("INSERT OR REPLACE INTO catalog_meta(key,value) VALUES (?,?)", (key, merged_json))
                 continue
             target.execute("INSERT OR IGNORE INTO catalog_meta(key,value) VALUES (?,?)", (key, value))
     if target_pending or source_pending:

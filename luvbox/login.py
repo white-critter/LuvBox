@@ -200,7 +200,8 @@ def normalize_identity(identity: object) -> dict:
     if (not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id) or
             not isinstance(handle, str) or not _HANDLE.fullmatch(handle) or
             not isinstance(display_name, str) or len(display_name) > 200 or
-            any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in display_name)):
+            any(ord(char) < 32 or 127 <= ord(char) <= 159 or 0xD800 <= ord(char) <= 0xDFFF
+                for char in display_name)):
         raise UserValueError(_ACCOUNT_HELP)
     return {"user_id": user_id, "handle": handle.lower(),
             "display_name": display_name.strip() or handle}

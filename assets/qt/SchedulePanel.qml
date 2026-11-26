@@ -7,7 +7,12 @@ ColumnLayout {
     id: panel
     objectName: "dailySchedulePanel"
     property var app: null
+    property var popupParent: null
     readonly property var schedule: app ? app.schedule : null
+    readonly property var accounts: app ? app.accounts : null
+    readonly property string connectedHandle: accounts && accounts.identity ? accounts.identity.handle || "" : ""
+    readonly property bool accountReady: !!(app && accounts && accounts.connected && app.account
+        && (!connectedHandle || app.account.toLowerCase() === connectedHandle.toLowerCase()))
     readonly property var hostWindow: Window.window
     property string action: ""
     property string requestedTime: ""
@@ -98,7 +103,7 @@ ColumnLayout {
             maximumLength: 5
             selectByMouse: true
             Accessible.name: "자동 저장 실행 시각"
-            enabled: panel.schedule && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running
+            enabled: !!(panel.app && panel.app.canStart && panel.schedule && !panel.schedule.busy && !panel.schedule.locked && !panel.schedule.running)
             onTextEdited: panel.timeEdited = true
             onAccepted: if (scheduleSaveButton.enabled) scheduleSaveButton.click()
         }
@@ -193,6 +198,18 @@ ColumnLayout {
         color: Theme.textMuted
     }
     Label {
+        objectName: "schedulePrerequisiteHint"
+        Layout.fillWidth: true
+        visible: (!!panel.app && !panel.app.busy && !panel.app.canStart) || (!!panel.schedule && panel.schedule.running)
+        text: panel.schedule && panel.schedule.running
+            ? "지금 자동 저장이 실행 중입니다."
+            : panel.accountReady && !panel.app.outputFolder ? "저장할 폴더를 먼저 선택해 주세요."
+                : "X 연결과 저장할 계정을 먼저 설정해 주세요."
+        textFormat: Text.PlainText
+        wrapMode: Text.WordWrap
+        color: Theme.textMuted
+    }
+    Label {
         Layout.fillWidth: true
         visible: !!(panel.schedule && panel.schedule.registered)
         text: "저장 결과는 설정 › 고급 › 실행 기록에서 확인하세요."
@@ -206,7 +223,7 @@ ColumnLayout {
     FlatDialog {
         id: confirmation
         objectName: "scheduleConfirmation"
-        parent: Overlay.overlay
+        parent: panel.popupParent || Overlay.overlay
         preferredWidth: 460
         title: panel.action === "remove" ? "자동 저장 예약을 해제할까요?"
             : panel.action === "migrate" ? "현재 버전으로 변경할까요?"

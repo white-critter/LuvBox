@@ -17,8 +17,8 @@ Dialog {
     focus: true
     closePolicy: Popup.CloseOnEscape
     width: Math.min(preferredWidth, parent ? Math.max(240, parent.width - windowMargin) : preferredWidth)
-    x: parent ? Math.round((parent.width - width) / 2) : 0
-    y: parent ? Math.round((parent.height - height) / 2) : 0
+    x: parent ? Math.max(0, Math.round((parent.width - width) / 2)) : 0
+    y: parent ? Math.max(0, Math.round((parent.height - height) / 2)) : 0
     leftPadding: Theme.dialogPadding
     rightPadding: Theme.dialogPadding
     topPadding: Theme.gapLarge

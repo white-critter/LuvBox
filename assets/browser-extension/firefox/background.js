@@ -188,7 +188,10 @@ async function dispatch(message, sender) {
       pairings.delete(tabId);
       throw error;
     }
-    await reportProgress(pairing, "extension_ready");
+    if (await reportProgress(pairing, "extension_ready") === "gone") {
+      pairings.delete(tabId);
+      return {ok: false, code: "app_gone", error: publicError};
+    }
     return {ok: true};
   }
   const {pairing, tabId} = await currentPairing(message, sender);

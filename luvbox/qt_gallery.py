@@ -56,6 +56,8 @@ class SafeThumbnailProvider(QQuickImageProvider):
 
     ready = Signal(str)
     failed = Signal(str)
+    readyForSize = Signal(str, int, int)
+    failedForSize = Signal(str, int, int)
 
     def __init__(self, *, cache_size=240, decoder=thumbnail, workers=2):
         if type(cache_size) is not int or not 1 <= cache_size <= 240:
@@ -208,7 +210,7 @@ class SafeThumbnailProvider(QQuickImageProvider):
                 self._enqueue_locked(key, width, height, index)
             self._start_workers_locked()
         for key in publish:
-            self._publish(key, generation)
+            self._publish(key, generation, width, height)
 
     def reset_notifications(self):
         with self._lock:
@@ -296,18 +298,20 @@ class SafeThumbnailProvider(QQuickImageProvider):
             del values[:len(values) - _TIMING_CAP]
             self._timing_truncated = True
 
-    def _publish(self, key, generation):
+    def _publish(self, key, generation, width=0, height=0):
         with self._lock:
             if self._closed or generation != self._registry_generation:
                 return
             self._notified[key] = time.perf_counter()
         self.ready.emit(key)
+        self.readyForSize.emit(key, width, height)
 
-    def _publish_failed(self, key, generation):
+    def _publish_failed(self, key, generation, width=0, height=0):
         with self._lock:
             if self._closed or generation != self._registry_generation:
                 return
         self.failed.emit(key)
+        self.failedForSize.emit(key, width, height)
 
     def _enqueue_locked(self, key, width, height, priority):
         token = (key, width, height)
@@ -400,9 +404,9 @@ class SafeThumbnailProvider(QQuickImageProvider):
                         publish = True
                 self._lock.notify_all()
             if publish:
-                self._publish(key, generation)
+                self._publish(key, generation, width, height)
             elif failed:
-                self._publish_failed(key, generation)
+                self._publish_failed(key, generation, width, height)
             if closed:
                 return
 
@@ -517,12 +521,20 @@ class GalleryModel(QAbstractListModel):
         self._missing = set()
         self._thumb_size = (0, 0)
         self._thumb_focus = None
-        ready = getattr(provider, "ready", None)
-        if ready is not None:
-            ready.connect(self._thumb_ready)
-        failed = getattr(provider, "failed", None)
-        if failed is not None:
-            failed.connect(self._thumb_failed)
+        ready_sized = getattr(provider, "readyForSize", None)
+        if ready_sized is not None:
+            ready_sized.connect(self._thumb_ready_for_size)
+        else:
+            ready = getattr(provider, "ready", None)
+            if ready is not None:
+                ready.connect(self._thumb_ready)
+        failed_sized = getattr(provider, "failedForSize", None)
+        if failed_sized is not None:
+            failed_sized.connect(self._thumb_failed_for_size)
+        else:
+            failed = getattr(provider, "failed", None)
+            if failed is not None:
+                failed.connect(self._thumb_failed)
         self._total = 0
         self._busy = False
         self._error = ""
@@ -796,17 +808,36 @@ class GalleryModel(QAbstractListModel):
             return
         self._thumb_focus = focus
         if size != self._thumb_size:
+            self._thumb_size = size
             reset = getattr(self._provider, "reset_notifications", None)
             if reset is not None:
                 reset()
+            roles = []
             if self._ready:
                 self._ready.clear()
-                self.dataChanged.emit(self.index(0), self.index(count - 1), [self.ThumbReadyRole])
-        self._thumb_size = size
+                roles.append(self.ThumbReadyRole)
+            missing_files = {key for key in self._missing if self._rows[self._positions[key]].get("missing")}
+            if missing_files != self._missing:
+                self._missing = missing_files
+                roles.append(self.ThumbMissingRole)
+            if roles:
+                self.dataChanged.emit(self.index(0), self.index(count - 1), roles)
         schedule = getattr(self._provider, "schedule", None)
         if schedule is not None:
             keys = [self._rows[index]["key"] for indexes in (visible, ahead) for index in indexes]
             schedule(keys, width, height)
+
+    @Slot(str, int, int)
+    def _thumb_ready_for_size(self, key, width, height):
+        if (width, height) != (0, 0) and self._thumb_size != (0, 0) and (width, height) != self._thumb_size:
+            return
+        self._thumb_ready(key)
+
+    @Slot(str, int, int)
+    def _thumb_failed_for_size(self, key, width, height):
+        if (width, height) != (0, 0) and self._thumb_size != (0, 0) and (width, height) != self._thumb_size:
+            return
+        self._thumb_failed(key)
 
     @Slot(str)
     def _thumb_ready(self, key):

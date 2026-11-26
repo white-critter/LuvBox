@@ -29,6 +29,7 @@ import stat
 import threading
 
 from .clip_model import ACTIVE_MODEL_ID, DEFAULT_CATEGORIES, embedding_bytes
+from .file_safety import is_reparse_or_link, normalize_tag as _safe_normalize_tag
 from .settings import app_directory
 from .user_errors import UserFacingError
 
@@ -41,7 +42,6 @@ REGIMES = ("zeroshot", "neighbor", "linear")
 SOURCE_KINDS = ("x", "local")
 _KOREA = timezone(timedelta(hours=9))
 _ERROR = "AI 태그 설정을 읽거나 저장하지 못했습니다. LuvBox 기록 폴더의 권한을 확인해 주세요."
-_NAME_SURROGATE = 0x20000000
 # One writer at a time in this process; SQLite's own lock keeps other processes apart.
 _WRITE_LOCK = threading.RLock()
 
@@ -56,10 +56,7 @@ def profile_path() -> Path:
 
 def normalize_tag(tag) -> str:
     """The catalog's rule for a tag: no leading '#', no control characters, trimmed."""
-    if not isinstance(tag, str):
-        return ""
-    cleaned = "".join(char for char in tag.strip().lstrip("#") if ord(char) >= 32 and ord(char) != 127)
-    return cleaned.strip()
+    return _safe_normalize_tag(tag)
 
 
 def valid_tag(tag) -> str:
@@ -77,9 +74,7 @@ def _linked(path: Path) -> bool:
         details = path.lstat()
     except FileNotFoundError:
         return False
-    return bool(stat.S_ISLNK(details.st_mode)
-                or getattr(details, "st_reparse_tag", 0) & _NAME_SURROGATE
-                or getattr(path, "is_junction", lambda: False)())
+    return is_reparse_or_link(path, status=details)
 
 
 def _check_plain(path: Path, top: Path | None) -> None:

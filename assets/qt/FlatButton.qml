@@ -26,6 +26,8 @@ Button {
     // the arrow points up while what it opened is showing.
     property bool dropdown: false
     property bool dropdownOpen: false
+    property int elideMode: Text.ElideRight
+    readonly property alias truncated: label.truncated
     // A line shown after the pointer rests on the button. It leaves when the
     // button is pressed and stays away until the pointer comes back, so it never
     // describes the state from before the click.
@@ -163,6 +165,7 @@ Button {
         }
     }
     contentItem: Text {
+        id: label
         text: control.text
         textFormat: Text.PlainText
         font: control.font
@@ -181,6 +184,6 @@ Button {
         }
         horizontalAlignment: Text.AlignHCenter
         verticalAlignment: Text.AlignVCenter
-        elide: Text.ElideRight
+        elide: control.elideMode
     }
 }

@@ -456,7 +456,8 @@ FlatDialog {
                             }
                             FlatButton {
                                 text: "기록 폴더 열기"
-                                onClicked: dialog.app.openRecordsFolder()
+                                enabled: !!dialog.app
+                                onClicked: if (dialog.app) dialog.app.openRecordsFolder()
                             }
                         }
                     }

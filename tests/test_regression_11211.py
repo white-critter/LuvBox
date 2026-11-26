@@ -177,7 +177,12 @@ def _qml_scene():
 
             # 2) tagBatchPopup is a FlatDialog.
             tag_popup = find("tagBatchPopup")
-            assert tag_popup.metaObject().className().startswith("FlatDialog"), tag_popup.metaObject().className()
+            meta = tag_popup.metaObject()
+            chain = []
+            while meta is not None:
+                chain.append(meta.className())
+                meta = meta.superClass()
+            assert any(name.startswith("FlatDialog") for name in chain), chain
 
             # 3) DuplicateReview active-filter empty state when duplicates exist elsewhere.
             controller.library._duplicate_only = True
@@ -478,7 +483,7 @@ class Regression11211BackendTests(unittest.TestCase):
             # recycling.verify_receipt returns False cleanly for non-$RECYCLE.BIN path.
             self.assertFalse(recycling.verify_receipt(f_main, Path(folder) / "not_recycle.jpg", deletion.file_signature(f_main)))
 
-            # recovery raises RecoveryError when -wal sidecar unlink raises OSError while still existing.
+            # Recovery stops if Windows will not move a -wal sidecar for replacement.
             with patch.dict(os.environ, {"LOCALAPPDATA": folder}):
                 rec_paths = resolve_storage(Path(folder) / "photos2", "acct")
                 rec_paths.record_dir.mkdir(parents=True, exist_ok=True)
@@ -488,14 +493,15 @@ class Regression11211BackendTests(unittest.TestCase):
                     db.execute("CREATE TABLE IF NOT EXISTS catalog_meta (key TEXT PRIMARY KEY, value TEXT)")
                     db.commit()
                 wal_file.write_bytes(b"wal")
-                orig_unlink = Path.unlink
-                def deny_wal(self_path, missing_ok=False):
+                original_rename = Path.rename
+                def deny_wal(self_path, target):
                     if self_path.name.endswith("-wal"):
                         raise PermissionError(32, "sharing violation")
-                    return orig_unlink(self_path, missing_ok=missing_ok)
-                with patch.object(Path, "unlink", deny_wal):
+                    return original_rename(self_path, target)
+                with patch.object(Path, "rename", deny_wal):
                     with self.assertRaises(recovery.RecoveryError):
                         recovery.repair_history(rec_paths.record_dir, "acct")
+                self.assertEqual(wal_file.read_bytes(), b"wal")
 
             # qt_records.shutdown is idempotent.
             ctrl = RecordsController()

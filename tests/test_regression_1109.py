@@ -660,21 +660,19 @@ class QtControllerRegressionTests(unittest.TestCase):
                 p.unlink()
         rec = RecordsController()
         self.addCleanup(lambda: (rec.shutdown(), self.wait(lambda: not rec._worker.is_alive())))
+        # Keep the worker from taking the queued items while checking their order.
         with rec._condition:
             rec._pending.clear()
-        rec._enqueue("counts", None, replace=True)
-        rec._enqueue("runs", (0, 1), replace=True)
-        with rec._condition:
+            rec._enqueue("counts", None, replace=True)
+            rec._enqueue("runs", (0, 1), replace=True)
             self.assertEqual([item[0] for item in rec._pending], ["runs", "counts"])
-
-        rec._retry_busy = False
-        with rec._condition:
             rec._pending.clear()
-        rec.retryAll()
-        rec.retryAll()
-        with rec._condition:
+
+            rec.retryAll()
+            rec.retryAll()
             self.assertEqual([item[0] for item in rec._pending], ["retry_keys"])
-        rec._accept(("retry_keys", rec._generation, {"keys": ()}, ""))
+            _, generation, payload = rec._pending.popleft()
+        rec._accept(("retry_keys", generation, {"keys": (), "serial": payload[2]}, ""))
         self.assertFalse(rec._retry_busy)
 
         with patch.object(HistoryStore, "_lost_items", wraps=HistoryStore._lost_items, autospec=True) as lost_spy:

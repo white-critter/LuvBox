@@ -77,11 +77,15 @@ Item {
     readonly property bool failed: String(activeSource).length > 0 && (videoSource
         ? player.error !== MediaPlayer.NoError || player.mediaStatus === MediaPlayer.InvalidMedia
         : gifSource ? animation.status === Image.Error : photo.status === Image.Error)
+    readonly property bool _bufferingFrame: videoSource && player.mediaStatus === MediaPlayer.BufferingMedia
+        && videoOutput.contentRect.width > 0
     readonly property bool loading: String(activeSource).length > 0 && !failed && (videoSource
         ? player.mediaStatus === MediaPlayer.LoadingMedia || player.mediaStatus === MediaPlayer.StalledMedia
+            || (player.mediaStatus === MediaPlayer.BufferingMedia && !_bufferingFrame)
         : gifSource ? animation.status === Image.Loading : photo.status === Image.Loading)
     readonly property bool ready: String(activeSource).length > 0 && !failed && (videoSource
         ? player.mediaStatus === MediaPlayer.LoadedMedia || player.mediaStatus === MediaPlayer.BufferedMedia
+            || _bufferingFrame
         : gifSource ? animation.status === Image.Ready : photo.status === Image.Ready)
     readonly property bool unavailable: !loading && !externalBusy && !ready
         && (failed || (playing && !_released && String(activeSource).length === 0))
@@ -343,6 +347,7 @@ Item {
 
     FlatButton {
         objectName: "previewAudioToggle"
+        focusPolicy: Qt.TabFocus
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.margins: 8

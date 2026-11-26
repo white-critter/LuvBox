@@ -67,9 +67,9 @@ p{overflow-wrap:anywhere}.guide{margin:0 0 12px;color:#f4f1f1}.guide b{font-weig
 <p id="extension-status" class="status">LuvBox 연결 확장을 기다리는 중… 확장이 있으면 곧 연결 확인 화면으로 바뀝니다.</p>
 <p class="guide">이 화면이 그대로라면 이 브라우저 프로필에 확장이 없거나 꺼져 있습니다. LuvBox의 X 연결 창에 있는
 <b>‘확장 설치·연결 도움말’</b>을 따르세요. 확장의 응답이 없으면 그 도움말이 저절로 펼쳐집니다.</p>
-<p class="guide">이미 설치했다면 같은 프로필인지 확인하고, 확장 관리에서 LuvBox 확장을 새로고침한 뒤 앱에서 연결을 취소하고 다시 시작하세요.</p>
+<p class="guide">이미 설치했다면 같은 프로필인지 확인하고, 확장 관리에서 LuvBox 확장을 새로고침한 뒤 앱에서 ‘연결 취소’를 누르고 다시 시작하세요.</p>
 <p class="help">브라우저의 비밀번호는 LuvBox에 전달되지 않습니다. 연결을 승인하면 X 로그인 정보와 계정 정보가 이 컴퓨터의 LuvBox에만
-전달됩니다. 이 탭을 닫고 앱에서 취소를 누르면 연결이 중단됩니다.</p>
+전달됩니다. 이 탭을 닫고 앱에서 ‘연결 취소’를 누르면 연결이 중단됩니다.</p>
 </main></body></html>""".encode("utf-8")
 
 
@@ -118,7 +118,8 @@ def _session(payload: object) -> BrowserSession:
             not isinstance(handle, str) or not _HANDLE.fullmatch(handle) or
             not isinstance(user_id, str) or not _USER_ID.fullmatch(user_id) or
             not isinstance(display_name, str) or len(display_name) > 200 or
-            any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in display_name)):
+            any(ord(char) < 32 or 127 <= ord(char) <= 159 or 0xD800 <= ord(char) <= 0xDFFF
+                for char in display_name)):
         raise ValueError("invalid bridge payload")
     return BrowserSession(token, handle.lower(), user_id, display_name)
 
@@ -458,6 +459,4 @@ class BrowserBridge:
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=1.1)
         if self._server is not None and (self._thread is None or not self._thread.is_alive()):
-            self._server.server_close()
-        if self._server is not None:
             self._server.server_close()

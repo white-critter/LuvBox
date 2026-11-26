@@ -39,15 +39,20 @@ WheelHandler {
         const view = handler.flickable
         const angle = event.angleDelta.y
         const pixel = event.pixelDelta.y
-        if (!view || (!angle && !pixel) || (angle ? event.angleDelta.x !== 0 : event.pixelDelta.x !== 0)
+        const isTouchPad = event.device.type === PointerDevice.TouchPad || pixel !== 0
+        const dy = pixel !== 0 ? pixel : angle
+        const dx = pixel !== 0 ? event.pixelDelta.x : event.angleDelta.x
+        if (!view || !dy || (isTouchPad ? Math.abs(dy) < Math.abs(dx) : dx !== 0)
                 || event.modifiers !== Qt.NoModifier || handler.wheelLines === 0) {
             event.accepted = false
             return
         }
         const minimum = view.originY
         const maximum = minimum + Math.max(0, view.contentHeight - view.height)
-        if (!angle) {
-            const sign = pixel > 0 ? -1 : 1
+        if (isTouchPad) {
+            const gainLines = handler.wheelLines > 0 && handler.wheelLines < 1000 ? handler.wheelLines / 3 : 1
+            const step = pixel !== 0 ? pixel : (angle / 120 * handler.notchPixels * gainLines)
+            const sign = step > 0 ? -1 : 1
             if (maximum - minimum < 1 || (sign < 0 && view.contentY <= minimum + 0.5)
                     || (sign > 0 && view.contentY >= maximum - 0.5)) {
                 handler.reset()
@@ -56,7 +61,7 @@ WheelHandler {
             }
             handler.reset()
             view.cancelFlick()
-            view.contentY = Math.max(minimum, Math.min(maximum, view.contentY - pixel))
+            view.contentY = Math.max(minimum, Math.min(maximum, view.contentY - step))
             event.accepted = true
             return
         }

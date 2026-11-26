@@ -848,11 +848,20 @@ class LibraryRepository:
         try:
             with closing(_ReadOnlyHistory(request.location())) as store:
                 store._folder_cache = {}
-                if not hasattr(store, "count_embeddings"):
+                if hasattr(store, "ai_cleared") and store.ai_cleared():
                     return False
-                if store.count_embeddings(ACTIVE_MODEL_ID, unlabeled=True):
-                    return True
-                if store.count_embeddings(ACTIVE_MODEL_ID):
+                has_embs = getattr(store, "has_embeddings", None)
+                if callable(has_embs):
+                    if has_embs(ACTIVE_MODEL_ID, unlabeled=True):
+                        return True
+                    has_active = has_embs(ACTIVE_MODEL_ID)
+                else:
+                    if not hasattr(store, "count_embeddings"):
+                        return False
+                    if store.count_embeddings(ACTIVE_MODEL_ID, unlabeled=True):
+                        return True
+                    has_active = bool(store.count_embeddings(ACTIVE_MODEL_ID))
+                if has_active:
                     profile = _open_profile()
                     if profile is not None:
                         with closing(profile):
@@ -1289,11 +1298,14 @@ class LibraryRepository:
         Returns the rows to move and how many chosen photos were kept back.
         """
         rule = store.duplicate_rule() if hasattr(store, "duplicate_rule") else "exact"
-        groups = store.duplicate_members() if hasattr(store, "duplicate_members") else {}
+        chosen = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows}
+        if hasattr(store, "ranked_duplicate_groups"):
+            groups, copies = store.ranked_duplicate_groups(chosen)
+        else:
+            groups = store.duplicate_members() if hasattr(store, "duplicate_members") else {}
+            copies = set(store.duplicate_copy_identities() or ()) if groups else set()
         member_of = {member["identity"]: number for number, members in groups.items() for member in members}
         first = {members[0]["identity"] for members in groups.values() if members}
-        copies = set(store.duplicate_copy_identities() or ()) if groups else set()
-        chosen = {(row["folder_mode"], row["tweet_id"], row["num"], row["media_type"]) for row in rows}
         spared = set()
         for members in groups.values():
             if members and all(member["identity"] in chosen for member in members):
@@ -2224,11 +2236,17 @@ class LibraryController(QObject):
                                     or not self._user_tags_loaded or not self._counts_loaded):
             with self._condition:
                 if reload_authors or not self._authors_loaded:
-                    self._authors_loaded = False
-                    self._interactive.append(("authors", self._generation, self._selection_serial, ""))
+                    if getattr(self._repository, "_has_tweet_facets", True):
+                        self._authors_loaded = False
+                        self._interactive.append(("authors", self._generation, self._selection_serial, ""))
+                    else:
+                        self._authors_loaded = True
                 if reload_authors or not self._hashtags_loaded:
-                    self._hashtags_loaded = False
-                    self._interactive.append(("hashtags", self._generation, self._selection_serial, ""))
+                    if getattr(self._repository, "_has_tweet_facets", True):
+                        self._hashtags_loaded = False
+                        self._interactive.append(("hashtags", self._generation, self._selection_serial, ""))
+                    else:
+                        self._hashtags_loaded = True
                 if reload_authors or not self._user_tags_loaded:
                     self._user_tags_loaded = False
                     self._interactive.append(("user_tags", self._generation, self._selection_serial, ""))
@@ -2392,24 +2410,27 @@ class LibraryController(QObject):
         if not self._closed:
             self._reload_ai_rules(announce=False)
 
-    def _reload_ai_rules(self, emit=True, announce=True):
+    def _reload_ai_rules(self, emit=True, announce=True, rules_snapshot=None):
         """Read the AI tags again from the shared profile (a small local database, no AI libraries).
 
         ``announce`` tells the other tab when something changed here (aiProfileChanged).
         """
-        rules, deleted = [], 0
-        profile = _open_profile()
-        if profile is not None:
-            try:
-                with closing(profile):
-                    rules = profile.active_tags(include_disabled=True)
-                    deleted = profile.deleted_builtin_count()
-            except AiProfileError:
-                rules = []
+        if rules_snapshot is not None:
+            rules, deleted = rules_snapshot
         else:
-            # The app data folder cannot hold the profile: offer the defaults, untaught.
-            rules = [{"tag": name, "enabled": True, "built_in": True, "pos_count": 0, "neg_count": 0,
-                      "regime": "zeroshot"} for name in CATEGORY_NAMES]
+            rules, deleted = [], 0
+            profile = _open_profile()
+            if profile is not None:
+                try:
+                    with closing(profile):
+                        rules = profile.active_tags(include_disabled=True)
+                        deleted = profile.deleted_builtin_count()
+                except AiProfileError:
+                    rules = []
+            else:
+                # The app data folder cannot hold the profile: offer the defaults, untaught.
+                rules = [{"tag": name, "enabled": True, "built_in": True, "pos_count": 0, "neg_count": 0,
+                          "regime": "zeroshot"} for name in CATEGORY_NAMES]
         shown = [{"tag": rule["tag"], "enabled": bool(rule["enabled"]), "built_in": bool(rule["built_in"]),
                   "pos_count": int(rule.get("pos_count") or 0), "neg_count": int(rule.get("neg_count") or 0),
                   "regime": rule.get("regime") or "", "status_text": self._rule_status(rule)} for rule in rules]
@@ -3261,13 +3282,17 @@ class LibraryController(QObject):
             if self.model._rows:
                 self.selectItem(self.model._rows[min(successor, len(self.model._rows) - 1)]["key"])
         # Counts beside the filters include the files that just left.
-        self._authors_loaded = False
-        self._hashtags_loaded = False
+        facets = getattr(self._repository, "_has_tweet_facets", True)
+        self._authors_loaded = not facets
+        self._hashtags_loaded = not facets
         self._user_tags_loaded = False
         self._duplicate_counts_loaded = False
         self._ai_counts_loaded = False
+        actions = ("authors", "hashtags", "user_tags", "duplicate_counts", "ai_counts") if facets else (
+            "user_tags", "duplicate_counts", "ai_counts"
+        )
         with self._condition:
-            for action in ("authors", "hashtags", "user_tags", "duplicate_counts", "ai_counts"):
+            for action in actions:
                 stamp = str(self._duplicate_count_stamp) if action == "duplicate_counts" else ""
                 self._interactive.append((action, self._generation, self._selection_serial, stamp))
             self._condition.notify_all()
@@ -3706,7 +3731,9 @@ class LibraryController(QObject):
             curr, tot = selection
             self._dup_current = curr
             self._dup_total = tot
-            self._status = message
+            cancel = getattr(self._repository, "_duplicate_cancel", None)
+            if not (cancel is not None and cancel.is_set()):
+                self._status = message
             self.duplicateScanProgress.emit(curr, tot)
             self.changed.emit()
             return
@@ -3714,7 +3741,9 @@ class LibraryController(QObject):
             curr, tot = selection
             self._ai_current = curr
             self._ai_total = tot
-            self._status = message
+            cancel = getattr(self._repository, "_ai_cancel", None)
+            if not (cancel is not None and cancel.is_set()):
+                self._status = message
             self.aiScanProgress.emit(curr, tot)
             self.changed.emit()
             return
@@ -3851,6 +3880,8 @@ class LibraryController(QObject):
                   and len(taught_idents) == 1 and single_key
                   and self._selected.get("key") == single_key and not kept_by_user
                   and self.removeDeleted([single_key])):
+                if self._busy:
+                    self._preserve_status_serial = self._selection_serial
                 reload = False
             else:
                 reload = True

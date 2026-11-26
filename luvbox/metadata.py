@@ -826,7 +826,7 @@ def embed_source(path: Path | str, tweet_id: str, author: str = "", author_id: s
             # copy2 also copies the read-only flag. Refuse before making a
             # temporary which neither the writer nor cleanup could change.
             raise PermissionError("read-only media")
-        deadline = time.monotonic() + TIMEOUT_SECONDS
+        deadline = time.monotonic() + TIMEOUT_SECONDS + min(60, original.st_size // (25 * 1024 * 1024))
         previous_tags = _retry_original_io(
             target, original, lambda: _read_tags(target, deadline), deadline, cancelled)
         reason = "copy"

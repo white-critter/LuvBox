@@ -12,6 +12,7 @@ from .protection import AccountGuard, ProtectionError
 from .recovery import backup_catalog
 from .recycling import RecyclingError, file_signature, recycle_file
 from .storage import OutputGuard, StoragePaths, publish_snapshot
+from .thumbcache import cloud_only
 
 
 class _DeletionMessageError(ValueError):
@@ -22,6 +23,7 @@ _NO_OTHER_COPY = "같은 내용의 다른 파일이 남는지 확인하지 못�
 _NEAR_ONLY = ("‘비슷한 사진도 검사’로 묶인 사진은 내용이 완전히 같은 파일이 남을 때만 사본으로 보냅니다. "
               "‘비슷함’ 사진은 한 장만 골라 휴지통으로 보내면 남길 사진과 나란히 비교한 뒤 보낼 수 있습니다.")
 _ALIKE_NOT_KEPT = "남길 사진이 그대로 있고 같은 사진인지 다시 확인하지 못해 그대로 두었습니다."
+_CLOUD_ONLY = "클라우드에만 있는 파일은 옮기지 않습니다. 파일을 이 PC에 내려받은 뒤 다시 시도해 주세요."
 
 
 def _same_content(first: Path, second: Path) -> bool:
@@ -273,6 +275,8 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
             try:
                 if not store.is_media_path(row["path"]):
                     raise RecyclingError("기록된 저장 폴더의 일반 파일만 삭제할 수 있습니다.")
+                if cloud_only(row["path"]):
+                    raise RecyclingError(_CLOUD_ONLY)
                 signature = file_signature(row["path"])
                 expected = row.get("_delete_signature")
                 if expected is not None and tuple(expected) != signature:
@@ -326,6 +330,8 @@ def run_deletion(location: StoragePaths | Path, rows: list[dict], keep_deleted: 
                 store.finish_deletion(ident, "cancelled", "중단 요청으로 파일을 그대로 두었습니다.")
                 break
             try:
+                if cloud_only(path):
+                    raise RecyclingError(_CLOUD_ONLY)
                 destination = recycle_file(path, expected=signature)
             except RecyclingError as exc:
                 uncertain = exc.uncertain or store._deletion_path_absent(path)

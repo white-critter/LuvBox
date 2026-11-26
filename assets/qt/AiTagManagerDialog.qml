@@ -14,9 +14,10 @@ FlatDialog {
     property var app: null
     // The gallery's by default; the 폴더 정리 tab gives its own controller (the tags are the same).
     property var library: app ? app.library : null
+    property bool shareLearning: true
     readonly property var rules: library ? library.aiTagRules : []
     readonly property bool locked: !library || library.tagsLocked || library.busy
-    readonly property string typed: newTagField.text.trim().replace(/^#+/, "").trim()
+    readonly property string typed: newTagField.displayText.trim().replace(/^#+/, "").trim()
     property string feedbackText: ""
     property string _openedStatus: ""
     // The person's own tags that are not AI tags yet, most used first.
@@ -43,10 +44,11 @@ FlatDialog {
         if (!dialog.library || dialog.locked || dialog.typed.length === 0)
             return
         if (dialog.library.addAiTag(dialog.typed))
-            newTagField.text = ""
+            newTagField.clearText()
     }
 
     onOpened: {
+        newTagField.clearText()
         dialog._openedStatus = dialog.library ? (dialog.library.status || "") : ""
         dialog.feedbackText = ""
         if (!dialog.locked)
@@ -114,6 +116,15 @@ FlatDialog {
             font.pixelSize: Theme.fontSmall
             wrapMode: Text.Wrap
         }
+        Label {
+            Layout.fillWidth: true
+            visible: dialog.candidates.length > 0 && !dialog.shareLearning
+            text: "이 폴더는 ‘AI 학습 공유’가 꺼져 있어 이 폴더의 예시 사진은 공통 AI 학습에 반영되지 않습니다."
+            color: Theme.notice
+            font.pixelSize: Theme.fontCaption
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+        }
         Flow {
             objectName: "aiTagCandidates"
             Layout.fillWidth: true
@@ -130,108 +141,104 @@ FlatDialog {
                     focusPolicy: Qt.TabFocus
                     text: "#" + modelData.tag + " · " + Number(modelData.count || 0).toLocaleString(Qt.locale(), "f", 0)
                     enabled: !dialog.locked
-                    tip: "AI 태그로 추가하고 이 태그의 사진으로 배웁니다"
+                    tip: !dialog.shareLearning
+                        ? "AI 태그로 추가합니다 (이 폴더의 ‘AI 학습 공유’가 꺼져 있어 예시는 공유되지 않습니다)"
+                        : "AI 태그로 추가하고 이 태그의 사진으로 배웁니다"
                     onClicked: if (dialog.library) dialog.library.enableUserTagAsAi(modelData.tag)
                 }
             }
         }
 
-        FocusScrollView {
-            id: ruleScroll
+        ColumnLayout {
+            id: ruleColumn
             objectName: "aiTagRuleList"
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(ruleColumn.implicitHeight, 340)
-            Layout.minimumHeight: Math.min(ruleColumn.implicitHeight, 48)
-            clip: true
-            contentWidth: availableWidth
-            rightPadding: ScrollBar.vertical.policy === ScrollBar.AlwaysOn ? 14 : 0
-            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
-            ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
-            ColumnLayout {
-                id: ruleColumn
-                width: ruleScroll.availableWidth
-                spacing: Theme.gapSmall
-                Label {
+            spacing: Theme.gapSmall
+            Label {
+                Layout.fillWidth: true
+                visible: dialog.rules.length === 0
+                text: "AI 태그가 없습니다. 위에서 새로 추가하거나 기본 태그를 복원해 주세요."
+                color: Theme.textMuted
+                wrapMode: Text.Wrap
+            }
+            Repeater {
+                model: dialog.rules
+                delegate: Rectangle {
+                    id: row
+                    required property var modelData
+                    objectName: "aiTagRow_" + (modelData.tag || "")
                     Layout.fillWidth: true
-                    visible: dialog.rules.length === 0
-                    text: "AI 태그가 없습니다. 위에서 새로 추가하거나 기본 태그를 복원해 주세요."
-                    color: Theme.textMuted
-                    wrapMode: Text.Wrap
-                }
-                Repeater {
-                    model: dialog.rules
-                    delegate: Rectangle {
-                        id: row
-                        required property var modelData
-                        objectName: "aiTagRow_" + (modelData.tag || "")
-                        Layout.fillWidth: true
-                        implicitHeight: rowLayout.implicitHeight + Theme.gapSmall * 2
-                        radius: Theme.radiusControl
-                        color: Theme.well
-                        border.width: 1
-                        border.color: Theme.line
-                        RowLayout {
-                            id: rowLayout
-                            anchors.fill: parent
-                            anchors.leftMargin: Theme.gap
-                            anchors.rightMargin: Theme.gapSmall
-                            spacing: Theme.gapSmall
-                            ColumnLayout {
+                    implicitHeight: rowLayout.implicitHeight + Theme.gapSmall * 2
+                    radius: Theme.radiusControl
+                    color: Theme.well
+                    border.width: 1
+                    border.color: Theme.line
+                    RowLayout {
+                        id: rowLayout
+                        anchors.fill: parent
+                        anchors.leftMargin: Theme.gap
+                        anchors.rightMargin: Theme.gapSmall
+                        spacing: Theme.gapSmall
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            spacing: Theme.gapTiny
+                            RowLayout {
                                 Layout.fillWidth: true
-                                Layout.minimumWidth: 0
-                                spacing: Theme.gapTiny
-                                RowLayout {
+                                spacing: Theme.gapSmall
+                                Label {
+                                    id: aiTagNameLabel
+                                    objectName: "aiTagName"
                                     Layout.fillWidth: true
-                                    spacing: Theme.gapSmall
-                                    Label {
-                                        objectName: "aiTagName"
-                                        Layout.fillWidth: true
-                                        Layout.minimumWidth: 0
-                                        text: "#" + row.modelData.tag
-                                        color: row.modelData.enabled ? Theme.text : Theme.textMuted
-                                        font.bold: true
-                                        elide: Text.ElideRight
-                                        textFormat: Text.PlainText
-                                    }
-                                    Label {
-                                        text: row.modelData.built_in ? "기본" : "직접 추가"
-                                        color: Theme.textFaint
-                                        font.pixelSize: Theme.fontCaption
-                                    }
+                                    Layout.minimumWidth: 0
+                                    text: "#" + row.modelData.tag
+                                    color: row.modelData.enabled ? Theme.text : Theme.textMuted
+                                    font.bold: true
+                                    elide: Text.ElideRight
+                                    textFormat: Text.PlainText
+                                    HoverHandler { id: aiTagNameHover }
+                                    ToolTip.visible: aiTagNameHover.hovered && aiTagNameLabel.truncated
+                                    ToolTip.delay: 500
+                                    ToolTip.text: aiTagNameLabel.text
                                 }
                                 Label {
-                                    objectName: "aiTagStatus"
-                                    Layout.fillWidth: true
-                                    text: row.modelData.enabled ? row.modelData.status_text
-                                                                : "꺼짐 · " + row.modelData.status_text
-                                    color: !row.modelData.built_in && row.modelData.pos_count === 0
-                                        ? Theme.notice : Theme.textMuted
-                                    font.pixelSize: Theme.fontSmall
-                                    elide: Text.ElideRight
+                                    text: row.modelData.built_in ? "기본" : "직접 추가"
+                                    color: Theme.textFaint
+                                    font.pixelSize: Theme.fontCaption
                                 }
                             }
-                            FlatSwitch {
-                                objectName: "aiTagSwitch_" + (row.modelData.tag || "")
-                                focusPolicy: Qt.TabFocus
-                                checked: row.modelData.enabled
-                                enabled: !dialog.locked
-                                Accessible.name: "#" + row.modelData.tag + " 자동분류"
-                                onToggled: {
-                                    if (dialog.library)
-                                        dialog.library.setAiTagEnabled(row.modelData.tag, checked)
-                                    checked = Qt.binding(function() { return row.modelData.enabled })
-                                }
+                            Label {
+                                objectName: "aiTagStatus"
+                                Layout.fillWidth: true
+                                text: row.modelData.enabled ? row.modelData.status_text
+                                                            : "꺼짐 · " + row.modelData.status_text
+                                color: !row.modelData.built_in && row.modelData.pos_count === 0
+                                    ? Theme.notice : Theme.textMuted
+                                font.pixelSize: Theme.fontSmall
+                                wrapMode: Text.WordWrap
                             }
-                            FlatButton {
-                                objectName: "aiTagDelete_" + (row.modelData.tag || "")
-                                text: "삭제"
-                                tone: "ghost"
-                                compact: true
-                                focusPolicy: Qt.TabFocus
-                                enabled: !dialog.locked
-                                tip: "AI 태그에서 뺍니다. 직접 붙인 태그와 사진은 그대로 둡니다"
-                                onClicked: if (dialog.library) dialog.library.deleteAiTag(row.modelData.tag)
+                        }
+                        FlatSwitch {
+                            objectName: "aiTagSwitch_" + (row.modelData.tag || "")
+                            focusPolicy: Qt.TabFocus
+                            checked: row.modelData.enabled
+                            enabled: !dialog.locked
+                            Accessible.name: "#" + row.modelData.tag + " 자동분류"
+                            onToggled: {
+                                if (dialog.library)
+                                    dialog.library.setAiTagEnabled(row.modelData.tag, checked)
+                                checked = Qt.binding(function() { return row.modelData.enabled })
                             }
+                        }
+                        FlatButton {
+                            objectName: "aiTagDelete_" + (row.modelData.tag || "")
+                            text: "삭제"
+                            tone: "ghost"
+                            compact: true
+                            focusPolicy: Qt.TabFocus
+                            enabled: !dialog.locked
+                            tip: "AI 태그에서 뺍니다. 직접 붙인 태그와 사진은 그대로 둡니다"
+                            onClicked: if (dialog.library) dialog.library.deleteAiTag(row.modelData.tag)
                         }
                     }
                 }

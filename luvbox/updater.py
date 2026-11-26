@@ -407,7 +407,9 @@ def download(version: str, folder, source: Source = GITHUB, *, size: int = 0, pr
         if footer is None or footer["version"] != version:
             raise UpdateError("program")
         try:
-            os.replace(partial, target)
+            _replace_loop(partial, target, cancelled=cancelled)
+        except UpdateError:
+            raise
         except OSError:
             raise UpdateError("space") from None
     finally:
@@ -440,17 +442,23 @@ def replaced_name(launcher: Path, index: int = 0) -> Path:
 _TRANSIENT_REPLACE_WINERRORS = {5, 32, 33}
 
 
-def _replace_with_retry(source: Path, destination: Path) -> None:
+def _replace_loop(source: Path, destination: Path, *, cancelled=None) -> None:
     """Retry brief Windows sharing or antivirus locks without masking real failures."""
-    delays = (0.05, 0.1, 0.2, 0.4)
+    delays = (0.05, 0.1, 0.2, 0.4, 0.8, 1.0, 1.0)
     for attempt in range(len(delays) + 1):
+        _check_cancelled(cancelled)
         try:
             os.replace(source, destination)
             return
         except OSError as exc:
+            _check_cancelled(cancelled)
             if getattr(exc, "winerror", None) not in _TRANSIENT_REPLACE_WINERRORS or attempt >= len(delays):
                 raise
             time.sleep(delays[attempt])
+
+
+def _replace_with_retry(source: Path, destination: Path) -> None:
+    _replace_loop(source, destination)
 
 
 def install(downloaded, launcher, expected: str, *, cancelled=None, before_replace=None) -> None:
@@ -458,8 +466,9 @@ def install(downloaded, launcher, expected: str, *, cancelled=None, before_repla
 
     Windows lets a program that is running be renamed but not overwritten, so
     the old file is renamed first and removed by the next start. Either both
-    renames happen or we restore the old program. Preparation can be cancelled.
-    Call `before_replace` at the point when the renames must run to completion.
+    renames happen or we restore the old program. The first rename can be
+    cancelled while waiting for a lock. Once it succeeds, finish the swap or
+    restore the launcher. Call `before_replace` before trying either rename.
     """
     downloaded, launcher = Path(downloaded), Path(launcher)
     staged = launcher.with_name(launcher.name + ".new")
@@ -497,7 +506,7 @@ def install(downloaded, launcher, expected: str, *, cancelled=None, before_repla
         if before_replace is not None:
             before_replace()
         try:
-            _replace_with_retry(launcher, aside)
+            _replace_loop(launcher, aside, cancelled=cancelled)
         except OSError:
             raise UpdateError("replace") from None
         try:

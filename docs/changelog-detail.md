@@ -2,6 +2,21 @@
 
 버전마다 무엇을 왜 바꿨는지 기술적으로 적는 기록입니다. 사용자가 읽는 짧은 요약은 [변경 사항](../CHANGELOG.md)에 따로 적습니다.
 
+## 1.13.0 — 2026-11-26
+
+- **공용 안전 Helper·저장소·AI 파이프라인 정리**: `luvbox/file_safety.py`(`is_link_stat`, `is_reparse_or_link`, `regular_file_stat`, `normalize_tag`)를 도입해 링크·리파스 포인트와 태그 정규화를 한 곳에 모으고, `history.py`(`ai_embeddings_model_len`·`tweets_hashtags_nonempty` 인덱스, `lost_count` 최소 컬럼 투영, `has_embeddings`/`ai_cleared` 경량 조회)와 `local_store.py`(`record_cursor`/`duplicate_cursor` 키셋 페이지네이션, 클라우드 오프로드 `0 -> 1` 시 `cluster_id=0` 정리 및 싱글턴 정리), `thumbcache.py`(연속 저장 데드밴드 헤드룸)를 보강했습니다. `duplicates.py`, `ai_profile.py`, `storage.py`, `recovery.py`, `deletion.py`, `local_deletion.py`, `ai_pipeline.py`의 경계 검사와 동시성·정리 경로도 함께 다듬었습니다.
+- **Qt 컨트롤러 보강**: `qt_local_folder.py`, `qt_library.py`, `qt_app.py`, `qt_records.py`(`refreshRuns()`, 페이지 리셋·로딩 중복 제거·`unsavedMutating`), `qt_gallery.py`(`readyForSize`/`failedForSize` 크기별 신호)의 상태 동기화와 생명주기 가드를 보완했습니다.
+- **저장·메타데이터·업데이트·연결·빌드 게이트**: `download_service.py`(`_ProtocolError(UserValueError)`, `_control.respond` 원자적 적용), `unsaved.py`(`remove(kinds=[])` 조기 반환, `counted_attempt` 플래그, `retryable_count()` `size_bytes` 상한 비교), `run_history.py`(저장소 루트·실행 시각 기준 레거시 중복 제거), `metadata.py`(25MiB당 +1초, 최대 +60초 대용량 마감 연장), `core.py`(공용 `Session`·단일 쿠키 복호화·`_retry_sharing_lock`), `updater.py`(`_replace_loop` 재시도·취소 지원 및 2인자 `_replace_with_retry` 유지), `login.py`/`browser_bridge.py`(대리 쌍 없는 서로게이트 거부·`'연결 취소'` 라벨 통일), Chromium/Firefox 확장 `profile.js`(`Array.from(...).slice(0, 200)` 코드 포인트 자르기)·`background.js`(`extension_ready === "gone"` 처리)·`connect.html` 일치, `Launcher.cs` 오프셋 뺄셈 오버플로 방어 및 `package_release.py` `require_user_facing_wording` 검사 범위 확장을 반영했습니다.
+- **QML 공용화·UI/UX 및 린트 정리**: `GridBandSelection.qml`(DragHandler 루트 구조), `PreviewShortcuts.qml`, `BatchTagDialog.qml`(`FlatDialog` 계승), `FlatField.clearText()`를 분리해 갤러리·폴더 정리·저장 못 한 미디어 화면의 중복 코드를 줄이고, `SmoothWheel`/`FlatCombo` 터치패드 처리, `UpdateNotice` 680×480 `RowLayout` 줄바꿈, `ConnectionDialog` `onChanged` 포커스 복귀, `SchedulePanel` 사전 안내 및 `popupParent`, `UnsavedReview`/`DuplicateReview`/`LocalFolderView`/`MainWindow` 키보드·IME 초기화와 `PySide6 qmllint` 0 경고를 맞췄습니다.
+
+### 안정화에서 고친 문제
+
+- 폴더 정리 중복 페이지의 커서를 묶음 안에서 표시 순번이 바뀌어도 다음 행을 가리키는 값으로 맞추고, 현재 형식에서 빠진 `local_files_cluster` 색인을 복원합니다. 복구 파일 교체가 실패하면 원본과 보조 파일을 복원하고, 작업 사본의 체크포인트 준비가 실패해도 보조 파일의 확정 기록을 읽습니다.
+- 갤러리와 폴더 정리 모두 실제 이동 직전에 클라우드 오프로드 상태를 다시 확인합니다. 사본으로 확인한 뒤 클라우드 전용으로 바뀐 파일은 제자리에 둡니다.
+- 기존 실행 파일이 잠겨 첫 이름 변경을 재시도하는 동안 취소와 종료 요청을 처리합니다. 교체가 시작되면 완료 또는 복구까지 기다립니다.
+- 썸네일 크기를 바꿀 때 이전 크기의 실패 표시를 지우고 지연 응답을 무시합니다. 폴더 정리 보기 전환 뒤 강조 위치와 실제 다중 선택 상태를 복원합니다. 입력 지우기는 확정 전 한글 조합도 지우며, 같은 저장 게시물의 미리보기가 뒤늦게 준비되어도 읽던 위치를 유지합니다.
+- 예약 화면에서 작업 중, 연결 필요, 저장 폴더 필요 상태의 안내를 구분합니다. 저장 못 한 미디어의 터치 스크롤을 복원하고, 일괄 태그 쓰기가 실패했을 때 이전 성공 문구가 남지 않도록 합니다.
+
 ## 1.12.13 — 2026-11-25
 
 - 갤러리와 폴더 정리의 정확한 중복 검사는 파일 해시만 계산합니다. 비슷한 사진을 처음 검사할 때 미뤄 둔 dHash를 채우고, 파일이 그대로이면 해시를 채우는 도중 중지해도 기존 묶음을 유지합니다.

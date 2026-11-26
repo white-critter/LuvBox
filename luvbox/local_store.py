@@ -29,6 +29,7 @@ import stat
 import threading
 
 from .clip_model import ACTIVE_MODEL_ID, embedding_bytes
+from .file_safety import is_link_stat, is_reparse_or_link, normalize_tag as _safe_normalize_tag
 from .settings import app_directory
 from .user_errors import UserFacingError
 
@@ -58,7 +59,19 @@ _FOLDER_READ_ERROR = "폴더를 끝까지 읽지 못했습니다. 폴더의 연�
 _FOLDER_CHANGED_ERROR = "다른 작업에서 폴더 목록을 바꾸고 있습니다. 잠시 뒤 새로고침해 주세요."
 _SCAN_ATTEMPTS = 3
 _WRITE_LOCK = threading.RLock()
+_WRITE_LOCKS_GUARD = threading.Lock()
+_WRITE_LOCKS: dict[str, threading.RLock] = {}
 _LABEL_CHUNK = 400
+
+
+def _write_lock_for(path: Path) -> threading.RLock:
+    key = os.path.normcase(os.path.abspath(str(path)))
+    with _WRITE_LOCKS_GUARD:
+        lock = _WRITE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _WRITE_LOCKS[key] = lock
+        return lock
 
 
 class LocalFolderError(UserFacingError, RuntimeError):
@@ -70,15 +83,12 @@ def _now() -> str:
 
 
 def normalize_tag(tag) -> str:
-    if not isinstance(tag, str):
-        return ""
-    cleaned = "".join(char for char in tag.strip().lstrip("#") if ord(char) >= 32 and ord(char) != 127)
-    return cleaned.strip()
+    return _safe_normalize_tag(tag)
 
 
 def _is_link(details) -> bool:
     """A stat result (``lstat`` or a directory entry's) of a link or junction."""
-    return bool(stat.S_ISLNK(details.st_mode) or getattr(details, "st_reparse_tag", 0) & _NAME_SURROGATE)
+    return is_link_stat(details)
 
 
 def _linked(path: Path) -> bool:
@@ -86,7 +96,7 @@ def _linked(path: Path) -> bool:
         details = path.lstat()
     except FileNotFoundError:
         return False
-    return _is_link(details) or bool(getattr(path, "is_junction", lambda: False)())
+    return is_reparse_or_link(path, status=details)
 
 
 def folder_key(root: Path | str) -> str:
@@ -191,6 +201,17 @@ def _scan_entries(entries, check_cancel):
         yield entry
 
 
+def _executemany_chunked(db, statement: str, rows, check_cancel, chunk: int = 64) -> None:
+    if not rows:
+        return
+    for start in range(0, len(rows), chunk):
+        if check_cancel is not None:
+            check_cancel()
+        db.executemany(statement, rows[start:start + chunk])
+    if check_cancel is not None:
+        check_cancel()
+
+
 class LocalFolderStore:
     """One opened folder's database. Every method keeps its own short transaction."""
 
@@ -200,6 +221,7 @@ class LocalFolderStore:
         self._folder_cache: dict | None = None
         try:
             self.path = Path(path) if path is not None else store_path(self.root)
+            self._write_lock = _write_lock_for(self.path)
             top = app_directory()
         except OSError as exc:
             raise LocalFolderError(_ERROR) from exc
@@ -224,12 +246,12 @@ class LocalFolderStore:
             self._db.execute("PRAGMA synchronous=FULL")
             # The window opens a folder's list for each small edit, often while a worker writes to
             # it: a list already made opens without writing anything, so it waits for no writer.
-            if self._schema_version() != _SCHEMA_VERSION:
+            if not self._schema_ready():
                 # Made once, by one opener at a time: the list, the folder reader and the window
                 # often open a new folder's list together, and two of them switching a new database
                 # to WAL at once found it locked (the first list of a folder came back empty).
-                with _WRITE_LOCK, self._tx_lock:
-                    if self._schema_version() != _SCHEMA_VERSION:
+                with self._write_lock, self._tx_lock:
+                    if not self._schema_ready():
                         self._db.execute("PRAGMA journal_mode=WAL")
                         with self._db:
                             self._db.execute("BEGIN IMMEDIATE")
@@ -242,8 +264,14 @@ class LocalFolderStore:
             self._db.close()
             raise LocalFolderError(_ERROR) from exc
 
-    def _schema_version(self) -> int:
-        return int(self._db.execute("PRAGMA user_version").fetchone()[0])
+    def _schema_ready(self) -> bool:
+        version = self._db.execute("PRAGMA user_version").fetchone()[0]
+        if version != _SCHEMA_VERSION:
+            return False
+        # Duplicate queries require this index even if the schema version is current.
+        return self._db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='local_files_cluster'"
+        ).fetchone() is not None
 
     # -- lifecycle ---------------------------------------------------------------------------
     def close(self):
@@ -292,13 +320,13 @@ class LocalFolderStore:
 
         class _Transaction:
             def __enter__(self):
-                _WRITE_LOCK.acquire()
+                store._write_lock.acquire()
                 store._tx_lock.acquire()
                 try:
                     store._db.execute("BEGIN IMMEDIATE")
                 except sqlite3.Error as exc:
                     store._tx_lock.release()
-                    _WRITE_LOCK.release()
+                    store._write_lock.release()
                     raise LocalFolderError(_ERROR) from exc
                 return store._db
 
@@ -317,7 +345,7 @@ class LocalFolderStore:
                         raise LocalFolderError(_ERROR) from exc
                 finally:
                     store._tx_lock.release()
-                    _WRITE_LOCK.release()
+                    store._write_lock.release()
                 if isinstance(value, sqlite3.Error):
                     raise LocalFolderError(_ERROR) from value
                 return False
@@ -400,11 +428,11 @@ class LocalFolderStore:
         except OSError:
             own = None
         found = {}
-        stack = [self.root]
+        stack = [(self.root, "")]
         while stack:
             if check_cancel:
                 check_cancel()
-            folder = stack.pop()
+            folder, rel_prefix = stack.pop()
             try:
                 with os.scandir(folder) as entries:
                     for entry in _scan_entries(entries, check_cancel):
@@ -417,7 +445,8 @@ class LocalFolderStore:
                                 path = Path(entry.path)
                                 if _is_link(entry.stat(follow_symlinks=False)) or path == own:
                                     continue
-                                stack.append(path)
+                                next_prefix = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
+                                stack.append((path, next_prefix))
                                 continue
                             kind = media_type_for(entry.name)
                             if not kind or not entry.is_file(follow_symlinks=False):
@@ -426,7 +455,7 @@ class LocalFolderStore:
                             if _is_link(info):
                                 continue
                             cloud = bool(getattr(info, "st_file_attributes", 0) & _CLOUD_ATTRIBUTES)
-                            rel = Path(entry.path).relative_to(self.root).as_posix()
+                            rel = f"{rel_prefix}/{entry.name}" if rel_prefix else entry.name
                             found[rel] = (int(info.st_size), int(info.st_mtime_ns), cloud, kind, entry.name)
                         except FileNotFoundError:
                             continue                    # entry disappeared during the scan
@@ -442,6 +471,16 @@ class LocalFolderStore:
         db.execute("DELETE FROM local_tags WHERE rel_path=? AND source='ai'", (rel,))
 
     @staticmethod
+    def _bump_scan_seq(db) -> None:
+        row = db.execute("SELECT value FROM local_meta WHERE key='folder_scan_seq'").fetchone()
+        try:
+            current = int(row[0]) if row else 0
+        except (TypeError, ValueError):
+            current = 0
+        db.execute("INSERT OR REPLACE INTO local_meta(key, value) VALUES ('folder_scan_seq', ?)",
+                   (str(current + 1),))
+
+    @staticmethod
     def _prune_singleton_clusters(db) -> None:
         """Clear positive cluster_id when fewer than two present files remain and no distinct twin holds -cid."""
         # Use the cluster index for both passes so unclustered files are skipped.
@@ -454,11 +493,19 @@ class LocalFolderStore:
             "WHERE neg.present=1 AND neg.cluster_id = -local_files.cluster_id)"
         )
 
-    def _scan_version(self) -> tuple[int, int]:
+    def _scan_version(self) -> tuple[str, tuple[tuple[str, str], ...]]:
+        """Version stamp for structural folder state; ignores unrelated favorite/tag edits."""
         try:
             with self._tx_lock:
-                external = self._db.execute("PRAGMA data_version").fetchone()[0]
-                return external, self._db.total_changes
+                seq = self._meta_with(self._db, "folder_scan_seq", "0")
+                meta = tuple(
+                    (row[0], row[1])
+                    for row in self._db.execute(
+                        "SELECT key, value FROM local_meta "
+                        "WHERE key NOT IN ('folder_scan_seq', 'ai_cleared') ORDER BY key"
+                    )
+                )
+                return seq, meta
         except sqlite3.Error as exc:
             raise LocalFolderError(_ERROR) from exc
 
@@ -477,7 +524,7 @@ class LocalFolderStore:
                 if check_cancel:
                     check_cancel()
                 # An older walk can miss a file another scan just added, or carry its old size.
-                # Check both other connections and writes through this connection before using it.
+                # Check structural/metadata changes across connections before committing.
                 if self._scan_version() == version:
                     result = self._apply_folder_scan(db, found, include_subfolders, check_cancel)
                     if check_cancel:
@@ -488,6 +535,7 @@ class LocalFolderStore:
     def _apply_folder_scan(self, db, found, include_subfolders: bool, check_cancel) -> dict:
         now = _now()
         added = changed = gone = restored = cloud_changes = 0
+        cloud_offloaded = False
         with closing(db.execute("SELECT rel_path, filesize, mtime_ns, present, cloud FROM local_files")) as rows:
             known = {row["rel_path"]: row for row in _scan_entries(rows, check_cancel)}
         # A case-only rename keeps the file's star, tags, feedback, features and marks.
@@ -508,41 +556,72 @@ class LocalFolderStore:
             self._rename_rows(db, renamed, check_cancel)
             for rel, old in _scan_entries(renamed.items(), check_cancel):
                 known[rel] = known.pop(old)
+        inserts = []
+        content_updates = []
+        changed_rels = []
+        presence_updates = []
+        cloud_offload_updates = []
         for rel, (size, mtime, cloud, kind, name) in _scan_entries(found.items(), check_cancel):
             old = known.get(rel)
             if old is None:
-                db.execute(
-                    "INSERT INTO local_files(rel_path, filename, media_type, filesize, mtime_ns, cloud, present, "
-                    "updated_at) VALUES (?,?,?,?,?,?,1,?)", (rel, name, kind, size, mtime, int(cloud), now))
+                inserts.append((rel, name, kind, size, mtime, int(cloud), now))
                 added += 1
                 continue
             contents_changed = old["filesize"] != size or old["mtime_ns"] != mtime
             cloud_changed = bool(old["cloud"]) != cloud
             if contents_changed:
                 # The bytes may differ: what was computed from them is computed again.
-                db.execute(
-                    "UPDATE local_files SET filesize=?, mtime_ns=?, cloud=?, present=1, file_hash='', dhash='', "
-                    "file_signature='', cluster_id=0, updated_at=? WHERE rel_path=?",
-                    (size, mtime, int(cloud), now, rel))
-                self._invalidate_file_analysis(db, rel)
+                content_updates.append((size, mtime, int(cloud), now, rel))
+                changed_rels.append(rel)
                 changed += 1
             elif not old["present"] or cloud_changed:
-                db.execute("UPDATE local_files SET present=1, cloud=?, updated_at=? WHERE rel_path=?",
-                           (int(cloud), now, rel))
+                if cloud and not old["cloud"]:
+                    cloud_offload_updates.append((int(cloud), now, rel))
+                    cloud_offloaded = True
+                else:
+                    presence_updates.append((int(cloud), now, rel))
                 restored += 0 if old["present"] else 1
             if old["present"] and cloud_changed:
                 cloud_changes += 1
+        gone_updates = []
         for rel, old in _scan_entries(known.items(), check_cancel):
             if rel not in found and old["present"]:
-                db.execute("UPDATE local_files SET present=0, cluster_id=0, updated_at=? WHERE rel_path=?",
-                           (now, rel))
+                gone_updates.append((now, rel))
                 gone += 1
-        if changed or gone:
+        if inserts:
+            _executemany_chunked(
+                db,
+                "INSERT INTO local_files(rel_path, filename, media_type, filesize, mtime_ns, cloud, present, "
+                "updated_at) VALUES (?,?,?,?,?,?,1,?)", inserts, check_cancel)
+        if content_updates:
+            _executemany_chunked(
+                db,
+                "UPDATE local_files SET filesize=?, mtime_ns=?, cloud=?, present=1, file_hash='', dhash='', "
+                "file_signature='', cluster_id=0, updated_at=? WHERE rel_path=?", content_updates, check_cancel)
+            for rel in _scan_entries(changed_rels, check_cancel):
+                self._invalidate_file_analysis(db, rel)
+        if presence_updates:
+            _executemany_chunked(
+                db,
+                "UPDATE local_files SET present=1, cloud=?, updated_at=? WHERE rel_path=?",
+                presence_updates, check_cancel)
+        if cloud_offload_updates:
+            _executemany_chunked(
+                db,
+                "UPDATE local_files SET present=1, cloud=?, cluster_id=0, updated_at=? WHERE rel_path=?",
+                cloud_offload_updates, check_cancel)
+        if gone_updates:
+            _executemany_chunked(
+                db,
+                "UPDATE local_files SET present=0, cluster_id=0, updated_at=? WHERE rel_path=?",
+                gone_updates, check_cancel)
+        if changed or gone or cloud_offloaded:
             self._prune_singleton_clusters(db)
         db.execute(
             "INSERT INTO local_meta(key, value) VALUES ('include_subfolders', ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE local_meta.value<>excluded.value",
             ("1" if include_subfolders else "0",))
+        self._bump_scan_seq(db)
         return {"found": len(found), "added": added, "changed": changed, "gone": gone, "restored": restored,
                 "renamed": len(renamed), "cloud_changed": cloud_changes}
 
@@ -570,6 +649,7 @@ class LocalFolderStore:
                                      (now, rel)).rowcount for rel in rels)
             if removed:
                 self._prune_singleton_clusters(db)
+                self._bump_scan_seq(db)
             return removed
 
     # -- listing ----------------------------------------------------------------------------
@@ -587,17 +667,46 @@ class LocalFolderStore:
             clauses.append("f.favorite=1")
         if user_tag:
             tag = normalize_tag(user_tag)
-            clauses.append("EXISTS (SELECT 1 FROM local_tags t WHERE t.rel_path=f.rel_path AND t.source='user' "
-                           "AND t.tag=?)")
+            if (not duplicate_only and tag and self._read(
+                    "SELECT COUNT(*) AS n FROM (SELECT 1 FROM local_tags WHERE source='user' AND tag=? LIMIT 1001)",
+                    (tag,))[0]["n"] <= 1000):
+                clauses.append("f.rel_path IN (SELECT rel_path FROM local_tags WHERE source='user' AND tag=?)")
+            else:
+                clauses.append("EXISTS (SELECT 1 FROM local_tags t WHERE t.rel_path=f.rel_path AND t.source='user' "
+                               "AND t.tag=?)")
             params.append(tag)
         if ai_category:
             tag = normalize_tag(ai_category)
-            clauses.append("EXISTS (SELECT 1 FROM local_tags t WHERE t.rel_path=f.rel_path AND t.tag=? "
-                           "AND t.source IN ('ai','confirmed','user'))")
+            if (not duplicate_only and tag and self._read(
+                    "SELECT COUNT(*) AS n FROM (SELECT 1 FROM local_tags WHERE source IN ('ai','confirmed','user') "
+                    "AND tag=? LIMIT 1001)", (tag,))[0]["n"] <= 1000):
+                clauses.append("f.rel_path IN (SELECT rel_path FROM local_tags "
+                               "WHERE source IN ('ai','confirmed','user') AND tag=?)")
+            else:
+                clauses.append("EXISTS (SELECT 1 FROM local_tags t WHERE t.rel_path=f.rel_path AND t.tag=? "
+                               "AND t.source IN ('ai','confirmed','user'))")
             params.append(tag)
         if duplicate_only:
             clauses.append(f"f.cluster_id>0 AND f.cluster_id IN ({_DUPLICATE_GROUPS})")
         return " WHERE " + " AND ".join(clauses), params
+
+    @staticmethod
+    def _after_clause(order: str, after) -> tuple[str, tuple]:
+        if after is None:
+            return "", ()
+        if order == "name":
+            if isinstance(after, (tuple, list)) and len(after) == 2:
+                return "(f.filename COLLATE NOCASE > ? OR (f.filename COLLATE NOCASE = ? AND f.rel_path > ?))", (
+                    str(after[0]), str(after[0]), str(after[1]))
+        elif order == "size":
+            if isinstance(after, (tuple, list)) and len(after) == 2:
+                return "(f.filesize < ? OR (f.filesize = ? AND f.rel_path > ?))", (
+                    int(after[0]), int(after[0]), str(after[1]))
+        else:
+            if isinstance(after, (tuple, list)) and len(after) == 2:
+                return "(f.mtime_ns < ? OR (f.mtime_ns = ? AND f.rel_path > ?))", (
+                    int(after[0]), int(after[0]), str(after[1]))
+        return "", ()
 
     def records(self, offset=0, limit=200, *, order="modified", **filters) -> tuple[int, list[dict]]:
         where, params = self._filter(**filters)
@@ -609,6 +718,27 @@ class LocalFolderStore:
         ])
         total = count_rows[0]["n"]
         return int(total), rows
+
+    def record_cursor(self, limit=200, *, order="modified", after=None, count_total: bool = True, **filters) -> dict:
+        """Keyset-paginated records matching ``HistoryStore.record_page`` contract."""
+        limit = max(1, min(int(limit), 1000))
+        where, params = self._filter(**filters)
+        order_by = ORDERS.get(order, ORDERS["modified"])
+        extra, extra_params = self._after_clause(order, after)
+        row_where = (where + " AND " + extra) if extra else where
+        row_params = (*params, *extra_params, limit + 1)
+        row_sql = ("SELECT f.rowid AS rowid, f.* FROM local_files f" + row_where +
+                   f" ORDER BY {order_by} LIMIT ?")
+        if not count_total:
+            rows = self._read(row_sql, row_params)
+            has_more = len(rows) > limit
+            return {"rows": rows[:limit], "total": None, "has_more": has_more}
+        count_rows, rows = self._read_snapshot([
+            ("SELECT COUNT(*) AS n FROM local_files f" + where, params),
+            (row_sql, row_params),
+        ])
+        has_more = len(rows) > limit
+        return {"rows": rows[:limit], "total": int(count_rows[0]["n"]), "has_more": has_more}
 
     @staticmethod
     def _ranked_duplicates(clusters: str) -> str:
@@ -647,6 +777,39 @@ class LocalFolderStore:
             if not row.get("file_hash"):
                 row["hash_rank"] = 1
         return int(total), rows
+
+    def duplicate_cursor(self, limit=200, *, after=None, count_total: bool = True, **filters) -> dict:
+        """Page duplicate groups by their keep order, even if an earlier member vanishes."""
+        limit = max(1, min(int(limit), 1000))
+        where, params = self._filter(**{**filters, "duplicate_only": True})
+        candidates = f"FROM local_files f INDEXED BY local_files_cluster{where}"
+        after_clause = ""
+        after_params = ()
+        if isinstance(after, (tuple, list)) and len(after) == 4:
+            cluster_id, favorite, size, rel_path = after
+            after_clause = " AND (f.cluster_id, -f.favorite, -f.filesize, f.rel_path) > (?, ?, ?, ?)"
+            after_params = (int(cluster_id), -int(favorite), -int(size), str(rel_path))
+        page = (f"SELECT f.rowid, f.cluster_id {candidates}{after_clause} "
+                f"ORDER BY f.cluster_id, {_DUPLICATE_KEEP_ORDER} LIMIT ?")
+        ranked = self._ranked_duplicates("SELECT cluster_id FROM page")
+        row_sql = (f"WITH page AS MATERIALIZED ({page}) SELECT g.* FROM ({ranked}) AS g "
+                   "WHERE g.rowid IN (SELECT rowid FROM page) ORDER BY g.cluster_id, g.cluster_rank")
+        row_params = (*params, *after_params, limit + 1)
+        if not count_total:
+            rows = self._read(row_sql, row_params)
+            total = None
+        else:
+            count_rows, rows = self._read_snapshot([
+                (f"SELECT COUNT(*) AS n {candidates}", params),
+                (row_sql, row_params),
+            ])
+            total = int(count_rows[0]["n"])
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        for row in rows:
+            if not row.get("file_hash"):
+                row["hash_rank"] = 1
+        return {"rows": rows, "total": total, "has_more": has_more}
 
     def duplicate_members(self) -> dict[int, list[str]]:
         """``{group: [rel_path, ...]}``, the photo kept first."""
@@ -910,6 +1073,10 @@ class LocalFolderStore:
         return ("FROM local_ai_embeddings e JOIN local_files f ON f.rel_path=e.rel_path WHERE e.model_id=? "
                 f"AND LENGTH(e.embedding)=? AND {present} AND f.media_type='photo' " + tags)
 
+    def has_embeddings(self, model_id=ACTIVE_MODEL_ID, *, unlabeled=False) -> bool:
+        return bool(self._read("SELECT 1 " + self._embedding_sql(unlabeled) + " LIMIT 1",
+                               (model_id, embedding_bytes(model_id))))
+
     def count_embeddings(self, model_id=ACTIVE_MODEL_ID, *, unlabeled=False) -> int:
         return int(self._read("SELECT COUNT(*) AS n " + self._embedding_sql(unlabeled),
                               (model_id, embedding_bytes(model_id)))[0]["n"])
@@ -989,21 +1156,10 @@ class LocalFolderStore:
             chunk = rels[start:start + _LABEL_CHUNK]
             marks = ",".join("?" for _ in chunk)
             stamp = _now()
+            if not self._ai_tag_chunk_updates(self._db, chunk, wanted, marks, read_only=True):
+                continue
             with self._write() as db:
-                decided: dict[str, set] = {}
-                current: dict[str, set] = {}
-                for row in db.execute(f"SELECT rel_path, tag FROM local_ai_feedback WHERE rel_path IN ({marks})", chunk):
-                    decided.setdefault(row["rel_path"], set()).add(row["tag"])
-                for row in db.execute(f"SELECT rel_path, tag, source FROM local_tags WHERE rel_path IN ({marks})", chunk):
-                    if row["source"] == "ai":
-                        current.setdefault(row["rel_path"], set()).add(row["tag"])
-                    elif row["tag"]:
-                        decided.setdefault(row["rel_path"], set()).add(row["tag"])
-                updates = []
-                for rel in chunk:
-                    final = {tag for tag in wanted[rel] if tag not in decided.get(rel, set())} or {""}
-                    if current.get(rel) != final:
-                        updates.append((rel, final))
+                updates = self._ai_tag_chunk_updates(db, chunk, wanted, marks, read_only=False)
                 for rel, final in updates:
                     db.execute("DELETE FROM local_tags WHERE rel_path=? AND source='ai'", (rel,))
                     for tag in sorted(final):
@@ -1015,6 +1171,31 @@ class LocalFolderStore:
                 if any(final != {""} for _rel, final in updates):
                     db.execute("DELETE FROM local_meta WHERE key='ai_cleared'")
         return changed, tagged
+
+    def _ai_tag_chunk_updates(self, db, chunk, wanted, marks, *, read_only: bool) -> list[tuple[str, set]]:
+        decided: dict[str, set] = {}
+        current: dict[str, set] = {}
+        if read_only:
+            fb_rows, tag_rows = self._read_snapshot([
+                (f"SELECT rel_path, tag FROM local_ai_feedback WHERE rel_path IN ({marks})", chunk),
+                (f"SELECT rel_path, tag, source FROM local_tags WHERE rel_path IN ({marks})", chunk),
+            ])
+        else:
+            fb_rows = db.execute(f"SELECT rel_path, tag FROM local_ai_feedback WHERE rel_path IN ({marks})", chunk)
+            tag_rows = db.execute(f"SELECT rel_path, tag, source FROM local_tags WHERE rel_path IN ({marks})", chunk)
+        for row in fb_rows:
+            decided.setdefault(row["rel_path"], set()).add(row["tag"])
+        for row in tag_rows:
+            if row["source"] == "ai":
+                current.setdefault(row["rel_path"], set()).add(row["tag"])
+            elif row["tag"]:
+                decided.setdefault(row["rel_path"], set()).add(row["tag"])
+        updates = []
+        for rel in chunk:
+            final = {tag for tag in wanted[rel] if tag not in decided.get(rel, set())} or {""}
+            if current.get(rel) != final:
+                updates.append((rel, final))
+        return updates
 
     def store_ai_tags(self, pairs) -> tuple[int, int]:
         return self.replace_ai_tags(pairs)
@@ -1140,6 +1321,7 @@ class LocalFolderStore:
                     self._invalidate_file_analysis(db, rel)
             if changed:
                 self._prune_singleton_clusters(db)
+                self._bump_scan_seq(db)
             if sized:
                 db.executemany("UPDATE local_files SET file_hash=?, dhash=?, file_signature=?, filesize=?, mtime_ns=? "
                                "WHERE rel_path=?", sized)
@@ -1229,6 +1411,7 @@ class LocalFolderStore:
             db.executemany("UPDATE local_files SET cluster_id=? WHERE rel_path=?", updates)
             db.execute("INSERT OR REPLACE INTO local_meta(key, value) VALUES ('duplicate_rule', ?)",
                        (rule if rule in ("exact", "near") else "exact",))
+            self._bump_scan_seq(db)
             if check_cancel:
                 check_cancel()
         return grouped
@@ -1387,7 +1570,7 @@ class LocalFolderStore:
 
 
 # Raised whenever _SCHEMA changes, so lists made before get the new tables once.
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS local_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS local_files ("
@@ -1397,12 +1580,16 @@ _SCHEMA = (
     " present INTEGER NOT NULL DEFAULT 1, cloud INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)",
     "CREATE INDEX IF NOT EXISTS local_files_cluster ON local_files(cluster_id)",
     "CREATE INDEX IF NOT EXISTS local_files_present_mtime ON local_files(present, mtime_ns DESC, rel_path ASC)",
+    "CREATE INDEX IF NOT EXISTS local_files_present_name ON local_files(present, filename COLLATE NOCASE ASC, rel_path ASC)",
+    "CREATE INDEX IF NOT EXISTS local_files_present_size ON local_files(present, filesize DESC, rel_path ASC)",
+    "CREATE INDEX IF NOT EXISTS local_files_present_fav ON local_files(rel_path) WHERE present=1 AND favorite=1",
     "CREATE INDEX IF NOT EXISTS local_files_hash ON local_files(file_hash)",
     "CREATE TABLE IF NOT EXISTS local_tags (rel_path TEXT NOT NULL, tag TEXT NOT NULL, "
     " source TEXT NOT NULL DEFAULT 'user', created_at TEXT NOT NULL, PRIMARY KEY(rel_path, tag))",
     "CREATE INDEX IF NOT EXISTS local_tags_source_tag ON local_tags(source, tag)",
     "CREATE TABLE IF NOT EXISTS local_ai_embeddings (rel_path TEXT PRIMARY KEY, model_id TEXT NOT NULL,"
     " embedding BLOB NOT NULL, confidence REAL, updated_at TEXT NOT NULL)",
+    "CREATE INDEX IF NOT EXISTS local_ai_embeddings_model_len ON local_ai_embeddings(model_id, LENGTH(embedding), rel_path)",
     "CREATE TABLE IF NOT EXISTS local_ai_feedback (rel_path TEXT NOT NULL, tag TEXT NOT NULL, label INTEGER NOT NULL,"
     " updated_at TEXT NOT NULL, PRIMARY KEY(rel_path, tag))",
     "CREATE TABLE IF NOT EXISTS local_unreadable (rel_path TEXT PRIMARY KEY, filesize INTEGER NOT NULL,"

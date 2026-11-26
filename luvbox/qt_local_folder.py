@@ -97,6 +97,8 @@ def _modified(mtime_ns) -> str:
 class LocalFolderRepository(LibraryRepository):
     """Off-thread reads and jobs for one opened folder."""
 
+    _has_tweet_facets = False
+
     def __init__(self):
         super().__init__()
         self.share_learning = True
@@ -147,6 +149,16 @@ class LocalFolderRepository(LibraryRepository):
         key = folder_key(request.root)
         return "local", key, (lambda rel: f"local:{key}:{rel}")
 
+    @staticmethod
+    def _page_cursor(row, order, grouped):
+        if grouped:
+            return (row["cluster_id"], row["favorite"], row["filesize"], row["rel_path"])
+        if order == "name":
+            return (row.get("filename") or "", row["rel_path"])
+        if order == "size":
+            return (int(row.get("filesize") or 0), row["rel_path"])
+        return (int(row.get("mtime_ns") or 0), row["rel_path"])
+
     # -- the list ---------------------------------------------------------------------------
     def read(self, token, offset, limit):
         request = self.current()
@@ -155,11 +167,25 @@ class LocalFolderRepository(LibraryRepository):
         try:
             with closing(request.store()) as store:
                 store._folder_cache = {}
+                with self._condition:
+                    after = self._cursor if offset and offset == self._cursor_offset else None
                 if request.duplicate_only:
-                    total, page = store.duplicate_page(offset, limit, **request.filters())
+                    if after is not None and hasattr(store, "duplicate_cursor"):
+                        result = store.duplicate_cursor(limit, after=after, count_total=False, **request.filters())
+                        total, page, has_more = result["total"], result["rows"], result["has_more"]
+                    else:
+                        total, page = store.duplicate_page(offset, limit, **request.filters())
+                        has_more = None
                 else:
-                    total, page = store.records(offset, limit, order=request.order, **request.filters())
+                    if after is not None and hasattr(store, "record_cursor"):
+                        result = store.record_cursor(limit, order=request.order, after=after, count_total=False,
+                                                     **request.filters())
+                        total, page, has_more = result["total"], result["rows"], result["has_more"]
+                    else:
+                        total, page = store.records(offset, limit, order=request.order, **request.filters())
+                        has_more = None
                 rows, served = [], {}
+                last = None
                 for row in page:
                     key = f"g{request.generation}_lf_{int(row['rowid'])}"
                     path, kind, info = self._locate_row(store, row)
@@ -186,12 +212,27 @@ class LocalFolderRepository(LibraryRepository):
                     else:
                         entry["detail"] = _format_size(row.get("filesize"))
                     rows.append(entry)
+                    last = row
+                if after is not None and not rows:
+                    return offset, []
                 with self._condition:
                     if self._request is not request:
                         return 0, []
                     for key, item in served.items():
                         self._served.setdefault(key, item)
-                return total, rows
+                    if last is not None:
+                        self._cursor = self._page_cursor(last, request.order, request.duplicate_only)
+                        self._cursor_offset = offset + len(rows)
+                    if after is None:
+                        self._known_total = int(total or 0)
+                    known_total = self._known_total
+                if total is not None:
+                    resolved_total = int(total)
+                elif not has_more:
+                    resolved_total = offset + len(rows)
+                else:
+                    resolved_total = max(known_total, offset + len(rows) + 1)
+                return resolved_total, rows
         except LocalFolderError:
             return 0, []
 
@@ -403,25 +444,38 @@ class LocalFolderRepository(LibraryRepository):
             except Exception:
                 return False
 
-    def set_share_learning(self, enabled, generation=None):
+    def set_share_learning(self, enabled, generation=None, *, return_rules: bool = False):
         """Sharing switched off takes this folder's examples out of the shared profile; on brings them back."""
         from . import ai_pipeline
+        from .ai_profile import AiProfileError
 
+        rules_snapshot = None
         with self._profile_lock:
             self.share_learning = bool(enabled)
             request = self.current(generation)
-            profile = _open_profile() if request is not None else None
+            profile = _open_profile() if (request is not None or return_rules) else None
             if profile is None:
-                return
+                return None
             try:
-                with closing(profile), closing(request.store()) as store:
-                    kind, scope, example_id = self._example_scope(request)
-                    if self.share_learning:
-                        ai_pipeline.sync_examples(store, profile, kind, scope, example_id)
-                    else:
-                        profile.remove_scope_examples(kind, scope)
+                with closing(profile):
+                    if request is not None:
+                        with closing(request.store()) as store:
+                            kind, scope, example_id = self._example_scope(request)
+                            if self.share_learning:
+                                ai_pipeline.sync_examples(store, profile, kind, scope, example_id)
+                            else:
+                                profile.remove_scope_examples(kind, scope)
+                    if return_rules:
+                        try:
+                            rules_snapshot = (
+                                profile.active_tags(include_disabled=True),
+                                profile.deleted_builtin_count(),
+                            )
+                        except AiProfileError:
+                            rules_snapshot = ([], 0)
             except Exception:
                 pass
+        return rules_snapshot
 
     # -- the folder itself ------------------------------------------------------------------
     def sync_folder(self, generation, epoch=None, progress_callback=None):
@@ -623,9 +677,14 @@ class LocalFolderRepository(LibraryRepository):
             with closing(request.store()) as store:
                 if store.ai_cleared():
                     return False
-                if not store.count_embeddings(ACTIVE_MODEL_ID):
+                has_embs = (store.has_embeddings(ACTIVE_MODEL_ID) if hasattr(store, "has_embeddings")
+                            else bool(store.count_embeddings(ACTIVE_MODEL_ID)))
+                if not has_embs:
                     return False
-                if store.count_embeddings(ACTIVE_MODEL_ID, unlabeled=True):
+                has_unlabeled = (store.has_embeddings(ACTIVE_MODEL_ID, unlabeled=True)
+                                 if hasattr(store, "has_embeddings")
+                                 else bool(store.count_embeddings(ACTIVE_MODEL_ID, unlabeled=True)))
+                if has_unlabeled:
                     return True
                 profile = _open_profile()
                 if profile is not None:
@@ -952,8 +1011,9 @@ class LocalFolderRepository(LibraryRepository):
             request = self._request
             if request is None or request.generation != generation:
                 return False
-            for key in keys:
-                self._served.pop(key, None)
+            dropped = sum(1 for key in keys if self._served.pop(key, None) is not None)
+            self._cursor_offset = max(0, self._cursor_offset - dropped)
+            self._known_total = max(0, self._known_total - dropped)
             return True
 
     def action(self, key, generation, action):
@@ -1036,8 +1096,10 @@ class LocalFolderController(LibraryController):
         self._share_learning = True
         self._overlaps = False
         self._checking_overlap = False
+        self._overlap_completed = False
         self._overlap_request = 0
         self._overlap_inputs = None
+        self._loaded_generation = 0
         self._x_folders = ()
         self._folder_error = ""
         self._last = ""
@@ -1277,7 +1339,7 @@ class LocalFolderController(LibraryController):
         if os.path.normcase(root_text) != os.path.normcase(self._root):
             self._reset_filters_quietly()
         self._root = root_text
-        self._check_overlap()
+        self._check_overlap(force=True)
         self._repository.share_learning = self._share_learning
         self.setLibrary("folder", root_text, self._include_subfolders)
         self.folderChanged.emit()
@@ -1329,15 +1391,16 @@ class LocalFolderController(LibraryController):
         def erase_record():
             # A folder on a drive that sleeps can take long to name: away from the window.
             removed = False
+            failed = False
             try:
                 removed = forget_folder_record(path)
                 profile = _open_profile()
                 if profile is not None:
                     with closing(profile):
                         profile.remove_scope_examples("local", folder_key(path))
-            except Exception:
-                pass
-            self._emit(generation, serial, "forget_folder", (path, removed), "", None)
+            except (OSError, LocalFolderError):
+                failed = True
+            self._emit(generation, serial, "forget_folder", (path, removed, failed), "", None)
 
         thread = threading.Thread(target=erase_record, name="qt-local-folder-forget", daemon=True)
         self._track_thread(thread)
@@ -1387,9 +1450,9 @@ class LocalFolderController(LibraryController):
             self.changed.emit()
             return
         self._share_learning = enabled
-        self._repository.set_share_learning(enabled, self._generation)
+        rules_snapshot = self._repository.set_share_learning(enabled, self._generation, return_rules=True)
         self.shareLearningChanged.emit()
-        self._reload_ai_rules()
+        self._reload_ai_rules(rules_snapshot=rules_snapshot)
         self.classifyNewPhotos()
 
     def checkXOverlap(self, output_dirs):
@@ -1399,16 +1462,18 @@ class LocalFolderController(LibraryController):
                                              if isinstance(folder, (str, Path)) and str(folder)))
         self._check_overlap()
 
-    def _check_overlap(self):
+    def _check_overlap(self, *, force: bool = False):
         inputs = (self._root, self._x_folders)
         same_inputs = inputs == self._overlap_inputs
-        if self._closed or (same_inputs and self._checking_overlap):
+        if self._closed or (same_inputs and (self._checking_overlap or self._overlap_completed) and not force):
             return
         self._overlap_inputs = inputs
+        self._overlap_completed = False
         self._overlap_request += 1
         request = self._overlap_request
         root, folders = inputs
         if not root or not folders:
+            self._overlap_completed = True
             self._set_overlap(False, False)
             return
         self._set_overlap(True, same_inputs and self._overlaps)
@@ -1436,6 +1501,7 @@ class LocalFolderController(LibraryController):
     @Slot(int, bool)
     def _finish_overlap_check(self, request, overlaps):
         if not self._closed and request == self._overlap_request:
+            self._overlap_completed = True
             self._set_overlap(False, overlaps)
 
     def _set_overlap(self, checking, overlaps):
@@ -1458,13 +1524,22 @@ class LocalFolderController(LibraryController):
         self.changed.emit()
         self._refresh(reload_authors=False)
 
+    @Slot()
+    def _model_changed(self):
+        super()._model_changed()
+        if not self._closed and not self.model.busy and not self.model.error and self.model._query == str(self._generation):
+            self._loaded_generation = self._generation
+
     def _job_finished(self, action, selection, message):
         """The folder was read: the list shows what is there now, and new photos are classified."""
         if action == "forget_folder":
-            path, removed = selection
+            path, removed, failed = selection if len(selection) == 3 else (*selection, False)
             self._erasing_folders.discard(os.path.normcase(os.path.normpath(path)))
-            self._status = ("최근 폴더에서 빼고 그 폴더의 정리 기록을 지웠습니다." if removed
-                            else "최근 폴더에서 뺐습니다. 지울 정리 기록은 없었습니다.")
+            if failed:
+                self._status = "최근 폴더에서 뺐지만 정리 기록을 지우지 못했습니다. 기록 폴더의 권한을 확인해 주세요."
+            else:
+                self._status = ("최근 폴더에서 빼고 그 폴더의 정리 기록을 지웠습니다." if removed
+                                else "최근 폴더에서 뺐습니다. 지울 정리 기록은 없었습니다.")
             self._reload_ai_rules()
             self.changed.emit()
             self.folderForgotten.emit(path)
@@ -1479,6 +1554,13 @@ class LocalFolderController(LibraryController):
             if selection.get("gone"):
                 parts.append(f"없어진 파일 {selection['gone']:,}개")
             message = "폴더를 읽었습니다: " + " · ".join(parts)
+            no_changes = not any(selection.get(key) for key in _FOLDER_CHANGES)
+            if (no_changes and not self.model.busy and self._loaded_generation == self._generation
+                    and (self.model.rowCount() > 0 or (self.model._exhausted and selection.get("found", 0) == 0))):
+                self._status = message
+                self.changed.emit()
+                self.classifyNewPhotos()
+                return True
         self._counts_loaded = False
         self._user_tags_loaded = False
         self._refresh(reload_authors=True, status=message, keep_place=True)

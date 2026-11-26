@@ -28,42 +28,9 @@ Dialog {
         glow: 0.1
     }
 
-    Shortcut {
-        sequence: "+"
-        enabled: dialog.visible && !moreMenu.visible && media.canZoomIn
-        onActivated: media.zoomIn()
-    }
-    Shortcut {
-        sequence: "="
-        enabled: dialog.visible && !moreMenu.visible && media.canZoomIn
-        onActivated: media.zoomIn()
-    }
-    Shortcut {
-        sequence: "-"
-        enabled: dialog.visible && !moreMenu.visible && media.canZoomOut
-        onActivated: media.zoomOut()
-    }
-    Shortcut {
-        sequence: "0"
-        enabled: dialog.visible && !moreMenu.visible && media.ready
-        onActivated: media.fit()
-    }
-    Shortcut {
-        sequence: "1"
-        enabled: dialog.visible && !moreMenu.visible && media.canActualSize
-        onActivated: media.actualSize()
-    }
-    Shortcut {
-        sequence: "m"
-        enabled: dialog.visible && !moreMenu.visible && media.mediaType === "video"
-            && media.videoSource && media.ready
-        onActivated: media.muted = !media.muted
-    }
-    Shortcut {
-        sequence: "Shift+M"
-        enabled: dialog.visible && !moreMenu.visible && media.mediaType === "video"
-            && media.videoSource && media.ready
-        onActivated: media.muted = !media.muted
+    PreviewShortcuts {
+        preview: media
+        shortcutsEnabled: dialog.visible && !moreMenu.visible
     }
 
     function submit(action) {
@@ -115,6 +82,7 @@ Dialog {
         FlatButton {
             objectName: "reviewMaximizeButton"
             tone: "ghost"
+            focusPolicy: Qt.TabFocus
             text: dialog.hostWindow && (dialog.hostWindow.visibility === Window.Maximized
                 || dialog.hostWindow.visibility === Window.FullScreen) ? "창 복원" : "창 최대화"
             enabled: !!dialog.hostWindow

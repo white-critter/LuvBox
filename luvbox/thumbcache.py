@@ -49,9 +49,11 @@ _VALID_IMAGE = "typeof(image)='blob' AND length(image) BETWEEN 1 AND ?"
 # Bound the set so a long session does not retain every identity it has seen.
 # Evicted keys are asked of the database again; stored previews are not lost.
 _KNOWN_LIMIT = 8192
+_USER_VERSION = 1
 _known: dict[str, OrderedDict] = {}
 _known_files: dict[str, tuple] = {}
 _prune_writes: dict[str, int] = {}
+_deadband_headroom: dict[str, tuple[int, int, tuple | None]] = {}
 _known_lock = threading.Lock()
 
 
@@ -109,6 +111,24 @@ def _file_identity(path: Path) -> tuple | None:
         except FileNotFoundError:
             changed = None
         return status.st_dev, status.st_ino, changed
+    except OSError:
+        return None
+
+
+def _db_stamp(path: Path) -> tuple | None:
+    try:
+        main = path.stat()
+        try:
+            wal = path.with_name(path.name + "-wal").stat()
+            wal_stamp = (wal.st_size, wal.st_mtime_ns)
+        except FileNotFoundError:
+            wal_stamp = None
+        try:
+            epoch = path.with_name(path.name + ".epoch").stat()
+            epoch_stamp = (epoch.st_dev, epoch.st_ino, epoch.st_mtime_ns)
+        except FileNotFoundError:
+            epoch_stamp = None
+        return (main.st_dev, main.st_ino, main.st_size, main.st_mtime_ns, wal_stamp, epoch_stamp)
     except OSError:
         return None
 
@@ -187,12 +207,16 @@ class Cache:
               sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, timeout=2))
         try:
             db.execute("PRAGMA busy_timeout=2000")
+            db.execute("PRAGMA synchronous=NORMAL")
             if create:
-                db.execute("PRAGMA journal_mode=WAL")
-                db.execute("CREATE TABLE IF NOT EXISTS previews (tweet_id TEXT NOT NULL, num INTEGER NOT NULL, "
-                           "media_type TEXT NOT NULL, image BLOB NOT NULL, saved_at TEXT NOT NULL, "
-                           "PRIMARY KEY(tweet_id,num,media_type))")
-                db.execute("CREATE INDEX IF NOT EXISTS previews_saved_at ON previews(saved_at)")
+                version = int(db.execute("PRAGMA user_version").fetchone()[0])
+                if version != _USER_VERSION:
+                    db.execute("PRAGMA journal_mode=WAL")
+                    db.execute("CREATE TABLE IF NOT EXISTS previews (tweet_id TEXT NOT NULL, num INTEGER NOT NULL, "
+                               "media_type TEXT NOT NULL, image BLOB NOT NULL, saved_at TEXT NOT NULL, "
+                               "PRIMARY KEY(tweet_id,num,media_type))")
+                    db.execute("CREATE INDEX IF NOT EXISTS previews_saved_at ON previews(saved_at)")
+                    db.execute(f"PRAGMA user_version={_USER_VERSION}")
         except BaseException:
             db.close()
             raise
@@ -268,38 +292,85 @@ class Cache:
             raise OSError("preview cache unavailable")
         key = identity(*key)
         data = encode(image)
+        stamp_before = _db_stamp(self.path)
         with self._db:
             self._db.execute("INSERT OR REPLACE INTO previews(tweet_id,num,media_type,image,saved_at) VALUES (?,?,?,?,?)",
                              (*key, data, datetime.now(timezone.utc).isoformat(timespec="seconds")))
         _note(self.path, {key})
+        self._auto_prune(len(data), 1, stamp_before)
+
+    def put_many(self, items) -> None:
+        if self._db is None:
+            raise OSError("preview cache unavailable")
+        encoded = []
+        keys = []
+        stamp_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        total_added = 0
+        for raw_key, image in items:
+            key = identity(*raw_key)
+            data = encode(image)
+            encoded.append((*key, data, stamp_time))
+            keys.append(key)
+            total_added += len(data)
+        if not encoded:
+            return
+        stamp_before = _db_stamp(self.path)
+        with self._db:
+            self._db.executemany(
+                "INSERT OR REPLACE INTO previews(tweet_id,num,media_type,image,saved_at) VALUES (?,?,?,?,?)",
+                encoded,
+            )
+        _note(self.path, keys)
+        self._auto_prune(total_added, len(encoded), stamp_before)
+
+    def _auto_prune(self, added_bytes: int, batch_count: int, stamp_before) -> None:
         # Gallery callbacks open one cache per image, and short save runs also
         # reopen it. Share the counter by file, checking an existing cache on
         # the first write in this process as well as every later batch.
+        limit = LIMIT_BYTES
+        path = str(self.path)
+        stamp_after = _db_stamp(self.path)
         with _known_lock:
-            path = str(self.path)
-            writes = _prune_writes.get(path, 0) + 1
+            prev_writes = _prune_writes.get(path, 0)
+            writes = prev_writes + batch_count
             _prune_writes[path] = writes
-        if writes == 1 or writes % _PRUNE_EVERY == 0:
-            self.prune()
+            entry = _deadband_headroom.get(path)
+            if entry is not None and entry[0] == limit and entry[2] == stamp_before:
+                remaining = entry[1] - added_bytes
+                _deadband_headroom[path] = (limit, remaining, stamp_after)
+            else:
+                remaining = None
+                _deadband_headroom.pop(path, None)
+        if not (prev_writes == 0 or (prev_writes // _PRUNE_EVERY != writes // _PRUNE_EVERY)):
+            return
+        if prev_writes > 0 and remaining is not None and remaining > 0:
+            return
+        self._prune_internal(limit, update_headroom=True)
 
     def total_bytes(self) -> int:
         if self._db is None:
             return 0
         return int(self._db.execute("SELECT COALESCE(SUM(length(image)),0) FROM previews").fetchone()[0])
 
-    def prune(self, limit: int | None = None) -> int:
-        """Drop the oldest previews once the cache is larger than ``limit``."""
-        if limit is None:
-            limit = LIMIT_BYTES
+    def _prune_internal(self, limit: int, *, update_headroom: bool) -> int:
         if self._db is None:
             return 0
         page_size = int(self._db.execute("PRAGMA page_size").fetchone()[0])
         page_count = int(self._db.execute("PRAGMA page_count").fetchone()[0])
         freelist_count = int(self._db.execute("PRAGMA freelist_count").fetchone()[0])
-        if max(0, page_count - freelist_count) * page_size <= limit:
+        active_bytes = max(0, page_count - freelist_count) * page_size
+        if active_bytes <= limit:
+            if update_headroom:
+                stamp = _db_stamp(self.path)
+                with _known_lock:
+                    _deadband_headroom[str(self.path)] = (limit, limit - active_bytes, stamp)
             return 0
         total = self.total_bytes()
         if total <= limit:
+            if update_headroom:
+                stamp = _db_stamp(self.path)
+                with _known_lock:
+                    _deadband_headroom[str(self.path)] = (limit, limit - total, stamp)
             return 0
         target = int(limit * 0.9)
         # Read only until enough bytes can be reclaimed, retaining compact
@@ -307,28 +378,45 @@ class Cache:
         # Finish the SELECT before deleting, even if a future index changes
         # its query plan from a materialized sort to a live table scan.
         pending = array("q")
+        remaining_total = total
         with closing(self._db.execute(
                 "SELECT rowid,length(image) FROM previews ORDER BY saved_at,rowid")) as rows:
             for rowid, size in rows:
-                if total <= target:
+                if remaining_total <= target:
                     break
                 pending.append(rowid)
-                total -= size
+                remaining_total -= size
         with self._db:
             self._db.executemany("DELETE FROM previews WHERE rowid=?", ((rowid,) for rowid in pending))
         _mark_pruned(self.path)
         stamp = _file_identity(self.path)
+        db_stamp = _db_stamp(self.path)
         with _known_lock:
             name = str(self.path)
             _known.pop(name, None)
             if stamp is not None:
                 _known_files[name] = stamp
+            if update_headroom:
+                _deadband_headroom[name] = (limit, max(0, limit - remaining_total), db_stamp)
+            else:
+                _deadband_headroom.pop(name, None)
         return len(pending)
+
+    def prune(self, limit: int | None = None) -> int:
+        """Drop the oldest previews once the cache is larger than ``limit``."""
+        if limit is None:
+            limit = LIMIT_BYTES
+        with _known_lock:
+            _deadband_headroom.pop(str(self.path), None)
+        return self._prune_internal(limit, update_headroom=False)
 
     def close(self) -> None:
         if self._db is not None:
             self._db.close()
             self._db = None
+
+
+_DEFAULT_CACHE_PUT = Cache.put
 
 
 def _note(path: Path, keys) -> None:
@@ -339,6 +427,7 @@ def _note(path: Path, keys) -> None:
             if _known_files.get(name) != stamp:
                 _known.pop(name, None)
                 _prune_writes.pop(name, None)
+                _deadband_headroom.pop(name, None)
                 _known_files[name] = stamp
             bucket = _known.setdefault(name, OrderedDict())
             for key in keys:
@@ -357,6 +446,7 @@ def known(account: str, key) -> bool:
             _known.pop(name, None)
             _known_files.pop(name, None)
             _prune_writes.pop(name, None)
+            _deadband_headroom.pop(name, None)
             return False
         bucket = _known.get(name)
         if not bucket or key not in bucket:
@@ -451,10 +541,16 @@ class Recorder:
             return False
         try:
             cache = self._open_cache()
-            for key in tuple(self._pending):
-                image = self._pending[key]
-                cache.put(key, image)
-                self._pending.pop(key).close()
+            if type(cache).put is _DEFAULT_CACHE_PUT:
+                cache.put_many(list(self._pending.items()))
+                while self._pending:
+                    _, image = self._pending.popitem(last=False)
+                    image.close()
+            else:
+                for key in tuple(self._pending):
+                    image = self._pending[key]
+                    cache.put(key, image)
+                    self._pending.pop(key).close()
         except Exception:
             # A busy cache must not disable every later preview in this run.
             # Back off, then retry the small batch on a later file or close.

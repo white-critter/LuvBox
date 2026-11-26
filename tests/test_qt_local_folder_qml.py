@@ -38,12 +38,12 @@ def scene():
     from unittest.mock import patch
 
     from PIL import Image
-    from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPoint, QPointF, Qt, qInstallMessageHandler
+    from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPoint, QPointF, Qt, qInstallMessageHandler
     from PySide6.QtGui import QFont, QFontDatabase
     from PySide6.QtQuick import QQuickItem
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
-    from PySide6.QtQml import QQmlApplicationEngine
+    from PySide6.QtQml import QQmlApplicationEngine, QQmlExpression, qmlContext
     from PySide6.QtQuickControls2 import QQuickStyle
     from shiboken6 import delete
 
@@ -280,6 +280,15 @@ def scene():
         settle(60)
         assert not find("localFolderBand").property("visible")
         assert set(local.selectedKeys) == {tiles[0].property("key"), tiles[1].property("key")}, local.selectedKeys
+        grid = find("localFolderGrid")
+        current = tiles[0].parentItem()
+        grid.setProperty("currentIndex", current.property("index"))
+        accessible = QQmlExpression(qmlContext(current), current, "Accessible.selected")
+        assert accessible.evaluate()[0] is True
+        local.toggleSelection(current.property("key"))
+        assert current.property("key") not in local.selectedKeys
+        assert accessible.evaluate()[0] is False, "focused tile was still reported as selected after deselection"
+        local.toggleSelection(current.property("key"))
         window.resize(680, 480)
         settle(120)
         first, last = find("localFolderSelectLoaded"), find("localFolderRecycleSelected")
@@ -290,6 +299,16 @@ def scene():
         settle(120)
         local.clearSelection()
         local.setSelectionMode(False)
+
+        # A mode switch can cancel restoration before the timer reaches its first tick.
+        view, grid = find("localFolderView"), find("localFolderGrid")
+        view.setProperty("pendingAnchor", 1)
+        assert QMetaObject.invokeMethod(view, "placeAnchor")
+        assert not grid.property("highlightFollowsCurrentItem")
+        local.setDuplicateOnly(True)
+        assert grid.property("highlightFollowsCurrentItem"), "mode switch left the grid highlight frozen"
+        local.setDuplicateOnly(False)
+        wait(lambda: not local.model.busy and local.model.count == 6, "normal grid restored")
 
         # --- Duplicates: found and shown as groups, with the gallery's tools.
         click("localFolderDuplicates")
@@ -338,7 +357,8 @@ def scene():
         controller.changed.emit()
         # ... but a Recycle Bin that waits (a save into an overlapping folder) shows on the button.
         click("localFolderDuplicates")
-        wait(lambda: not local.filterDuplicateOnly, "list again")
+        wait(lambda: not local.filterDuplicateOnly and not local.model.busy and local.model.count > 0,
+             "folder list loaded again")
         local.selectLoaded()
         wait(lambda: local.selectedCount > 0, "photos picked")
         # The folder lies inside the X save folder and a save is running: the app holds the Recycle Bin.
@@ -410,6 +430,40 @@ def scene():
         click(next(item for item in shown("localFolderForgetConfirm")), "confirm")
         wait(lambda: not dialog.property("visible") and list(local.recentFolders) == [], "off the list")
         assert local_store.store_path(photos).exists()
+
+        scrolled_folder = base / "scrolled"
+        scrolled_folder.mkdir()
+        with Image.new("RGB", (32, 24), (90, 30, 150)) as sample:
+            sample.save(scrolled_folder / "scrolled-00.jpg")
+        sample = (scrolled_folder / "scrolled-00.jpg").read_bytes()
+        for index in range(1, 32):
+            (scrolled_folder / f"scrolled-{index:02}.jpg").write_bytes(sample)
+        assert local.openFolder(str(scrolled_folder))
+        wait(lambda: not local.model.busy and local.model.count == 32, "scrollable folder loaded")
+        window.resize(680, 480)
+        settle(120)
+        grid = find("localFolderGrid")
+        grid.setProperty("contentY", grid.property("originY") + 2 * grid.property("cellHeight"))
+        settle(120)
+        scrolled = grid.property("contentY")
+        assert scrolled > grid.property("originY")
+        visible = sorted((item for item in shown("localFolderTile")
+                          if 30 < grid.mapFromScene(QPointF(point_of(item))).y() < grid.height() - 30),
+                         key=lambda item: (point_of(item).y(), point_of(item).x()))
+        first, second = visible[:2]
+        begin, finish = point_of(first), point_of(second)
+        assert begin.y() == finish.y()
+        QTest.mousePress(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, begin)
+        for step in range(1, 7):
+            QTest.mouseMove(window, QPoint(begin.x() + (finish.x() - begin.x()) * step // 6, begin.y()))
+            settle(15)
+        band = find("localFolderBand")
+        wait(lambda: band.property("visible") and local.selectedCount == 2, "scrolled folder band selects two tiles")
+        corner = band.mapToItem(grid, QPointF(0, 0))
+        expected = grid.mapFromScene(QPointF(begin))
+        assert abs(corner.x() - expected.x()) < 2 and abs(corner.y() - expected.y()) < 2, (corner, expected)
+        QTest.mouseRelease(window, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, finish)
+        assert set(local.selectedKeys) == {first.property("key"), second.property("key")}
 
         # --- Back to the gallery tab: chosen alone again.
         click("navGallery")

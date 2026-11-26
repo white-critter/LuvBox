@@ -135,6 +135,8 @@ ApplicationWindow {
         }
         if (currentScreen === 1)
             Qt.callLater(updateFocus)
+        if (currentScreen === 2)
+            Qt.callLater(unsavedReview.takeFocus)
         if (currentScreen === 3) {
             folderTabSeen = true
             Qt.callLater(function() { if (localFolderLoader.item) localFolderLoader.item.takeFocus() })
@@ -512,6 +514,7 @@ ApplicationWindow {
             window.seenLibraryStatus = text
             if (text.length > 0) {
                 window.statusSource = "library"
+                window.seenManagementStatus = ""
                 if (window.transientNotice.length > 0) {
                     window.transientNotice = ""
                     noticeTimer.stop()
@@ -534,6 +537,7 @@ ApplicationWindow {
             window.seenManagementStatus = text
             if (text.length > 0) {
                 window.statusSource = "management"
+                window.seenLibraryStatus = ""
                 if (window.transientNotice.length > 0) {
                     window.transientNotice = ""
                     noticeTimer.stop()
@@ -661,7 +665,7 @@ ApplicationWindow {
             anchors.fill: parent
             anchors.leftMargin: Theme.pageMargin
             anchors.rightMargin: 144
-            spacing: window.width <= 760 ? Theme.gapTiny : Theme.gapSmall
+            spacing: window.width <= 800 ? Theme.gapTiny : Theme.gapSmall
             Image {
                 id: titleBrandMark
                 objectName: "titleBrandMark"
@@ -684,13 +688,14 @@ ApplicationWindow {
             }
             Label {
                 text: "LuvBox"
-                visible: window.width > 760
+                visible: window.width > 800
                 font.pixelSize: Theme.fontHeading
                 font.bold: true
-                Layout.rightMargin: Theme.gapLarge
+                Layout.rightMargin: window.width > 860 ? Theme.gapLarge : Theme.gapSmall
             }
             FlatButton {
                 objectName: "navSave"
+                focusPolicy: Qt.TabFocus
                 text: "저장"
                 tone: "nav"
                 checkable: true
@@ -702,6 +707,7 @@ ApplicationWindow {
             }
             FlatButton {
                 objectName: "navGallery"
+                focusPolicy: Qt.TabFocus
                 text: "갤러리"
                 tone: "nav"
                 checkable: true
@@ -715,6 +721,7 @@ ApplicationWindow {
             // Screen 3: a folder of this PC, with the gallery's duplicate and AI tools.
             FlatButton {
                 objectName: "navLocalFolder"
+                focusPolicy: Qt.TabFocus
                 text: "폴더 정리"
                 tone: "nav"
                 checkable: true
@@ -729,7 +736,7 @@ ApplicationWindow {
                 text: window.app ? window.app.version : ""
                 color: Theme.textFaint
                 font.pixelSize: Theme.fontSmall
-                visible: window.width > 760
+                visible: window.width > 860
                 Layout.rightMargin: Theme.gapTiny
             }
             // The two gallery windows keep the places they had: one click, no menu.
@@ -1230,8 +1237,8 @@ ApplicationWindow {
                                 window.galleryModel.search(displayText)
                         }
                         Keys.onEscapePressed: event => {
-                            if (text.length > 0) {
-                                text = ""
+                            if (displayText.length > 0) {
+                                clearText()
                                 window.stopWheel()
                                 searchDelay.stop()
                                 if (window.app)
@@ -1252,7 +1259,7 @@ ApplicationWindow {
                             anchors.verticalCenter: parent.verticalCenter
                             width: 24
                             height: 24
-                            visible: search.text.length > 0
+                            visible: search.displayText.length > 0
                             focusPolicy: Qt.NoFocus
                             Accessible.name: "검색어 지우기"
                             HoverHandler { cursorShape: Qt.PointingHandCursor }
@@ -1269,7 +1276,7 @@ ApplicationWindow {
                                 color: clearSearchButton.hovered ? Theme.raisedHover : "transparent"
                             }
                             onClicked: {
-                                search.text = ""
+                                search.clearText()
                                 window.stopWheel()
                                 searchDelay.stop()
                                 if (window.app)
@@ -1653,12 +1660,12 @@ ApplicationWindow {
                             rightPadding: 10
                             text: "× 필터 지우기"
                             Accessible.name: "필터 초기화"
-                            visible: !!window.app && (window.app.library.filterSummary.length > 0 || search.text.length > 0
+                            visible: !!window.app && (window.app.library.filterSummary.length > 0 || search.displayText.length > 0
                                 || mediaFilter.currentIndex > 0 || orderChoice.currentIndex > 0 || window.app.library.filterFavoriteOnly || window.app.library.filterDuplicateOnly)
                             onClicked: {
                                 searchDelay.stop()
                                 datePickerPopup.close()
-                                search.text = ""
+                                search.clearText()
                                 mediaFilter.currentIndex = orderChoice.currentIndex = 0
                                 window.app.library.resetFilters()
                             }
@@ -2054,104 +2061,52 @@ ApplicationWindow {
                         enabled: window.currentScreen === 1 && !window.modalOpen && !datePickerPopup.visible
                             && !window.duplicateMode && (!window.app || !window.app.closing)
                     }
-                    DragHandler {
-                        id: bandDrag
-                        objectName: "galleryBandDrag"
+                    WheelHandler {
+                        objectName: "galleryTouchPadWheel"
+                        enabled: window.currentScreen === 1 && !window.modalOpen && !datePickerPopup.visible
+                            && !window.duplicateMode && (!window.app || !window.app.closing)
                         target: null
-                        acceptedDevices: PointerDevice.Mouse
-                        acceptedButtons: Qt.LeftButton
-                        enabled: !!window.app && !window.modalOpen && !window.app.closing
-                        dragThreshold: 10
-                        property real startX: 0
-                        property real startY: 0
-                        property real currentX: 0
-                        property real currentY: 0
-                        // Ctrl or Shift held when the button went down adds to the selection,
-                        // even if the key is let go before the drag ends.
-                        property int pressModifiers: Qt.NoModifier
-                        onGrabChanged: (transition, point) => {
-                            if (transition === PointerDevice.GrabPassive)
-                                pressModifiers = centroid.modifiers
-                        }
-                        function update() {
-                            // The rectangle lives in content coordinates, so it grows while the grid scrolls under it.
-                            const top = Math.min(startY, currentY)
-                            const bottom = Math.max(startY, currentY)
-                            const left = Math.min(startX, currentX)
-                            const right = Math.max(startX, currentX)
-                            const columns = window.columnCount()
-                            window.app.library.bandSelect(
-                                Math.floor(Math.max(0, top) / gallery.cellHeight),
-                                Math.floor(Math.max(0, bottom) / gallery.cellHeight),
-                                Math.floor(Math.max(0, left) / gallery.cellWidth),
-                                Math.floor(Math.max(0, right) / gallery.cellWidth), columns)
-                        }
-                        // Where a pointer position is inside the grid's visible area. The handler
-                        // reports positions in the scrolling content, which already include the
-                        // scroll offset and go stale while the grid moves under a resting pointer,
-                        // so the scene position is mapped instead.
-                        function inView(scenePoint) {
-                            return gallery.mapFromItem(null, scenePoint.x, scenePoint.y)
-                        }
-                        function follow() {
-                            const point = inView(centroid.scenePosition)
-                            currentX = Math.max(0, Math.min(gallery.width, point.x))
-                            currentY = point.y + gallery.contentY - gallery.originY
-                            update()
-                        }
-                        onActiveChanged: {
-                            if (active) {
-                                gallery.forceActiveFocus()
-                                window.stopWheel()
-                                const pressed = inView(centroid.scenePressPosition)
-                                startX = Math.max(0, Math.min(gallery.width, pressed.x))
-                                startY = pressed.y + gallery.contentY - gallery.originY
-                                const held = pressModifiers | centroid.modifiers
-                                window.app.library.beginBandSelection(
-                                    (held & (Qt.ControlModifier | Qt.ShiftModifier)) !== 0)
-                                follow()
-                            } else {
-                                window.app.library.endBandSelection()
-                            }
-                        }
-                        onCentroidChanged: if (active) follow()
-                    }
-                    Timer {
-                        // Near the top or bottom edge the grid scrolls and the rectangle keeps growing.
-                        interval: 30
-                        repeat: true
-                        running: bandDrag.active
-                        onTriggered: {
-                            const y = bandDrag.inView(bandDrag.centroid.scenePosition).y
-                            let step = 0
-                            if (y < 28)
-                                step = -Math.min(48, 8 + (28 - y) * 0.6)
-                            else if (y > gallery.height - 28)
-                                step = Math.min(48, 8 + (y - (gallery.height - 28)) * 0.6)
-                            if (!step)
+                        acceptedDevices: PointerDevice.TouchPad | PointerDevice.Mouse
+                        onWheel: event => {
+                            const angle = event.angleDelta.y
+                            const pixel = event.pixelDelta.y
+                            const isTouchPad = event.device.type === PointerDevice.TouchPad
+                                || pixel !== 0 || event.pixelDelta.x !== 0 || event.phase !== Qt.NoScrollPhase
+                            if (!isTouchPad) {
+                                event.accepted = false
                                 return
+                            }
+                            const dy = pixel !== 0 ? pixel : angle
+                            const dx = pixel !== 0 ? event.pixelDelta.x : event.angleDelta.x
+                            if (!dy || Math.abs(dy) < Math.abs(dx) || event.modifiers !== Qt.NoModifier) {
+                                event.accepted = false
+                                return
+                            }
                             const minimum = gallery.originY
                             const maximum = minimum + Math.max(0, gallery.contentHeight - gallery.height)
-                            const next = Math.max(minimum, Math.min(maximum, gallery.contentY + step))
-                            if (next !== gallery.contentY) {
-                                gallery.contentY = next
-                                bandDrag.follow()
+                            const lines = Application.styleHints.wheelScrollLines
+                            if (lines === 0 || maximum - minimum < 1) {
+                                event.accepted = false
+                                return
                             }
+                            const gainLines = lines > 0 && lines < 1000 ? lines / 3 : 1
+                            const step = pixel !== 0 ? pixel : (angle / 120 * wheelMotion.notchPixels * gainLines)
+                            window.stopWheel()
+                            gallery.cancelFlick()
+                            gallery.contentY = Math.max(minimum, Math.min(maximum, gallery.contentY - step))
+                            event.accepted = true
                         }
                     }
-                    Rectangle {
-                        objectName: "galleryBand"
-                        // Drawn over the visible area, not inside the scrolling content.
-                        parent: gallery
-                        visible: bandDrag.active
-                        z: 5
-                        x: Math.min(bandDrag.startX, bandDrag.currentX)
-                        y: Math.min(bandDrag.startY, bandDrag.currentY) - (gallery.contentY - gallery.originY)
-                        width: Math.abs(bandDrag.currentX - bandDrag.startX)
-                        height: Math.abs(bandDrag.currentY - bandDrag.startY)
-                        color: Qt.alpha(Theme.accent, 0.2)
-                        border.width: 1
-                        border.color: Theme.accent
+                    GridBandSelection {
+                        objectName: "galleryBandDrag"
+                        grid: gallery
+                        columns: window.columnCount()
+                        enabled: !!window.app && !window.modalOpen && !window.app.closing
+                        bandObjectName: "galleryBand"
+                        wheelReset: function() { window.stopWheel() }
+                        onBandStarted: additive => window.app.library.beginBandSelection(additive)
+                        onBandUpdated: (row0, row1, col0, col1, cols) => window.app.library.bandSelect(row0, row1, col0, col1, cols)
+                        onBandEnded: window.app.library.endBandSelection()
                     }
                     onContentYChanged: {
                         window.requestMore()
@@ -2327,7 +2282,8 @@ ApplicationWindow {
                                         gallery.currentIndex = tile.index
                                         teachMenu.singleOnly = false
                                         teachMenu.targetKey = tile.key
-                                        teachMenu.popup()
+                                        const pt = tileMouse.mapToItem(gallery, mouse.x, mouse.y)
+                                        teachMenu.popup(gallery, pt.x, pt.y)
                                         return
                                     }
                                     // The range is measured from the highlight. Setting
@@ -2409,19 +2365,15 @@ ApplicationWindow {
                         anchors.centerIn: parent
                         visible: gallery.count === 0 && !window.galleryModel.busy && !window.galleryModel.error.length
                         text: {
-                            if (window.app && window.app.library.filterDuplicateOnly && window.app.library.copiesLocked)
-                                return "중복 사진을 찾는 중…"
-                            if (window.app && window.app.library.filterDuplicateOnly)
-                                return "중복 사진이 없어요 · 위의 ‘중복 검사’로 다시 찾아볼 수 있어요"
                             // Only when nothing else narrows the list: otherwise there may well be
                             // favorites, just none that meet the other conditions too.
-                            if (window.app && window.app.library.filterFavoriteOnly && !search.text.length
+                            if (window.app && window.app.library.filterFavoriteOnly && !search.displayText.length
                                     && mediaFilter.currentIndex === 0 && !window.app.library.filterAuthor
                                     && !window.app.library.filterHashtag && !window.app.library.filterUserTag
                                     && !window.app.library.filterAiCategory && !window.app.library.dateFrom
                                     && !window.app.library.dateTo)
                                 return "아직 즐겨찾기가 없어요 · 사진의 ★이나 F 키로 담아 보세요"
-                            return search.text.length || (window.app && (window.app.library.filterSummary.length > 0
+                            return search.displayText.length || (window.app && (window.app.library.filterSummary.length > 0
                                 || mediaFilter.currentIndex > 0)) ? "조건에 맞는 사진이 없어요"
                                 : "아직 사진이 없어요 · 저장 화면에서 좋아요를 담아 보세요"
                         }
@@ -2747,7 +2699,7 @@ ApplicationWindow {
             sequence: "Left"
             enabled: previewDialog.shortcutActive && window.app && window.app.library.canPrevious
             onActivated: {
-                inlineTagField.text = ""
+                inlineTagField.clearText()
                 window.app.library.previousItem()
             }
         }
@@ -2755,7 +2707,7 @@ ApplicationWindow {
             sequence: "Right"
             enabled: previewDialog.shortcutActive && window.app && window.app.library.canNext
             onActivated: {
-                inlineTagField.text = ""
+                inlineTagField.clearText()
                 window.app.library.nextItem()
             }
         }
@@ -2764,42 +2716,9 @@ ApplicationWindow {
             enabled: previewDialog.shortcutActive && !!window.app && !!window.app.library.selectedKey
             onActivated: previewDialog.toggleFavorite()
         }
-        Shortcut {
-            sequence: "+"
-            enabled: previewDialog.shortcutActive && selectedMedia.canZoomIn
-            onActivated: selectedMedia.zoomIn()
-        }
-        Shortcut {
-            sequence: "="
-            enabled: previewDialog.shortcutActive && selectedMedia.canZoomIn
-            onActivated: selectedMedia.zoomIn()
-        }
-        Shortcut {
-            sequence: "-"
-            enabled: previewDialog.shortcutActive && selectedMedia.canZoomOut
-            onActivated: selectedMedia.zoomOut()
-        }
-        Shortcut {
-            sequence: "0"
-            enabled: previewDialog.shortcutActive && selectedMedia.ready
-            onActivated: selectedMedia.fit()
-        }
-        Shortcut {
-            sequence: "1"
-            enabled: previewDialog.shortcutActive && selectedMedia.canActualSize
-            onActivated: selectedMedia.actualSize()
-        }
-        Shortcut {
-            sequence: "m"
-            enabled: previewDialog.shortcutActive && selectedMedia.mediaType === "video"
-                && selectedMedia.videoSource && selectedMedia.ready
-            onActivated: selectedMedia.muted = !selectedMedia.muted
-        }
-        Shortcut {
-            sequence: "Shift+M"
-            enabled: previewDialog.shortcutActive && selectedMedia.mediaType === "video"
-                && selectedMedia.videoSource && selectedMedia.ready
-            onActivated: selectedMedia.muted = !selectedMedia.muted
+        PreviewShortcuts {
+            preview: selectedMedia
+            shortcutsEnabled: previewDialog.shortcutActive
         }
         Shortcut {
             sequence: "Delete"
@@ -2832,7 +2751,7 @@ ApplicationWindow {
         }
         onOpened: previewCloseButton.forceActiveFocus()
         onClosed: {
-            inlineTagField.text = ""
+            inlineTagField.clearText()
             selectedMedia.release()
         }
         background: Card {
@@ -2855,6 +2774,7 @@ ApplicationWindow {
             }
             FlatButton {
                 objectName: "previewMaximizeButton"
+                focusPolicy: Qt.TabFocus
                 Layout.rightMargin: 12
                 Layout.topMargin: 8
                 tone: "ghost"
@@ -3108,7 +3028,7 @@ ApplicationWindow {
                             FlatField {
                                 id: inlineTagField
                                 objectName: "inlineTagField"
-                                readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
+                                readonly property string cleanTag: displayText.trim().replace(/^#+/, "").trim()
                                 implicitHeight: Theme.compactHeight
                                 Layout.preferredWidth: 132
                                 leftPadding: Theme.gap
@@ -3118,14 +3038,14 @@ ApplicationWindow {
                                 font.pixelSize: Theme.fontSmall
                                 enabled: !window.app || !window.app.library.tagsLocked
                                 Keys.onEscapePressed: event => {
-                                    text = ""
+                                    clearText()
                                     focus = false
                                     event.accepted = true
                                 }
                                 onAccepted: {
                                     if ((!window.app || !window.app.library.tagsLocked)
                                             && cleanTag.length > 0 && window.app.library.addSelectedTag(cleanTag))
-                                        text = ""
+                                        clearText()
                                 }
                             }
                             FlatButton {
@@ -3136,7 +3056,7 @@ ApplicationWindow {
                                 tip: window.app && window.app.library.tagsLocked ? (window.app ? window.app.library.holdReason : "") : ""
                                 onClicked: {
                                     if (window.app && window.app.library.addSelectedTag(inlineTagField.cleanTag))
-                                        inlineTagField.text = ""
+                                        inlineTagField.clearText()
                                 }
                             }
                             // An AI tag the AI did not give: the person names it, and photos like this one follow.
@@ -3625,6 +3545,13 @@ ApplicationWindow {
         preferredWidth: 460
         windowMargin: 48
         onOpened: aiClearCancel.forceActiveFocus()
+        onAccepted: {
+            if (window.app && !window.app.library.busy) {
+                window.app.library.clearAiTags()
+                window.flashNotice("AI 자동분류 태그를 초기화하는 중입니다…")
+            }
+        }
+        onRejected: aiClearConfirm.close()
         contentItem: Label {
             text: "자동분류로 붙은 AI 태그만 지웁니다. 직접 추가한 태그와 사진 파일은 그대로 둡니다."
             wrapMode: Text.Wrap
@@ -3636,6 +3563,9 @@ ApplicationWindow {
                 objectName: "aiClearConfirmButton"
                 text: "AI 태그 초기화"
                 tone: "primary"
+                enabled: !!window.app && !window.app.library.busy
+                tip: window.app && window.app.library.busy
+                    ? (window.app.library.holdReason || "진행 중인 작업이 끝난 뒤 초기화할 수 있습니다.") : ""
                 DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
             }
             FlatButton {
@@ -3644,13 +3574,6 @@ ApplicationWindow {
                 text: "취소"
                 DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
             }
-            onAccepted: {
-                if (window.app && !window.app.library.busy) {
-                    window.app.library.clearAiTags()
-                    window.flashNotice("AI 자동분류 태그를 초기화하는 중입니다…")
-                }
-            }
-            onRejected: aiClearConfirm.close()
         }
     }
 
@@ -3710,9 +3633,10 @@ ApplicationWindow {
         padding: 16
         property string notice: ""
         onOpened: {
-            teachNewTagField.text = ""
+            teachNewTagField.clearText()
             teachPopup.notice = ""
-            teachNewTagField.forceActiveFocus()
+            if (teachNewTagField.enabled)
+                teachNewTagField.forceActiveFocus()
         }
         background: Card {
             topColor: Theme.dialogTop
@@ -3735,7 +3659,7 @@ ApplicationWindow {
                 FlatField {
                     id: teachNewTagField
                     objectName: "teachNewTagField"
-                    readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
+                    readonly property string cleanTag: displayText.trim().replace(/^#+/, "").trim()
                     Layout.fillWidth: true
                     implicitHeight: Theme.compactHeight
                     leftPadding: Theme.gap
@@ -3759,7 +3683,7 @@ ApplicationWindow {
                             return
                         if (window.app.library.addAiTag(clean)) {
                             window.teachCategory(clean, true)
-                            teachNewTagField.text = ""
+                            teachNewTagField.clearText()
                             teachPopup.close()
                         } else {
                             teachPopup.notice = window.app.library.status || "AI 태그를 추가하지 못했습니다."
@@ -3789,7 +3713,7 @@ ApplicationWindow {
                     Label {
                         Layout.fillWidth: true
                         visible: !window.app || window.app.library.aiCategories.length === 0
-                        text: "켜져 있는 AI 태그가 없습니다. AI 태그 관리에서 추가해 주세요."
+                        text: "켜져 있는 AI 태그가 없습니다. 위에서 새 AI 태그를 만들거나 ‘AI 태그 관리…’에서 켜 주세요."
                         color: Theme.textMuted
                         font.pixelSize: Theme.fontSmall
                         wrapMode: Text.Wrap
@@ -3934,46 +3858,14 @@ ApplicationWindow {
         }
     }
 
-    FlatDialog {
+    BatchTagDialog {
         id: tagBatchPopup
         objectName: "tagBatchPopup"
+        inputObjectName: "batchTagInput"
         parent: popupHost
-        title: "선택한 항목에 태그 추가"
-        preferredWidth: 340
-        light: 0.12
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-        function submitTag() {
-            if (batchTagInput.cleanTag.length > 0 && window.app && !window.app.library.tagsLocked
-                    && window.app.library.addTagToSelection(batchTagInput.cleanTag) > 0) {
-                batchTagInput.text = ""
-                tagBatchPopup.close()
-            }
-        }
-        onOpened: {
-            batchTagInput.text = ""
-            batchTagInput.forceActiveFocus()
-        }
-        onAccepted: submitTag()
-        contentItem: FlatField {
-            id: batchTagInput
-            objectName: "batchTagInput"
-            readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
-            maximumLength: 50
-            placeholderText: "태그 이름 입력"
-            onAccepted: tagBatchPopup.submitTag()
-        }
-        footer: DialogButtons {
-            FlatButton {
-                text: "추가"
-                tone: "primary"
-                enabled: batchTagInput.cleanTag.length > 0 && (!window.app || !window.app.library.tagsLocked)
-                DialogButtonBox.buttonRole: DialogButtonBox.AcceptRole
-            }
-            FlatButton {
-                text: "취소"
-                DialogButtonBox.buttonRole: DialogButtonBox.RejectRole
-            }
-        }
+        locked: !!window.app && window.app.library.tagsLocked
+        lockTip: window.app && window.app.library.tagsLocked ? window.app.library.holdReason : ""
+        onSubmitRequested: tag => tagBatchPopup.submitTo(window.app ? window.app.library : null, tag)
     }
 
     SaveReviewDialog {

@@ -1,5 +1,22 @@
 # 성능 구조와 재현
 
+## 1.13.0 저장소·목록·캐시 마이크로 벤치마크
+
+1.13.0에 포함된 1.12.14 개발 중간판으로 측정했습니다. Windows 11 (`Windows-11-10.0.26300-SP0`), `AMD64 Family 25 Model 33 Stepping 2`, 논리 코어 12개 PC에서 격리된 임시 데이터셋(카탈로그 1,000행·임베딩 400행·중복 묶음 100개, 로컬 폴더 1,000개 파일·태그 200건, 썸네일 64×64 50건 배치, 예열 1회 후 5회 반복)에서 `.test-output/bench-11214.py`를 실행했습니다.
+
+| 항목 | 중앙값 | 최솟값 | 최댓값 |
+| --- | ---: | ---: | ---: |
+| `HistoryStore.has_embeddings` | `0.015 ms` | `0.014 ms` | `0.026 ms` |
+| `HistoryStore.iter_embeddings` (전체 소비) | `5.238 ms` | `4.806 ms` | `5.948 ms` |
+| `HistoryStore.authors` | `1.476 ms` | `1.465 ms` | `1.512 ms` |
+| `HistoryStore.lost_count` | `111.009 ms` | `103.808 ms` | `131.26 ms` |
+| `HistoryStore.duplicate_page(100)` | `4.872 ms` | `4.786 ms` | `5.252 ms` |
+| `LocalFolderStore.records(query='cat')` | `1.46 ms` | `1.451 ms` | `1.545 ms` |
+| `LocalFolderStore.records(user_tag='취향')` | `1.151 ms` | `1.112 ms` | `1.691 ms` |
+| `LocalFolderStore.record_cursor(200)` | `0.672 ms` | `0.645 ms` | `1.109 ms` |
+| `thumbcache.Cache.put` x50 | `34.585 ms` | `30.292 ms` | `43.618 ms` |
+| `thumbcache.Cache.prune` (한도 내 조기 반환) | `0.01 ms` | `0.01 ms` | `0.014 ms` |
+
 ## 1.12.11 로컬 분류 조회·중복 확인·임베딩 전처리 개선
 
 로컬 분류 SQLite의 임베딩 페이지 조회, 유지 사본 해시 크기 사전 필터링, CLIP 4000×3000 EXIF 회전 이미지 전처리, 기록 DB 100,000행 조회를 격리 환경(Python 3.12.16, SQLite 3.53.1)에서 측정했습니다.

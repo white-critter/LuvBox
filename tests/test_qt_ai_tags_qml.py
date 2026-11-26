@@ -34,6 +34,7 @@ def scene():
 
     from PIL import Image
     from PySide6.QtCore import QCoreApplication, QEvent, QMetaObject, QObject, QPointF, Qt, qInstallMessageHandler
+    from PySide6.QtGui import QInputMethodEvent
     from PySide6.QtQuick import QQuickItem
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
@@ -215,6 +216,18 @@ def scene():
         assert QMetaObject.invokeMethod(preview, "open")
         wait(lambda: preview.property("visible"), "preview")
         settle(80)
+        tag_field = find("inlineTagField")
+        tag_field.forceActiveFocus()
+        QCoreApplication.sendEvent(tag_field, QInputMethodEvent("한", []))
+        assert tag_field.property("preeditText") == "한"
+        assert not preview.property("shortcutActive")
+        favorite = library.selectedIsFavorite
+        for key_press in (Qt.Key.Key_F, Qt.Key.Key_D, Qt.Key.Key_M, Qt.Key.Key_Delete):
+            QTest.keyClick(window, key_press)
+        settle(40)
+        assert library.selectedIsFavorite == favorite
+        assert not library.filterDuplicateOnly and not controller.management.deleteConfirmationPending
+        QMetaObject.invokeMethod(tag_field, "clearText")
         # The chips sit in the same row as the tag field (a search from the window also passes
         # through each popup and would meet them twice).
         chips, pending = [], [find("inlineTagField").parentItem().parentItem()]

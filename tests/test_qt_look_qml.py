@@ -291,6 +291,15 @@ def scene(shots=None):
         for name in ("connectionDialog", "scheduleDialog"):
             dialog, showing = opened(name, 1)
             closed(dialog, name)
+        window.resize(680, 480)
+        settle(120)
+        for name in ("connectionDialog", "scheduleDialog", "aiTagManagerDialog"):
+            dialog, showing = opened(name, 1)
+            assert dialog.property("width") <= window.width(), name
+            assert dialog.property("height") <= window.height(), name
+            closed(dialog, name)
+        window.resize(1280, 860)
+        settle(120)
         # The unsaved media have a page of their own, laid out like the gallery: one main button at most.
         screen = window.property("currentScreen")
         from PySide6.QtCore import Q_ARG

@@ -274,26 +274,13 @@ ComboBox {
             // the first and last row, so it does not fall through to a list behind.
             ScrollBar.vertical: ScrollBar {
                 policy: popupList.contentHeight > popupList.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                onPressedChanged: if (pressed) comboWheel.reset()
             }
             SmoothWheel {
+                id: comboWheel
                 flickable: popupList
                 notchPixels: 108
                 passAtEnds: false
-            }
-            WheelHandler {
-                acceptedDevices: PointerDevice.TouchPad
-                blocking: true
-                onWheel: function(event) {
-                    const step = event.pixelDelta.y
-                        || (event.angleDelta.y ? Math.round(event.angleDelta.y / 120 * 108) : 0)
-                    if (!step) {
-                        event.accepted = false
-                        return
-                    }
-                    const minimum = popupList.originY
-                    const maximum = minimum + Math.max(0, popupList.contentHeight - popupList.height)
-                    popupList.contentY = Math.max(minimum, Math.min(maximum, popupList.contentY - step))
-                }
             }
         }
     }

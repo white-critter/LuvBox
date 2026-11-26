@@ -4,6 +4,8 @@ import QtQuick.Window
 
 ScrollView {
     id: control
+    rightPadding: ScrollBar.vertical.policy === ScrollBar.AlwaysOn ? 14 : 0
+    ScrollBar.vertical.policy: contentHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
 
     // ScrollView clips its contents but does not reveal controls reached by Tab.
     // Follow focus only when the focused item belongs to this scrolling form.

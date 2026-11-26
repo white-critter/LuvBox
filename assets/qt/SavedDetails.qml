@@ -9,6 +9,8 @@ Frame {
     readonly property var download: app ? app.download : null
     readonly property var item: download ? download.currentSavedItem : ({})
     readonly property bool hasItem: !!(item && item.filename)
+    readonly property string savedItemPath: item.path || item.filename || ""
+    onSavedItemPathChanged: if (bodyScroll.contentItem) bodyScroll.contentItem.contentY = 0
     padding: Theme.cardPadding
     background: Card {}
 
@@ -35,7 +37,9 @@ Frame {
                     id: savedThumbnail
                     objectName: "savedMediaThumbnail"
                     anchors.fill: parent
-                    source: details.item.preview_url || ""
+                    source: (details.visible && (!details.Window.window
+                        || (details.Window.window.visible && details.Window.window.visibility !== Window.Minimized)))
+                        ? (details.item.preview_url || "") : ""
                     sourceSize: Qt.size(384, 288)
                     asynchronous: true
                     cache: false
@@ -165,6 +169,8 @@ Frame {
             Layout.preferredHeight: Math.min(120, savedBody.implicitHeight)
             visible: details.hasItem && !!details.item.body
             clip: true
+            contentWidth: availableWidth
+            rightPadding: 14
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
             ScrollBar.vertical.policy: savedBody.implicitHeight > height + 2 ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
             TextArea {

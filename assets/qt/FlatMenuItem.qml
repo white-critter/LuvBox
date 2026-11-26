@@ -5,6 +5,7 @@ MenuItem {
     id: item
     // The key that does the same thing, shown dimmed at the right.
     property string hint: ""
+    property int elideMode: Text.ElideRight
     implicitHeight: 34
     height: visible ? implicitHeight : 0
     readonly property bool truncated: label.truncated
@@ -37,7 +38,7 @@ MenuItem {
             textFormat: Text.PlainText
             font: item.font
             color: !item.enabled ? Theme.textDisabled : (item.checked ? Theme.accentText : Theme.text)
-            elide: Text.ElideRight
+            elide: item.elideMode
         }
         Text {
             id: keys

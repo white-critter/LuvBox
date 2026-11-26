@@ -43,6 +43,9 @@ Item {
     readonly property int thumbDecodeH: Math.min(384, Math.max(1, Math.round((Math.round(tileWidth * 0.75) - 16) * thumbPixelRatio)))
     onThumbPixelRatioChanged: Qt.callLater(updateFocus)
     property real focusContentY: 0
+    property int topIndex: 0
+    property int pendingAnchor: -1
+    property int anchorGeneration: 0
     property bool resumePreview: false
     // The status line, as in the gallery: the folder's work and the Recycle Bin's results; the one
     // that changed last speaks, and a key refused just now says why.
@@ -68,11 +71,14 @@ Item {
     }
     onFolderPathChanged: {
         searchDelay.stop()
-        searchField.text = ""
+        searchField.clearText()
         view.seenFolderStatus = ""
+        view.topIndex = 0
+        cancelAnchor()
     }
     onDuplicateModeChanged: {
         localDuplicateHelp.close()
+        cancelAnchor()
         Qt.callLater(takeFocus)
         Qt.callLater(updateFocus)
     }
@@ -83,7 +89,74 @@ Item {
     onTileWidthChanged: {
         if (localWheel)
             localWheel.reset()
-        Qt.callLater(updateFocus)
+        localAnchorTimer.stop()
+        grid.cancelFlick()
+        if (view.opened && !view.duplicateMode && grid.count > 0 && grid.width > 0 && grid.cellHeight > 0) {
+            const cols = Math.max(1, grid.columns)
+            const first = Math.floor(Math.max(0, grid.contentY - grid.originY) / Math.max(1, grid.cellHeight)) * cols
+            view.pendingAnchor = Math.min(grid.count - 1, Math.max(0, first))
+            placeAnchor()
+        } else {
+            cancelAnchor()
+            Qt.callLater(updateFocus)
+        }
+    }
+    function cancelAnchor() {
+        pendingAnchor = -1
+        localAnchorTimer.stop()
+        grid.highlightFollowsCurrentItem = true
+    }
+    function placeAnchor() {
+        if (pendingAnchor < 0)
+            return
+        anchorGeneration += 1
+        localAnchorTimer.keep = pendingAnchor
+        localAnchorTimer.tries = 0
+        localAnchorTimer.generation = anchorGeneration
+        grid.highlightFollowsCurrentItem = false
+        localAnchorTimer.restart()
+    }
+    Timer {
+        id: localAnchorTimer
+        interval: 40
+        repeat: true
+        property int keep: -1
+        property int tries: 0
+        property int generation: 0
+        onTriggered: {
+            tries += 1
+            if (generation !== view.anchorGeneration || keep < 0 || grid.width < 2 || grid.cellWidth < 2 || grid.cellHeight < 2) {
+                if (tries >= 8) {
+                    grid.highlightFollowsCurrentItem = true
+                    stop()
+                }
+                return
+            }
+            const columns = Math.max(1, grid.columns)
+            const rowStart = keep - (keep % columns)
+            const offset = (rowStart / columns) * grid.cellHeight
+            if (grid.contentHeight < offset + grid.cellHeight) {
+                if (tries >= 8) {
+                    grid.highlightFollowsCurrentItem = true
+                    stop()
+                }
+                return
+            }
+            const limit = Math.max(0, grid.contentHeight - grid.height)
+            const target = grid.originY + Math.min(offset, limit)
+            grid.cancelFlick()
+            grid.contentY = target
+            view.topIndex = rowStart
+            view.updateFocus()
+            if (Math.abs(grid.contentY - target) < 1 || tries >= 8) {
+                const visibleEnd = rowStart + columns * Math.max(1, Math.ceil(grid.height / grid.cellHeight))
+                if (grid.currentIndex >= 0 && (grid.currentIndex < rowStart || grid.currentIndex >= visibleEnd))
+                    grid.currentIndex = rowStart
+                grid.highlightFollowsCurrentItem = true
+                view.pendingAnchor = -1
+                stop()
+            }
+        }
     }
     onWindowShownChanged: if (windowShown) Qt.callLater(updateFocus)
 
@@ -122,6 +195,7 @@ Item {
         const first = Math.min(grid.count - 1, Math.floor(y / grid.cellHeight) * columns)
         const bottom = Math.min(grid.contentHeight, y + grid.height)
         const last = Math.min(grid.count - 1, Math.max(first, Math.ceil(bottom / grid.cellHeight) * columns - 1))
+        view.topIndex = first
         folder.folderModel.focusViewport(first | 0, last | 0, (direction * columns * 2) | 0,
                                          view.thumbDecodeW | 0, view.thumbDecodeH | 0)
     }
@@ -375,12 +449,17 @@ Item {
                                 Layout.fillWidth: true
                                 spacing: Theme.gapSmall
                                 FlatButton {
+                                    id: recentButtonItem
                                     objectName: "localFolderRecent"
                                     Layout.fillWidth: true
                                     tone: "ghost"
                                     compact: true
                                     focusPolicy: Qt.TabFocus
+                                    elideMode: Text.ElideMiddle
                                     text: recentRow.modelData
+                                    ToolTip.visible: hovered && recentButtonItem.truncated
+                                    ToolTip.delay: 500
+                                    ToolTip.text: recentRow.modelData
                                     onClicked: if (view.folder) view.folder.openFolder(recentRow.modelData)
                                 }
                                 // Off the list, and the folder's record too when asked (forgetDialog).
@@ -507,11 +586,11 @@ Item {
                         view.folder.search(displayText)
                 }
                 Keys.onEscapePressed: event => {
-                    if (text.length > 0) {
+                    if (displayText.length > 0) {
                         if (localWheel)
                             localWheel.reset()
                         searchDelay.stop()
-                        text = ""
+                        clearText()
                         if (view.folder)
                             view.folder.search("")
                         event.accepted = true
@@ -527,7 +606,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     width: 24
                     height: 24
-                    visible: searchField.text.length > 0
+                    visible: searchField.displayText.length > 0
                     focusPolicy: Qt.NoFocus
                     Accessible.name: "검색어 지우기"
                     HoverHandler { cursorShape: Qt.PointingHandCursor }
@@ -547,7 +626,7 @@ Item {
                         if (localWheel)
                             localWheel.reset()
                         searchDelay.stop()
-                        searchField.text = ""
+                        searchField.clearText()
                         if (view.folder)
                             view.folder.search("")
                         searchField.forceActiveFocus()
@@ -683,7 +762,7 @@ Item {
                     objectName: "localFolderUserTag"
                     chosen: !!view.folder && view.folder.filterUserTag.length > 0
                     maxChipWidth: 200
-                    minimumPopupWidth: 200
+                    minimumPopupWidth: 260
                     escapeFocus: view.duplicateMode ? duplicateReview : grid
                     Accessible.name: "내 태그 선택"
                     readonly property var rawTags: view.folder ? view.folder.userTags : []
@@ -715,12 +794,12 @@ Item {
                     tone: "ghost"
                     focusPolicy: Qt.TabFocus
                     Accessible.name: "필터 초기화"
-                    visible: !!view.folder && (view.folder.filterSummary.length > 0 || searchField.text.length > 0
+                    visible: !!view.folder && (view.folder.filterSummary.length > 0 || searchField.displayText.length > 0
                         || mediaTypeCombo.currentIndex > 0 || orderCombo.currentIndex > 0
                         || view.folder.filterFavoriteOnly || view.folder.filterDuplicateOnly)
                     onClicked: {
                         searchDelay.stop()
-                        searchField.text = ""
+                        searchField.clearText()
                         if (view.folder)
                             view.folder.resetFilters()
                     }
@@ -861,6 +940,7 @@ Item {
                         if (text.length > 0) {
                             view.flashNotice("")
                             view.statusSource = "folder"
+                            view.seenManagerStatus = ""
                         }
                     }
                 }
@@ -874,6 +954,7 @@ Item {
                         if (text.length > 0) {
                             view.flashNotice("")
                             view.statusSource = "manager"
+                            view.seenFolderStatus = ""
                         }
                     }
                 }
@@ -1118,19 +1199,26 @@ Item {
                 }
                 onCellHeightChanged: {
                     if (localWheel) localWheel.reset()
+                    if (view.pendingAnchor >= 0)
+                        view.placeAnchor()
                     Qt.callLater(view.updateFocus)
                 }
                 onOriginYChanged: {
                     if (localWheel) localWheel.reset()
                     Qt.callLater(view.updateFocus)
                 }
-                onContentHeightChanged: Qt.callLater(view.updateFocus)
+                onContentHeightChanged: {
+                    if (view.pendingAnchor >= 0)
+                        view.placeAnchor()
+                    Qt.callLater(view.updateFocus)
+                }
                 onVisibleChanged: if (visible) Qt.callLater(view.updateFocus)
                 Connections {
                     target: view.folder ? view.folder.folderModel : null
                     function onModelReset() {
                         if (localWheel)
                             localWheel.reset()
+                        grid.currentIndex = -1
                         Qt.callLater(view.updateFocus)
                     }
                 }
@@ -1150,93 +1238,16 @@ Item {
 
                 // Dragging draws a rectangle and picks the tiles it touches, as in the gallery
                 // (Ctrl or Shift held adds to what is picked).
-                DragHandler {
-                    id: bandDrag
+                GridBandSelection {
                     objectName: "localFolderBandDrag"
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse
-                    acceptedButtons: Qt.LeftButton
+                    grid: grid
+                    columns: grid.columns
                     enabled: !!view.folder && !view.modalOpen && !view.windowModalOpen
-                    dragThreshold: 10
-                    property real startX: 0
-                    property real startY: 0
-                    property real currentX: 0
-                    property real currentY: 0
-                    property int pressModifiers: Qt.NoModifier
-                    onGrabChanged: (transition, point) => {
-                        if (transition === PointerDevice.GrabPassive)
-                            pressModifiers = centroid.modifiers
-                    }
-                    function update() {
-                        // In content coordinates, so the rectangle grows while the grid scrolls under it.
-                        view.folder.bandSelect(
-                            Math.floor(Math.max(0, Math.min(startY, currentY)) / grid.cellHeight),
-                            Math.floor(Math.max(0, Math.max(startY, currentY)) / grid.cellHeight),
-                            Math.floor(Math.max(0, Math.min(startX, currentX)) / grid.cellWidth),
-                            Math.floor(Math.max(0, Math.max(startX, currentX)) / grid.cellWidth), grid.columns)
-                    }
-                    function inView(scenePoint) {
-                        return grid.mapFromItem(null, scenePoint.x, scenePoint.y)
-                    }
-                    function follow() {
-                        const point = inView(centroid.scenePosition)
-                        currentX = Math.max(0, Math.min(grid.width, point.x))
-                        currentY = point.y + grid.contentY - grid.originY
-                        update()
-                    }
-                    onActiveChanged: {
-                        if (!view.folder)
-                            return
-                        if (active) {
-                            if (localWheel)
-                                localWheel.reset()
-                            grid.forceActiveFocus()
-                            const pressed = inView(centroid.scenePressPosition)
-                            startX = Math.max(0, Math.min(grid.width, pressed.x))
-                            startY = pressed.y + grid.contentY - grid.originY
-                            const held = pressModifiers | centroid.modifiers
-                            view.folder.beginBandSelection((held & (Qt.ControlModifier | Qt.ShiftModifier)) !== 0)
-                            follow()
-                        } else {
-                            view.folder.endBandSelection()
-                        }
-                    }
-                    onCentroidChanged: if (active) follow()
-                }
-                Timer {
-                    // Near the top or bottom edge the grid scrolls and the rectangle keeps growing.
-                    interval: 30
-                    repeat: true
-                    running: bandDrag.active
-                    onTriggered: {
-                        const y = bandDrag.inView(bandDrag.centroid.scenePosition).y
-                        let step = 0
-                        if (y < 28)
-                            step = -Math.min(48, 8 + (28 - y) * 0.6)
-                        else if (y > grid.height - 28)
-                            step = Math.min(48, 8 + (y - (grid.height - 28)) * 0.6)
-                        if (!step)
-                            return
-                        const maximum = grid.originY + Math.max(0, grid.contentHeight - grid.height)
-                        const next = Math.max(grid.originY, Math.min(maximum, grid.contentY + step))
-                        if (next !== grid.contentY) {
-                            grid.contentY = next
-                            bandDrag.follow()
-                        }
-                    }
-                }
-                Rectangle {
-                    objectName: "localFolderBand"
-                    parent: grid
-                    visible: bandDrag.active
-                    z: 5
-                    x: Math.min(bandDrag.startX, bandDrag.currentX)
-                    y: Math.min(bandDrag.startY, bandDrag.currentY) - (grid.contentY - grid.originY)
-                    width: Math.abs(bandDrag.currentX - bandDrag.startX)
-                    height: Math.abs(bandDrag.currentY - bandDrag.startY)
-                    color: Qt.alpha(Theme.accent, 0.2)
-                    border.width: 1
-                    border.color: Theme.accent
+                    bandObjectName: "localFolderBand"
+                    wheelReset: function() { if (localWheel) localWheel.reset() }
+                    onBandStarted: additive => view.folder.beginBandSelection(additive)
+                    onBandUpdated: (row0, row1, col0, col1, cols) => view.folder.bandSelect(row0, row1, col0, col1, cols)
+                    onBandEnded: view.folder.endBandSelection()
                 }
 
                 component FolderTile: Item {
@@ -1260,6 +1271,19 @@ Item {
                     height: grid.cellHeight
                     GridView.onPooled: activeTile = false
                     GridView.onReused: activeTile = true
+                    Accessible.role: Accessible.ListItem
+                    Accessible.name: cell.caption
+                    Accessible.selected: view.folder && view.folder.selectionMode ? cell.chosen : grid.currentIndex === cell.index
+                    Accessible.onPressAction: {
+                        grid.forceActiveFocus()
+                        grid.currentIndex = cell.index
+                        if (view.folder) {
+                            if (view.folder.selectionMode)
+                                view.folder.toggleSelection(cell.key)
+                            else
+                                view.folder.selectItem(cell.key)
+                        }
+                    }
                     Rectangle {
                         objectName: "localFolderTile"
                         readonly property string key: cell.key
@@ -1323,7 +1347,8 @@ Item {
                                     grid.currentIndex = cell.index
                                     teachMenu.singleOnly = false
                                     teachMenu.targetKey = cell.key
-                                    teachMenu.popup()
+                                    const pt = tileMouse.mapToItem(grid, mouse.x, mouse.y)
+                                    teachMenu.popup(grid, pt.x, pt.y)
                                     return
                                 }
                                 if (mouse.modifiers & Qt.ShiftModifier) {
@@ -1405,7 +1430,12 @@ Item {
                 text: {
                     if (view.folder && view.folder.scanningFolder)
                         return "폴더를 읽는 중…"
-                    if (view.folder && (view.folder.filterSummary.length > 0 || searchField.text.length > 0 || mediaTypeCombo.currentIndex > 0))
+                    if (view.folder && view.folder.filterFavoriteOnly && !searchField.displayText.length
+                            && mediaTypeCombo.currentIndex === 0 && !view.folder.filterUserTag
+                            && !view.folder.filterAiCategory)
+                        return "아직 즐겨찾기가 없어요 · 사진의 ★이나 F 키로 담아 보세요"
+                    if (view.folder && (view.folder.filterSummary.length > 0 || searchField.displayText.length > 0
+                            || mediaTypeCombo.currentIndex > 0))
                         return "조건에 맞는 사진이 없어요"
                     return "이 폴더에 사진이 없어요"
                 }
@@ -1508,6 +1538,7 @@ Item {
             FlatMenuItem {
                 id: recentMenuItem
                 required property string modelData
+                elideMode: Text.ElideMiddle
                 text: modelData
                 checkable: true
                 checked: !!view.folder && view.folder.folderPath === modelData
@@ -1649,6 +1680,7 @@ Item {
         parent: view.popupParent || Overlay.overlay
         app: view.app
         library: view.folder
+        shareLearning: view.folder ? view.folder.shareLearning : true
     }
 
     FlatDialog {
@@ -1688,33 +1720,48 @@ Item {
         property string path: ""
         title: "최근 폴더에서 뺄까요?"
         preferredWidth: 480
+        windowMargin: 48
+        readonly property int windowLimit: parent ? Math.max(200, parent.height - 48) : 520
+        readonly property int chromeHeight: topPadding + bottomPadding
+            + (header && header.implicitHeight > 0 ? header.implicitHeight + spacing : 0)
+            + (footer && footer.implicitHeight > 0 ? footer.implicitHeight + spacing : 0)
+        height: Math.min(forgetColumn.implicitHeight + chromeHeight + 4, windowLimit)
         onOpened: {
             forgetErase.checked = false
             forgetCancel.forceActiveFocus()
         }
         onAccepted: if (view.folder) view.folder.forgetFolder(forgetDialog.path, forgetErase.checked)
-        contentItem: ColumnLayout {
-            spacing: Theme.gap
-            Label {
-                Layout.fillWidth: true
-                text: forgetDialog.path
-                textFormat: Text.PlainText
-                wrapMode: Text.WrapAnywhere
-                color: Theme.text
-            }
-            Label {
-                Layout.fillWidth: true
-                text: "폴더와 사진은 그대로 둡니다."
-                color: Theme.textMuted
-                wrapMode: Text.Wrap
-            }
-            FlatSwitch {
-                id: forgetErase
-                objectName: "localFolderForgetErase"
-                Layout.fillWidth: true
-                trailing: true
-                text: "이 폴더의 정리 기록도 지우기 (태그·즐겨찾기·중복 아님·AI 분류 정보)"
-                Accessible.name: text
+        contentItem: FocusScrollView {
+            id: forgetScroll
+            clip: true
+            contentWidth: availableWidth
+            ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+            ColumnLayout {
+                id: forgetColumn
+                width: forgetScroll.availableWidth
+                spacing: Theme.gap
+                Label {
+                    Layout.fillWidth: true
+                    text: forgetDialog.path
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WrapAnywhere
+                    color: Theme.text
+                }
+                Label {
+                    Layout.fillWidth: true
+                    text: "폴더와 사진은 그대로 둡니다."
+                    color: Theme.textMuted
+                    wrapMode: Text.Wrap
+                }
+                FlatSwitch {
+                    id: forgetErase
+                    objectName: "localFolderForgetErase"
+                    Layout.fillWidth: true
+                    trailing: true
+                    wrap: true
+                    text: "이 폴더의 정리 기록도 지우기 (태그·즐겨찾기·중복 아님·AI 분류 정보)"
+                    Accessible.name: text
+                }
             }
         }
         footer: DialogButtons {
@@ -1732,64 +1779,15 @@ Item {
         }
     }
 
-    Popup {
+    BatchTagDialog {
         id: tagPopup
         objectName: "localFolderTagPopup"
+        inputObjectName: "localFolderBatchTag"
         parent: view.popupParent || Overlay.overlay
-        modal: true
-        focus: true
-        anchors.centerIn: parent
-        width: 320
-        padding: 16
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-        onOpened: {
-            batchTag.text = ""
-            batchTag.forceActiveFocus()
-        }
-        background: Card {
-            topColor: Theme.dialogTop
-            bottomColor: Theme.dialog
-            border.color: Theme.lineStrong
-            glow: 0.12
-        }
-        contentItem: ColumnLayout {
-            spacing: 12
-            Label {
-                text: "선택한 사진에 태그 추가"
-                font.bold: true
-                font.pixelSize: Theme.fontSection
-                color: Theme.text
-            }
-            FlatField {
-                id: batchTag
-                readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
-                Layout.fillWidth: true
-                maximumLength: 50
-                placeholderText: "태그 이름 입력"
-                onAccepted: addBatch.click()
-            }
-            RowLayout {
-                Layout.alignment: Qt.AlignRight
-                spacing: 8
-                FlatButton {
-                    text: "취소"
-                    onClicked: tagPopup.close()
-                }
-                FlatButton {
-                    id: addBatch
-                    text: "추가"
-                    tone: "primary"
-                    enabled: batchTag.cleanTag.length > 0 && !!view.folder && !view.folder.tagsLocked
-                    onClicked: {
-                        if (view.folder && !view.folder.tagsLocked
-                                && view.folder.addTagToSelection(batchTag.cleanTag) > 0) {
-                            batchTag.text = ""
-                            tagPopup.close()
-                        }
-                    }
-                }
-            }
-        }
+        title: "선택한 사진에 태그 추가"
+        locked: !view.folder || view.folder.tagsLocked
+        lockTip: view.folder && view.folder.tagsLocked ? view.folder.holdReason : ""
+        onSubmitRequested: tag => tagPopup.submitTo(view.folder, tag)
     }
 
     Popup {
@@ -1805,10 +1803,21 @@ Item {
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         property string notice: ""
         onOpened: {
-            localTeachNewTagField.text = ""
+            localTeachNewTagField.clearText()
             teachPopup.notice = ""
-            if (localTeachNewTagField.enabled)
+            if (localTeachNewTagField.enabled) {
                 localTeachNewTagField.forceActiveFocus()
+                return
+            }
+            for (let i = 0; i < localTeachCategories.count; i++) {
+                const btn = localTeachCategories.itemAt(i)
+                if (btn && btn.enabled) {
+                    btn.forceActiveFocus()
+                    return
+                }
+            }
+            if (localTeachRefuse.enabled)
+                localTeachRefuse.forceActiveFocus()
         }
         background: Card {
             topColor: Theme.dialogTop
@@ -1831,7 +1840,7 @@ Item {
                 FlatField {
                     id: localTeachNewTagField
                     objectName: "localFolderTeachNewField"
-                    readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
+                    readonly property string cleanTag: displayText.trim().replace(/^#+/, "").trim()
                     Layout.fillWidth: true
                     implicitHeight: Theme.compactHeight
                     leftPadding: Theme.gap
@@ -1859,13 +1868,22 @@ Item {
                             return
                         if (view.folder.addAiTag(clean)) {
                             view.teachCategory(clean, true)
-                            localTeachNewTagField.text = ""
+                            localTeachNewTagField.clearText()
                             teachPopup.close()
                         } else {
                             teachPopup.notice = view.folder.status || "AI 태그를 추가하지 못했습니다."
                         }
                     }
                 }
+            }
+            Label {
+                Layout.fillWidth: true
+                visible: !!view.folder && !view.folder.shareLearning
+                text: "‘AI 학습 공유’가 꺼져 있어 새 AI 태그를 만들 수 없습니다. 기존 AI 태그만 적용할 수 있습니다."
+                color: Theme.textMuted
+                font.pixelSize: Theme.fontCaption
+                wrapMode: Text.Wrap
+                textFormat: Text.PlainText
             }
             Label {
                 Layout.fillWidth: true
@@ -1895,6 +1913,7 @@ Item {
                         wrapMode: Text.Wrap
                     }
                     Repeater {
+                        id: localTeachCategories
                         model: view.folder ? view.folder.aiCategories : []
                         delegate: FlatButton {
                             required property string modelData
@@ -1910,6 +1929,7 @@ Item {
                 }
             }
             FlatButton {
+                id: localTeachRefuse
                 Layout.fillWidth: true
                 text: "AI 태그 모두 아님"
                 tip: "보이는 AI 태그를 모두 빼고 AI 학습에 반영합니다"
@@ -1967,21 +1987,21 @@ Item {
             notice = ""
             noticeKey = ""
             _openedStatus = view.folder ? (view.folder.status || "") : ""
-            previewTagField.text = ""
+            previewTagField.clearText()
             resetScroll()
         }
         onAboutToShow: {
             notice = ""
             noticeKey = ""
             _openedStatus = view.folder ? (view.folder.status || "") : ""
-            previewTagField.text = ""
+            previewTagField.clearText()
             resetScroll()
             if (localWheel)
                 localWheel.reset()
         }
         onOpened: localPreviewCloseButton.forceActiveFocus()
         onClosed: {
-            previewTagField.text = ""
+            previewTagField.clearText()
             localPreviewMedia.release()
         }
         Shortcut {
@@ -1999,48 +2019,9 @@ Item {
             enabled: previewPopup.shortcutActive && !!view.folder && !!view.folder.selectedKey
             onActivated: previewPopup.toggleFavorite()
         }
-        Shortcut {
-            sequence: "+"
-            enabled: previewPopup.shortcutActive && localPreviewMedia.canZoomIn
-            onActivated: localPreviewMedia.zoomIn()
-        }
-        Shortcut {
-            sequence: "="
-            enabled: previewPopup.shortcutActive && localPreviewMedia.canZoomIn
-            onActivated: localPreviewMedia.zoomIn()
-        }
-        Shortcut {
-            sequence: "-"
-            enabled: previewPopup.shortcutActive && localPreviewMedia.canZoomOut
-            onActivated: localPreviewMedia.zoomOut()
-        }
-        Shortcut {
-            sequence: "0"
-            enabled: previewPopup.shortcutActive && localPreviewMedia.ready
-            onActivated: localPreviewMedia.fit()
-        }
-        Shortcut {
-            sequence: "1"
-            enabled: previewPopup.shortcutActive && localPreviewMedia.canActualSize
-            onActivated: localPreviewMedia.actualSize()
-        }
-        Shortcut {
-            sequence: "m"
-            enabled: previewPopup.shortcutActive && localPreviewMedia.mediaType === "video"
-                && localPreviewMedia.videoSource && localPreviewMedia.ready
-            onActivated: localPreviewMedia.muted = !localPreviewMedia.muted
-        }
-        Shortcut {
-            sequence: "m"
-            enabled: previewPopup.shortcutActive && localPreviewMedia.mediaType === "video"
-                && localPreviewMedia.videoSource && localPreviewMedia.ready
-            onActivated: localPreviewMedia.muted = !localPreviewMedia.muted
-        }
-        Shortcut {
-            sequence: "Shift+M"
-            enabled: previewPopup.shortcutActive && localPreviewMedia.mediaType === "video"
-                && localPreviewMedia.videoSource && localPreviewMedia.ready
-            onActivated: localPreviewMedia.muted = !localPreviewMedia.muted
+        PreviewShortcuts {
+            preview: localPreviewMedia
+            shortcutsEnabled: previewPopup.shortcutActive
         }
         Shortcut {
             sequence: "Delete"
@@ -2116,14 +2097,22 @@ Item {
                     text: "파일 열기"
                     focusPolicy: Qt.TabFocus
                     enabled: !!view.folder && !view.folder.selectedMissing
-                    onClicked: view.folder.openSelected()
+                    onClicked: {
+                        previewPopup.notice = ""
+                        previewPopup.noticeKey = previewPopup.openedKey
+                        view.folder.openSelected()
+                    }
                 }
                 FlatButton {
                     objectName: "localFolderPreviewReveal"
                     text: "폴더에서 보기"
                     focusPolicy: Qt.TabFocus
                     enabled: !!view.folder && !view.folder.selectedMissing
-                    onClicked: view.folder.revealSelected()
+                    onClicked: {
+                        previewPopup.notice = ""
+                        previewPopup.noticeKey = previewPopup.openedKey
+                        view.folder.revealSelected()
+                    }
                 }
                 FlatButton {
                     objectName: "localFolderPreviewRecycle"
@@ -2182,7 +2171,7 @@ Item {
                     enabled: !!view.folder && view.folder.canPrevious
                     tip: "이전 사진 (←)"
                     onClicked: {
-                        previewTagField.text = ""
+                        previewTagField.clearText()
                         view.folder.previousItem()
                     }
                 }
@@ -2193,7 +2182,7 @@ Item {
                     enabled: !!view.folder && view.folder.canNext
                     tip: "다음 사진 (→)"
                     onClicked: {
-                        previewTagField.text = ""
+                        previewTagField.clearText()
                         view.folder.nextItem()
                     }
                 }
@@ -2291,7 +2280,7 @@ Item {
                             FlatField {
                                 id: previewTagField
                                 objectName: "localFolderPreviewTagField"
-                                readonly property string cleanTag: text.trim().replace(/^#+/, "").trim()
+                                readonly property string cleanTag: displayText.trim().replace(/^#+/, "").trim()
                                 implicitHeight: Theme.compactHeight
                                 Layout.preferredWidth: 132
                                 leftPadding: Theme.gap
@@ -2301,14 +2290,17 @@ Item {
                                 font.pixelSize: Theme.fontSmall
                                 enabled: !!view.folder && !view.folder.tagsLocked
                                 Keys.onEscapePressed: event => {
-                                    text = ""
+                                    clearText()
                                     focus = false
                                     event.accepted = true
                                 }
                                 onAccepted: {
-                                    if (cleanTag.length > 0 && view.folder && !view.folder.tagsLocked
-                                            && view.folder.addSelectedTag(cleanTag))
-                                        text = ""
+                                    if (cleanTag.length > 0 && view.folder && !view.folder.tagsLocked) {
+                                        previewPopup.notice = ""
+                                        previewPopup.noticeKey = previewPopup.openedKey
+                                        if (view.folder.addSelectedTag(cleanTag))
+                                            clearText()
+                                    }
                                 }
                             }
                             FlatButton {
@@ -2319,9 +2311,12 @@ Item {
                                 enabled: previewTagField.cleanTag.length > 0 && !!view.folder && !view.folder.tagsLocked
                                 tip: view.folder && view.folder.tagsLocked ? view.folder.holdReason : ""
                                 onClicked: {
-                                    if (view.folder && !view.folder.tagsLocked
-                                            && view.folder.addSelectedTag(previewTagField.cleanTag))
-                                        previewTagField.text = ""
+                                    if (view.folder && !view.folder.tagsLocked) {
+                                        previewPopup.notice = ""
+                                        previewPopup.noticeKey = previewPopup.openedKey
+                                        if (view.folder.addSelectedTag(previewTagField.cleanTag))
+                                            previewTagField.clearText()
+                                    }
                                 }
                             }
                             FlatButton {
@@ -2346,6 +2341,16 @@ Item {
                                 }
                             }
                         }
+                    }
+                    Label {
+                        objectName: "localFolderPreviewStatus"
+                        Layout.fillWidth: true
+                        visible: text.length > 0 && previewPopup.notice.length === 0
+                        text: view.folder ? view.folder.status : ""
+                        color: Theme.textMuted
+                        font.pixelSize: Theme.fontCaption
+                        wrapMode: Text.Wrap
+                        textFormat: Text.PlainText
                     }
                 }
             }

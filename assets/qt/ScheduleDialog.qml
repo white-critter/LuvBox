@@ -33,6 +33,7 @@ FlatDialog {
             id: panel
             width: scroll.availableWidth
             app: dialog.app
+            popupParent: dialog.parent
         }
     }
     footer: DialogButtons {

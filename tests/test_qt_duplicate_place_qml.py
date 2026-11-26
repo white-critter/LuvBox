@@ -114,7 +114,8 @@ def scene(shots=None):
                            (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton)):
             QCoreApplication.postEvent(window, QMouseEvent(kind, point, position, Qt.MouseButton.LeftButton, held,
                                                            Qt.KeyboardModifier.NoModifier))
-        settle(30)
+            # Deliver the press before queuing release, like separate native events.
+            settle(30)
 
     def click(name):
         settle(30)

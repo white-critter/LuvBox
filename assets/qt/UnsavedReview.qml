@@ -51,6 +51,10 @@ Item {
             records.selectUnsavedPage()
     }
 
+    function takeFocus() {
+        grid.forceActiveFocus()
+    }
+
     function requestMore() {
         if (records && records.unsavedMore && !records.unsavedBusy
                 && grid.contentY - grid.originY + grid.height + grid.cellHeight * 2 >= grid.contentHeight)
@@ -276,11 +280,52 @@ Item {
                 objectName: "unsavedGrid"
                 anchors.fill: parent
                 clip: true
+                acceptedButtons: Qt.NoButton
+                focus: true
+                activeFocusOnTab: true
+                keyNavigationEnabled: true
+                keyNavigationWraps: false
+                highlightMoveDuration: 0
+                currentIndex: -1
                 boundsBehavior: Flickable.StopAtBounds
                 readonly property int columns: Math.max(1, Math.floor(width / (review.tileWidth + 12)))
-                cellWidth: Math.floor(width / columns)
+                cellWidth: Math.max(1, Math.floor(width / columns))
                 cellHeight: Math.round(review.tileWidth * 0.75) + 62
                 model: review.records ? review.records.unsavedModel : null
+                Keys.onPressed: event => {
+                    unsavedWheel.reset()
+                    if ((event.key === Qt.Key_Right || event.key === Qt.Key_Down) && currentIndex < 0 && count > 0) {
+                        currentIndex = 0
+                        positionViewAtIndex(0, GridView.Contain)
+                        event.accepted = true
+                        return
+                    }
+                    if (event.key === Qt.Key_Space && currentIndex >= 0 && review.records) {
+                        const item = currentItem as UnsavedTileCell
+                        if (item && item.token)
+                            review.records.toggleUnsavedSelected(item.token)
+                        event.accepted = true
+                        return
+                    }
+                    if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter) && currentIndex >= 0 && review.records) {
+                        const item = currentItem as UnsavedTileCell
+                        if (item && item.token)
+                            review.records.openSource(item.token)
+                        event.accepted = true
+                        return
+                    }
+                    let step = 0
+                    if (event.key === Qt.Key_PageDown) step = Math.max(cellHeight, height - cellHeight)
+                    else if (event.key === Qt.Key_PageUp) step = -Math.max(cellHeight, height - cellHeight)
+                    else if (event.key === Qt.Key_Home) step = -contentHeight
+                    else if (event.key === Qt.Key_End) step = contentHeight
+                    if (step !== 0 && contentHeight > height) {
+                        cancelFlick()
+                        const maxY = originY + Math.max(0, contentHeight - height)
+                        contentY = Math.max(originY, Math.min(maxY, contentY + step))
+                        event.accepted = true
+                    }
+                }
                 ScrollBar.vertical: ScrollBar {
                     policy: grid.contentHeight > grid.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                     onPressedChanged: if (pressed) unsavedWheel.reset()
@@ -310,6 +355,8 @@ Item {
                         const wanted = grid.keptY
                         const serial = ++grid.resets
                         grid.keptY = -1
+                        if (grid.currentIndex >= grid.count)
+                            grid.currentIndex = -1
                         if (wanted > 0)
                             Qt.callLater(function() {
                                 if (serial !== grid.resets)
@@ -320,7 +367,8 @@ Item {
                     }
                 }
 
-                delegate: Item {
+                delegate: UnsavedTileCell {}
+                component UnsavedTileCell: Item {
                     id: cell
                     required property int index
                     required property string token
@@ -346,9 +394,9 @@ Item {
                         anchors.margins: 4
                         radius: Theme.radiusCard
                         activeFocusOnTab: true
-                        color: cell.picked ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.raised : Theme.well)
-                        border.width: tile.activeFocus ? 2 : (cell.picked ? 1 : 0)
-                        border.color: tile.activeFocus ? Theme.focus : Theme.accent
+                        color: cell.picked || grid.currentIndex === cell.index ? Theme.accentSoft : (tileMouse.containsMouse ? Theme.raised : Theme.well)
+                        border.width: tile.activeFocus ? 2 : (cell.picked || grid.currentIndex === cell.index ? 1 : 0)
+                        border.color: tile.activeFocus ? Theme.focus : (cell.picked ? Theme.accent : Theme.accentLine)
                         Accessible.role: Accessible.CheckBox
                         Accessible.name: cell.reasonLabel + " " + cell.author
                         Accessible.checkable: true
@@ -511,7 +559,7 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            ToolTip.visible: containsMouse && !bandDrag.active
+                            ToolTip.visible: containsMouse && !bandSelection.active
                             ToolTip.delay: 600
                             ToolTip.text: [
                                 cell.detail,
@@ -520,6 +568,8 @@ Item {
                                 "클릭 선택 · Shift+클릭 범위 선택 · 더블 클릭 원문 보기"
                             ].filter(Boolean).join("\n")
                             onClicked: mouse => {
+                                grid.forceActiveFocus()
+                                grid.currentIndex = cell.index
                                 if (mouse.modifiers & Qt.ShiftModifier) {
                                     review.clickedToken = ""
                                     review.records.selectUnsavedRangeTo(cell.token)
@@ -542,99 +592,17 @@ Item {
                 }
 
                 // Drag a rectangle to pick the tiles it touches, as in the gallery.
-                DragHandler {
-                    id: bandDrag
+                GridBandSelection {
+                    id: bandSelection
                     objectName: "unsavedBandDrag"
-                    target: null
-                    acceptedDevices: PointerDevice.Mouse
-                    acceptedButtons: Qt.LeftButton
+                    grid: grid
+                    columns: grid.columns
                     enabled: !!review.records && grid.count > 0
-                    dragThreshold: 10
-                    property real startX: 0
-                    property real startY: 0
-                    property real currentX: 0
-                    property real currentY: 0
-                    // Ctrl or Shift held when the button went down adds to what is picked,
-                    // even if the key is let go before the drag ends.
-                    property int pressModifiers: Qt.NoModifier
-                    onGrabChanged: (transition, point) => {
-                        if (transition === PointerDevice.GrabPassive)
-                            pressModifiers = centroid.modifiers
-                    }
-                    function update() {
-                        // The rectangle lives in content coordinates, so it grows while the grid scrolls under it.
-                        const top = Math.min(startY, currentY)
-                        const bottom = Math.max(startY, currentY)
-                        const left = Math.min(startX, currentX)
-                        const right = Math.max(startX, currentX)
-                        review.records.unsavedBandSelect(
-                            Math.floor(Math.max(0, top) / grid.cellHeight),
-                            Math.floor(Math.max(0, bottom) / grid.cellHeight),
-                            Math.floor(Math.max(0, left) / grid.cellWidth),
-                            Math.floor(Math.max(0, right) / grid.cellWidth), grid.columns)
-                    }
-                    // The handler reports positions in the scrolling content, which go stale while
-                    // the grid moves under a resting pointer; the scene position is mapped instead.
-                    function inView(scenePoint) {
-                        return grid.mapFromItem(null, scenePoint.x, scenePoint.y)
-                    }
-                    function follow() {
-                        const point = inView(centroid.scenePosition)
-                        currentX = Math.max(0, Math.min(grid.width, point.x))
-                        currentY = point.y + grid.contentY - grid.originY
-                        update()
-                    }
-                    onActiveChanged: {
-                        if (active) {
-                            unsavedWheel.reset()
-                            const pressed = inView(centroid.scenePressPosition)
-                            startX = Math.max(0, Math.min(grid.width, pressed.x))
-                            startY = pressed.y + grid.contentY - grid.originY
-                            const held = pressModifiers | centroid.modifiers
-                            review.records.beginUnsavedBand((held & (Qt.ControlModifier | Qt.ShiftModifier)) !== 0)
-                            follow()
-                        } else {
-                            review.records.endUnsavedBand()
-                        }
-                    }
-                    onCentroidChanged: if (active) follow()
-                }
-                Timer {
-                    // Near the top or bottom edge the grid scrolls and the rectangle keeps growing.
-                    interval: 30
-                    repeat: true
-                    running: bandDrag.active
-                    onTriggered: {
-                        const y = bandDrag.inView(bandDrag.centroid.scenePosition).y
-                        let step = 0
-                        if (y < 28)
-                            step = -Math.min(48, 8 + (28 - y) * 0.6)
-                        else if (y > grid.height - 28)
-                            step = Math.min(48, 8 + (y - (grid.height - 28)) * 0.6)
-                        if (!step)
-                            return
-                        const minimum = grid.originY
-                        const maximum = minimum + Math.max(0, grid.contentHeight - grid.height)
-                        const next = Math.max(minimum, Math.min(maximum, grid.contentY + step))
-                        if (next !== grid.contentY) {
-                            grid.contentY = next
-                            bandDrag.follow()
-                        }
-                    }
-                }
-                Rectangle {
-                    objectName: "unsavedBand"
-                    // Drawn over the visible area, not inside the scrolling content.
-                    parent: grid
-                    visible: bandDrag.active
-                    z: 5
-                    x: Math.min(bandDrag.startX, bandDrag.currentX)
-                    y: Math.min(bandDrag.startY, bandDrag.currentY) - (grid.contentY - grid.originY)
-                    width: Math.abs(bandDrag.currentX - bandDrag.startX)
-                    height: Math.abs(bandDrag.currentY - bandDrag.startY)
-                    color: Qt.alpha(Theme.accent, 0.2)
-                    border.width: 1
-                    border.color: Theme.accent
+                    bandObjectName: "unsavedBand"
+                    wheelReset: function() { unsavedWheel.reset() }
+                    onBandStarted: additive => review.records.beginUnsavedBand(additive)
+                    onBandUpdated: (row0, row1, col0, col1, cols) => review.records.unsavedBandSelect(row0, row1, col0, col1, cols)
+                    onBandEnded: review.records.endUnsavedBand()
                 }
             }
             Label {

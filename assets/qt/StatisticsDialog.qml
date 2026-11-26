@@ -8,6 +8,7 @@ FlatDialog {
     objectName: "statisticsDialog"
     property var app: null
     property var stats: ({})
+    property bool awaitingStats: false
     signal authorSelected(string author)
     signal aiCategorySelected(string category)
     signal userTagSelected(string tag)
@@ -37,13 +38,19 @@ FlatDialog {
 
     function reload() {
         stats = {}
-        if (app && app.library)
+        if (app && app.library) {
+            awaitingStats = true
             app.library.requestStatistics()
+        } else {
+            awaitingStats = false
+        }
     }
 
     function scrollBy(delta) {
         if (!statsFlick.needsScroll || statsFlick.contentHeight <= statsFlick.height)
             return false
+        statsWheel.reset()
+        statsFlick.cancelFlick()
         const maxY = Math.max(0, statsFlick.contentHeight - statsFlick.height)
         statsFlick.contentY = Math.max(0, Math.min(maxY, statsFlick.contentY + delta))
         return true
@@ -51,12 +58,15 @@ FlatDialog {
 
     onAboutToShow: reload()
     onOpened: statsCloseButton.forceActiveFocus()
+    onClosed: awaitingStats = false
 
     Connections {
         target: dialog.app ? dialog.app.library : null
         function onStatisticsLoaded(data) {
-            if (dialog.visible)
+            if (dialog.awaitingStats || dialog.visible) {
+                dialog.awaitingStats = false
                 dialog.stats = data || {}
+            }
         }
     }
 
@@ -163,8 +173,26 @@ FlatDialog {
         ScrollBar.vertical: ScrollBar {
             objectName: "statsScrollBar"
             policy: statsFlick.needsScroll ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+            onPressedChanged: if (pressed) statsWheel.reset()
         }
-        SmoothWheel { flickable: statsFlick }
+        SmoothWheel {
+            id: statsWheel
+            flickable: statsFlick
+        }
+        Keys.onPressed: event => {
+            if (event.key === Qt.Key_Down)
+                event.accepted = dialog.scrollBy(48)
+            else if (event.key === Qt.Key_Up)
+                event.accepted = dialog.scrollBy(-48)
+            else if (event.key === Qt.Key_PageDown)
+                event.accepted = dialog.scrollBy(Math.max(120, statsFlick.height - 48))
+            else if (event.key === Qt.Key_PageUp)
+                event.accepted = dialog.scrollBy(-Math.max(120, statsFlick.height - 48))
+            else if (event.key === Qt.Key_Home)
+                event.accepted = dialog.scrollBy(-statsFlick.contentHeight)
+            else if (event.key === Qt.Key_End)
+                event.accepted = dialog.scrollBy(statsFlick.contentHeight)
+        }
 
         ColumnLayout {
             id: statsColumn
@@ -422,6 +450,7 @@ FlatDialog {
                 id: extras
                 objectName: "statsExtrasCard"
                 Layout.fillWidth: true
+                clip: true
                 visible: dialog.hasAi || dialog.hasTags || dialog.problem.length > 0
                 implicitHeight: extrasColumn.implicitHeight + 20
                 border.color: dialog.problem.length ? Theme.accentLine : Theme.line
@@ -475,6 +504,7 @@ FlatDialog {
                                 delegate: FlatButton {
                                     required property var modelData
                                     compact: true
+                                    width: Math.min(implicitWidth, parent.width)
                                     text: (modelData.category || "") + " " + dialog.amount(modelData.count)
                                     onActiveFocusChanged: if (activeFocus) statsFlick.revealItem(this)
                                     onClicked: {
@@ -510,6 +540,7 @@ FlatDialog {
                                 delegate: FlatButton {
                                     required property var modelData
                                     compact: true
+                                    width: Math.min(implicitWidth, parent.width)
                                     text: "#" + (modelData.tag || "") + " " + dialog.amount(modelData.count)
                                     onActiveFocusChanged: if (activeFocus) statsFlick.revealItem(this)
                                     onClicked: {

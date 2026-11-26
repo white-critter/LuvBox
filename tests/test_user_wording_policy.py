@@ -66,11 +66,15 @@ class UserWordingPolicyTests(unittest.TestCase):
                 'import QtQuick\nItem {\n    Text { text: "PermissionError 발생" }\n}\n',
                 "assets/qt/Sample.qml",
             ),
+            ("assets/browser-extension/chromium/manifest.json", '{"description":"SQLite"}', "manifest.json"),
+            ("assets/browser-extension/firefox/background.js", 'const publicError = "SQLite";', "background.js"),
+            ("luvbox/browser_bridge.py", '_PAGE = "<p>SQLite</p>".encode("utf-8")', "browser_bridge.py"),
         )
         for rel, bad_content, expected_label in cases:
             with self.subTest(rel=rel), tempfile.TemporaryDirectory(prefix="luvbox-wording-") as folder:
                 root = Path(folder)
                 _write_clean_tree(root)
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_text(bad_content, encoding="utf-8")
                 with self.assertRaisesRegex(ValueError, expected_label):
                     package_release.require_user_facing_wording(root)

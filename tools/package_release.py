@@ -502,6 +502,50 @@ def require_user_facing_wording(root: Path) -> None:
             literals = "\n".join(m.group(1) if m.group(1) is not None else (m.group(2) or "")
                                  for m in _QUOTED_LITERAL_RE.finditer(clean_js))
             scan(f"assets/browser-extension/{variant}/extension-page.js", literals)
+        manifest = root / "assets" / "browser-extension" / variant / "manifest.json"
+        if manifest.is_file():
+            try:
+                manifest_data = json.loads(manifest.read_text(encoding="utf-8"))
+            except ValueError:
+                manifest_data = {}
+            if isinstance(manifest_data, dict):
+                scan(
+                    f"assets/browser-extension/{variant}/manifest.json",
+                    "\n".join(str(manifest_data.get(key) or "") for key in ("name", "description")),
+                )
+        bg_js = root / "assets" / "browser-extension" / variant / "background.js"
+        if bg_js.is_file():
+            clean_bg = _strip_c_comments(bg_js.read_text(encoding="utf-8"))
+            err_match = re.search(r"\bpublicError\s*=\s*([^\n;]+)", clean_bg)
+            if err_match:
+                err_literals = "\n".join(
+                    m.group(1) if m.group(1) is not None else (m.group(2) or "")
+                    for m in _QUOTED_LITERAL_RE.finditer(err_match.group(1))
+                )
+                scan(f"assets/browser-extension/{variant}/background.js", err_literals)
+
+    bridge = root / "luvbox" / "browser_bridge.py"
+    if bridge.is_file():
+        import ast
+
+        tree = ast.parse(bridge.read_text(encoding="utf-8"), filename=str(bridge))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "_PAGE" for target in node.targets
+            ):
+                val = node.value
+                raw_page = ""
+                if (isinstance(val, ast.Call) and isinstance(val.func, ast.Attribute)
+                        and val.func.attr == "encode" and isinstance(val.func.value, ast.Constant)
+                        and isinstance(val.func.value.value, str)):
+                    raw_page = val.func.value.value
+                elif isinstance(val, ast.Constant) and isinstance(val.value, (str, bytes)):
+                    raw_page = val.value.decode("utf-8", "ignore") if isinstance(val.value, bytes) else val.value
+                if raw_page:
+                    raw_page = re.sub(r"<(?:script|style)[^>]*>.*?</(?:script|style)>", " ",
+                                      raw_page, flags=re.IGNORECASE | re.DOTALL)
+                    scan("luvbox/browser_bridge.py", re.sub(r"<[^>]+>", " ", raw_page))
+                break
 
     if violations:
         raise ValueError("User-facing wording exposes internal details:\n" + "\n".join(violations))

@@ -37,9 +37,11 @@ Card {
         anchors.rightMargin: 12
         spacing: 8
 
-        RowLayout {
+        GridLayout {
             Layout.fillWidth: true
-            spacing: 10
+            columns: notice.width < 760 ? 2 : 3
+            columnSpacing: 10
+            rowSpacing: 8
 
             Rectangle {
                 Layout.alignment: Qt.AlignVCenter
@@ -92,53 +94,59 @@ Card {
                     wrapMode: Text.Wrap
                 }
             }
-            FlatButton {
-                objectName: "updateNotesToggle"
-                visible: notice.phase === "available" && !!notice.updates && notice.updates.notes.length > 0
-                text: notice.notesOpen ? "변경 사항 접기" : "변경 사항"
-                Accessible.name: notice.notesOpen ? "변경 사항 접기" : "변경 사항 보기"
-                onClicked: notice.notesOpen = !notice.notesOpen
-            }
-            FlatButton {
-                objectName: "updateCancelButton"
-                visible: notice.phase === "downloading"
-                text: notice.updates && notice.updates.version ? "받기 취소" : "확인 취소"
-                onClicked: notice.updates.cancel()
-            }
-            FlatButton {
-                objectName: "updateReleasePageButton"
-                visible: notice.phase === "failed"
-                    || (notice.phase === "available" && !!notice.updates && !notice.updates.canInstall)
-                text: "다운로드 페이지"
-                Accessible.name: "다운로드 페이지 열기"
-                onClicked: notice.updates.openReleasePage()
-            }
-            FlatButton {
-                objectName: "updateLaterButton"
-                tone: "ghost"
-                visible: notice.phase !== "downloading"
-                text: notice.phase === "failed" ? "닫기" : "나중에"
-                onClicked: notice.updates.dismiss()
-            }
-            FlatButton {
-                objectName: "updateInstallButton"
-                visible: (notice.phase === "available" || notice.phase === "failed")
-                    && !!notice.updates && (notice.updates.canInstall || notice.updates.retryLatest)
-                // Lit, but not the screen's main action: that stays "저장 시작".
-                tone: "soft"
-                font.bold: true
-                text: notice.phase === "failed" ? "다시 시도" : "업데이트"
-                Accessible.name: notice.updates && notice.updates.retryLatest ? "새 버전 다시 확인" : "새 버전 받기"
-                onClicked: notice.updates.install()
-            }
-            FlatButton {
-                objectName: "updateRestartButton"
-                visible: notice.phase === "ready"
-                enabled: !notice.busyWork
-                tone: "soft"
-                font.bold: true
-                text: "지금 다시 시작"
-                onClicked: notice.restartRequested()
+            RowLayout {
+                Layout.columnSpan: notice.width < 760 ? 2 : 1
+                Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                spacing: 8
+
+                FlatButton {
+                    objectName: "updateNotesToggle"
+                    visible: notice.phase === "available" && !!notice.updates && notice.updates.notes.length > 0
+                    text: notice.notesOpen ? "변경 사항 접기" : "변경 사항"
+                    Accessible.name: notice.notesOpen ? "변경 사항 접기" : "변경 사항 보기"
+                    onClicked: notice.notesOpen = !notice.notesOpen
+                }
+                FlatButton {
+                    objectName: "updateCancelButton"
+                    visible: notice.phase === "downloading"
+                    text: notice.updates && notice.updates.version ? "받기 취소" : "확인 취소"
+                    onClicked: notice.updates.cancel()
+                }
+                FlatButton {
+                    objectName: "updateReleasePageButton"
+                    visible: notice.phase === "failed"
+                        || (notice.phase === "available" && !!notice.updates && !notice.updates.canInstall)
+                    text: "다운로드 페이지"
+                    Accessible.name: "다운로드 페이지 열기"
+                    onClicked: notice.updates.openReleasePage()
+                }
+                FlatButton {
+                    objectName: "updateLaterButton"
+                    tone: "ghost"
+                    visible: notice.phase !== "downloading"
+                    text: notice.phase === "failed" ? "닫기" : "나중에"
+                    onClicked: notice.updates.dismiss()
+                }
+                FlatButton {
+                    objectName: "updateInstallButton"
+                    visible: (notice.phase === "available" || notice.phase === "failed")
+                        && !!notice.updates && (notice.updates.canInstall || notice.updates.retryLatest)
+                    // Lit, but not the screen's main action: that stays "저장 시작".
+                    tone: "soft"
+                    font.bold: true
+                    text: notice.phase === "failed" ? "다시 시도" : "업데이트"
+                    Accessible.name: notice.updates && notice.updates.retryLatest ? "새 버전 다시 확인" : "새 버전 받기"
+                    onClicked: notice.updates.install()
+                }
+                FlatButton {
+                    objectName: "updateRestartButton"
+                    visible: notice.phase === "ready"
+                    enabled: !notice.busyWork
+                    tone: "soft"
+                    font.bold: true
+                    text: "지금 다시 시작"
+                    onClicked: notice.restartRequested()
+                }
             }
         }
 
@@ -198,6 +206,7 @@ Card {
             }
             ScrollBar.vertical: ScrollBar {
                 policy: notesView.scrollable ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
+                onPressedChanged: if (pressed) notesWheel.reset()
             }
             SmoothWheel {
                 id: notesWheel
